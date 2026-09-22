@@ -1,128 +1,128 @@
 # wolf-setup.sh
 
-[English](README.md) · [Español](README.es.md) · **Русский**
+[English](README.md) · **Español** · [Русский](README.ru.md)
 
-Облачный игровой ПК на арендованной видеокарте Vast.ai, который не пропадает вместе с инстансом.
+Un PC para jugar en la nube, sobre una GPU alquilada en Vast.ai, que no desaparece junto con la instancia.
 
-Арендовали машину, поиграли, удалили. В следующий раз — на другой машине, хоть через неделю — Moonlight подключается по тому же адресу, Steam не спрашивает пароль, сохранения на месте. Скрипт превращает свежий KVM-инстанс в рабочий стол со Steam и Sunshine, подключает его к вашей сети Tailscale под постоянным именем, восстанавливает из Google Drive сессию Steam, настройки, префиксы Proton и сохранения — и всё время игры выгружает изменения обратно.
+Alquilas una máquina, juegas y la destruyes. La próxima vez —en otra máquina, quizá una semana después— Moonlight se conecta a la misma dirección, Steam sigue con la sesión iniciada y tus partidas guardadas están donde las dejaste. El script convierte una instancia KVM recién creada en un escritorio con Steam y Sunshine, la une a tu red de Tailscale con un nombre fijo, restaura desde Google Drive tu sesión de Steam, la configuración, los prefijos de Proton y las partidas guardadas, y sigue subiendo los cambios mientras juegas.
 
 ```
-   Vast.ai (KVM, NVIDIA)                  Google Drive            ваши устройства
+   Vast.ai (KVM, NVIDIA)                  Google Drive            tus dispositivos
 ┌─────────────────────────┐          ┌──────────────────┐      ┌──────────────────┐
 │  Steam + Proton         │◄────────►│  identity        │      │  Moonlight       │
 │  Sunshine ──────────────┼──────────┼─ steam-state     │      │  + Tailscale     │
-│  wolf (синхронизация)   │          │  steam-cache     │      │  (телефон, ПК,   │
-│  Tailscale ─────────────┼──────────┼─ pfx--<appid>    │      │   ноут, ТВ)      │
-└──────────┬──────────────┘          │  game--<папка>   │      └────────▲─────────┘
+│  wolf (sincronización)  │          │  steam-cache     │      │  (teléfono, PC,  │
+│  Tailscale ─────────────┼──────────┼─ pfx--<appid>    │      │   portátil, TV)  │
+└──────────┬──────────────┘          │  game--<carpeta> │      └────────▲─────────┘
            │                         └──────────────────┘               │
-           └─────────────── Tailscale (весь трафик стрима) ─────────────┘
+           └────────── Tailscale (todo el tráfico del stream) ──────────┘
 ```
 
 ---
 
-## Для кого это
+## Para quién es
 
-Это не сервис в одну кнопку. Придётся завести аккаунты на трёх сайтах, скопировать два ключа в настройки Vast и иногда открывать терминал на инстансе. Если вы хоть раз поднимали Plex, домашний сервер или Linux на десктопе — справитесь. Если хочется просто нажать «Играть», для этого есть GeForce NOW и Boosteroid.
+Esto no es un servicio de un solo clic. Vas a crear cuentas en tres sitios, copiar dos claves en la configuración de Vast y, de vez en cuando, abrir una terminal en la instancia. Si alguna vez montaste Plex, un servidor casero o un escritorio Linux, te las arreglarás. Si solo quieres pulsar «Jugar», GeForce NOW y Boosteroid están hechos para eso.
 
-Что получаете взамен: свою библиотеку Steam, моды и игры не из Steam на видеокарте, за которую платите по часам и только пока играете.
-
----
-
-## Что он делает
-
-- **Постоянный адрес.** Состояние узла Tailscale хранится в облаке, поэтому каждый новый инстанс поднимается как тот же самый узел: то же имя, тот же IP. Компьютер добавляется в Moonlight один раз.
-- **Steam остаётся залогиненным.** Сохраняются `machine-id`, `loginusers.vdf`, `ConnectCache`, `ssfn*` и `userdata/`, так что сессия переживает смену машины. Работает и автономный режим: кэш лицензий (`appcache`) тоже уезжает в облако.
-- **Инкрементальная синхронизация.** Выгружается только то, что изменилось. Сохранение в игре — архив в несколько килобайт, а не перезалив всего префикса.
-- **Выгрузка сразу после выхода из игры.** Фоновая служба замечает, что игра закрылась, примерно через 10 секунд выгружает её сохранения и показывает уведомление.
-- **Разрешение под устройство.** Рабочий стол стартует в 1920×1200 на видеокарте без монитора, при подключении Moonlight переключается на родное разрешение вашего устройства и возвращается обратно при отключении.
-- **Изоляция.** Sunshine и страница статуса принимают подключения только через Tailscale. Секреты не попадают ни в игры, ни в список процессов.
+Lo que obtienes a cambio: tu propia biblioteca de Steam, mods y juegos que no son de Steam, en una GPU que pagas por horas y solo mientras juegas.
 
 ---
 
-## Почему не держать диск на Vast
+## Qué hace
 
-Vast берёт деньги за диск за каждый час существования инстанса, запущен он или остановлен — обычно $0.09–0.20 за гигабайт в месяц, а у некоторых хостов намного больше. Диск на 500 ГБ под библиотеку игр стоит примерно $45–100 в месяц ещё до того, как вы сыграли хоть минуту. Встроенный Cloud Sync на KVM-инстансах не работает, а для игр нужен именно KVM: контейнер не может запустить собственный дисплей-сервер на видеокарте.
-
-Эта схема хранит в Google Drive только то, что нельзя перекачать заново: сохранения, префиксы Proton, сессию Steam и сетевую идентичность. Обычно это несколько гигабайт и часто укладывается в бесплатные 15 ГБ. Закончили — удаляете инстанс и платите только за часы игры: на RTX 3060 примерно за $0.11 в час четыре часа каждый день выходят около $13.60 в месяц со всем, пара вечеров в неделю — около $2–3.
-
-Цена за это: на каждом новом инстансе игры Steam скачиваются заново, обычно за 10–20 минут.
+- **Una dirección fija.** El estado del nodo de Tailscale se guarda en la nube, así que cada instancia nueva arranca como el mismo nodo: mismo nombre, misma IP. Añades el PC a Moonlight una sola vez.
+- **Steam sigue con la sesión iniciada.** Se conservan `machine-id`, `loginusers.vdf`, `ConnectCache`, `ssfn*` y `userdata/`, así que la sesión sobrevive al cambio de máquina. El modo sin conexión también funciona, porque la caché de licencias (`appcache`) se sube a la nube igualmente.
+- **Sincronización incremental.** Solo se sube lo que cambió. Una partida guardada es un archivo de unos pocos kilobytes, no una resubida del prefijo entero.
+- **Subida en cuanto sales del juego.** Un servicio en segundo plano detecta cuándo se cierra un juego, sube sus partidas guardadas en unos 10 segundos y muestra una notificación en el escritorio.
+- **La resolución se adapta a tu dispositivo.** El escritorio arranca a 1920×1200 en una GPU sin monitor conectado, cambia a la resolución nativa de tu dispositivo cuando Moonlight se conecta y vuelve a la base al desconectarte.
+- **Aislamiento.** Sunshine y la página de estado solo aceptan conexiones a través de Tailscale. Los secretos nunca llegan a los juegos ni a la lista de procesos.
 
 ---
 
-## Быстрый старт
+## ¿Por qué no mantener un disco en Vast?
 
-В первый раз около получаса. Понадобится:
+Vast cobra el almacenamiento por cada hora que existe la instancia, esté en marcha o detenida: normalmente entre $0.09 y $0.20 por GB al mes, y algunos hosts bastante más. Un disco de 500 GB para una biblioteca de juegos cuesta unos $45–100 al mes antes de haber jugado un solo minuto. El Cloud Sync propio de Vast no funciona en instancias KVM, y para jugar hace falta KVM: un contenedor no puede ejecutar su propio servidor gráfico en la GPU.
+
+Esta configuración guarda en Google Drive solo lo que no se puede volver a descargar: partidas guardadas, prefijos de Proton, la sesión de Steam y la identidad de red. Normalmente son unos pocos gigabytes, a menudo dentro de los 15 GB gratuitos de Google. Cuando terminas, destruyes la instancia y pagas solo las horas que juegas: en una RTX 3060 a unos $0.11 la hora, cuatro horas diarias salen por unos $13.60 al mes con todo incluido; un par de tardes por semana, unos $2–3.
+
+A cambio, cada instancia nueva vuelve a descargar tus juegos de Steam, normalmente en 10–20 minutos.
+
+---
+
+## Inicio rápido
+
+Unos treinta minutos la primera vez. Necesitarás:
 
 | | |
 |---|---|
-| аккаунт **Vast.ai** | с деньгами на балансе |
-| аккаунт **Tailscale** | хватит бесплатного тарифа |
-| аккаунт **Google** для Drive | отдельный, не основной — см. [Безопасность](#безопасность) |
-| **rclone** на вашем компьютере | один раз, чтобы получить токен Drive |
-| **Tailscale** и **Moonlight** на каждом устройстве, с которого будете играть | телефон, ноутбук, ТВ-приставка |
+| una cuenta de **Vast.ai** | con algo de saldo |
+| una cuenta de **Tailscale** | el plan gratuito basta |
+| una cuenta de **Google** para Drive | una aparte, no la principal — ver [Seguridad](#seguridad) |
+| **rclone** en tu equipo | una vez, para obtener el token de Drive |
+| **Tailscale** y **Moonlight** en cada dispositivo desde el que vayas a jugar | teléfono, portátil, TV box |
 
 ### 1. Tailscale
 
-1. На [login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys) нажмите **Generate auth key**:
-   - **Reusable — включить.** Ключ используется при каждом запуске.
-   - **Ephemeral — выключить.** Эфемерные узлы удаляются, как только уходят в офлайн, и постоянного имени не будет.
-   - Expiration — до 90 дней. Когда истечёт, сгенерируйте новый и обновите переменную в Vast.
+1. En [login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys) pulsa **Generate auth key**:
+   - **Reusable — activado.** La clave se usa en cada arranque.
+   - **Ephemeral — desactivado.** Los nodos efímeros se eliminan en cuanto se desconectan, y perderías el nombre fijo.
+   - Expiration — hasta 90 días. Cuando caduque, genera una nueva y actualiza la variable en Vast.
 
-   Строка вида `tskey-auth-...` — это `TAILSCALE_AUTHKEY`.
-2. В разделе **DNS** включите **MagicDNS**. Там же указано имя вашей сети, например `tail3d42c9.ts.net`. Оно понадобится для Moonlight.
-3. Поставьте Tailscale на каждое устройство, с которого будете играть, и войдите в тот же аккаунт. Moonlight достаёт до инстанса только через Tailscale.
+   La cadena `tskey-auth-...` es tu `TAILSCALE_AUTHKEY`.
+2. En **DNS**, activa **MagicDNS**. En esa misma página aparece el nombre de tu tailnet, algo como `tail3d42c9.ts.net`. Lo necesitarás para Moonlight.
+3. Instala Tailscale en cada dispositivo desde el que vayas a jugar e inicia sesión con la misma cuenta. Moonlight solo llega a la instancia a través de Tailscale.
 
-### 2. Токен Google Drive
+### 2. Token de Google Drive
 
-Установите rclone ([rclone.org/install](https://rclone.org/install/); на macOS `brew install rclone`, на Windows `winget install Rclone.Rclone`) и выполните:
+Instala rclone ([rclone.org/install](https://rclone.org/install/); en macOS `brew install rclone`, en Windows `winget install Rclone.Rclone`) y ejecuta:
 
 ```bash
 rclone config
 ```
 
-- `n` — новый remote, имя: **gdrive**
-- тип хранилища: **drive**
-- `client_id` и `client_secret`: просто Enter на оба
+- `n` para un remoto nuevo, llámalo **gdrive**
+- tipo de almacenamiento: **drive**
+- `client_id` y `client_secret`: pulsa Enter en ambos
 - scope: **1** (Full access)
-- дальше Enter; на `Use auto config?` ответьте **y** — откроется браузер; войдите в Google-аккаунт, который заводили для этого, и разрешите доступ
+- pulsa Enter en el resto; responde **y** a `Use auto config?` — se abrirá el navegador; inicia sesión con la cuenta de Google que usarás para esto y concede el acceso
 
-Затем:
+Después:
 
 ```bash
 rclone config show gdrive
 ```
 
-В строке `token = {...}` найдите `"refresh_token":"1//0...."`. Скопируйте то, что внутри кавычек, без самих кавычек — это `RCLONE_REFRESH_TOKEN`. Он длинный и начинается с `1//`.
+En la línea `token = {...}` busca `"refresh_token":"1//0...."`. Copia lo que hay dentro de las comillas, sin las comillas: ese es tu `RCLONE_REFRESH_TOKEN`. Es largo y empieza por `1//`.
 
-На Drive ничего создавать не нужно: при первом запуске скрипт сам создаст в корне «Моего диска» папку `vastai-cloud-games` и будет работать только внутри неё.
+No hace falta crear nada en Drive: en el primer arranque el script crea una carpeta `vastai-cloud-games` en la raíz de Mi unidad y trabaja solo dentro de ella.
 
-Пустой `client_id` означает, что используется собственный клиент rclone. Он медленнее своего, но для этой схемы его хватает с запасом, и токены у него не истекают. Прежде чем менять это, прочитайте [Свой OAuth-клиент Google](#свой-oauth-клиент-google).
+Dejar `client_id` vacío usa el cliente propio de rclone. Es más lento que uno tuyo, pero de sobra para esta configuración, y sus tokens no caducan. Lee [Tu propio cliente OAuth de Google](#tu-propio-cliente-oauth-de-google) antes de cambiarlo.
 
-### 3. Сохраните оба ключа в Vast
+### 3. Guarda ambas claves en Vast
 
-На Vast откройте **Settings** и пролистайте до **Environment Variables**. Добавьте:
+En Vast, abre **Settings** y baja hasta **Environment Variables**. Añade:
 
-| Ключ | Значение |
+| Clave | Valor |
 |---|---|
-| `RCLONE_REFRESH_TOKEN` | токен из шага 2 |
-| `TAILSCALE_AUTHKEY` | ключ из шага 1 |
+| `RCLONE_REFRESH_TOKEN` | el token del paso 2 |
+| `TAILSCALE_AUTHKEY` | la clave del paso 1 |
 
-После каждого нажмите **+**, в конце — **Save Edits**. Эти переменные действуют на весь аккаунт и попадают в каждый арендованный инстанс. В шаблон их не пишите никогда.
+Pulsa **+** después de cada una y, al final, **Save Edits**. Estas variables son de toda la cuenta y llegan a cada instancia que alquiles. Nunca las pongas en una plantilla.
 
-### 4. Арендуйте по шаблону
+### 4. Alquila con la plantilla
 
-**[Открыть шаблон на Vast.ai](https://cloud.vast.ai?ref_id=688160&template_id=49faada2e6e7fe3e15bef0ea1999420a)**
+**[Abrir la plantilla en Vast.ai](https://cloud.vast.ai?ref_id=688160&template_id=49faada2e6e7fe3e15bef0ea1999420a)**
 
-Выбирая машину, смотрите:
+Al elegir máquina, fíjate en:
 
-- **игровая видеокарта NVIDIA** — RTX или GTX, у них есть кодировщик NVENC. Датацентровые A100 и H100 не подойдут: у них нет вывода изображения.
-- **поближе к вам** — от расстояния зависит задержка.
-- **диск** под игры, которые будете ставить, плюс примерно 20 ГБ.
-- **трафик бесплатный.** Наведите курсор на цену: в разбивке должны быть только GPU и диск. Большинство хостов трафик не тарифицирует, но решает каждый хост сам, а стрим расходует примерно 10–20 ГБ в час.
+- **una tarjeta gráfica NVIDIA para juegos** — RTX o GTX, que tienen el codificador NVENC. Las GPU de centro de datos como la A100 o la H100 no tienen salida de vídeo y no funcionarán.
+- **que esté cerca de ti** — la latencia depende de la distancia.
+- **disco suficiente** para los juegos que vayas a instalar, más unos 20 GB.
+- **que no cobre el tráfico.** Pasa el cursor sobre el precio: el desglose solo debe mostrar GPU y disco. La mayoría de los hosts no cobran el tráfico, pero lo decide cada uno, y un stream consume unos 10–20 GB por hora.
 
-Затем **Rent**. Установка занимает несколько минут.
+Luego pulsa **Rent**. La instalación tarda unos minutos.
 
-Для любопытных — это всё, что шаблон выполняет при старте. Он скачивает скрипт и запускает его:
+Para los curiosos, esto es todo lo que la plantilla ejecuta al arrancar. Descarga el script y lo ejecuta:
 
 ```bash
 #!/bin/bash
@@ -134,196 +134,179 @@ done
 exec bash /root/setup.sh
 ```
 
-Ссылка ведёт на одну конкретную ревизию скрипта, так что то, что запускается, не может поменяться у вас за спиной.
+La URL apunta a una revisión fija del script, así que lo que se ejecuta no puede cambiar a tus espaldas.
 
-### 5. Подключите Moonlight
+### 5. Conecta Moonlight
 
-Когда инстанс поднимется, в [списке Machines](https://login.tailscale.com/admin/machines) консоли Tailscale появится узел `vastai-gaming`. Раз уж вы там, откройте у него **⋯ → Disable key expiry**, иначе через полгода он отвалится.
+Cuando la instancia esté lista, aparecerá un nodo `vastai-gaming` en [Machines](https://login.tailscale.com/admin/machines), en la consola de Tailscale. Ya que estás ahí, abre **⋯ → Disable key expiry** en ese nodo; si no, se desconectará dentro de seis meses.
 
-Полное имя узла — его имя плюс имя вашей сети:
+El nombre completo del nodo es su nombre más el de tu tailnet:
 
 ```
 vastai-gaming.tail3d42c9.ts.net
 ```
 
-Если узел называется `vastai-gaming-2` или вроде того, цифра досталась от прежних узлов с тем же именем. Удалите устаревшие и используйте точное имя, которое видите.
+Si aparece como `vastai-gaming-2` o algo parecido, ese número viene de nodos anteriores con el mismo nombre. Elimina los obsoletos y usa el nombre exacto que veas.
 
-В Moonlight добавьте компьютер **вручную, по этому имени — не по IP-адресу.** Когда спросит PIN, откройте в браузере `https://vastai-gaming.tail3d42c9.ts.net:47990`. Предупреждение о сертификате — это нормально. В первый раз Sunshine попросит придумать логин и пароль, затем введите PIN в разделе PIN.
+En Moonlight, añade el PC **a mano, por ese nombre, no por dirección IP.** Cuando pida un PIN, abre `https://vastai-gaming.tail3d42c9.ts.net:47990` en el navegador. El aviso del certificado es normal. La primera vez, Sunshine te pedirá crear un usuario y una contraseña; después introduce el PIN en la sección PIN.
 
-Пара сохраняется в облаке, так что делается это один раз.
+El emparejamiento se guarda en la nube, así que esto se hace una sola vez.
 
-Выставьте в Moonlight разрешение **Native** — тогда будет родное разрешение вашего экрана: рабочий стол подстраивается под то, что просит клиент.
+Pon la resolución de Moonlight en **Native** para obtener la resolución de tu pantalla: el escritorio se adapta a lo que pida el cliente.
 
-### 6. Один раз настройте Steam
+### 6. Configura Steam una vez
 
-1. Войдите в Steam.
-2. Установите игры.
-3. Переведите Steam в **автономный режим** (Steam → Перейти в автономный режим). Без этого каждый новый инстанс будет просить код Steam Guard.
-4. Поиграйте 10–15 минут, чтобы всё успело уехать в облако.
+1. Inicia sesión en Steam.
+2. Instala tus juegos.
+3. Activa el **modo sin conexión** de Steam (en el menú Steam). Sin él, cada instancia nueva te pedirá un código de Steam Guard.
+4. Juega 10–15 minutos para que todo llegue a la nube.
 
-На этом настройка закончена. Дальше только: арендовали по шаблону, подключились, играете.
+Con eso termina la configuración. A partir de ahora: alquilas con la plantilla, te conectas y juegas.
 
 ---
 
-## Каждая сессия
+## Cada sesión
 
-Арендуете по шаблону, ждёте несколько минут, подключаете Moonlight. Игры Steam каждый раз скачиваются заново, обычно за 10–20 минут; сохранения и настройки уже на месте.
+Alquila con la plantilla, espera unos minutos y conecta Moonlight. Tus juegos de Steam se vuelven a descargar cada vez, normalmente en 10–20 minutos; las partidas guardadas y la configuración ya están ahí.
 
-**Закончили: выйдите из игры, дождитесь уведомления «Сохранения в облаке», потом удалите инстанс.** Уведомление появляется только после того, как сохранения дошли до Drive, так что это и есть подтверждение.
+**Cuando termines: sal del juego, espera la notificación del escritorio y luego destruye la instancia.** La notificación —titulada «Сохранения в облаке», porque los mensajes del script están en ruso— aparece solo cuando tus partidas guardadas ya han llegado a Drive, así que es tu confirmación.
 
-Удаляйте, а не останавливайте: остановленный инстанс продолжает брать деньги за диск.
+Destrúyela, no la detengas: una instancia detenida sigue cobrando por su disco.
 
-Настройки Steam и кэш автономного режима синхронизируются раз в пять минут. Если вы что-то поменяли прямо перед уходом, откройте терминал на инстансе и сначала выполните `sudo wolf shutdown`: он закроет Steam и сразу выгрузит всё.
+La configuración de Steam y la caché del modo sin conexión se sincronizan cada cinco minutos. Si cambiaste algo justo antes de irte, abre una terminal en la instancia y ejecuta primero `sudo wolf shutdown`: cierra Steam y sube todo al momento.
 
-Остальные команды — в терминале на инстансе или по SSH:
+Otros comandos, desde una terminal en la instancia o por SSH:
 
 ```bash
-sudo wolf shutdown          # закрыть Steam и выгрузить всё прямо сейчас
-sudo wolf state             # выгрузить состояние прямо сейчас
-sudo wolf games             # выгрузить игры не из Steam прямо сейчас
-sudo wolf restore ИМЯ...    # восстановить архивы (FORCE=1 — даже если актуальны)
-sudo wolf display           # переприменить настройки дисплея (перезапускает X — не во время игры)
-sudo wolf firewall          # переприменить изоляцию портов
-sudo wolf-res 2560 1440 60  # сменить разрешение вручную; без аргументов — вернуть базовое
+sudo wolf shutdown          # cerrar Steam y subir todo ahora mismo
+sudo wolf state             # subir el estado ahora mismo
+sudo wolf games             # subir ahora mismo los juegos que no son de Steam
+sudo wolf restore NOMBRE... # restaurar archivos (FORCE=1 para restaurar aunque estén al día)
+sudo wolf display           # reaplicar la configuración de pantalla (reinicia X; no en plena partida)
+sudo wolf firewall          # reaplicar el aislamiento de puertos
+sudo wolf-res 2560 1440 60  # cambiar la resolución a mano; sin argumentos vuelve a la base
 ```
 
-Логи и статус:
+Registros y estado:
 
 | | |
 |---|---|
-| `/var/log/wolf-setup.log` | установка; проблемы с окружением помечены `!!!` |
-| `/var/log/wolf.log` | синхронизация, сеть, дисплей |
-| `/var/log/wolf-res.log` | смена разрешения |
-| `http://vastai-gaming.<сеть>.ts.net:8099` | страница статуса, только через Tailscale; `/json` — то же для скриптов |
+| `/var/log/wolf-setup.log` | instalación; los problemas del entorno van marcados con `!!!` |
+| `/var/log/wolf.log` | sincronización, red, pantalla |
+| `/var/log/wolf-res.log` | cambios de resolución |
+| `http://vastai-gaming.<tailnet>.ts.net:8099` | página de estado, solo por Tailscale; `/json` da los mismos datos para scripts |
 
 ---
 
-## Для продвинутых
+## Avanzado
 
-### Свой OAuth-клиент Google
+### Tu propio cliente OAuth de Google
 
-Имеет смысл, только если включаете `SYNC_STEAM_GAMES=1` или синхронизируете большие игры не из Steam: общий клиент rclone ограничен по скорости, а свой быстрее на больших объёмах. Инструкция: [rclone.org/drive/#making-your-own-client-id](https://rclone.org/drive/#making-your-own-client-id).
+Solo merece la pena si activas `SYNC_STEAM_GAMES=1` o sincronizas juegos grandes que no son de Steam: el cliente compartido de rclone tiene límites de velocidad, y uno propio es más rápido con volúmenes grandes. Instrucciones: [rclone.org/drive/#making-your-own-client-id](https://rclone.org/drive/#making-your-own-client-id).
 
-**Его обязательно надо опубликовать.** Новый клиент создаётся в статусе **Testing**, и таким клиентам Google выдаёт refresh-токены, которые умирают через 7 дней — синхронизация молча остановится через неделю после настройки. В Google Cloud Console откройте экран согласия OAuth (в новой консоли: Google Auth Platform → Audience) и переведите статус публикации в **In production**. Верификация для личного использования не нужна; при входе Google один раз покажет предупреждение о непроверенном приложении — нажмите «Дополнительные настройки» и продолжите.
+**Tienes que publicarlo.** Un cliente nuevo empieza en estado **Testing**, y Google les da a esos clientes tokens que caducan a los 7 días: la sincronización se detendría sin avisar una semana después de configurarla. En Google Cloud Console abre la pantalla de consentimiento de OAuth (en la consola nueva: Google Auth Platform → Audience) y cambia el estado de publicación a **In production** (En producción). Para uso personal no hace falta verificación; al iniciar sesión, Google mostrará una vez un aviso de aplicación no verificada: elige Configuración avanzada y continúa.
 
-Затем повторите шаг 2, указав свои `client_id` и `client_secret`, и добавьте `RCLONE_CLIENT_ID` и `RCLONE_CLIENT_SECRET` в Environment Variables на Vast рядом с новым токеном.
+Después repite el paso 2 introduciendo tus `client_id` y `client_secret`, y añade `RCLONE_CLIENT_ID` y `RCLONE_CLIENT_SECRET` en las Environment Variables de Vast, junto al nuevo token.
 
 ### ZeroTier
 
-Если нужна вторая сеть, положите её Network ID с [my.zerotier.com](https://my.zerotier.com) в `ZT_NETWORK_ID`. Без этой переменной ZeroTier не ставится и не запускается. Для стрима достаточно одного Tailscale.
+Si quieres una segunda red, pon su Network ID de [my.zerotier.com](https://my.zerotier.com) en `ZT_NETWORK_ID`. Sin esa variable, ZeroTier ni se instala ni se inicia. Para el stream basta con Tailscale.
 
-### Свой шаблон
+### Tu propia plantilla
 
-Скрипт больше 16 КБ, которые Vast разрешает в поле on-start, поэтому в шаблоне лежит только загрузчик. Для своего шаблона: образ `docker.io/vastai/kvm:ubuntu_desktop_22.04`, загрузчик из шага 4 в **On-start script**, диск под ваши игры. Если держите свою копию скрипта, ведите ссылку на конкретную ревизию — тег релиза или коммит, а не ветку: иначе любое изменение мгновенно уедет на все запускающиеся инстансы.
+El script ocupa más de los 16 KB que Vast permite en el campo on-start; por eso la plantilla solo contiene un cargador. Para una plantilla propia: imagen `docker.io/vastai/kvm:ubuntu_desktop_22.04`, el cargador del paso 4 en **On-start script** y un disco a la medida de tus juegos. Si alojas tu propia copia del script, haz que la URL apunte a una revisión fija —una etiqueta de versión o un commit—, no a una rama; si no, cualquier cambio llegará al instante a todas las instancias que arranquen.
 
-### Переменные
+### Variables
 
-Все задаются в Environment Variables на Vast и перекрывают значения по умолчанию.
+Todas se definen en las Environment Variables de Vast y sustituyen los valores por defecto del script.
 
-**Секреты**
+**Secretos**
 
 | | |
 |---|---|
-| `RCLONE_REFRESH_TOKEN` | токен Google Drive |
-| `TAILSCALE_AUTHKEY` | ключ `tskey-auth-...` |
-| `RCLONE_CLIENT_ID`, `RCLONE_CLIENT_SECRET` | свой OAuth-клиент Google |
-| `ZT_NETWORK_ID` | сеть ZeroTier; пусто — без ZeroTier |
+| `RCLONE_REFRESH_TOKEN` | token de Google Drive |
+| `TAILSCALE_AUTHKEY` | la clave `tskey-auth-...` |
+| `RCLONE_CLIENT_ID`, `RCLONE_CLIENT_SECRET` | tu propio cliente OAuth de Google |
+| `ZT_NETWORK_ID` | red de ZeroTier; vacío = sin ZeroTier |
 
-**Поведение**
+**Comportamiento**
 
-| | По умолчанию | |
+| | Por defecto | |
 |---|---|---|
-| `STEAM_FREEZE` | `1` | не давать клиенту Steam обновляться при запуске |
-| `SYNC_STEAM_GAMES` | `0` | синхронизировать сами игры Steam |
-| `AUTO_RES` | `1` | управлять разрешением |
-| `RES` | `1920x1200` | базовое разрешение рабочего стола |
-| `STEAM_LANG` | пусто | принудительно задать язык Steam (`russian`, `english`, …); пусто — Steam берёт язык из своих настроек |
-| `TAILSCALE_SSH` | `1` | поднимать Tailscale SSH — см. [Безопасность](#безопасность) |
-| `NOTIFY_SAVES` | `1` | уведомлять о выгрузке сохранений |
-| `NOTIFY_SEC` | `8` | сколько секунд показывать уведомление |
+| `STEAM_FREEZE` | `1` | no dejar que el cliente de Steam se actualice al arrancar |
+| `SYNC_STEAM_GAMES` | `0` | sincronizar también los juegos de Steam |
+| `AUTO_RES` | `1` | gestionar la resolución |
+| `RES` | `1920x1200` | resolución base del escritorio |
+| `STEAM_LANG` | vacío | forzar un idioma de Steam (`spanish`, `latam`, `english`, …); vacío = Steam usa su propia configuración |
+| `TAILSCALE_SSH` | `1` | activar Tailscale SSH — ver [Seguridad](#seguridad) |
+| `NOTIFY_SAVES` | `1` | avisar cuando se suben las partidas guardadas |
+| `NOTIFY_SEC` | `8` | cuántos segundos se muestra la notificación |
 
-**Тонкая настройка**
+**Ajuste fino**
 
-| | По умолчанию | |
+| | Por defecto | |
 |---|---|---|
-| `R_REMOTE` | `gdrive:vastai-cloud-games` | папка в Drive |
-| `TAILSCALE_HOSTNAME` | `vastai-gaming` | имя узла |
-| `TAILSCALE_EXTRA_ARGS` | — | доп. флаги `tailscale up` |
-| `GAMES_DIR` | `~/Downloads/Games` | игры не из Steam |
-| `STATE_SYNC_MIN` | `5` | период синхронизации состояния, мин |
-| `GAMES_SYNC_MIN` | `15` | период синхронизации игр, мин |
-| `PAR` | `4` | архивов параллельно |
-| `ZSTD_STATE` / `ZSTD_GAMES` | `3` / `1` | уровень сжатия |
-| `WOLF_PORT` | `8099` | порт страницы статуса |
-| `DESKTOP_USER` | uid 1000 | пользователь рабочего стола |
+| `R_REMOTE` | `gdrive:vastai-cloud-games` | carpeta en Drive |
+| `TAILSCALE_HOSTNAME` | `vastai-gaming` | nombre del nodo |
+| `TAILSCALE_EXTRA_ARGS` | — | parámetros extra para `tailscale up` |
+| `GAMES_DIR` | `~/Downloads/Games` | juegos que no son de Steam |
+| `STATE_SYNC_MIN` | `5` | intervalo de sincronización del estado, minutos |
+| `GAMES_SYNC_MIN` | `15` | intervalo de sincronización de juegos, minutos |
+| `PAR` | `4` | archivos en paralelo |
+| `ZSTD_STATE` / `ZSTD_GAMES` | `3` / `1` | nivel de compresión |
+| `WOLF_PORT` | `8099` | puerto de la página de estado |
+| `DESKTOP_USER` | uid 1000 | usuario del escritorio |
 
 ---
 
-## Что и когда синхронизируется
+## Qué se sincroniza y cuándo
 
-| Архив | Что внутри | Когда выгружается |
+| Archivo | Contenido | Se sube |
 |---|---|---|
-| `identity` | `machine-id`, состояние Tailscale, ключи ZeroTier, сертификаты Sunshine | каждые 5 мин |
-| `steam-state` | вход в Steam, настройки, `userdata/` | каждые 5 мин |
-| `steam-client` | клиент Steam без кэшей и игр | каждые 5 мин, после «успокоения» |
-| `steam-cache` | `appcache` для автономного режима | когда два прохода подряд не менялся, либо при выключении, если Steam закрыт |
-| `pfx--<appid>` | префикс Proton — там лежат сохранения | каждые 5 мин и сразу после выхода из игры |
-| `game--<папка>` | игра не из Steam, подпапка `~/Downloads/Games` | каждые 15 мин и после выхода |
-| `sgame--<папка>` | игра Steam, только при `SYNC_STEAM_GAMES=1` | каждые 15 мин и после выхода |
+| `identity` | `machine-id`, estado de Tailscale, claves de ZeroTier, certificados de Sunshine | cada 5 min |
+| `steam-state` | sesión de Steam, configuración, `userdata/` | cada 5 min |
+| `steam-client` | el cliente de Steam sin cachés ni juegos | cada 5 min, cuando se estabiliza |
+| `steam-cache` | `appcache` para el modo sin conexión | cuando no cambia en dos pasadas seguidas, o al apagar si Steam ya está cerrado |
+| `pfx--<appid>` | el prefijo de Proton, donde están las partidas guardadas | cada 5 min, y justo al salir del juego |
+| `game--<carpeta>` | un juego que no es de Steam, subcarpeta de `~/Downloads/Games` | cada 15 min, y al salir |
+| `sgame--<carpeta>` | un juego de Steam, solo con `SYNC_STEAM_GAMES=1` | cada 15 min, y al salir |
 
-Сами игры Steam по умолчанию **не** синхронизируются: перекачать их со Steam обычно быстрее, чем с Drive, и это не тратит квоту Google (750 ГБ загрузки в сутки). Включайте `SYNC_STEAM_GAMES=1` только для игр с локальными правками или пропавших из магазина — и тогда заведите [свой OAuth-клиент](#свой-oauth-клиент-google).
+Los juegos de Steam **no** se sincronizan por defecto: volver a descargarlos de Steam suele ser más rápido que desde Drive y no gasta tu cuota de Google (750 GB de subida al día). Activa `SYNC_STEAM_GAMES=1` solo para juegos que hayas modificado o que ya no estén en la tienda, y en ese caso configura [tu propio cliente OAuth](#tu-propio-cliente-oauth-de-google).
 
-Игры не из Steam складывайте в подпапки `~/Downloads/Games` — каждая подпапка становится отдельным архивом.
-
----
-
-## Безопасность
-
-Что сделано в скрипте:
-
-- Порты Sunshine (47984–48010, включая веб-панель 47990) и страница статуса принимают трафик только с интерфейса `tailscale0` и локальной петли, остальное отбрасывается. Сама политика INPUT не трогается, поэтому SSH и управление Vast продолжают работать.
-- Токен Drive лежит только в `/root/.config/rclone/rclone.conf` (600, root), ключ Tailscale — в `/etc/wolf/tskey` (600, root) и передаётся как `file:`, так что в списке процессов его не видно. Оба удаляются из `/etc/environment`, а Steam и игры стартуют через `env -i` и секретов не наследуют.
-- Архив `identity` никогда не распаковывается в `/`. Он скачивается во временный файл, проверяется на абсолютные пути и `..`, распаковывается в промежуточный каталог, каждый симлинк сверяется через `realpath`, и только фиксированный список файлов копируется на свои места. Пользовательские архивы всегда распаковываются от имени обычного пользователя, никогда от root.
-- Выгрузка на Drive атомарна: файл пишется как `ИМЯ.part` и заменяет боевой только при успешном `moveto`. Перезаписанные версии уходят в корзину Drive, их можно вернуть.
-
-Что зависит от вас:
-
-- **Заведите отдельный Google-аккаунт.** Токен Drive доступен всему, что работает на инстансе, а доступ у него — ко всему Drive. Отдельный аккаунт ограничивает ущерб папкой с играми.
-- **Инстанс арендован у постороннего человека.** У владельца машины есть root на хосте, и там будут лежать ваша сессия Steam и токен Drive. Это не паранойя, а свойство аренды — решайте, что готовы туда класть.
-- **Tailscale SSH включён по умолчанию.** Любое устройство в вашей сети Tailscale получает root на инстансе. Для личной сети удобно; если делите её с кем-то, поставьте `TAILSCALE_SSH=0`.
-- **Никому не открывайте папку на Drive.** В архивах лежит рабочая сессия Steam.
+Pon los juegos que no son de Steam en subcarpetas de `~/Downloads/Games`; cada subcarpeta se convierte en su propio archivo.
 
 ---
 
-## Ограничения
+## Seguridad
 
-- **Только один инстанс одновременно.** У них общие архивы и общая личность Tailscale. Скрипт заметит расхождение версий и остановит выгрузку, но полагаться на это не стоит.
-- **Игры с анти-читами** (EAC, BattlEye) в виртуальной машине могут не запуститься или привести к блокировке аккаунта. На свой риск.
-- **Только NVIDIA.** На других видеокартах управление разрешением отключается, остальное работает.
-- Проверено на `docker.io/vastai/kvm:ubuntu_desktop_22.04` с дисплей-менеджером SDDM. На другом образе может понадобиться правка.
+Lo que hace el script:
 
----
+- Los puertos de Sunshine (47984–48010, incluida la interfaz web en el 47990) y la página de estado solo aceptan tráfico de la interfaz `tailscale0` y de loopback; el resto se descarta. La política de INPUT no se toca, así que SSH y la gestión propia de Vast siguen funcionando.
+- El token de Drive solo está en `/root/.config/rclone/rclone.conf` (600, root); la clave de Tailscale está en `/etc/wolf/tskey` (600, root) y se pasa como `file:`, así que nunca aparece en la lista de procesos. Ambos se eliminan de `/etc/environment`, y Steam y los juegos arrancan con `env -i`, sin heredar ningún secreto.
+- El archivo `identity` nunca se descomprime en `/`. Se descarga a un archivo temporal, se comprueba que no contenga rutas absolutas ni `..`, se extrae en un directorio intermedio, cada enlace simbólico se verifica con `realpath` y solo una lista fija de ficheros se copia a su sitio. Los archivos de usuario siempre se extraen como el usuario sin privilegios del escritorio, nunca como root.
+- Las subidas a Drive son atómicas: el archivo se escribe como `NOMBRE.part` y sustituye al definitivo solo si `moveto` termina bien. Las versiones sobrescritas van a la papelera de Drive, así que se pueden recuperar.
 
-## Диагностика
+Lo que depende de ti:
 
-**Moonlight не видит компьютер, страница статуса не открывается.** Устройство, с которого вы заходите, не в сети Tailscale, или выключен MagicDNS. Проверьте, что Tailscale на нём запущен и вошёл в тот же аккаунт.
-
-**Синхронизация перестала работать примерно через неделю после настройки.** Используется свой OAuth-клиент Google в статусе Testing — см. [Свой OAuth-клиент Google](#свой-oauth-клиент-google). Либо опубликуйте его и получите новый токен, либо удалите `RCLONE_CLIENT_ID` и `RCLONE_CLIENT_SECRET` из Vast и получите новый токен через клиент rclone.
-
-**Steam бесконечно грузится.** Включён автономный режим, а кэша лицензий ещё нет. Скрипт это замечает и запускает Steam онлайн, на странице статуса появляется подсказка. Войдите, снова включите автономный режим и дайте инстансу поработать 10–15 минут.
-
-**Moonlight просит PIN на каждом новом инстансе.** Не восстанавливается архив `identity`. Проверьте `grep identity /var/log/wolf.log` — нужна строка `ok`.
-
-**В Tailscale копятся узлы с цифрами в имени.** Та же причина: состояние Tailscale не возвращается из облака, и каждый запуск регистрирует новый узел. Сначала разберитесь с `identity`, потом удалите лишние.
-
-**Чёрный экран, виден только курсор.** Разрешение клиента не совпало с тем, что захватывает Sunshine. Поставьте в Moonlight ровно 1920×1200; если картинка появилась, дело в смене разрешения — смотрите `/var/log/wolf-res.log`.
-
-**В логе сказано, что `tailscale0` не найден.** Tailscale не поднялся, порты Sunshine и страница статуса остались открытыми. Проверьте ключ и выполните `tailscale status`.
-
-**Синхронизация встала с ошибкой «в облаке другая версия».** Работал второй инстанс. Определитесь, какая копия свежее, и выполните `sudo wolf restore ИМЯ` на машине, которую оставляете.
+- **Usa una cuenta de Google aparte.** El token de Drive puede leerlo cualquier cosa que se ejecute en la instancia, y da acceso completo a Drive. Una cuenta aparte limita el daño a la carpeta de juegos.
+- **La instancia se la alquilas a un desconocido.** El dueño de la máquina tiene root en el host, y allí estarán tu sesión de Steam y tu token de Drive. No es paranoia, es lo que implica alquilar: decide qué estás dispuesto a dejar ahí.
+- **Tailscale SSH está activado por defecto.** Cualquier dispositivo de tu tailnet obtiene root en la instancia. Es cómodo en una tailnet personal; pon `TAILSCALE_SSH=0` si la compartes.
+- **No compartas nunca la carpeta de Drive.** Los archivos contienen una sesión de Steam activa.
 
 ---
 
-## Лицензия
+## Limitaciones
 
-MIT.
+- **Una sola instancia a la vez.** Las instancias comparten los mismos archivos y la misma identidad de Tailscale. El script detecta el desajuste de versiones y deja de subir, pero no confíes en ello.
+- **Juegos con antitrampas** (EAC, BattlEye): pueden negarse a funcionar en una máquina virtual o hacer que te baneen la cuenta. Bajo tu responsabilidad.
+- **Solo NVIDIA.** En otras GPU la gestión de la resolución se desactiva sola; lo demás funciona.
+- Probado en `docker.io/vastai/kvm:ubuntu_desktop_22.04` con el gestor de pantalla SDDM. Otras imágenes pueden necesitar ajustes.
+- Los mensajes del registro, las notificaciones y la página de estado del script están en ruso.
+
+---
+
+## Solución de problemas
+
+**Moonlight no encuentra el PC; la página de estado no abre.** El dispositivo que usas no está en Tailscale, o MagicDNS está desactivado. Comprueba que Tailscale esté en marcha en él y con la sesión iniciada en la misma cuenta.
+
+**La sincronización dejó de funcionar una semana después de configurarla.** Estás usando tu propio cliente OAuth de Google en estado Testing: ver [Tu propio cliente OAuth de Google](#tu-propio-cliente-oauth-de-google). Publícalo y obtén un token
