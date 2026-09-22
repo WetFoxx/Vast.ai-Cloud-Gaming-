@@ -104,8 +104,11 @@ The script is larger than 16 KB and the on-start field is capped. So the field h
 
 ```bash
 #!/bin/bash
-URL='https://raw.githubusercontent.com/USER/REPO/vX.Y/wolf-setup.sh'
-for _ in {1..30}; do curl -fsSL "$URL" -o /root/setup.sh && [ -s /root/setup.sh ] && break; sleep 5; done
+URL='https://gist.githubusercontent.com/WetFoxx/792f2333664d95c442fa451063b16436/raw/787acea52dc0d909adbf76bdf847b15a28ace4a9/gistfile1.txt'
+for _ in {1..30}; do
+  curl -fsSL "$URL" -o /root/setup.sh && [ -s /root/setup.sh ] && break
+  sleep 5
+done
 exec bash /root/setup.sh
 ```
 
