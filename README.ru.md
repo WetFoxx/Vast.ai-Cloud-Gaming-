@@ -309,4 +309,4 @@ Lo que depende de ti:
 
 **Moonlight no encuentra el PC; la página de estado no abre.** El dispositivo que usas no está en Tailscale, o MagicDNS está desactivado. Comprueba que Tailscale esté en marcha en él y con la sesión iniciada en la misma cuenta.
 
-**La sincronización dejó de funcionar una semana después de configurarla.** Estás usando tu propio cliente OAuth de Google en estado Testing: ver [Tu propio cliente OAuth de Google](#tu-propio-cliente-oauth-de-google). Publícalo y obtén un token.
+**La sincronización dejó de funcionar una semana después de configurarla.** Estás usando tu propio cliente OAuth de Google en estado Testing: ver [Tu propio cliente OAuth de Google](#tu-propio-cliente-oauth-de-google). Publícalo y obtén un token
