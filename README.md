@@ -1,5 +1,3 @@
-# wolf-setup.sh
-
 A cloud gaming PC on a rented Vast.ai GPU that doesn't disappear along with the instance.
 
 The script turns a fresh KVM machine into a desktop with Steam and Sunshine, brings it up on your Tailscale network under the same node name every time, and restores your Steam login, settings, Proton prefixes and saves from Google Drive — then keeps pushing changes back to the cloud while you play. Destroy the instance, rent a different machine a week later, and Moonlight connects to the same address, Steam doesn't ask for a password, and your saves are where you left them.
