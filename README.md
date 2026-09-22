@@ -1,6 +1,6 @@
 # wolf-setup.sh
 
-**English** · [Русский](README.ru.md)
+**English** · [Español](README.es.md) · [Русский](README.ru.md)
 
 A cloud gaming PC on a rented Vast.ai GPU that doesn't disappear with the instance.
 
@@ -93,6 +93,8 @@ rclone config show gdrive
 ```
 
 In the `token = {...}` line find `"refresh_token":"1//0...."`. Copy what's inside the quotes, without the quotes — that's your `RCLONE_REFRESH_TOKEN`. It's long and starts with `1//`.
+
+You don't need to create anything on Drive: on first launch the script creates a `vastai-cloud-games` folder at the root of My Drive and works only inside it.
 
 Leaving `client_id` empty uses rclone's own client. It's slower than a client of your own, but plenty for this setup, and its tokens don't expire. Read [Your own Google OAuth client](#your-own-google-oauth-client) before changing that.
 
@@ -319,7 +321,7 @@ What is up to you:
 
 **The log says `tailscale0` wasn't found.** Tailscale didn't come up, so Sunshine's ports and the status page were left open. Check the key and run `tailscale status`.
 
-**Sync stopped with "another version in the cloud".** A second instance was running. Decide which copy is newer and run `sudo wolf restore NAME` on the machine you're keeping.
+**Sync stopped with «в облаке другая версия» ("another version in the cloud").** A second instance was running. Decide which copy is newer and run `sudo wolf restore NAME` on the machine you're keeping.
 
 ---
 
