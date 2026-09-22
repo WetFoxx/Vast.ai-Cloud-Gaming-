@@ -1,106 +1,126 @@
-A cloud gaming PC on a rented Vast.ai GPU that doesn't disappear along with the instance.
+# wolf-setup.sh
 
-The script turns a fresh KVM machine into a desktop with Steam and Sunshine, brings it up on your Tailscale network under the same node name every time, and restores your Steam login, settings, Proton prefixes and saves from Google Drive — then keeps pushing changes back to the cloud while you play. Destroy the instance, rent a different machine a week later, and Moonlight connects to the same address, Steam doesn't ask for a password, and your saves are where you left them.
+**English** · [Русский](README.ru.md)
+
+A cloud gaming PC on a rented Vast.ai GPU that doesn't disappear with the instance.
+
+Rent a machine, play, destroy it. Next time — on a different machine, maybe a week later — Moonlight connects to the same address, Steam is still signed in, and your saves are where you left them. The script turns a fresh KVM instance into a desktop with Steam and Sunshine, joins it to your Tailscale network under a fixed name, restores your Steam session, settings, Proton prefixes and saves from Google Drive, and keeps uploading changes while you play.
 
 ```
    Vast.ai (KVM, NVIDIA)                  Google Drive            your devices
 ┌─────────────────────────┐          ┌──────────────────┐      ┌──────────────────┐
 │  Steam + Proton         │◄────────►│  identity        │      │  Moonlight       │
-│  Sunshine ──────────────┼──────────┼─ steam-state     │      │  (phone, PC,     │
-│  wolf (sync engine)     │          │  steam-cache     │      │   laptop, TV)    │
-│  Tailscale ─────────────┼──────────┼─ pfx--<appid>    │      │        ▲         │
-└──────────┬──────────────┘          │  game--<folder>  │      └────────┼─────────┘
+│  Sunshine ──────────────┼──────────┼─ steam-state     │      │  + Tailscale     │
+│  wolf (sync engine)     │          │  steam-cache     │      │  (phone, PC,     │
+│  Tailscale ─────────────┼──────────┼─ pfx--<appid>    │      │   laptop, TV)    │
+└──────────┬──────────────┘          │  game--<folder>  │      └────────▲─────────┘
            │                         └──────────────────┘               │
            └──────────────── Tailscale (all stream traffic) ────────────┘
 ```
 
 ---
 
-## What it does
+## Who this is for
 
-- **A stable address.** Tailscale's node state lives in the cloud, so a new instance comes up as the same node: same name, same IP. You add the PC to Moonlight once.
-- **Steam without logging in again.** `machine-id`, `loginusers.vdf`, `ConnectCache`, `ssfn*` and `userdata/` are preserved, so the session survives a change of instance. Offline mode works too: the license cache (`appcache`) goes to the cloud as well, without which offline Steam spins on the splash screen forever.
-- **Incremental sync.** Manifests are compared and only the delta is uploaded. A save in a game is an archive of a few kilobytes, not a re-upload of the whole prefix.
-- **Upload right after you quit a game.** A separate service watches running games and uploads their saves about 10 seconds after they close, without waiting for a timer. A desktop notification confirms it.
-- **Resolution follows the client.** A base mode of 1920×1200 on a GPU with no monitor attached (generated EDID plus `xorg.conf`), and when Moonlight connects, the resolution switches to the device's native one and switches back on disconnect.
-- **Isolation.** Sunshine's ports and the status page accept traffic only from the Tailscale interface; everything else is dropped. Secrets never reach the games' environment or the process list.
+This is not a one-click service. You'll create accounts on three sites, copy two keys into Vast's settings, and now and then open a terminal on the instance. If you've ever set up Plex, a home server or a Linux desktop, you'll manage. If you just want to press Play, GeForce NOW and Boosteroid are built for that.
+
+What you get in exchange: your own Steam library, mods and non-Steam games, on a GPU you pay for by the hour and only while you play.
 
 ---
 
-## What you'll need
+## What it does
+
+- **A fixed address.** Tailscale's node state lives in the cloud, so every new instance comes up as the same node: same name, same IP. You add the PC to Moonlight once.
+- **Steam stays signed in.** `machine-id`, `loginusers.vdf`, `ConnectCache`, `ssfn*` and `userdata/` are preserved, so the session survives a change of machine. Offline mode works too: the license cache (`appcache`) goes to the cloud as well.
+- **Incremental sync.** Only what changed is uploaded. A game save is an archive of a few kilobytes, not a re-upload of the whole prefix.
+- **Upload the moment you quit.** A background service notices when a game closes and uploads its saves within about 10 seconds, then shows a desktop notification.
+- **Resolution follows your device.** The desktop starts at 1920×1200 on a GPU with no monitor attached, switches to your device's native resolution when Moonlight connects, and switches back when you disconnect.
+- **Isolation.** Sunshine and the status page accept connections only over Tailscale. Secrets never reach the games or the process list.
+
+---
+
+## Why not just keep a disk on Vast?
+
+Vast bills storage for every hour an instance exists, running or stopped — typically $0.09–0.20 per GB per month, some hosts far more. A 500 GB disk for a game library costs roughly $45–100 a month before you've played a minute. Vast's own Cloud Sync doesn't work on KVM instances, and gaming needs KVM: a container can't run its own display server on the GPU.
+
+This setup keeps on Google Drive only what can't be re-downloaded — saves, Proton prefixes, the Steam session, the network identity. That's usually a few gigabytes, often within Google's free 15 GB. You destroy the instance when you're done and pay only for the hours you play: on an RTX 3060 at about $0.11 an hour, four hours every day comes to about $13.60 a month all-in, a couple of evenings a week to about $2–3.
+
+The trade-off: every new instance re-downloads your Steam games, usually in 10–20 minutes.
+
+---
+
+## Quick start
+
+About half an hour the first time. You'll need:
 
 | | |
 |---|---|
-| A **Vast.ai** account | able to rent a KVM instance |
-| A **Google** account | for Drive; use a separate one, not your main — see [Security](#security) |
-| A **Tailscale** account | the free tier is enough |
-| **Moonlight** | on the devices you'll play from |
-| **rclone** locally | once, to obtain the Drive token |
+| a **Vast.ai** account | with some credit |
+| a **Tailscale** account | the free tier is enough |
+| a **Google** account for Drive | a separate one, not your main — see [Security](#security) |
+| **rclone** on your computer | once, to get the Drive token |
+| **Tailscale** and **Moonlight** on every device you'll play from | phone, laptop, TV box |
 
-Picking an instance:
+### 1. Tailscale
 
-- image `docker.io/vastai/kvm:ubuntu_desktop_22.04` — it has to be KVM, not a container;
-- **NVIDIA** with an NVENC hardware encoder, so a consumer RTX/GTX card. Datacenter accelerators such as the A100 or H100 won't do: they have no display engine;
-- disk sized for your games plus about 20 GB for temporary archives;
-- a host geographically close to you — latency depends on it;
-- **check the host's bandwidth rate.** Hover over the price in the search results: the breakdown should list GPU and disk only. Most hosts don't charge for traffic, but the rate is set per host, and a Moonlight stream runs roughly 18 GB per hour at 40 Mbit/s, so a paid one would dominate your bill.
+1. In [login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys) click **Generate auth key**:
+   - **Reusable — on.** The key is used on every launch.
+   - **Ephemeral — off.** Ephemeral nodes are deleted when they go offline, and you'd lose the fixed name.
+   - Expiration — up to 90 days. When it runs out, generate a new one and update the variable in Vast.
 
----
+   The `tskey-auth-...` string is your `TAILSCALE_AUTHKEY`.
+2. Under **DNS**, enable **MagicDNS**. The same page shows your tailnet name, something like `tail3d42c9.ts.net`. You'll need it for Moonlight.
+3. Install Tailscale on every device you'll play from and sign in with the same account. Moonlight reaches the instance only through Tailscale.
 
-## Setup
+### 2. Google Drive token
 
-### Step 1. Your own Google OAuth client (recommended)
-
-You can skip this and use rclone's shared client, but it is heavily rate-limited and downloads from Drive will be noticeably slower. Creating your own takes ten minutes: [rclone.org/drive/#making-your-own-client-id](https://rclone.org/drive/#making-your-own-client-id).
-
-You end up with a `client_id` / `client_secret` pair, used in the next step and in the `RCLONE_CLIENT_ID` / `RCLONE_CLIENT_SECRET` variables.
-
-### Step 2. The Google Drive token
-
-On your own computer (a browser is required):
+Install rclone ([rclone.org/install](https://rclone.org/install/); on macOS `brew install rclone`, on Windows `winget install Rclone.Rclone`) and run:
 
 ```bash
 rclone config
 ```
 
-- `n` — new remote, name it **gdrive**
+- `n` for a new remote, name it **gdrive**
 - storage type: **drive**
-- `client_id` / `client_secret` — from step 1, or Enter for the shared client
+- `client_id` and `client_secret`: just press Enter for both
 - scope: **1** (Full access)
-- Enter through the rest; answer **y** to `Use auto config?` and a browser will open
+- press Enter through the rest; answer **y** to `Use auto config?` — a browser opens; sign in with the Google account you're using for this and allow access
 
-Then print the configuration:
+Then:
 
 ```bash
 rclone config show gdrive
 ```
 
-In the `token = {...}` line find `"refresh_token":"1//0...."`. The value inside the quotes is your `RCLONE_REFRESH_TOKEN`. It is long and starts with `1//`.
+In the `token = {...}` line find `"refresh_token":"1//0...."`. Copy what's inside the quotes, without the quotes — that's your `RCLONE_REFRESH_TOKEN`. It's long and starts with `1//`.
 
-The script creates the `vastai-cloud-games` folder on Drive itself and works only inside it.
+Leaving `client_id` empty uses rclone's own client. It's slower than a client of your own, but plenty for this setup, and its tokens don't expire. Read [Your own Google OAuth client](#your-own-google-oauth-client) before changing that.
 
-### Step 3. The Tailscale key
+### 3. Save both keys in Vast
 
-[login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys) → **Generate auth key**:
+On Vast, open **Settings** and scroll to **Environment Variables**. Add:
 
-- **Reusable — on.** The key is used on every instance launch.
-- **Ephemeral — off.** Ephemeral nodes are removed as soon as they go offline, and you won't get a stable name.
-- Expiration — up to 90 days. When it expires, generate a new one and update the variable.
+| Key | Value |
+|---|---|
+| `RCLONE_REFRESH_TOKEN` | the token from step 2 |
+| `TAILSCALE_AUTHKEY` | the key from step 1 |
 
-The resulting `tskey-auth-...` string is your `TAILSCALE_AUTHKEY`.
+Press **+** after each, then **Save Edits**. These are account-wide and reach every instance you rent. Never put them into a template.
 
-Two more settings in the admin console, without which this gets awkward:
+### 4. Rent from the template
 
-- **DNS → MagicDNS — enable it.** The same page shows your tailnet name, something like `tail3d42c9.ts.net`. You'll need it for Moonlight.
-- After the first launch: **Machines → your node → ⋯ → Disable key expiry.** Otherwise the node drops off mid-game six months from now.
+**[Open the template on Vast.ai](https://cloud.vast.ai?ref_id=688160&template_id=49faada2e6e7fe3e15bef0ea1999420a)**
 
-### Step 4. ZeroTier (optional)
+Pick a machine:
 
-If you want a second network, take the Network ID from [my.zerotier.com](https://my.zerotier.com) and put it in `ZT_NETWORK_ID`. Without that variable ZeroTier is neither installed nor started. Tailscale alone is enough for streaming.
+- **an NVIDIA gaming card** — RTX or GTX, which have the NVENC encoder. Datacenter GPUs such as the A100 and H100 have no display output and won't work.
+- **close to you** — latency depends on distance.
+- **enough disk** for the games you'll install, plus about 20 GB.
+- **no bandwidth charge.** Hover over the price: the breakdown should list only GPU and disk. Most hosts don't charge for traffic, but it's up to each host, and a stream uses roughly 10–20 GB an hour.
 
-### Step 5. The Vast.ai template
+Then **Rent**. Installation takes a few minutes.
 
-The script is larger than 16 KB and the on-start field is capped. So the field holds a tiny loader that fetches the script:
+For the curious, this is everything the template runs on start. It downloads the script and executes it:
 
 ```bash
 #!/bin/bash
@@ -112,114 +132,91 @@ done
 exec bash /root/setup.sh
 ```
 
-Point the URL at a **release tag**, not at a branch: otherwise every commit ships immediately to every instance that starts.
+The URL points at one fixed revision of the script, so what runs can't change behind your back.
 
-In the template set:
+### 5. Connect Moonlight
 
-- **Image:** `docker.io/vastai/kvm:ubuntu_desktop_22.04`
-- **On-start script:** the loader above
-- **Disk space:** sized for your games
+Once the instance is up, a `vastai-gaming` node appears under [Machines](https://login.tailscale.com/admin/machines) in the Tailscale console. While you're there, open **⋯ → Disable key expiry** on it, or it will drop off in six months.
 
-Don't put secrets in the template. They belong in **Account → Environment Variables**, from where they arrive as environment variables and the script immediately moves them into files with mode `600` and strips them from `/etc/environment`:
-
-| Variable | |
-|---|---|
-| `RCLONE_REFRESH_TOKEN` | required |
-| `TAILSCALE_AUTHKEY` | required |
-| `RCLONE_CLIENT_ID`, `RCLONE_CLIENT_SECRET` | if you made your own client |
-| `ZT_NETWORK_ID` | if you want ZeroTier |
-
-You don't need to forward Sunshine's ports in the Vast settings: the stream goes over Tailscale.
-
-### Step 6. First launch
-
-Rent the instance and watch the install:
-
-```bash
-tail -f /var/log/wolf-setup.log    # package installation
-tail -f /var/log/wolf.log          # restore and sync
-```
-
-Anything the script finds wrong with the environment — not Ubuntu 22.04, no NVIDIA, a missing token — is printed near the top of `wolf-setup.log` with a `!!!` prefix.
-
-Status page: `http://<node-name>:8099` — a table of archives and the tail of the log, refreshed every five seconds.
-
-With an empty Drive there is nothing to restore, so the first launch is just ordinary setup from scratch:
-
-1. Wait for the `boot: ok` line.
-2. Connect with Moonlight (next step) and sign in to Steam.
-3. Install your games.
-4. **Switch Steam to offline mode** (Steam → Go Offline). Without it, every new instance will ask for Steam Guard confirmation.
-5. Play for 10–15 minutes so the saves and the cache reach the cloud. Check with `grep steam-cache /var/log/wolf.log` — you want a line saying it was uploaded.
-
-From here you can destroy and re-create instances as often as you like.
-
-### Step 7. Moonlight
-
-You work out the node name once. In the [Tailscale admin console → Machines](https://login.tailscale.com/admin/machines) find the `vastai-gaming` node and read its full name, which is the node name plus your tailnet name from the DNS page:
+The node's full name is its name plus your tailnet name:
 
 ```
 vastai-gaming.tail3d42c9.ts.net
 ```
 
-The name may come with a suffix — `vastai-gaming-2`, `-3` and so on. Those are leftovers from earlier nodes: Tailscale won't give two machines the same name and appends a number. Delete the stale nodes in the console, keep the working one, and note its exact name. It won't change after that, because the node's state is restored from the cloud.
+If it shows up as `vastai-gaming-2` or similar, those numbers come from earlier nodes with the same name. Delete the stale ones and use the exact name you see.
 
-In Moonlight, add the PC **manually by that name, not by IP address.** The 100.x.y.z address is usually stable, but it changes if the node is ever recreated; the name doesn't.
+In Moonlight, add the PC **manually, by that name — not by IP address.** When it asks for a PIN, open `https://vastai-gaming.tail3d42c9.ts.net:47990` in a browser. The certificate warning is expected. The first time, Sunshine asks you to create a username and password; then enter the PIN in the PIN section.
 
-When it asks for a PIN, open `https://vastai-gaming.tail3d42c9.ts.net:47990`. Your browser will complain about the self-signed certificate, which is expected. On the first visit Sunshine asks you to create a username and password for its web UI. Enter the PIN in the PIN section.
+The pairing is saved to the cloud, so you do this once.
 
-The Moonlight pairing is kept in the `identity` archive, so you won't have to confirm it again when the instance changes.
+Set Moonlight's resolution to **Native** to get your screen's resolution; the desktop adapts to whatever the client asks for.
 
-**Resolution.** To get your device's native resolution, select **Native** in Moonlight rather than a fixed 1080p. The script applies exactly what the client sends. Landscape orientation works on every kind of device; portrait sometimes fails NVIDIA's timing validation, in which case the stream simply runs at the base 1920×1200 and `/var/log/wolf-res.log` records the failure.
+### 6. Set up Steam once
+
+1. Sign in to Steam.
+2. Install your games.
+3. Switch Steam to **offline mode** (Steam → Go Offline). Without it, every new instance asks for a Steam Guard code.
+4. Play for 10–15 minutes so everything reaches the cloud.
+
+That's the whole setup. From now on it's: rent from the template, connect, play.
 
 ---
 
-## Day-to-day use
+## Every session
+
+Rent from the template, wait a few minutes, connect Moonlight. Your Steam games re-download each time, usually in 10–20 minutes; saves and settings are already there.
+
+**When you're done: quit the game, wait for the desktop notification, then destroy the instance.** The notification — titled «Сохранения в облаке», the script's messages are in Russian — appears only after your saves have reached Drive, so it is your confirmation.
+
+Destroy, don't stop: a stopped instance keeps billing for its disk.
+
+Steam settings and the offline cache sync every five minutes. If you changed something right before leaving, open a terminal on the instance and run `sudo wolf shutdown` first: it closes Steam and uploads everything immediately.
+
+Other commands, from a terminal on the instance or over SSH:
 
 ```bash
-sudo wolf shutdown          # close Steam and upload everything — BEFORE destroying the instance
+sudo wolf shutdown          # close Steam and upload everything right now
 sudo wolf state             # upload state right now
-sudo wolf games             # upload games right now
+sudo wolf games             # upload non-Steam games right now
 sudo wolf restore NAME...   # restore archives (FORCE=1 to restore even if current)
-sudo wolf display           # re-apply EDID/xorg and return to the base mode
+sudo wolf display           # re-apply the display config (restarts X — not mid-game)
 sudo wolf firewall          # re-apply port isolation
-sudo wolf-res 2560 1440 60  # change resolution by hand; no arguments means the base mode
+sudo wolf-res 2560 1440 60  # change resolution by hand; no arguments = back to base
 ```
-
-**`sudo wolf shutdown` before destroying an instance is the one rule that matters.** Destruction on Vast is immediate and the system gets no chance to shut down cleanly. Without this command you lose the last interval: up to 5 minutes of state and saves, up to 15 minutes of game files.
 
 Logs and status:
 
 | | |
 |---|---|
-| `/var/log/wolf-setup.log` | installation |
+| `/var/log/wolf-setup.log` | installation; environment problems are marked `!!!` |
 | `/var/log/wolf.log` | sync, network, display |
 | `/var/log/wolf-res.log` | resolution changes |
-| `http://<node-name>:8099` | status page; `/json` for the same data machine-readable |
+| `http://vastai-gaming.<tailnet>.ts.net:8099` | status page, over Tailscale only; `/json` for the same data machine-readable |
 
 ---
 
-## What is synced, and when
+## Advanced
 
-| Archive | Contents | Uploaded |
-|---|---|---|
-| `identity` | `machine-id`, Tailscale state, ZeroTier keys, Sunshine certificates | every 5 min |
-| `steam-state` | Steam login, settings, `userdata/` | every 5 min |
-| `steam-client` | the Steam client without caches or games | every 5 min, once it settles |
-| `steam-cache` | `appcache` for offline mode | once unchanged across two passes, or at shutdown if Steam is already closed |
-| `pfx--<appid>` | the Proton prefix, which is where saves live | every 5 min, and right after you quit the game |
-| `game--<folder>` | a non-Steam game, a subfolder of `~/Downloads/Games` | every 15 min, and after you quit |
-| `sgame--<folder>` | a Steam game, only with `SYNC_STEAM_GAMES=1` | every 15 min, and after you quit |
+### Your own Google OAuth client
 
-Steam games themselves are **not** synced by default: re-downloading them from Steam is usually faster than from Drive and doesn't eat your Google quota (750 GB per day of uploads). Turn on `SYNC_STEAM_GAMES=1` only for games you've modified locally or that are no longer on the store.
+Only worth it if you turn on `SYNC_STEAM_GAMES=1` or sync large non-Steam games: rclone's shared client is rate-limited, and a client of your own is faster for big transfers. Instructions: [rclone.org/drive/#making-your-own-client-id](https://rclone.org/drive/#making-your-own-client-id).
 
-Put non-Steam games in subfolders of `~/Downloads/Games`; each subfolder becomes its own archive.
+**You must publish it.** A new client starts in **Testing** status, and Google gives Testing clients refresh tokens that expire after 7 days — sync would quietly stop a week after setup. In Google Cloud Console open the OAuth consent screen (in the newer console: Google Auth Platform → Audience) and set the publishing status to **In production**. No verification is needed for personal use; when you sign in, Google shows an "unverified app" warning once — choose Advanced and continue.
 
----
+Then repeat step 2 entering your `client_id` and `client_secret`, and add `RCLONE_CLIENT_ID` and `RCLONE_CLIENT_SECRET` to Vast's Environment Variables next to the new token.
 
-## Variables
+### ZeroTier
 
-All of these go in Environment Variables on Vast and override the defaults in the script.
+If you want a second network, put its Network ID from [my.zerotier.com](https://my.zerotier.com) in `ZT_NETWORK_ID`. Without that variable ZeroTier is neither installed nor started. Tailscale alone is enough for streaming.
+
+### Your own template
+
+The script is bigger than the 16 KB Vast allows in the on-start field, which is why the template holds only a loader. For a template of your own: image `docker.io/vastai/kvm:ubuntu_desktop_22.04`, the loader from step 4 in **On-start script**, disk sized for your games. If you host your own copy of the script, point the URL at a fixed revision — a release tag or a commit — rather than a branch; otherwise every change ships instantly to every instance that starts.
+
+### Variables
+
+All of these go in Vast's Environment Variables and override the script's defaults.
 
 **Secrets**
 
@@ -228,7 +225,7 @@ All of these go in Environment Variables on Vast and override the defaults in th
 | `RCLONE_REFRESH_TOKEN` | Google Drive token |
 | `TAILSCALE_AUTHKEY` | the `tskey-auth-...` key |
 | `RCLONE_CLIENT_ID`, `RCLONE_CLIENT_SECRET` | your own Google OAuth client |
-| `ZT_NETWORK_ID` | ZeroTier network; empty means ZeroTier is unused |
+| `ZT_NETWORK_ID` | ZeroTier network; empty means no ZeroTier |
 
 **Behaviour**
 
@@ -238,10 +235,10 @@ All of these go in Environment Variables on Vast and override the defaults in th
 | `SYNC_STEAM_GAMES` | `0` | sync the Steam games themselves |
 | `AUTO_RES` | `1` | manage resolution |
 | `RES` | `1920x1200` | base desktop resolution |
-| `STEAM_LANG` | empty | force a Steam language (`english`, `german`, …); empty means no `-language` flag is passed and Steam uses its own setting |
-| `TAILSCALE_SSH` | `1` | bring Tailscale SSH up — see [Security](#security) |
+| `STEAM_LANG` | empty | force a Steam language (`english`, `german`, …); empty means Steam uses its own setting |
+| `TAILSCALE_SSH` | `1` | bring up Tailscale SSH — see [Security](#security) |
 | `NOTIFY_SAVES` | `1` | notify when saves are uploaded |
-| `NOTIFY_SEC` | `8` | how long a notification stays on screen |
+| `NOTIFY_SEC` | `8` | how long a notification stays on screen, seconds |
 
 **Fine tuning**
 
@@ -260,48 +257,69 @@ All of these go in Environment Variables on Vast and override the defaults in th
 
 ---
 
+## What is synced, and when
+
+| Archive | Contents | Uploaded |
+|---|---|---|
+| `identity` | `machine-id`, Tailscale state, ZeroTier keys, Sunshine certificates | every 5 min |
+| `steam-state` | Steam login, settings, `userdata/` | every 5 min |
+| `steam-client` | the Steam client without caches or games | every 5 min, once it settles |
+| `steam-cache` | `appcache` for offline mode | once unchanged across two passes, or at shutdown if Steam is closed |
+| `pfx--<appid>` | the Proton prefix, which is where saves live | every 5 min, and right after you quit the game |
+| `game--<folder>` | a non-Steam game, a subfolder of `~/Downloads/Games` | every 15 min, and after you quit |
+| `sgame--<folder>` | a Steam game, only with `SYNC_STEAM_GAMES=1` | every 15 min, and after you quit |
+
+Steam games themselves are **not** synced by default: re-downloading from Steam is usually faster than from Drive and doesn't eat your Google quota (750 GB of uploads per day). Turn on `SYNC_STEAM_GAMES=1` only for games you've modified or that are gone from the store — and set up [your own OAuth client](#your-own-google-oauth-client) if you do.
+
+Put non-Steam games in subfolders of `~/Downloads/Games`; each subfolder becomes its own archive.
+
+---
+
 ## Security
 
 What the script does:
 
-- Sunshine's ports (47984–48010, including the 47990 web UI) and the status page accept traffic only from the `tailscale0` interface and from loopback; everything else is dropped. The INPUT policy itself is left alone, so SSH and Vast's own management keep working.
-- The Drive token lives only in `/root/.config/rclone/rclone.conf` (600, root); the Tailscale key lives in `/etc/wolf/tskey` (600, root) and is passed as `file:`, so it never shows up in the process list. Both are stripped from `/etc/environment`, and Steam and games start through `env -i` so they inherit no secrets.
-- The `identity` archive is never unpacked into `/`. It is downloaded to a temporary file, checked for absolute paths and `..`, extracted into a staging directory, every symlink is verified with `realpath`, and only then is a fixed allowlist of files copied into place. User archives are always extracted as the unprivileged desktop user, never as root.
-- Uploads to Drive are atomic: the file is written as `NAME.part` and replaces the live one only on a successful `moveto`. Overwrites go to the trash, so they can be rolled back.
+- Sunshine's ports (47984–48010, including the 47990 web UI) and the status page accept traffic only from the `tailscale0` interface and loopback; everything else is dropped. The INPUT policy itself is untouched, so SSH and Vast's own management keep working.
+- The Drive token lives only in `/root/.config/rclone/rclone.conf` (600, root); the Tailscale key lives in `/etc/wolf/tskey` (600, root) and is passed as `file:`, so it never appears in the process list. Both are removed from `/etc/environment`, and Steam and games start through `env -i`, inheriting no secrets.
+- The `identity` archive is never unpacked into `/`. It is downloaded to a temporary file, checked for absolute paths and `..`, extracted into a staging directory, every symlink is verified with `realpath`, and only a fixed allowlist of files is copied into place. User archives are always extracted as the unprivileged desktop user, never as root.
+- Uploads to Drive are atomic: the file is written as `NAME.part` and replaces the live one only on a successful `moveto`. Overwritten versions go to Drive's trash, so they can be recovered.
 
 What is up to you:
 
-- **Use a separate Google account for this.** The token from Environment Variables is readable by anything running on the instance, and its scope is full access to Drive. A separate account limits the damage to the games folder.
-- **The instance is rented from a stranger.** The machine's owner has root on the host. Your Steam session and your Drive token will be sitting there. That isn't paranoia, it's what renting means — decide accordingly what you're willing to put there.
-- **Tailscale SSH is on by default.** Any node on your tailnet gets root on the instance. Convenient on a personal tailnet; set `TAILSCALE_SSH=0` if the tailnet is shared.
+- **Use a separate Google account.** The Drive token is readable by anything running on the instance, and its scope is full access to Drive. A separate account limits the damage to the games folder.
+- **The instance is rented from a stranger.** The machine's owner has root on the host, and your Steam session and Drive token will sit there. That's not paranoia, it's what renting means — decide what you're willing to put there.
+- **Tailscale SSH is on by default.** Any device on your tailnet gets root on the instance. Convenient on a personal tailnet; set `TAILSCALE_SSH=0` if you share it.
 - **Never share the Drive folder.** The archives contain a live Steam session.
 
 ---
 
 ## Limitations
 
-- **One instance at a time.** They share the same archives and the same Tailscale identity. The script notices the version mismatch and stops uploading with an "another version in the cloud" error, but it's better not to get there.
-- **Anti-cheat games** (EAC, BattlEye) may refuse to launch in a virtual machine, or get you banned. Your risk.
-- **NVIDIA only.** On any other GPU, resolution management switches itself off; everything else still works.
-- `wolf display` restarts X when the configuration changes, which closes any running game and the Steam session. Don't run it mid-game.
-- Tested on `docker.io/vastai/kvm:ubuntu_desktop_22.04` with the SDDM display manager. Another image may need adjustments.
-- The script's log messages and status page are in Russian.
+- **One instance at a time.** Instances share the same archives and Tailscale identity. The script notices the version mismatch and stops uploading, but don't rely on it.
+- **Anti-cheat games** (EAC, BattlEye) may refuse to run in a virtual machine, or get your account banned. Your risk.
+- **NVIDIA only.** On other GPUs resolution management switches itself off; everything else works.
+- Tested on `docker.io/vastai/kvm:ubuntu_desktop_22.04` with the SDDM display manager. Other images may need adjustments.
+- The script's log messages, notifications and status page are in Russian.
 
 ---
 
 ## Troubleshooting
 
-**Steam loads forever.** There's no license cache for offline mode. Since v3.6 such a launch automatically goes online and the status page shows a hint. Sign in, switch back to offline mode, and let the instance run for 10–15 minutes. Check with `grep steam-cache /var/log/wolf.log`.
+**Moonlight can't find the PC; the status page won't open.** The device you're using isn't on Tailscale, or MagicDNS is off. Check that Tailscale is running there and signed in to the same account.
 
-**Moonlight asks for a PIN on every instance.** `identity` isn't being restored. Check `grep identity /var/log/wolf.log` for an `ok` line.
+**Sync stopped working about a week after setup.** You're using your own Google OAuth client in Testing status — see [Your own Google OAuth client](#your-own-google-oauth-client). Either publish it and get a new token, or delete `RCLONE_CLIENT_ID` and `RCLONE_CLIENT_SECRET` from Vast and get a new token with rclone's own client.
 
-**Nodes with numeric suffixes pile up in the Tailscale console.** Same cause: the Tailscale state isn't arriving from the cloud, so every launch registers a new node. Fix `identity` first, then delete the extras.
+**Steam loads forever.** Offline mode is on but there's no license cache yet. The script detects this and starts Steam online instead, with a hint on the status page. Sign in, switch back to offline mode, and let the instance run 10–15 minutes.
 
-**Black screen with only the cursor visible.** The client's resolution didn't match what Sunshine captures. Set Moonlight to exactly 1920×1200; if the picture appears, the problem is in the resolution switch — see `/var/log/wolf-res.log`.
+**Moonlight asks for a PIN on every new instance.** The `identity` archive isn't being restored. Check `grep identity /var/log/wolf.log` for an `ok` line.
 
-**`firewall: tailscale0 not found` in the log.** Tailscale didn't come up, so Sunshine's ports and the status page were left open. Check the key and `tailscale status`.
+**Nodes with numeric suffixes keep piling up in Tailscale.** Same cause: the Tailscale state isn't coming back from the cloud, so each launch registers a new node. Fix `identity` first, then delete the extras.
 
-**Sync stopped with "another version in the cloud".** A second instance was running somewhere. Decide which copy is newer and run `sudo wolf restore NAME` on the machine you're keeping.
+**Black screen with only a cursor.** The client's resolution didn't match what Sunshine captures. Set Moonlight to exactly 1920×1200; if the picture appears, the resolution switch is at fault — see `/var/log/wolf-res.log`.
+
+**The log says `tailscale0` wasn't found.** Tailscale didn't come up, so Sunshine's ports and the status page were left open. Check the key and run `tailscale status`.
+
+**Sync stopped with "another version in the cloud".** A second instance was running. Decide which copy is newer and run `sudo wolf restore NAME` on the machine you're keeping.
 
 ---
 
