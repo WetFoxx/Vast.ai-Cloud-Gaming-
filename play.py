@@ -1,11 +1,13 @@
 # play.py — арендовать машину по шаблону и дождаться, пока можно играть.
-# Запуск: .venv/bin/python play.py <ID машины из offers.py>
-#         .venv/bin/python play.py 51607424 --disk 150 --no-games
-#         .venv/bin/python play.py 51607424 --dry-run   (показать запрос, ничего не арендовать)
+# Запуск: vastgame play                   — подобрать машину самому (самая выгодная из подходящих)
+#         vastgame play 51607424          — конкретная машина (ID из vastgame offers)
+#         vastgame play --disk 150 --no-games
+#         vastgame play --dry-run         — показать запрос, ничего не арендовать
 #
 # Что происходит:
 #  1. Проверка: других инстансов нет (одновременно — только один).
-#  2. Свежая цена машины и баланс → вопрос «Арендовать?». Аренда — только после «да».
+#  2. Машина: подобрать (пятёрка лучших, по умолчанию — первая) или проверить указанную;
+#     свежая цена и баланс → вопрос «Арендовать?». Аренда — только после «да».
 #  3. PUT asks/<id>/ — аренда по шаблону.
 #  4. Ожидание: Vast запустил машину → узел vastai-gaming онлайн в Tailscale →
 #     wolf-setup.sh восстановил всё из Google Drive (boot = ok на странице /json).
@@ -17,12 +19,13 @@ import re
 import sys
 import time
 
+import market
 from vastapi import TEMPLATE_NAME, call, list_instances, my_template
 from wolfnode import NODE, print_links, ts_node, wolf_status
 
 
 p = argparse.ArgumentParser(description="Арендовать машину и дождаться готовности")
-p.add_argument("offer", type=int, help="ID машины из таблицы offers.py")
+p.add_argument("offer", type=int, nargs="?", help="ID машины из vastgame offers; без него — подобрать самому")
 p.add_argument("--disk", type=int, help="размер диска, ГБ (по умолчанию — из шаблона)")
 g = p.add_mutually_exclusive_group()
 g.add_argument("--games", dest="games", action="store_const", const="1",
@@ -42,15 +45,21 @@ def ask(question):
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
 
 
-def fail(instance_id, why):
-    """Что-то пошло не так после аренды: машина уже платная — предложить удалить."""
+def fail(instance_id, why, bad_host=False):
+    """Что-то пошло не так после аренды: машина уже платная — предложить удалить.
+    bad_host — виноват хост: запомнить его, чтобы больше не предлагать."""
     print(f"\n!!! {why}")
+    if bad_host:
+        market.mark_bad(o.get("machine_id"), why)
+        print(f"Этот хост (machine {o.get('machine_id')}) больше не будет предлагаться.")
     print(f"Инстанс {instance_id} арендован и тратит деньги.")
     if ask("Удалить его сейчас? На нём ещё ничего не сохранялось"):
         r = call("DELETE", f"instances/{instance_id}/", {})
         print("Удалён." if r.get("success") else f"Vast не удалил: {r.get('msg')}")
     else:
         print("Не удаляю. Удалить можно в консоли Vast (Instances → корзина).")
+    if bad_host:
+        print("Попробовать другую машину: vastgame play")
     sys.exit(1)
 
 
@@ -58,7 +67,10 @@ def fail(instance_id, why):
 running = list_instances()
 if running:
     ids = ", ".join(str(i["id"]) for i in running)
-    sys.exit(f"У тебя уже есть инстанс ({ids}). Одновременно — только один: общие архивы и личность Tailscale.")
+    msg = f"У тебя уже есть инстанс ({ids}). Одновременно — только один: общие архивы и личность Tailscale."
+    if not a.dry_run:
+        sys.exit(msg)
+    print(f"({msg} --dry-run всё равно покажет, что было бы арендовано.)\n")
 
 # ---- 2. Шаблон (создаёт мастер) и размер диска по умолчанию из него
 tpl = my_template()
@@ -67,19 +79,39 @@ if not tpl:
 if a.disk is None:
     a.disk = int(tpl.get("recommended_disk_space") or 100)
 
-# ---- 3. Свежая цена этой машины (с нашим диском) и баланс
-# Поле id в фильтре поиска не работает (молча находит 0), а ask_contract_id — работает
-found = call("POST", "bundles/", {
-    "ask_contract_id": {"eq": a.offer}, "rentable": {"eq": True}, "type": "ondemand",
-    "allocated_storage": a.disk, "limit": 1,
-}).get("offers", [])
-if not found:
-    sys.exit(f"Машина {a.offer} уже недоступна — запусти offers.py заново.")
-o = found[0]
-if not o.get("vms_enabled"):
-    sys.exit(f"Машина {a.offer} не поддерживает KVM — шаблон на ней не запустится.")
-if o.get("disk_space", 0) < a.disk:
-    sys.exit(f"На машине свободно {o['disk_space']:.0f} ГБ, а нужно {a.disk}.")
+# ---- 3. Машина: подобрать самим или проверить указанную (свежая цена — с нашим диском)
+if a.offer is None:
+    rows = market.search(a.disk)
+    if not rows:
+        sys.exit("Подходящих машин сейчас нет. Посмотри шире: vastgame offers --min-rel 0.95")
+    top = rows[:5]
+    print(f"Подходящих машин: {len(rows)} (RTX/GTX, KVM, надёжность от {market.MIN_REL}, диск {a.disk} ГБ).")
+    print("Самые выгодные по полной цене часа (аренда с диском + стрим 15 ГБ):\n")
+    market.print_table(top, numbered=True)
+    print("\nЗадержка в игре зависит от расстояния до машины — смотри на страну.")
+    pick = input(f"Какую? Номер 1–{len(top)}, Enter — №1, «нет» — отмена: ").strip().lower()
+    if pick in ("нет", "н", "no", "n", "q"):
+        sys.exit("Отменено, ничего не арендовано.")
+    if pick and not (pick.isdigit() and 1 <= int(pick) <= len(top)):
+        sys.exit("Нет такого номера. Отменено, ничего не арендовано.")
+    o = top[int(pick or 1) - 1]
+    a.offer = o["id"]
+    print()
+else:
+    # Поле id в фильтре поиска не работает (молча находит 0), а ask_contract_id — работает
+    found = call("POST", "bundles/", {
+        "ask_contract_id": {"eq": a.offer}, "rentable": {"eq": True}, "type": "ondemand",
+        "allocated_storage": a.disk, "limit": 1,
+    }).get("offers", [])
+    if not found:
+        sys.exit(f"Машина {a.offer} уже недоступна — подбери другую: vastgame play")
+    o = found[0]
+    if not o.get("vms_enabled"):
+        sys.exit(f"Машина {a.offer} не поддерживает KVM — шаблон на ней не запустится.")
+    if o.get("disk_space", 0) < a.disk:
+        sys.exit(f"На машине свободно {o['disk_space']:.0f} ГБ, а нужно {a.disk}.")
+    if str(o.get("machine_id")) in market.bad_hosts():
+        print(f"!!! Этот хост раньше не смог запустить машину: {market.bad_hosts()[str(o.get('machine_id'))]['reason']}")
 credit = call("GET", "users/current/").get("credit", 0)
 
 body = {
@@ -93,7 +125,7 @@ if a.games is not None:
     body["env"] = {"SYNC_STEAM_GAMES": a.games}
 tpl_games = "1" if re.search(r"-e\s+SYNC_STEAM_GAMES=\"?1", tpl.get("env") or "") else "0"
 
-print(f"Машина {a.offer}: {o['gpu_name']}, {(o.get('geolocation') or '?').strip(', ')}, "
+print(f"Машина {a.offer}: {o['gpu_name']}, {market.country(o)}, "
       f"надёжность {o['reliability']:.3f}")
 print(f"Цена: ${o['dph_total']:.3f}/ч (с диском {a.disk} ГБ); трафик: ↑ ${o.get('inet_up_cost', 0) * 1000:.2f}/ТБ, "
       f"↓ ${o.get('inet_down_cost', 0) * 1000:.2f}/ТБ")
@@ -148,15 +180,15 @@ while True:
         break
     # Из этих состояний машина уже не дойдёт до running (см. документацию Vast)
     if st in ("exited", "offline", "unknown"):
-        fail(iid, f"Машина перешла в состояние «{st}» и не запустится.")
+        fail(iid, f"Машина перешла в состояние «{st}» и не запустится.", bad_host=True)
     # Хост не смог создать машину: «Error response from daemon ...» в status_msg.
     # Ошибку, повторившуюся две проверки подряд (~30 с), считаем окончательной.
     err = "error" in (inst.get("status_msg") or "").lower()
     errors = errors + 1 if err else 0
     if errors >= 2:
-        fail(iid, "Хост не смог запустить машину: " + inst["status_msg"].strip()[:200])
+        fail(iid, "Хост не смог запустить машину: " + inst["status_msg"].strip()[:200], bad_host=True)
     if time.time() > deadline:
-        fail(iid, "Машина не запустилась за 30 минут.")
+        fail(iid, "Машина не запустилась за 30 минут.", bad_host=True)
     time.sleep(15)
 
 # ---- 5b. Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
