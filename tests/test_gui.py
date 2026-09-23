@@ -172,5 +172,25 @@ class TestStop(unittest.TestCase):
         self.assertEqual(calls, [42])
 
 
+class TestMoonlight(unittest.TestCase):
+    def test_apps_and_stream_remembers_choice(self):
+        api = gui.Api()
+        store = {}
+        started = []
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: ["Desktop", "Steam Big Picture"]), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a: started.append((h, a)) or True), \
+             mock.patch.object(gui.settings, "get", lambda k, d=None: store.get(k, d)), \
+             mock.patch.object(gui.settings, "set", lambda k, v: store.__setitem__(k, v)):
+            self.assertEqual(api.moonlight_apps("m")["selected"], "Desktop")          # по умолчанию
+            self.assertEqual(api.open_moonlight("m", "Steam Big Picture"), {"ok": True})
+            self.assertEqual(api.moonlight_apps("m")["selected"], "Steam Big Picture")  # запомнил
+        self.assertEqual(started, [("m", "Steam Big Picture")])
+
+    def test_not_installed(self):
+        with mock.patch.object(gui.moonlight, "path", lambda: None):
+            self.assertEqual(gui.Api().moonlight_apps("m"), {"installed": False})
+
+
 if __name__ == "__main__":
     unittest.main()

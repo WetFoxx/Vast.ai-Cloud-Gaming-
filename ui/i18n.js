@@ -153,7 +153,11 @@ const I18N = {
     "emergency.title2": "Точно удалить?",
     "emergency.text2": "Машина {id} будет удалена сразу, без выгрузки. Отменить это нельзя.",
     "emergency.working": "Удаляю машину…",
-    "emergency.done": "Машина {id} удалена без выгрузки."
+    "emergency.done": "Машина {id} удалена без выгрузки.",
+    "moonlight.start": "Запустить Moonlight",
+    "moonlight.app": "Приложение Sunshine",
+    "moonlight.missing": "Moonlight не установлен — скачай его с moonlight-stream.org",
+    "moonlight.starting": "Открываю Moonlight…"
   },
   "en": {
     "app.loading": "loading…",
@@ -306,7 +310,11 @@ const I18N = {
     "emergency.title2": "Are you sure?",
     "emergency.text2": "Machine {id} will be deleted right away, without uploading. This can't be undone.",
     "emergency.working": "Deleting the machine…",
-    "emergency.done": "Machine {id} was deleted without uploading."
+    "emergency.done": "Machine {id} was deleted without uploading.",
+    "moonlight.start": "Start Moonlight",
+    "moonlight.app": "Sunshine app",
+    "moonlight.missing": "Moonlight isn't installed — get it at moonlight-stream.org",
+    "moonlight.starting": "Opening Moonlight…"
   },
   "es": {
     "app.loading": "cargando…",
@@ -459,7 +467,11 @@ const I18N = {
     "emergency.title2": "¿Seguro?",
     "emergency.text2": "La máquina {id} se borrará de inmediato, sin subir nada. No se puede deshacer.",
     "emergency.working": "Borrando la máquina…",
-    "emergency.done": "La máquina {id} se borró sin subir nada."
+    "emergency.done": "La máquina {id} se borró sin subir nada.",
+    "moonlight.start": "Iniciar Moonlight",
+    "moonlight.app": "Aplicación de Sunshine",
+    "moonlight.missing": "Moonlight no está instalado: descárgalo en moonlight-stream.org",
+    "moonlight.starting": "Abriendo Moonlight…"
   }
 };
 

@@ -20,6 +20,7 @@ import webview   # pywebview: окно с веб-страницей (на Mac �
 
 import core
 import market
+import moonlight
 import settings
 import steamnames
 from vastapi import VastgameError
@@ -236,6 +237,26 @@ class Api:
     def answer(self, qid, yes):
         if self._job:
             self._job.answer(qid, yes)
+
+    # ---- Moonlight
+    def moonlight_apps(self, host):
+        """Приложения Sunshine на машине и сохранённый выбор. installed=False — Moonlight не установлен."""
+        if not moonlight.path():
+            return {"installed": False}
+        names = moonlight.apps(host) or [moonlight.DEFAULT_APP]
+        saved = settings.get("moonlight_app")
+        return {"installed": True, "apps": names,
+                "selected": saved if saved in names else (moonlight.DEFAULT_APP if moonlight.DEFAULT_APP in names
+                                                          else names[0])}
+
+    def open_moonlight(self, host, app):
+        """Открыть трансляцию; выбор приложения запомнить."""
+        if not isinstance(host, str) or not host or not isinstance(app, str) or not app:
+            return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
+        settings.set("moonlight_app", app)
+        if not moonlight.stream(host, app):
+            return {"error": {"key": "moonlight.missing", "params": {}, "text": "Moonlight не установлен"}}
+        return {"ok": True}
 
     # ---- прочее
     def open_url(self, url):

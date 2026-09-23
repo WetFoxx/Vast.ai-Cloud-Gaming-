@@ -85,6 +85,7 @@ function render(data) {
   const li = st.links;
   $("links").hidden = !li || st.state === "starting";
   if (li) $("moonlight").textContent = li.moonlight;
+  if (li && st.state !== "starting") loadMoonlightApps(li.moonlight);
 
   $("play").disabled = st.state !== "none" || !!data.busy;
   // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
@@ -110,6 +111,37 @@ $("copy-moonlight").addEventListener("click", async () => {
   }
   $("copy-moonlight").textContent = t("btn.copied");
   setTimeout(() => ($("copy-moonlight").textContent = t("btn.copy")), 1500);
+});
+
+// ---- Moonlight: список приложений Sunshine приходит с самой машины (один раз на машину)
+let mlHost = null;
+async function loadMoonlightApps(host) {
+  if (host === mlHost) return;
+  mlHost = host;
+  const sel = $("ml-app");
+  sel.innerHTML = "<option>Desktop</option>";
+  const r = DEMO ? { installed: true, apps: ["Desktop", "Steam Big Picture"], selected: "Desktop" } : await api().moonlight_apps(host);
+  if (!r.installed) {
+    $("ml-start").disabled = true;
+    $("ml-note").hidden = false;
+    $("ml-note").textContent = t("moonlight.missing");
+    return;
+  }
+  sel.innerHTML = "";
+  for (const a of r.apps) { const o = document.createElement("option"); o.value = o.textContent = a; sel.appendChild(o); }
+  sel.value = r.selected;
+}
+
+async function startMoonlight(host, app) {
+  $("ml-note").hidden = false;
+  $("ml-note").textContent = t("moonlight.starting");
+  const r = DEMO ? { ok: true } : await api().open_moonlight(host, app);
+  $("ml-note").textContent = r.error ? errText(r.error) : "";
+  $("ml-note").hidden = !r.error;
+}
+
+$("ml-start").addEventListener("click", () => {
+  if (current && current.status.links) startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop");
 });
 
 $("open-sunshine").addEventListener("click", () => {
@@ -334,8 +366,11 @@ function renderResult(r) {
   links.hidden = false;
   links.removeAttribute("id");
   links.querySelector("code").textContent = r.links.moonlight;
-  links.querySelector("button").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.links.moonlight);
-  links.querySelectorAll("button")[1].onclick = () => !DEMO && api().open_url(r.links.sunshine);
+  links.querySelector(".ml-row select").remove();   // приложение — как выбрано на главном экране
+  links.querySelector(".ml-row button").onclick = () =>
+    DEMO || api().moonlight_apps(r.links.moonlight).then((m) => m.installed && api().open_moonlight(r.links.moonlight, m.selected));
+  links.querySelector("#copy-moonlight").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.links.moonlight);
+  links.querySelector("#open-sunshine").onclick = () => !DEMO && api().open_url(r.links.sunshine);
   box.appendChild(links);
   for (const n of r.notes || []) {
     const w = document.createElement("div");
