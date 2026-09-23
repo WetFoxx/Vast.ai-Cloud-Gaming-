@@ -505,16 +505,19 @@ def push_secret(name, keychain_name=None):
     print(f"    Переменные аккаунта сейчас: {', '.join(sorted(have))}")
 
 
-p = argparse.ArgumentParser(description="Первая настройка vastgame: ключи в Keychain")
-p.add_argument("what", nargs="?", choices=["google", "vast"],
-               help="без параметра — мастер; google — войти в Google; vast — токен Drive в аккаунт Vast")
-a = p.parse_args()
-if a.what is None:
-    try:
-        wizard()
-    except (KeyboardInterrupt, EOFError):
-        sys.exit("\n\nНастройка прервана. Уже сохранённое осталось; запусти vastgame setup, чтобы продолжить.")
-elif a.what == "google":
-    google()
-elif a.what == "vast":
-    vast()
+# Запуск как команды (vastgame setup). При import setup — ничего не запускается: функции мастера
+# нужны окну приложения, а сам мастер там свой.
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="Первая настройка vastgame: ключи в Keychain")
+    p.add_argument("what", nargs="?", choices=["google", "vast"],
+                   help="без параметра — мастер; google — войти в Google; vast — токен Drive в аккаунт Vast")
+    a = p.parse_args()
+    if a.what is None:
+        try:
+            wizard()
+        except (KeyboardInterrupt, EOFError):
+            sys.exit("\n\nНастройка прервана. Уже сохранённое осталось; запусти vastgame setup, чтобы продолжить.")
+    elif a.what == "google":
+        google()
+    elif a.what == "vast":
+        vast()

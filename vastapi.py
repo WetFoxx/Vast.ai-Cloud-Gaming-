@@ -3,7 +3,6 @@
 # чтобы чтение ключа и запросы не повторялись в каждом файле.
 
 import json
-import sys
 from pathlib import Path
 
 import keyring
@@ -13,6 +12,17 @@ HOST = "https://console.vast.ai/"
 API = HOST + "api/v0/"
 KEY_FILE = Path.home() / ".vast_api_key"   # старое место ключа — до переноса в Keychain
 SERVICE = "vastgame"                        # имя записей в Keychain («Связка ключей»)
+
+
+class VastgameError(SystemExit):
+    """Ошибка, о которой нужно сказать человеку.
+
+    Подвид SystemExit: в терминале ведёт себя как sys.exit(сообщение) — печатает и завершает программу;
+    окно приложения перехватывает её (except VastgameError) и показывает, не закрываясь.
+    Внимание: `except Exception` её НЕ ловит — только явно.
+    """
+
+
 # Шаблон Vast для игровой машины: его создаёт мастер (vastgame setup, шаг «Шаблон»).
 # Ищется по имени: при каждом сохранении Vast меняет его hash_id
 TEMPLATE_NAME = "vastgame"
@@ -24,7 +34,7 @@ def read_key():
     if not key and KEY_FILE.exists():
         key = KEY_FILE.read_text().strip()
     if not key:
-        sys.exit("Нет ключа Vast — запусти первую настройку: vastgame setup")
+        raise VastgameError("Нет ключа Vast — запусти первую настройку: vastgame setup")
     return key
 
 
@@ -33,14 +43,14 @@ def check_key(key):
     try:
         r = requests.get(API + "users/current/", headers={"Authorization": f"Bearer {key}"}, timeout=30)
     except requests.RequestException as e:
-        sys.exit(f"Не удалось связаться с Vast: {type(e).__name__}")
+        raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}")
     if r.status_code != 200:
         return None
     return r.json().get("credit", 0)
 
 
 def call(method, path, body=None, params=None, base=API):
-    """Запрос к API Vast. Возвращает ответ как словарь или завершает программу с понятной ошибкой.
+    """Запрос к API Vast. Возвращает ответ как словарь или бросает VastgameError с понятным текстом.
 
     method — "GET", "POST" и т.д.; path — например "users/current/"; body — JSON для POST/PUT.
     """
@@ -54,16 +64,16 @@ def call(method, path, body=None, params=None, base=API):
             timeout=30,
         )
     except requests.RequestException as e:
-        sys.exit(f"Не удалось связаться с Vast: {type(e).__name__}")
+        raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}")
     if r.status_code == 401:
-        sys.exit("Vast не принял ключ (401): проверь ~/.vast_api_key")
+        raise VastgameError("Vast не принял ключ (401) — замени его: vastgame setup")
     if r.status_code != 200:
         # В ошибках Vast кладёт объяснение в поле msg — показываем только его
         try:
             msg = r.json().get("msg") or ""
         except ValueError:
             msg = ""
-        sys.exit(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip())
+        raise VastgameError(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip())
     return r.json()
 
 
@@ -73,7 +83,7 @@ def my_template(name=TEMPLATE_NAME):
     ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}).get("templates", [])
     mine = [t for t in ts if t.get("creator_id") == me]
     if len(mine) > 1:
-        sys.exit(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.")
+        raise VastgameError(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.")
     return mine[0] if mine else None
 
 
