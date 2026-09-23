@@ -18,18 +18,30 @@ def setUpModule():
     import tempfile
     import history, market, settings
     tmp = Path(tempfile.mkdtemp())
-    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS")]:
-        p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
+    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"),
+                      (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG")]:
+        p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.{name}")
         p.start()
         unittest.addModuleCleanup(p.stop)
+    # Фоновый процесс в тестах — поток с той же работой (jobs.work: блокировка, job.json, уведомление)
+    for obj, name, value in [(gui.jobs, "_launch", lambda kind, args: threading.Thread(
+                                  target=gui.jobs.work, args=(kind, args), daemon=True).start()),
+                             (gui.jobs.notify, "send", lambda title, text: SENT.append((title, text)))]:
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        unittest.addModuleCleanup(p.stop)
+
+
+SENT = []   # уведомления, которые «показали»
 
 OFFER = {"id": 5, "gpu_name": "RTX 3090", "geolocation": "Latvia, LV", "dph_total": 0.2, "machine_id": 9}
 
 
-def wait_done(api, timeout=5):
+def wait_done(api, timeout=5, session=False):
+    """Дождаться конца операции: session=True — «Играть»/«Закончить» (фоновый процесс), иначе — в окне."""
     end = time.time() + timeout
     while time.time() < end:
-        p = api.progress()
+        p = api.session_progress() if session else api.progress()
         if p and p["done"]:
             return p
         time.sleep(0.02)
@@ -72,6 +84,7 @@ class TestPlay(unittest.TestCase):
     def setUp(self):
         self.rented = []
         self.gate = threading.Event()      # держит «запуск» открытым, пока тест не разрешит
+        self.addCleanup(self.gate.set)
         patches = {
             "require_no_machine": lambda: None,
             "template": lambda: {"hash_id": "h", "recommended_disk_space": 100, "env": ""},
@@ -81,10 +94,19 @@ class TestPlay(unittest.TestCase):
             "identity_notes": lambda r: [],
         }
         for name, value in patches.items():
-            p = mock.patch.object(gui.core, name, value)
+            p = mock.patch.object(gui.jobs.core, name, value)
             p.start()
             self.addCleanup(p.stop)
+        self.addCleanup(self.wait_idle)
         self.api = gui.Api()
+        SENT.clear()
+
+    def wait_idle(self):
+        """Следующий тест начинается, когда фоновая работа этого закончилась."""
+        for _ in range(250):
+            if not gui.jobs.running() and not (gui.jobs.state() or {}).get("active"):
+                return
+            time.sleep(0.02)
 
     def fake_rent(self, offer_id, body, offer=None):
         self.rented.append(offer_id)
@@ -100,35 +122,45 @@ class TestPlay(unittest.TestCase):
         return {"links": {"moonlight": "m", "sunshine": "s", "status": "st"}, "minutes": 7,
                 "boot": (0, "ok", ""), "identity": None, "ip": "1", "dns": "m"}
 
-    def test_disk_from_slider_goes_to_rental(self):
-        self.gate.set()
-        self.assertEqual(self.api.play(5, None, 300), {"ok": True})
-        wait_done(self.api)
-        self.assertEqual(self.body["disk"], 300)
-        self.assertEqual(gui.settings.get("disk"), 300)            # запомнен (во временном файле теста)
-
-    def test_normal_play(self):
-        self.assertEqual(self.api.play(5), {"ok": True})
-        time.sleep(0.1)
-        p = self.api.progress()
-        self.assertEqual(p["stage"], "vast")
+    def test_normal_play_in_background_and_notification(self):
+        self.assertEqual(self.api.play(5, None, None, "ru"), {"ok": True})
+        for _ in range(100):
+            p = self.api.session_progress()
+            if p["stage"] == "vast" and p["archives"]:
+                break
+            time.sleep(0.02)
         self.assertEqual(p["archives"]["steam-state"][0], "down")
         self.assertIn("core.vast_status", [e["key"] for e in p["events"]])
         self.gate.set()
-        p = wait_done(self.api)
+        p = wait_done(self.api, session=True)
         self.assertIsNone(p["error"])
         self.assertEqual(p["result"]["minutes"], 7)
         self.assertEqual(self.rented, [5])
+        self.assertEqual(SENT[0][0], "Машина готова")                 # уведомление на языке окна
+
+    def test_progress_since_and_new_window_sees_same_job(self):
+        self.api.play(5)
+        self.gate.set()
+        p = wait_done(self.api, session=True)
+        again = gui.Api().session_progress(p["next"])                  # «окно открыли заново»
+        self.assertEqual((again["kind"], again["events"], again["done"]), ("play", [], True))
+
+    def test_disk_from_slider_goes_to_rental(self):
+        self.gate.set()
+        self.assertEqual(self.api.play(5, None, 300), {"ok": True})
+        wait_done(self.api, session=True)
+        self.assertEqual(self.body["disk"], 300)
+        self.assertEqual(gui.settings.get("disk"), 300)            # запомнен (во временном файле теста)
 
     def test_sync_toggles_remembered_and_sent(self):
         bodies, store = [], {}
-        with mock.patch.object(gui.core, "rent", lambda oid, body, offer=None: bodies.append(body) or (42, time.time())), \
+        with mock.patch.object(gui.jobs.core, "rent", lambda oid, body, offer=None: bodies.append(body) or (42, time.time())), \
              mock.patch.object(gui.settings, "get", lambda k, d=None: store.get(k, d)), \
              mock.patch.object(gui.settings, "set", lambda k, v: store.__setitem__(k, v)):
             self.assertEqual(self.api._sync(), {"steam_games": False, "other_games": True, "saves": True})
             self.api.play(5, {"steam_games": True, "saves": False})
             self.gate.set()
-            wait_done(self.api)
+            wait_done(self.api, session=True)
             self.assertEqual(self.api._sync(), {"steam_games": True, "other_games": True, "saves": False})
         self.assertEqual(bodies[0]["env"], {"SYNC_STEAM_GAMES": "1", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
 
@@ -136,101 +168,102 @@ class TestPlay(unittest.TestCase):
         self.api.play(5)
         r = self.api.play(5)                         # пока первая аренда идёт
         self.assertEqual(r["error"]["key"], "busy")
+        self.assertEqual(gui.Api().play(5)["error"]["key"], "busy")    # и из другого окна тоже
         self.gate.set()
-        wait_done(self.api)
+        wait_done(self.api, session=True)
         self.assertEqual(self.rented, [5])
 
     def test_existing_machine_blocks_rent(self):
         def running():
             raise VastgameError("есть машина", key="core.running", ids="1")
-        with mock.patch.object(gui.core, "require_no_machine", running):
-            self.api.play(5)
-            p = wait_done(self.api)
+        with mock.patch.object(gui.jobs.core, "require_no_machine", running):
+            self.api.play(5, lang="en")
+            p = wait_done(self.api, session=True)
         self.assertEqual(p["error"]["key"], "core.running")
         self.assertEqual(self.rented, [])            # аренды не было
+        self.assertEqual(SENT[0][0], "Machine didn't start")
 
-    def test_question_goes_to_page_and_back(self):
+    def test_unexpected_question_is_no(self):
         answers = []
 
         def wait_with_question(iid, t0, o, ui):
-            answers.append(ui.confirm("Удалить?", key="core.ask_delete_unused"))
+            answers.append(ui.confirm("Удалить?"))
             raise VastgameError("Запуск не удался.", key="core.start_failed")
-        with mock.patch.object(gui.core, "wait_ready", wait_with_question):
+        with mock.patch.object(gui.jobs.core, "wait_ready", wait_with_question):
             self.api.play(5)
-            for _ in range(100):
-                q = self.api.progress()["question"]
-                if q:
-                    break
-                time.sleep(0.02)
-            self.assertEqual(q["key"], "core.ask_delete_unused")
-            self.api.answer(q["id"] + 1, True)       # чужой номер вопроса — игнорируется
-            time.sleep(0.05)
-            self.assertEqual(answers, [])
-            self.api.answer(q["id"], False)
-            p = wait_done(self.api)
-        self.assertEqual(answers, [False])
+            p = wait_done(self.api, session=True)
+        self.assertEqual(answers, [False])           # спросить некого — безопасное «нет»
         self.assertEqual(p["error"]["key"], "core.start_failed")
 
-    def test_closing_while_busy_is_blocked(self):
+    def test_closing_window_does_not_stop_play(self):
         self.api._window = mock.Mock()
         self.api.play(5)
-        self.assertFalse(self.api._on_closing())    # идёт запуск — не закрывать молча
+        self.assertTrue(self.api._on_closing())     # запуск в фоне — окно закрывается спокойно
         self.gate.set()
-        wait_done(self.api)
-        self.assertTrue(self.api._on_closing())     # закончилось — можно
+        wait_done(self.api, session=True)
+
+    def test_result_shown_once_after_reopen(self):
+        self.gate.set()
+        self.api.play(5)
+        wait_done(self.api, session=True)
+        with mock.patch.object(gui.core, "status", lambda: {"machine": None, "archives": {}}), \
+             mock.patch.object(gui.core, "balance", lambda: 5.0):
+            self.assertEqual(gui.Api().state()["task"], {"kind": "play", "active": False, "unseen": True})
+            self.api.session_seen()
+            self.assertFalse(gui.Api().state()["task"]["unseen"])     # посмотрел — больше не показываем
+
+    def test_dead_worker_becomes_error(self):
+        gui.jobs.FileJob("stop", pid=999999)         # «процесс» записал ход и умер, блокировку не держит
+        p = self.api.session_progress()
+        self.assertTrue(p["done"])
+        self.assertEqual(p["error"]["key"], "progress.lost")
+        self.assertIsNone(self.api.play(5).get("error"))   # и новую операцию это не блокирует
+        self.gate.set()
+        wait_done(self.api, session=True)
 
 
 class TestStop(unittest.TestCase):
     def setUp(self):
         self.api = gui.Api()
         self.deleted = []
+        SENT.clear()
 
     def fake_stop(self, ui, dry_run=False):
         ui.stage("shutdown", "…")
         ui.archive("pfx--1", "up", "выгрузка")
         ui.say("Всё выгружено.", "ok", key="core.all_uploaded")
-        if not ui.confirm("Удалить?", key="core.ask_delete", id=42):
-            raise VastgameError("Не удаляю.", key="core.kept")
         self.deleted.append(42)
         ui.stage("deleted", "…")
         return {"iid": 42, "uploaded": ["pfx--1"], "deleted": True}
 
-    def answer_question(self, yes):
-        for _ in range(200):
-            q = self.api.progress()["question"]
-            if q:
-                self.api.answer(q["id"], yes)
-                return q
-            time.sleep(0.01)
-        raise AssertionError("вопроса не было")
-
-    def test_stop_yes_deletes(self):
-        with mock.patch.object(gui.core, "stop", self.fake_stop):
-            self.assertEqual(self.api.stop(), {"ok": True})
-            q = self.answer_question(True)
-            p = wait_done(self.api)
-        self.assertEqual((q["key"], q["params"]), ("core.ask_delete", {"id": 42}))
+    def test_stop_deletes_without_question(self):
+        with mock.patch.object(gui.jobs.core, "stop", self.fake_stop):
+            self.assertEqual(self.api.stop("ru"), {"ok": True})
+            p = wait_done(self.api, session=True)
         self.assertEqual(p["kind"], "stop")
+        self.assertIsNone(p["question"])
         self.assertEqual(p["result"], {"uploaded": ["pfx--1"], "deleted": True, "iid": 42})
         self.assertEqual(self.deleted, [42])
+        self.assertEqual(SENT[-1][0], "Игра закончена")
 
-    def test_stop_no_keeps_machine(self):
-        with mock.patch.object(gui.core, "stop", self.fake_stop):
-            self.api.stop()
-            self.answer_question(False)
-            p = wait_done(self.api)
-        self.assertEqual(p["error"]["key"], "core.kept")
-        self.assertEqual(self.deleted, [])
+    def test_failed_upload_notifies(self):
+        def failing(ui, dry_run=False):
+            raise VastgameError("не подтверждена", key="core.upload_unconfirmed", names=["pfx--1"])
+        with mock.patch.object(gui.jobs.core, "stop", failing):
+            self.api.stop("ru")
+            p = wait_done(self.api, session=True)
+        self.assertEqual(p["error"]["key"], "core.upload_unconfirmed")
+        self.assertEqual(SENT[-1][0], "Завершить не удалось")
 
     def test_emergency_only_when_idle_and_by_id(self):
         gate = threading.Event()
         calls = []
-        with mock.patch.object(gui.core, "stop", lambda ui, dry_run=False: gate.wait(5) and {}), \
+        with mock.patch.object(gui.jobs.core, "stop", lambda ui, dry_run=False: gate.wait(5) and {"iid": 1, "uploaded": [], "deleted": True}), \
              mock.patch.object(gui.core, "emergency_delete", lambda mid: calls.append(mid) or True):
             self.api.stop()
             self.assertEqual(self.api.emergency_delete(42)["error"]["key"], "busy")   # идёт выгрузка
             gate.set()
-            wait_done(self.api)
+            wait_done(self.api, session=True)
             self.assertEqual(self.api.emergency_delete("42"), {"ok": True, "gone": True})
         self.assertEqual(calls, [42])
 
@@ -247,6 +280,17 @@ class TestGames(unittest.TestCase):
             self.assertEqual(api.games_remove("pfx--1"), {"ok": True})
             p = wait_done(api)
         self.assertEqual((p["kind"], p["result"], removed), ("games", {"how": "drive"}, ["pfx--1"]))
+
+    def test_closing_while_local_job_asks(self):
+        api = gui.Api()
+        api._window = mock.Mock()
+        gate = threading.Event()
+        with mock.patch.object(gui.cloudgames, "remove", lambda name, on_notice=None: gate.wait(5) and "drive"):
+            api.games_remove("pfx--1")
+            self.assertFalse(api._on_closing())      # убирает игру в самом окне — сначала спросить
+            gate.set()
+            wait_done(api)
+        self.assertTrue(api._on_closing())
 
 
 class TestSetupActions(unittest.TestCase):

@@ -151,15 +151,16 @@ def _failed_start(iid, why, o, ui, bad_host, key, **params):
         market.mark_bad(o.get("machine_id"), why)
         ui.say(f"Хост (machine {o.get('machine_id')}) помечен: в списке он будет с пометкой «может не запуститься».",
                "warn", key="core.marked", machine=o.get("machine_id"))
-    ui.say(f"Инстанс {iid} арендован и тратит деньги.", "warn", key="core.costs", id=iid)
-    if ui.confirm("Удалить его сейчас? На нём ещё ничего не сохранялось", key="core.ask_delete_unused"):
-        ok, msg = delete_instance(iid)
-        if ok:
-            ui.say("Удалён.", "ok", key="core.deleted")
-        else:
-            ui.say(f"Vast не удалил: {msg}", "error", key="core.delete_failed", msg=msg or "")
+    # Удаляем без вопроса (решение 2026-09-24): машина не запустилась, на ней ничего не сохранялось,
+    # а деньги идут — и окно может быть закрыто, спросить некого
+    ui.say(f"Инстанс {iid} арендован и тратит деньги — удаляю: на нём ещё ничего не сохранялось.", "warn",
+           key="core.deleting_unused", id=iid)
+    ok, msg = delete_instance(iid)
+    if ok:
+        ui.say("Удалён.", "ok", key="core.deleted")
     else:
-        ui.say("Не удаляю. Удалить можно в консоли Vast (Instances → корзина).", "warn", key="core.not_deleting")
+        ui.say(f"Vast не удалил: {msg}. Удали вручную: консоль Vast → Instances → корзина.", "error",
+               key="core.delete_failed_manual", msg=msg or "")
     if bad_host:
         raise VastgameError("Попробовать другую машину: vastgame play", key="core.try_another")
     raise VastgameError("Запуск не удался.", key="core.start_failed")
@@ -464,10 +465,10 @@ def stop(ui, dry_run=False):
                               "затем запусти vastgame stop снова.",
                             key="core.upload_unconfirmed", names=sorted(bad))
 
-    # ---- Удаление — только после «да»
+    # ---- Удаление — сразу, без вопроса (решение 2026-09-24), но только после подтверждённой выгрузки:
+    # если выгрузка не подтвердилась, выше уже VastgameError и машина остаётся
     ui.say("Всё выгружено.", "ok", key="core.all_uploaded")
-    if not ui.confirm(f"Удалить инстанс {iid}? Диск машины будет стёрт", key="core.ask_delete", id=iid):
-        raise VastgameError("Не удаляю. Инстанс продолжает работать и тратить деньги.", key="core.kept")
+    ui.say(f"Удаляю инстанс {iid}.", "info", key="core.deleting", id=iid)
     ok, msg = delete_instance(iid)
     if not ok:
         raise VastgameError(f"Vast не удалил инстанс: {msg}", key="core.delete_failed", msg=msg or "")

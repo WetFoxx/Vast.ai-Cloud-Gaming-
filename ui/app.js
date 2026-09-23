@@ -259,7 +259,7 @@ $("rent").addEventListener("click", async () => {
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
-  const r = await api().play(o.id, sync, disk);
+  const r = await api().play(o.id, sync, disk, LANG);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
 });
@@ -269,7 +269,7 @@ $("stop").addEventListener("click", async () => {
   const yes = await ask({ title: t("confirm.stop.title"), text: t("confirm.stop.text"), yes: t("confirm.stop.yes"), no: t("btn.cancel") });
   if (!yes) return;
   if (DEMO) { startProgress("stop"); return; }
-  const r = await api().stop();
+  const r = await api().stop(LANG);
   if (r.error) { showError("error", r.error); return; }
   startProgress("stop");
 });
@@ -647,7 +647,7 @@ function startProgress(kind = "play") {
   show("progress");
   prog = { since: 0, log: [], shownQ: 0, kind };
   $("progress-title").textContent = t("progress.title." + kind);
-  $("progress-note").textContent = t(kind === "stop" ? "progress.keep_open_stop" : "progress.keep_open");
+  $("progress-note").textContent = t(kind === "stop" ? "progress.background_stop" : "progress.background");
   $("tailscale-box").hidden = true;
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
@@ -702,13 +702,14 @@ async function pollProgress() {
 }
 
 async function pollOnce() {
-  const p = DEMO ? demoProgress() : await api().progress(prog.since);
+  // Ход «Играть»/«Закончить» — из фонового процесса (он живёт и без окна)
+  const p = DEMO ? demoProgress() : await api().session_progress(prog.since);
   if (!p) return;
   if (p.game_names) GAME_NAMES = p.game_names;
   if (p.kind && p.kind !== prog.kind) {          // окно открыли заново посреди операции — узнаём какой
     prog.kind = p.kind;
     $("progress-title").textContent = t("progress.title." + p.kind);
-    $("progress-note").textContent = t(p.kind === "stop" ? "progress.keep_open_stop" : "progress.keep_open");
+    $("progress-note").textContent = t(p.kind === "stop" ? "progress.background_stop" : "progress.background");
   }
   for (const ev of p.events) {
     prog.log.push(ev);
@@ -784,7 +785,7 @@ function renderResult(r) {
   }
 }
 
-$("progress-back").addEventListener("click", () => { show("main"); refresh(); });
+$("progress-back").addEventListener("click", () => { if (!DEMO) api().session_seen(); show("main"); refresh(); });
 
 // ---------------------------------------------------------------- язык
 function fillLanguages() {
@@ -851,9 +852,10 @@ function demoProgress() {
     const events = demoTick === 1 ? [{ level: "tailscale", text: "To authenticate, visit: https://login.tailscale.com/a/x", url: "https://login.tailscale.com/a/x" }]
       : demoTick === 3 ? [{ level: "ok", key: "core.ssh_ok" }] : [];
     const arch = demoTick < 3 ? {} : { "steam-state": [demoTick < 5 ? "up" : "ok", ""], "pfx--3751260": [demoTick < 6 ? "up" : "ok", ""] };
-    const q = demoTick === 7 ? { id: 1, key: "core.ask_delete", params: { id: 52246512 } } : null;
+    const events2 = demoTick === 7 ? [{ level: "ok", key: "core.all_uploaded" }, { level: "info", key: "core.deleting", params: { id: 52246512 } }] : [];
+    const q = null;
     const done = demoTick >= 8;
-    return { kind: "stop", elapsed: demoTick * 20, stage, archives: arch, events, next: 0, question: q, done, error: null,
+    return { kind: "stop", elapsed: demoTick * 20, stage, archives: arch, events: events.concat(events2), next: 0, question: q, done, error: null,
              result: done ? { deleted: true, iid: 52246512, uploaded: ["steam-state", "pfx--3751260"] } : null,
              game_names: { 3751260: "The Blood of Dawnwalker" } };
   }
@@ -912,8 +914,10 @@ async function start() {
   // Настройка: проверяем в фоне; нет ключа Vast (первый запуск) — сразу открыть экран настройки
   if (current === null && !DEMO) openSetup();
   else loadSetup();
-  // Окно открыли заново, а операция ещё идёт — показать её ход
-  if (!DEMO && current && current.busy) startProgress();   // вид операции уточнит первый ответ progress
+  // Окно открыли заново: запуск/завершение ещё идёт в фоне — показать ход; закончилось, пока окно
+  // было закрыто, — показать результат (особенно важно, если что-то не получилось)
+  const task = !DEMO && current && current.task;
+  if (task && (task.active || task.unseen)) startProgress(task.kind);
   if (!DEMO) setInterval(() => { if (!$("screen-main").hidden) refresh(); }, REFRESH_SEC * 1000);
 }
 

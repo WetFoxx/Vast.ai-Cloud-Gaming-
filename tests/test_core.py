@@ -134,16 +134,25 @@ class TestWaitReady(Base):
         with self.assertRaises(VastgameError):
             core.wait_ready(42, T0, OFFER, ui)
         self.assertIn("999", market.bad_hosts())          # хост помечен
-        self.assertEqual(self.deleted, [42])               # удалён после «да»
-        self.assertEqual(len(ui.questions), 1)
+        self.assertEqual(self.deleted, [42])               # удалён сам — на машине ничего не было
+        self.assertEqual(ui.questions, [])                 # без вопроса: окно может быть закрыто
 
-    def test_host_error_kept_if_no(self):
+    def test_exited_machine_deleted_without_question(self):
         self.patch(core, "call", lambda *a, **k: {"instances": {"actual_status": "exited", "status_msg": ""}})
         self.patch(core, "delete_instance", self.fake_delete([42]))
+        ui = FakeUI(answer=False)                          # даже «нет» на любой вопрос ничего не меняет
         with self.assertRaises(VastgameError):
-            core.wait_ready(42, T0, OFFER, FakeUI(answer=False))
-        self.assertEqual(self.deleted, [])                 # «нет» — не удаляем
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual(self.deleted, [42])
         self.assertIn("999", market.bad_hosts())
+
+    def test_failed_delete_is_reported(self):
+        self.patch(core, "call", lambda *a, **k: {"instances": {"actual_status": "exited", "status_msg": ""}})
+        self.patch(core, "delete_instance", lambda iid: (False, "busy"))
+        ui = FakeUI()
+        with self.assertRaises(VastgameError):
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertIn("core.delete_failed_manual", ui.keys)   # не удалилось — сказать, как удалить вручную
 
     def test_renamed_node_and_lost_identity_notes(self):
         base = {"ip": "1", "links": {}, "boot": (0, "ok", ""), "minutes": 1}
@@ -231,17 +240,24 @@ class TestStop(Base):
             core.stop(ui)
         self.assertIn("НЕ подтверждена", str(e.exception))
         self.assertEqual(self.deleted, [])
-        self.assertEqual(ui.questions, [])                 # до вопроса об удалении не дошло
+        self.assertEqual(ui.questions, [])
 
     def test_old_error_does_not_block(self):
         ui = self.setup_machine({"pfx--1": (T0 - 500, "err", "старая ошибка"), "steam-state": (T0 + 5, "ok", "")})
         core.stop(ui)
         self.assertEqual(self.deleted, [42])
 
-    def test_no_means_no(self):
+    def test_verified_upload_deletes_without_question(self):
         ui = self.setup_machine({"steam-state": (T0 + 5, "ok", "")}, answer=False)
-        with self.assertRaises(VastgameError):
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])               # вопроса нет — удалено после проверки
+        self.assertEqual(ui.questions, [])
+
+    def test_status_page_gone_not_deleted(self):
+        ui = self.setup_machine(None)                      # /json не ответил после выгрузки
+        with self.assertRaises(VastgameError) as e:
             core.stop(ui)
+        self.assertEqual(e.exception.key, "core.no_status_after")
         self.assertEqual(self.deleted, [])
 
     def test_shutdown_error_not_deleted(self):

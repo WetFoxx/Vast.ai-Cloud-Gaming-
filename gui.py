@@ -5,9 +5,9 @@
 # в отдельном потоке, окно при этом не замирает. Ключи и токены в страницу не попадают никогда —
 # только готовые данные: баланс, состояние машины, адреса.
 #
-# Долгие операции (аренда, позже — остановка) идут в фоне как Job: ядро (core.py) сообщает ему
-# события, страница раз в секунду забирает их (progress) и показывает. Если ядру нужно «да/нет»,
-# Job ждёт, пока человек ответит на странице (answer).
+# «Играть» и «Закончить» идут в отдельном фоновом процессе (jobs.py): окно можно закрыть, операция
+# доведётся до конца. Страница раз в секунду забирает её ход из файла (session_progress).
+# Короткие операции (убрать игру, установка, вход в Google) — Job в потоке окна (progress, answer).
 
 import os
 import re
@@ -23,6 +23,7 @@ import webview   # pywebview: окно с веб-страницей (на Mac �
 import cloudgames
 import core
 import history
+import jobs
 import market
 import moonlight
 import settings
@@ -31,82 +32,15 @@ import setup
 import setupcheck
 from vastapi import KEY_FILE
 import steamnames
+from jobs import Job, error_data
 from vastapi import VastgameError, my_template
 
 HERE = Path(__file__).resolve().parent
 LOW_BALANCE = 1.0   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_SHOWN = 10   # сколько машин показывать в выборе
-DISK_MIN, DISK_MAX = 50, 1000   # пределы ползунка диска, ГБ (система и Steam занимают ~30 ГБ)
+DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
-
-
-def error_data(e):
-    """Ошибку — странице: ключ перевода и данные (перевод делает страница), плюс русский текст."""
-    return {"key": getattr(e, "key", None), "params": getattr(e, "params", {}), "text": str(e)}
-
-
-class Job:
-    """Фоновая операция с машиной. Это же и «ui» для ядра: say/stage/archive/confirm/tailscale."""
-
-    def __init__(self, kind):
-        self.kind = kind                 # "play", "stop" или "games" (убрать игру из облака)
-        self.started = time.time()
-        self.events = []                 # сообщения по порядку: {level, key, params, text}
-        self.stage_key = None
-        self.archives = {}               # {имя: [состояние, текст wolf]}
-        self.question = None             # {id, key, params, text} — пока ждём ответа
-        self.result = None
-        self.error = None
-        self.done = False
-        self._lock = threading.Lock()
-        self._answered = threading.Event()
-        self._answer = False
-        self._qid = 0
-
-    # ---- ui для ядра
-    def say(self, text, level="info", key=None, **params):
-        with self._lock:
-            self.events.append({"level": level, "key": key, "params": params, "text": text})
-
-    def stage(self, key, text):
-        with self._lock:
-            self.stage_key = key
-            self.events.append({"level": "stage", "key": "stage." + key, "params": {}, "text": text})
-
-    def archive(self, name, state, text):
-        with self._lock:
-            self.archives[name] = [state, text]
-
-    def confirm(self, question, key=None, **params):
-        """Ждать ответа человека на странице (сколько угодно: без его «да» ничего не делаем)."""
-        with self._lock:
-            self._qid += 1
-            self.question = {"id": self._qid, "key": key, "params": params, "text": question}
-            self._answered.clear()
-        self._answered.wait()
-        with self._lock:
-            self.question = None
-            return self._answer
-
-    def tailscale(self, text):
-        url = re.search(r"https://\S+", text)
-        with self._lock:
-            self.events.append({"level": "tailscale", "key": None, "params": {}, "text": text,
-                                "url": url.group(0) if url else None})
-
-    # ---- для страницы
-    def answer(self, qid, yes):
-        with self._lock:
-            if self.question and self.question["id"] == qid:
-                self._answer = bool(yes)
-                self._answered.set()
-
-    def snapshot(self, since=0):
-        with self._lock:
-            return {"kind": self.kind, "elapsed": int(time.time() - self.started), "stage": self.stage_key,
-                    "events": self.events[since:], "next": len(self.events), "archives": dict(self.archives),
-                    "question": self.question, "result": self.result, "error": self.error, "done": self.done}
 
 
 class Api:
@@ -147,7 +81,9 @@ class Api:
                 session = {"elapsed": elapsed, "cost": round(elapsed / 3600 * (cur["price"] or price or 0), 3)}
         except OSError:
             pass   # запись истории не должна ломать главный экран
-        return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session,
+        d = jobs.state()
+        task = d and {"kind": d["kind"], "active": d["active"], "unseen": d["done"] and not d.get("seen")}
+        return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session, "task": task,
                 "hours_left": credit / price if price else None, "status": st,
                 "game_names": self._game_names(st["archives"]), "busy": self._busy()}
 
@@ -158,13 +94,15 @@ class Api:
         return self._names
 
     def _busy(self):
+        """Идёт ли операция: короткая в окне или play/stop в фоновом процессе."""
+        return self._local_busy() or bool((jobs.state() or {}).get("active"))
+
+    def _local_busy(self):
         return bool(self._job and not self._job.done)
 
     # ---- «Играть»: выбор машины
     def _disk(self, disk, tpl):
-        """Размер диска: переданный с ползунка, иначе последний выбранный, иначе из шаблона; в пределах."""
-        disk = disk or settings.get("disk") or core.template_disk(tpl)
-        return max(DISK_MIN, min(DISK_MAX, int(disk)))
+        return jobs.disk_size(disk, tpl)
 
     def offers(self, disk=None):
         """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс."""
@@ -205,55 +143,24 @@ class Api:
         saved = settings.get("sync") or {}
         return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
 
-    def play(self, offer_id, sync=None, disk=None):
-        """Арендовать машину (человек уже ответил «да») и следить за запуском в фоне.
-        sync — тумблеры синхронизации с облаком, disk — ГБ с ползунка; запоминаются для следующего раза."""
+    def play(self, offer_id, sync=None, disk=None, lang=None):
+        """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
+        закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
+        lang — язык окна для уведомления в конце."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
         settings.set("sync", sync)
-        job = self._job = Job("play")
-
-        def run():
-            try:
-                core.require_no_machine()                        # ещё раз — прямо перед арендой
-                tpl = core.template()
-                size = self._disk(disk, tpl)
-                settings.set("disk", size)
-                o = core.offer_by_id(int(offer_id), size)       # свежая цена и наличие
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
-                r = core.wait_ready(iid, t0, o, job)
-                job.result = {"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
-                              "notes": [{"level": lv, "key": k, "params": p, "text": tx}
-                                        for lv, tx, k, p in core.identity_notes(r)]}
-            except VastgameError as e:
-                job.error = error_data(e)
-            except Exception as e:                               # неожиданное — тоже показать, не молчать
-                job.error = {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}
-            finally:
-                job.done = True
-
-        threading.Thread(target=run, daemon=True).start()
+        if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang):
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 
-    def stop(self):
-        """«Закончить»: выгрузить всё, проверить, спросить про удаление (вопрос — на странице)."""
+    def stop(self, lang=None):
+        """«Закончить»: выгрузить всё, проверить и удалить машину — в фоновом процессе."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
-        job = self._job = Job("stop")
-
-        def run():
-            try:
-                r = core.stop(job)
-                job.result = {"uploaded": r["uploaded"], "deleted": r["deleted"], "iid": r["iid"]}
-            except VastgameError as e:
-                job.error = error_data(e)
-            except Exception as e:
-                job.error = {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}
-            finally:
-                job.done = True
-
-        threading.Thread(target=run, daemon=True).start()
+        if not jobs.spawn("stop", lang=lang):
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 
     def emergency_delete(self, machine_id):
@@ -278,6 +185,21 @@ class Api:
     def answer(self, qid, yes):
         if self._job:
             self._job.answer(qid, yes)
+
+    def session_progress(self, since=0):
+        """Ход «Играть»/«Закончить» из фонового процесса (job.json) начиная с события номер since."""
+        d = jobs.state()
+        if not d:
+            return None
+        since = int(since)
+        return {"kind": d["kind"], "elapsed": int((d.get("ended") or time.time()) - d["started"]),
+                "stage": d["stage"], "events": d["events"][since:], "next": len(d["events"]),
+                "archives": d["archives"], "question": None, "result": d["result"], "error": d["error"],
+                "done": d["done"], "game_names": self._game_names(d["archives"])}
+
+    def session_seen(self):
+        """Человек посмотрел результат запуска/завершения — больше не показывать его при открытии окна."""
+        jobs.mark_seen()
 
     # ---- Настройка
     def setup_status(self):
@@ -452,10 +374,11 @@ class Api:
         self._window.destroy()
 
     def _on_closing(self):
-        """Закрытие окна. Идёт операция — не закрывать молча, а спросить на странице.
+        """Закрытие окна. «Играть»/«Закончить» идут в фоновом процессе — окно закрывается спокойно.
+        Идёт короткая операция в самом окне (убрать игру, установка) — спросить на странице.
         Спрашиваем страницей, а не системным диалогом: этот обработчик работает в главном потоке,
         и системный диалог из него повесил бы окно."""
-        if self._busy() and not self._force_close:
+        if self._local_busy() and not self._force_close:
             threading.Thread(target=lambda: self._window.evaluate_js("askClose()"), daemon=True).start()
             return False   # не закрывать
         return True
