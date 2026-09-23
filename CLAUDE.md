@@ -126,6 +126,7 @@
 - [ ] OAuth-клиент Google зашит в приложение; шаг «OAuth-клиент» в мастере скрыт (свой клиент — для продвинутых).
 - [x] `wolf-setup.sh` в репозитории проекта (`WetFoxx/Vast.ai-Cloud-Gaming-`, коммит `b9909e7` = v3.9); `SCRIPT_URL` закреплён на коммит. Публичный шаблон `WETFOX CLOUD GAME` и README на GitHub пока ссылаются на старый gist (v3.7).
 - [ ] Приложение собрано (`.app` / `.exe`) со своим Python и библиотеками; не нужен `.venv`, `bin/vastgame`, `/opt/homebrew/bin`.
+- [x] Программы (rclone, tailscale, ssh, brew) ищутся не только в PATH: у приложения из Finder/Dock PATH без Homebrew — `paths.find` смотрит `/opt/homebrew/bin`, `/usr/local/bin`, `Tailscale.app/Contents/MacOS`.
 - [x] Moonlight ищется в `/Applications` и `~/Applications` (Mac), в Program Files и LOCALAPPDATA (Windows).
 - [ ] Первое подключение Moonlight: мастер/окно проводят через PIN (кабинет Sunshine → PIN из Moonlight); `Moonlight list` без пары не работает — окно показывает «Desktop».
 - [x] Tailscale SSH: ссылка подтверждения показывается, только если её прислал Tailscale (режим check зависит от сети пользователя).

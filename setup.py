@@ -18,7 +18,8 @@ import webbrowser   # открыть ссылку в браузере (Mac и Wi
 import keyring   # доступ к Keychain («Связка ключей») macOS
 
 import drive
-from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, call, check_key, my_template
+import paths
+from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 
@@ -454,33 +455,33 @@ def find_refresh_token(x):
     return None
 
 
-def google():
-    """Вход в Google через OAuth-клиент приложения со scope drive.file; токен — в Keychain."""
+def google_login():
+    """Вход в Google через OAuth-клиент приложения со scope drive.file; токен — в Keychain.
+    Открывает браузер (rclone authorize) и ждёт, пока человек разрешит доступ (до 10 минут).
+    Ничего не печатает; ошибки — VastgameError с ключом перевода. Возвращает длину токена."""
     cid, secret = drive.client()
     if not (cid and secret):
-        sys.exit("Нет OAuth-клиента Google — пройди мастер: vastgame setup")
-    print("  Браузер: войди в Google-аккаунт для игр и разреши доступ (только к файлам приложения).\n")
+        raise VastgameError("Нет OAuth-клиента Google — пройди мастер: vastgame setup", key="setup.err.no_client")
     # rclone authorize принимает настройки как base64 от JSON (без «=» в конце) —
     # так передаём свой клиент и scope drive.file, не создавая файл конфига
     blob = base64.b64encode(json.dumps({"client_id": cid, "client_secret": secret,
                                         "scope": drive.SCOPE}).encode()).decode().rstrip("=")
-    # stdout перехватываем (там токен), stderr — служебные сообщения rclone — идут на экран как есть
+    # stdout перехватываем (там токен), stderr — служебные сообщения rclone — на экран терминала как есть
     try:
-        out = subprocess.run(["rclone", "authorize", "drive", blob], stdout=subprocess.PIPE, text=True, timeout=600)
+        out = subprocess.run([paths.need("rclone"), "authorize", "drive", blob], stdout=subprocess.PIPE, text=True, timeout=600)
     except FileNotFoundError:
-        sys.exit("rclone не найден. Установи: brew install rclone")
+        raise VastgameError("rclone не найден. Установи: brew install rclone", key="setup.err.no_rclone")
     except subprocess.TimeoutExpired:
-        sys.exit("Вход не завершён за 10 минут — запусти ещё раз.")
+        raise VastgameError("Вход не завершён за 10 минут — запусти ещё раз.", key="setup.err.login_timeout")
     if out.returncode != 0:
-        sys.exit(f"rclone завершился с ошибкой (код {out.returncode}) — вход не выполнен.")
+        raise VastgameError(f"rclone завершился с ошибкой (код {out.returncode}) — вход не выполнен.",
+                            key="setup.err.login_failed", code=out.returncode)
 
     # Токен лежит между «--->» и «<---End paste»; если разметки нет — берём весь вывод
     m = re.search(r"--->\s*(.*?)\s*<---", out.stdout, re.S)
     token = find_refresh_token(m.group(1) if m else out.stdout)
     if not token:
-        sys.exit("Не нашёл refresh_token в ответе rclone. Ничего не сохранено.")
-    if not token.startswith("1//"):
-        print("Внимание: токен Google обычно начинается с «1//» — этот выглядит иначе, но сохраняю.")
+        raise VastgameError("Не нашёл refresh_token в ответе rclone. Ничего не сохранено.", key="setup.err.no_token")
 
     # Прежний токен (общий клиент rclone, полный доступ) не выбрасываем: он нужен, чтобы перенести
     # архивы из старой папки — новому клиенту она не видна
@@ -489,10 +490,23 @@ def google():
         keyring.set_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD", prev)
     keyring.set_password(SERVICE, "RCLONE_REFRESH_TOKEN", token)
     keyring.set_password(SERVICE, "RCLONE_TOKEN_SCOPE", drive.SCOPE)   # токен — через клиент приложения
-    check = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
-    if check != token:
-        sys.exit("Не удалось сохранить токен в Keychain.")
-    print(f"\n  ✓ Вход выполнен, токен Drive сохранён в Keychain ({len(token)} символов).")
+    if keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN") != token:
+        raise VastgameError("Не удалось сохранить токен в Keychain.", key="setup.err.keychain")
+    return len(token)
+
+
+def google():
+    """vastgame setup google — вход в Google в терминале."""
+    print("  Браузер: войди в Google-аккаунт для игр и разреши доступ (только к файлам приложения).\n")
+    n = google_login()
+    print(f"\n  ✓ Вход выполнен, токен Drive сохранён в Keychain ({n} символов).")
+
+
+def send_google_to_vast():
+    """Клиент и токен Drive из Keychain — в переменные аккаунта Vast (оттуда их получает каждая машина)."""
+    send_secret("RCLONE_CLIENT_ID", "GOOGLE_CLIENT_ID")
+    send_secret("RCLONE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET")
+    return send_secret("RCLONE_REFRESH_TOKEN")
 
 
 def vast():
@@ -500,27 +514,64 @@ def vast():
     push_secret("RCLONE_REFRESH_TOKEN")
 
 
-def push_secret(name, keychain_name=None):
+def send_secret(name, keychain_name=None):
     """Записать секрет из Keychain (запись keychain_name, по умолчанию — name) в Environment Variables
-    аккаунта Vast под именем name. Vast подставляет их в каждый инстанс — и через утилиту, и через сайт."""
+    аккаунта Vast под именем name. Vast подставляет их в каждый инстанс — и через утилиту, и через сайт.
+    Ничего не печатает. Возвращает (добавлен или обновлён, имена переменных аккаунта)."""
     token = keyring.get_password(SERVICE, keychain_name or name)
     if not token:
-        sys.exit(f"В Keychain нет {name} — пройди мастер: vastgame setup")
-
+        raise VastgameError(f"В Keychain нет {name} — пройди мастер: vastgame setup", key="setup.err.no_secret", name=name)
     # Переменные аккаунта: POST secrets/ — создать, PUT — заменить (как в официальном CLI Vast)
     have = call("GET", "secrets/").get("secrets") or {}
     method = "PUT" if name in have else "POST"
     r = call(method, "secrets/", {"key": name, "value": token})
     if not r.get("success"):
-        sys.exit("Vast не сохранил переменную (ответ без success).")   # msg не печатаем: вдруг там значение
-
+        # msg не показываем: вдруг в нём значение
+        raise VastgameError("Vast не сохранил переменную (ответ без success).", key="setup.err.vast_secret", name=name)
     # Проверка: переменная появилась. Значения Vast отдаёт замаскированными («********»),
     # поэтому сверить само значение нельзя — только имя
     have = call("GET", "secrets/").get("secrets") or {}
     if name not in have:
-        sys.exit(f"{name} после записи не видна в Vast — проверь на сайте.")
-    print(f"  ✓ {name} {'обновлён' if method == 'PUT' else 'добавлен'} в переменные аккаунта Vast.")
-    print(f"    Переменные аккаунта сейчас: {', '.join(sorted(have))}")
+        raise VastgameError(f"{name} после записи не видна в Vast — проверь на сайте.", key="setup.err.secret_missing",
+                            name=name)
+    return ("обновлён" if method == "PUT" else "добавлен"), sorted(have)
+
+
+def push_secret(name, keychain_name=None):
+    """То же для терминала — с печатью результата."""
+    how, names = send_secret(name, keychain_name)
+    print(f"  ✓ {name} {how} в переменные аккаунта Vast.")
+    print(f"    Переменные аккаунта сейчас: {', '.join(names)}")
+
+
+def save_vast_key(key):
+    """Проверить ключ Vast (запросом баланса) и сохранить в Keychain. Возвращает баланс."""
+    key = (key or "").strip()
+    credit = check_key(key) if key else None
+    if credit is None:
+        raise VastgameError("Vast не принял этот ключ.", key="setup.err.vast_key")
+    keyring.set_password(SERVICE, "VAST_API_KEY", key)
+    return credit
+
+
+def save_tailscale_key(key):
+    """Сохранить ключ Tailscale (tskey-auth-…) в Keychain с датой и отправить в аккаунт Vast."""
+    import datetime
+    key = (key or "").strip()
+    if not key.startswith("tskey-auth-"):
+        raise VastgameError("Это не ключ входа Tailscale: он начинается с «tskey-auth-».", key="setup.err.ts_key")
+    keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY", key)
+    keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY_DATE", datetime.date.today().isoformat())
+    return send_secret("TAILSCALE_AUTHKEY")
+
+
+def save_google_client(cid, secret):
+    """Свой OAuth-клиент Google (для продвинутых) — в Keychain."""
+    cid, secret = "".join((cid or "").split()), (secret or "").strip()
+    if not cid.endswith(".apps.googleusercontent.com") or not secret:
+        raise VastgameError("Нужны Client ID (…apps.googleusercontent.com) и Client secret.", key="setup.err.client")
+    keyring.set_password(SERVICE, "GOOGLE_CLIENT_ID", cid)
+    keyring.set_password(SERVICE, "GOOGLE_CLIENT_SECRET", secret)
 
 
 # Запуск как команды (vastgame setup). При import setup — ничего не запускается: функции мастера

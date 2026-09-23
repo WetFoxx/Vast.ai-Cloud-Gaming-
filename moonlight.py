@@ -4,9 +4,10 @@
 #   Moonlight stream <узел> "<приложение>" — открыть трансляцию
 
 import os
-import shutil
 import subprocess
 import sys
+
+import paths
 
 DEFAULT_APP = "Desktop"   # стандартное приложение Sunshine — рабочий стол
 
@@ -25,7 +26,7 @@ def path():
             p = os.path.join(base, "Moonlight Game Streaming", "Moonlight.exe")
             if os.path.exists(p):
                 return p
-    return shutil.which("moonlight")
+    return paths.find("moonlight")
 
 
 def apps(host, timeout=25):

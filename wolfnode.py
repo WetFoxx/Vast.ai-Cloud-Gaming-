@@ -6,6 +6,8 @@ import subprocess
 
 import requests
 
+import paths
+
 NODE = "vastai-gaming"   # имя узла в Tailscale (TAILSCALE_HOSTNAME в wolf-setup.sh)
 WOLF_PORT = 8099         # страница статуса wolf на инстансе
 
@@ -17,7 +19,7 @@ def ts_node():
     (их DNS-имена vastai-gaming-1, -2...). Нам нужен тот, что онлайн.
     """
     try:
-        out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=20)
+        out = subprocess.run([paths.need("tailscale"), "status", "--json"], capture_output=True, text=True, timeout=20)
         peers = json.loads(out.stdout).get("Peer") or {}
     except Exception:
         return None
@@ -104,7 +106,7 @@ def ssh(ip, command):
     accept-new — ключ хоста каждой новой машины принимается сам (машины каждый раз новые).
     """
     return subprocess.Popen(
-        ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+        [paths.need("ssh"), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
          "-o", "UserKnownHostsFile=/dev/null",
          "-o", "ConnectTimeout=20",
          # машина пропала (удалили, упала) — ssh заметит за ~1 минуту, а не будет ждать вечно

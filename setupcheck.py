@@ -8,13 +8,13 @@
 
 import datetime
 import json
-import shutil
 import subprocess
 
 import keyring
 
 import drive
 import moonlight
+import paths
 import setup   # функции мастера: при import он НЕ запускается (защищён __main__)
 from vastapi import KEY_FILE, SERVICE, VastgameError, call, check_key, my_template
 
@@ -26,13 +26,13 @@ def _step(id_, state, key, **params):
 def tools():
     """Программы на компьютере: rclone, Tailscale (и что Mac в сети), Moonlight."""
     out = []
-    out.append(_step("rclone", "ok", "setup.rclone.ok") if shutil.which("rclone")
+    out.append(_step("rclone", "ok", "setup.rclone.ok") if paths.find("rclone")
                else _step("rclone", "missing", "setup.rclone.missing"))
-    if not shutil.which("tailscale"):
+    if not paths.find("tailscale"):
         out.append(_step("tailscale_app", "missing", "setup.tailscale_app.missing"))
     else:
         try:
-            st = json.loads(subprocess.run(["tailscale", "status", "--json"],
+            st = json.loads(subprocess.run([paths.need("tailscale"), "status", "--json"],
                                            capture_output=True, text=True, timeout=20).stdout)
         except Exception:
             st = {}

@@ -10,6 +10,7 @@ import tempfile
 import keyring
 import requests
 
+import paths
 from vastapi import SERVICE
 
 FOLDER = "vastai-cloud-games"   # папка на Drive, с которой работает wolf-setup.sh
@@ -59,7 +60,7 @@ def rclone_both(*args, capture=True, timeout=None):
     old_tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if not is_old_token() else token()
     env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),
                **_remote("vgold", old_tok, True), **_remote("vgdrive", token(), False))
-    return subprocess.run(["rclone", *args], capture_output=capture, text=True, env=env, timeout=timeout)
+    return subprocess.run([paths.need("rclone"), *args], capture_output=capture, text=True, env=env, timeout=timeout)
 
 
 def rclone(*args, tok=None, old=None, timeout=300):
@@ -76,7 +77,7 @@ def rclone(*args, tok=None, old=None, timeout=300):
         tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if old and not is_old_token() else saved
     env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
                **_remote("vgdrive", tok, old))
-    return subprocess.run(["rclone", *args], capture_output=True, text=True, env=env, timeout=timeout)
+    return subprocess.run([paths.need("rclone"), *args], capture_output=True, text=True, env=env, timeout=timeout)
 
 
 def check(tok, old=None):
