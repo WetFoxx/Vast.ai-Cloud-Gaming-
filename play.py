@@ -35,6 +35,7 @@ a = p.parse_args()
 
 def ask(question):
     """Задать вопрос; True — только если человек напечатал «да»."""
+    import readline  # noqa: F401 — с ним в ответе работают стрелки и Backspace, а не печатаются ^[[C
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
 
 
@@ -132,6 +133,7 @@ print("Ctrl+C прервёт ожидание, но НЕ остановит ин
 
 # ---- 4a. Vast запускает машину
 last = None
+errors = 0
 deadline = time.time() + 30 * 60
 while True:
     # Разовый сбой API не должен обрывать ожидание: машина уже платная, следим дальше
@@ -161,6 +163,12 @@ while True:
     # Из этих состояний машина уже не дойдёт до running (см. документацию Vast)
     if st in ("exited", "offline", "unknown"):
         fail(iid, f"Машина перешла в состояние «{st}» и не запустится.")
+    # Хост не смог создать машину: «Error response from daemon ...» в status_msg.
+    # Ошибку, повторившуюся две проверки подряд (~30 с), считаем окончательной.
+    err = "error" in (inst.get("status_msg") or "").lower()
+    errors = errors + 1 if err else 0
+    if errors >= 2:
+        fail(iid, "Хост не смог запустить машину: " + inst["status_msg"].strip()[:200])
     if time.time() > deadline:
         fail(iid, "Машина не запустилась за 30 минут.")
     time.sleep(15)
