@@ -410,7 +410,7 @@ def wizard():
     if not step_template():
         sys.exit(1)
     summary()
-    print("\nГотово. Дальше: vastgame offers → vastgame play <ID> → играть → vastgame stop")
+    print("\nГотово. Дальше: vastgame play → играть → vastgame stop")
 
 
 def find_refresh_token(x):

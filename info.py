@@ -8,7 +8,7 @@ from wolfnode import print_links, ts_node, wolf_status
 
 inst = list_instances()
 if not inst:
-    sys.exit("Машин нет. Арендовать: vastgame offers → vastgame play <ID>")
+    sys.exit("Машин нет. Арендовать: vastgame play")
 i = inst[0]
 print(f"Инстанс {i['id']}: {i.get('gpu_name', '?')}, {(i.get('geolocation') or '?').strip(', ')}, "
       f"${(i.get('dph_total') or 0):.3f}/ч, Vast: {i.get('actual_status') or '?'}")

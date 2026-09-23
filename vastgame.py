@@ -12,9 +12,9 @@ COMMANDS = {
     "setup":   ("setup.py",   "первая настройка: ключи Vast, Google Drive, Tailscale"),
     "balance": ("balance.py", "баланс Vast"),
     "offers":  ("offers.py",  "подходящие машины (--free — только с бесплатным трафиком)"),
-    "play":    ("play.py",    "арендовать машину и дождаться готовности: vastgame play <ID>"),
+    "play":    ("play.py",    "подобрать и арендовать машину, дождаться готовности"),
     "migrate": ("migrate.py", "перенести архивы из старой папки (до своего OAuth-клиента) в папку приложения"),
-    "games":   ("games.py",   "игры и сохранения в облаке; vastgame games rm <название> — убрать"),
+    "games":   ("games.py",   "игры и сохранения в облаке; убрать: vastgame games rm часть-названия"),
     "info":    ("info.py",    "адреса работающей машины: Moonlight, кабинет Sunshine, статус"),
     "stop":    ("stop.py",    "выгрузить всё в облако и удалить машину"),
 }

@@ -87,7 +87,7 @@ if a.cmd is None:
     if service:
         gb = sum(v["size"] for v in service.values()) / 1e9
         print(f"Служебные (Steam, сеть, настройки — не удаляются): {', '.join(sorted(service))}; {size(gb)}.")
-    print("\nУбрать из облака: vastgame games rm <название>")
+    print("\nУбрать из облака: vastgame games rm и часть названия, например: vastgame games rm dawnwalker")
     sys.exit(0)
 
 # ---- rm: найти архив по имени или его части
