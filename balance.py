@@ -37,13 +37,11 @@ def main():
         sys.exit(f"Vast ответил ошибкой: HTTP {r.status_code}")
 
     data = r.json()   # ответ — JSON, превращаем его в словарь Python
-    # В документации баланс называется то credit, то balance — смотрим оба поля
-    # и выводим только их, остальной ответ не печатаем
-    for field in ("credit", "balance"):
-        if field in data:
-            print(f"{field}: ${data[field]:.2f}")
-    if "credit" not in data and "balance" not in data:
-        sys.exit("В ответе нет полей credit и balance")
+    # Деньги на счету — поле credit (сверено с консолью Vast).
+    # Выводим только его, остальной ответ не печатаем
+    if "credit" not in data:
+        sys.exit("В ответе нет поля credit")
+    print(f"Баланс Vast: ${data['credit']:.2f}")
 
 
 main()
