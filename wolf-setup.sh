@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.10 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -916,6 +916,11 @@ boot() {
   done < <(names '^s?game--')
   [ ${#g[@]} -gt 0 ] && pool unpack "${g[@]}"
 
+  # Папка для игр не из Steam (v3.10): создаётся один раз на инстанс — при первой загрузке, после
+  # восстановления архивов (они сами создают свои подпапки). Отметка в $S: если человек удалит
+  # папку, при перезагрузке этого же инстанса она не вернётся. Игр внутри нет — выгружать нечего.
+  [ -e "$S/games-dir-made" ] || { u mkdir -p "$GD" && touch "$S/games-dir-made"; }
+
   # Манифест есть, а игры нет ни на диске, ни в облаке (архив удалили с Drive или инстанс
   # удалили раньше, чем игра успела выгрузиться) — убираем манифест, и Steam покажет игру
   # неустановленной, а не сломанной. Только при полном списке облака и восстановленном
@@ -1240,4 +1245,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.9 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.10 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

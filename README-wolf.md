@@ -240,7 +240,7 @@ All of these go in Vast's Environment Variables and override the script's defaul
 | `R_REMOTE` | gdrive:vastai-cloud-games | folder on Drive |
 | `TAILSCALE_HOSTNAME` | vastai-gaming | node name |
 | `TAILSCALE_EXTRA_ARGS` | — | extra tailscale up flags |
-| `GAMES_DIR` | ~/Downloads/Games | non-Steam games |
+| `GAMES_DIR` | ~/Downloads/Games | non-Steam games; created empty on the instance's first boot (v3.10) |
 | `STATE_SYNC_MIN` | 5 | state sync interval, minutes |
 | `GAMES_SYNC_MIN` | 15 | game sync interval, minutes |
 | `PAR` | 4 | archives in parallel |
