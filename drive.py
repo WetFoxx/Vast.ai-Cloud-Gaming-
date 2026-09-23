@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 
 import keyring
+import requests
 
 from vastapi import SERVICE
 
@@ -127,3 +128,23 @@ def trash(files):
         r = rclone("deletefile", "--drive-use-trash=true", f"{REMOTE}{FOLDER}/{name}", timeout=120)
         ok = ok and r.returncode == 0
     return ok
+
+
+def _access_token():
+    """Короткоживущий access token Drive API по refresh token через клиент приложения. Никуда не выводится."""
+    cid, secret = client()
+    r = requests.post("https://oauth2.googleapis.com/token", timeout=30, data={
+        "client_id": cid, "client_secret": secret, "refresh_token": token(), "grant_type": "refresh_token"})
+    return r.json().get("access_token") if r.status_code == 200 else None
+
+
+def set_trashed(file_id, trashed):
+    """Убрать в корзину (True) или достать из корзины (False) файл/папку по ID — строго по ID, не по имени.
+    Работает для того, что создало приложение (scope drive.file). True — если получилось."""
+    at = _access_token()
+    if not at:
+        return False
+    r = requests.patch(f"https://www.googleapis.com/drive/v3/files/{file_id}", timeout=30,
+                       params={"fields": "id,trashed"}, json={"trashed": trashed},
+                       headers={"Authorization": f"Bearer {at}"})
+    return r.status_code == 200 and r.json().get("trashed") == trashed
