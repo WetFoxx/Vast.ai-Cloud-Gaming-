@@ -1,5 +1,6 @@
 # setup.py — настройка: ключи и токены хранятся в Keychain macOS, а не в файлах.
 # Запуск: .venv/bin/python setup.py google    — войти в Google и сохранить токен Drive
+#         .venv/bin/python setup.py vast      — записать токен из Keychain в переменные аккаунта Vast
 #
 # Никакие токены не выводятся на экран: только «сохранён, N символов».
 
@@ -11,6 +12,8 @@ import subprocess
 import sys
 
 import keyring   # доступ к Keychain («Связка ключей») macOS
+
+from vastapi import call
 
 SERVICE = "vastgame"   # под этим именем записи видны в приложении «Связка ключей»
 
@@ -67,8 +70,35 @@ def google():
     print(f"Запись видна в «Связке ключей» по имени «{SERVICE}».")
 
 
+def vast():
+    """Записать токен Drive из Keychain в Environment Variables аккаунта Vast.
+    Vast подставляет их в каждый инстанс — и при аренде через утилиту, и через сайт."""
+    name = "RCLONE_REFRESH_TOKEN"
+    token = keyring.get_password(SERVICE, name)
+    if not token:
+        sys.exit("В Keychain нет токена Drive — сначала: .venv/bin/python setup.py google")
+
+    # Переменные аккаунта: POST secrets/ — создать, PUT — заменить (как в официальном CLI Vast)
+    have = call("GET", "secrets/").get("secrets") or {}
+    method = "PUT" if name in have else "POST"
+    r = call(method, "secrets/", {"key": name, "value": token})
+    if not r.get("success"):
+        sys.exit("Vast не сохранил переменную (ответ без success).")   # msg не печатаем: вдруг там значение
+
+    # Проверка: переменная появилась. Значения Vast отдаёт замаскированными («********»),
+    # поэтому сверить само значение нельзя — только имя
+    have = call("GET", "secrets/").get("secrets") or {}
+    if name not in have:
+        sys.exit(f"{name} после записи не видна в Vast — проверь на сайте.")
+    print(f"Готово: {name} {'обновлён' if method == 'PUT' else 'добавлен'} в переменные аккаунта Vast.")
+    print(f"Переменные аккаунта сейчас: {', '.join(sorted(have))}")
+
+
 p = argparse.ArgumentParser(description="Настройка vastgame: ключи в Keychain")
-p.add_argument("what", choices=["google"], help="google — войти в Google и сохранить токен Drive")
+p.add_argument("what", choices=["google", "vast"],
+               help="google — войти в Google и сохранить токен Drive; vast — записать его в аккаунт Vast")
 a = p.parse_args()
 if a.what == "google":
     google()
+elif a.what == "vast":
+    vast()
