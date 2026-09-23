@@ -150,11 +150,10 @@ while True:
     if st == "running":
         # Диагностика: что реально попало на машину. Только ИМЕНА переменных — значения
         # (ключи Tailscale и Google) не печатаем. Сравнить с тем, что ждёт wolf-setup.sh.
-        names = sorted(e[0] for e in inst.get("extra_env") or [] if e)
-        print(f"  Переменные на машине: {', '.join(names) or 'НЕТ'}")
-        for need in ("RCLONE_REFRESH_TOKEN", "TAILSCALE_AUTHKEY"):
-            if need not in names:
-                print(f"  !!! нет {need} среди переменных инстанса (возможно, аккаунтные передаются иначе)")
+        # Порты (-p ...) тоже лежат в extra_env — их пропускаем. Секретные переменные
+        # (ключи из аккаунта, OPEN_BUTTON_TOKEN) API не показывает — их отсутствие здесь нормально.
+        names = sorted(e[0] for e in inst.get("extra_env") or [] if e and not e[0].startswith("-"))
+        print(f"  Переменные на машине (кроме секретных): {', '.join(names) or 'НЕТ'}")
         for k in sorted(inst):
             if "onstart" in k or "template" in k:
                 v = inst[k]
