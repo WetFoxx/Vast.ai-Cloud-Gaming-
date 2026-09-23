@@ -25,13 +25,17 @@ function showError(id, e) { const el = $(id); el.hidden = !e; el.textContent = e
 function size(bytes) {
   return bytes >= 1e9 ? t("unit.gb", { n: num(bytes / 1e9, 1) }) : t("unit.mb", { n: num(bytes / 1e6, 0) });
 }
+function hm(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h ? t("unit.hm", { h, m }) : t("unit.m", { m });
+}
 function duration(sec) {
   const m = Math.floor(sec / 60), s = sec % 60;
   return LANG === "ru" ? `${m} мин ${s} с` : `${m} min ${s} s`;
 }
 
 function show(screen) {
-  for (const s of ["main", "offers", "progress", "games", "setup"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["main", "offers", "progress", "games", "setup", "history"]) $("screen-" + s).hidden = s !== screen;
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -86,6 +90,9 @@ function render(data) {
   const m = st.machine;
   $("machine").hidden = !m;
   if (m) $("machine").textContent = t("machine.line", { gpu: m.gpu, country: m.country, price: money(m.price), id: m.id });
+  // Сколько идёт сессия и сколько она уже стоит (по своей записи: начало и цена часа)
+  $("session-line").hidden = !data.session;
+  if (data.session) $("session-line").textContent = t("session.running", { time: hm(data.session.elapsed), cost: money(data.session.cost) });
   const li = st.links;
   $("links").hidden = !li || st.state === "starting";
   if (li) $("moonlight").textContent = li.moonlight;
@@ -425,6 +432,61 @@ function setupActions(st, li) {
   }
 }
 
+// ---------------------------------------------------------------- история и траты
+let historyData = null, historyDays = 30;
+$("open-history").addEventListener("click", () => openHistory(historyDays));
+$("history-back").addEventListener("click", () => { show("main"); refresh(); });
+
+async function openHistory(days) {
+  show("history");
+  historyDays = days;
+  const tabs = $("history-tabs");
+  tabs.innerHTML = "";
+  for (const n of [7, 30, 90]) {
+    const b = button(t("history.days", { n }), () => openHistory(n));
+    if (n === days) b.classList.add("active");
+    tabs.appendChild(b);
+  }
+  $("history-summary").hidden = false;
+  $("history-summary").textContent = t("history.loading");
+  $("history-stats").hidden = $("history-card").hidden = true;
+  $("history-breakdown").textContent = "";
+  showError("history-error", null);
+  const d = DEMO ? demoHistory(days) : await api().history(days);
+  if (days !== historyDays) return;             // пока считали, выбрали другой период
+  if (d.error) { $("history-summary").hidden = true; showError("history-error", d.error); return; }
+  historyData = d;
+  renderHistory();
+}
+
+function renderHistory() {
+  const d = historyData;
+  if (!d) return;
+  const tt = d.totals;
+  $("history-summary").hidden = !!tt.count;
+  $("history-summary").textContent = tt.count ? "" : t("history.empty");
+  $("history-stats").hidden = !tt.count;
+  $("h-spent").textContent = money(tt.amount);
+  $("h-hours").textContent = num(tt.hours);
+  $("h-count").textContent = tt.count;
+  $("h-per-hour").textContent = tt.per_hour != null ? money(tt.per_hour) : "—";
+  $("history-breakdown").textContent = tt.count ? t("history.breakdown", { gpu: money(tt.gpu), disk: money(tt.disk), traffic: money(tt.traffic) }) : "";
+  $("history-card").hidden = !tt.count;
+  const body = $("history-table").querySelector("tbody");
+  body.innerHTML = "";
+  for (const x of d.sessions) {
+    const tr = document.createElement("tr");
+    tr.style.cursor = "default";
+    tr.innerHTML = '<td></td><td></td><td class="num"></td><td class="num"></td>';
+    const c = tr.children;
+    c[0].textContent = x.start ? new Date(x.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—";
+    c[1].textContent = x.gpu ? `${x.gpu} · ${x.country || "?"}` : t("history.unknown_machine", { id: x.iid });
+    c[2].textContent = num(x.hours);
+    c[3].textContent = money(x.amount);
+    body.appendChild(tr);
+  }
+}
+
 // ---------------------------------------------------------------- игры в облаке
 let gamesData = null;
 let gamesTimer = null;
@@ -698,6 +760,7 @@ $("lang").addEventListener("change", (e) => {
   if (!$("screen-offers").hidden) renderOffers();
   if (!$("screen-games").hidden) renderGames();
   if (!$("screen-setup").hidden) renderSetup();
+  if (!$("screen-history").hidden) openHistory(historyDays);
   if (!$("screen-progress").hidden && prog) $("progress-log").textContent = prog.log.map(eventText).join("\n");
   if (!DEMO) api().set_language(LANG, true);   // выбор запоминается
 });
@@ -717,6 +780,7 @@ function demoState(kind) {
   }[kind] || { state: "none", kind: "none", machine: null, links: null };
   const balance = kind === "low" ? 0.74 : 3.18;
   return { balance, low_balance: balance < 1, hours_left: s.machine ? balance / s.machine.price : null, status: s,
+           session: s.machine ? { elapsed: 4870, cost: 0.276 } : null,
            game_names: { 3751260: "The Blood of Dawnwalker" } };
 }
 function demoOffers() {
@@ -772,6 +836,14 @@ function demoSetup() {
     st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.9" })] };
 }
 
+function demoHistory(days) {
+  const now = Date.now() / 1000;
+  const sessions = Array.from({ length: 8 }, (_, i) => ({ iid: 52264565 - i, start: now - i * 86400 * 1.5,
+    gpu: i % 3 ? "RTX 3060" : "RTX 3090", country: i % 3 ? "Pennsylvania, US" : "Latvia, LV", hours: 1 + (i % 4) * 0.7,
+    amount: 0.12 + i * 0.05 }));
+  return { days, sessions, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
+}
+
 // ---------------------------------------------------------------- старт
 async function start() {
   let saved = null;
@@ -785,6 +857,7 @@ async function start() {
   if (DEMO === "stop") { startProgress("stop"); return; }
   if (DEMO === "games") { openGames(); return; }
   if (DEMO === "setup") { openSetup(); return; }
+  if (DEMO === "history") { openHistory(30); return; }
   await refresh();
   // Настройка: проверяем в фоне; нет ключа Vast (первый запуск) — сразу открыть экран настройки
   if (current === null && !DEMO) openSetup();

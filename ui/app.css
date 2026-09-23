@@ -234,3 +234,11 @@ tr.group td { font-weight: 600; font-size: 13px; color: var(--muted); background
 }
 .step-msg { font-size: 13px; color: var(--muted); margin-top: 4px; }
 .step-msg.err { color: var(--error); }
+
+/* ---- История и траты */
+.tabs { display: flex; gap: 6px; }
+.tabs button { flex: none; padding: 5px 12px; font-size: 13px; border-radius: 9px; }
+.tabs button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.stats .big { font-size: 22px; }
+#history-card { max-height: 360px; overflow: auto; }

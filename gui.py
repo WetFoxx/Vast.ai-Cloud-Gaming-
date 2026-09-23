@@ -22,6 +22,7 @@ import webview   # pywebview: окно с веб-страницей (на Mac �
 
 import cloudgames
 import core
+import history
 import market
 import moonlight
 import settings
@@ -136,7 +137,16 @@ class Api:
         except VastgameError as e:   # подвид SystemExit — ловим явно, иначе поток тихо завершится
             return {"error": error_data(e)}
         price = st["machine"]["price"] if st["machine"] else None
-        return {"balance": credit, "low_balance": credit < LOW_BALANCE,
+        session = None
+        try:
+            history.reconcile({st["machine"]["id"]} if st["machine"] else set())
+            cur = history.current(st["machine"]["id"]) if st["machine"] else None
+            if cur:
+                elapsed = int(time.time() - cur["start"])
+                session = {"elapsed": elapsed, "cost": round(elapsed / 3600 * (cur["price"] or price or 0), 3)}
+        except OSError:
+            pass   # запись истории не должна ломать главный экран
+        return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session,
                 "hours_left": credit / price if price else None, "status": st,
                 "game_names": self._game_names(st["archives"]), "busy": self._busy()}
 
@@ -198,7 +208,7 @@ class Api:
                 tpl = core.template()
                 disk = core.template_disk(tpl)
                 o = core.offer_by_id(int(offer_id), disk)       # свежая цена и наличие
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, disk, sync=sync))
+                iid, t0 = core.rent(o["id"], core.rental_body(tpl, disk, sync=sync), o)
                 r = core.wait_ready(iid, t0, o, job)
                 job.result = {"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
                               "notes": [{"level": lv, "key": k, "params": p, "text": tx}
@@ -356,6 +366,14 @@ class Api:
             if not ok:
                 raise VastgameError(msg, key="setup.err.template")
         return self._simple(refresh)
+
+    # ---- История и траты
+    def history(self, days=30):
+        """Сессии и траты за days дней: реальные списания Vast + своя запись сессий."""
+        try:
+            return history.summary(int(days))
+        except VastgameError as e:
+            return {"error": error_data(e)}
 
     # ---- Игры в облаке
     def games(self):

@@ -19,6 +19,7 @@ import re
 import threading
 import time
 
+import history
 import market
 from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
 from wolfnode import NODE, links, ssh, ssh_run, ts_node, wolf_status
@@ -121,20 +122,24 @@ def balance():
 
 # ------------------------------------------------------------------------- аренда ---
 
-def rent(offer_id, body):
-    """Арендовать. Возвращает (id инстанса, время начала). Деньги начинают списываться сразу."""
+def rent(offer_id, body, offer=None):
+    """Арендовать. Возвращает (id инстанса, время начала). Деньги начинают списываться сразу.
+    offer — данные машины (видеокарта, страна, цена) для истории сессий."""
     t0 = time.time()
     r = call("PUT", f"asks/{offer_id}/", body)
     iid = r.get("new_contract")
     if not r.get("success") or not iid:
         why = r.get("msg") or r.get("error") or ""
         raise VastgameError(f"Vast не арендовал машину: {why or 'без объяснения'}", key="core.rent_failed", msg=why)
+    history.started(iid, offer or {}, t0)
     return iid, t0
 
 
 def delete_instance(iid):
     """Удалить инстанс. (успех, сообщение Vast)."""
     r = call("DELETE", f"instances/{iid}/", {})
+    if r.get("success"):
+        history.ended(iid)
     return bool(r.get("success")), r.get("msg")
 
 

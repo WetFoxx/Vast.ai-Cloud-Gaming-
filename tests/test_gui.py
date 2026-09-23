@@ -43,7 +43,7 @@ class TestPlay(unittest.TestCase):
             self.addCleanup(p.stop)
         self.api = gui.Api()
 
-    def fake_rent(self, offer_id, body):
+    def fake_rent(self, offer_id, body, offer=None):
         self.rented.append(offer_id)
         return 42, time.time()
 
@@ -71,7 +71,7 @@ class TestPlay(unittest.TestCase):
 
     def test_sync_toggles_remembered_and_sent(self):
         bodies, store = [], {}
-        with mock.patch.object(gui.core, "rent", lambda oid, body: bodies.append(body) or (42, time.time())), \
+        with mock.patch.object(gui.core, "rent", lambda oid, body, offer=None: bodies.append(body) or (42, time.time())), \
              mock.patch.object(gui.settings, "get", lambda k, d=None: store.get(k, d)), \
              mock.patch.object(gui.settings, "set", lambda k, v: store.__setitem__(k, v)):
             self.assertEqual(self.api._sync(), {"steam_games": False, "other_games": True, "saves": True})

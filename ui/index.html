@@ -36,6 +36,7 @@
         </div>
       </div>
       <div class="machine" id="machine" hidden></div>
+      <div class="sub" id="session-line" hidden></div>
       <div class="links" id="links" hidden>
         <div class="ml-row">
           <button class="primary" id="ml-start" data-i18n="moonlight.start"></button>
@@ -64,6 +65,7 @@
     <div class="error" id="error" hidden></div>
     <div class="actions">
       <button id="open-games" data-i18n="games.open"></button>
+      <button id="open-history" data-i18n="history.open"></button>
       <button id="open-setup" data-i18n="setup.open"></button>
     </div>
     <div class="danger-row"><button class="link danger" id="emergency" hidden data-i18n="btn.emergency"></button></div>
@@ -117,6 +119,32 @@
       <button id="setup-recheck" data-i18n="setup.recheck"></button>
       <button class="primary" id="setup-back" data-i18n="btn.back"></button>
     </div>
+  </main>
+
+  <!-- ===== История и траты ===== -->
+  <main id="screen-history" hidden>
+    <h1 data-i18n="history.title"></h1>
+    <div class="tabs" id="history-tabs"></div>
+    <div class="sub" id="history-summary" data-i18n="history.loading"></div>
+    <section class="card stats" id="history-stats" hidden>
+      <div><div class="label" data-i18n="history.spent"></div><div class="big" id="h-spent"></div></div>
+      <div><div class="label" data-i18n="history.hours"></div><div class="big" id="h-hours"></div></div>
+      <div><div class="label" data-i18n="history.sessions"></div><div class="big" id="h-count"></div></div>
+      <div><div class="label" data-i18n="history.per_hour"></div><div class="big" id="h-per-hour"></div></div>
+    </section>
+    <div class="sub" id="history-breakdown"></div>
+    <section class="card table-card" id="history-card" hidden>
+      <table id="history-table">
+        <thead><tr>
+          <th data-i18n="col.date"></th><th data-i18n="col.machine"></th>
+          <th class="num" data-i18n="col.hours"></th><th class="num" data-i18n="col.cost"></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <div class="note" data-i18n="history.note"></div>
+    <div class="error" id="history-error" hidden></div>
+    <div class="actions"><button class="primary" id="history-back" data-i18n="btn.back"></button></div>
   </main>
 
   <!-- ===== Игры в облаке ===== -->

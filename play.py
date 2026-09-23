@@ -88,7 +88,7 @@ if not ui.confirm("\nАрендовать? Деньги начнут списы�
     sys.exit("Отменено, ничего не арендовано.")
 
 # ---- 4. Аренда и ожидание готовности
-iid, t0 = core.rent(a.offer, body)
+iid, t0 = core.rent(a.offer, body, o)
 print("Ctrl+C прервёт ожидание, но НЕ остановит инстанс — он продолжит работать и тратить деньги.")
 result = core.wait_ready(iid, t0, o, ui)
 
