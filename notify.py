@@ -51,5 +51,6 @@ def job_finished(kind, result, error, lang):
     elif kind == "play":
         send(t(tr, "notify.ready.title"), t(tr, "notify.ready.text", min=result.get("minutes", "?")))
     else:
-        text = t(tr, "notify.stopped.text") if result.get("deleted") else t(tr, "core.delete_pending", id=result.get("iid"))
+        text = (t(tr, "progress.stop_gone") if result.get("gone") else t(tr, "notify.stopped.text")
+                if result.get("deleted") else t(tr, "core.delete_pending", id=result.get("iid")))
         send(t(tr, "notify.stopped.title"), text)

@@ -750,8 +750,9 @@ function renderStopResult(r) {
   box.innerHTML = "";
   const ok = document.createElement("div");
   ok.className = "result-ok";
-  ok.textContent = r.deleted ? t("progress.stopped") : t("core.delete_pending", { id: r.iid });
+  ok.textContent = r.gone ? t("progress.stop_gone") : r.deleted ? t("progress.stopped") : t("core.delete_pending", { id: r.iid });
   box.appendChild(ok);
+  if (r.gone) return;
   const up = document.createElement("div");
   up.className = "sub";
   up.textContent = r.uploaded.length ? t("core.uploaded", { names: r.uploaded }) : t("core.uploaded_none");

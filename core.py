@@ -28,6 +28,7 @@ VAST_START_MIN = 30      # сколько ждать, пока Vast запуст
 TAILSCALE_WARN_MIN = 10  # после стольких минут без узла — подсказать, где искать причину
 TAILSCALE_MIN = 20       # сколько всего ждать узел в Tailscale
 SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown
+SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина удалит себя сама (wolf finish ждёт 30 с перед удалением)
 
 
 # ------------------------------------------------------------------ подготовка аренды ---
@@ -403,6 +404,69 @@ def stop(ui, dry_run=False):
         raise VastgameError("Не удалось узнать время на машине — НЕ запускаю выгрузку.", key="core.no_clock")
     t0 = int(out.strip()) - 2
     ui.stage("shutdown", "Закрываю Steam и выгружаю всё в Google Drive (может занять несколько минут)...")
+    # wolf finish (v3.11+): машина сама выгружает, проверяет и удаляет себя отдельной службой —
+    # обрыв связи с этим компьютером её уже не прервёт. Мы только следим и перепроверяем.
+    code, out = ssh_run(ip, "wolf finish", timeout=60, on_notice=ui.tailscale)
+    if code == 0 and out.strip().startswith("finish:") and "не удалось" not in out:
+        return _follow_finish(ui, iid, ip, t0)
+    ui.say("На машине скрипт старше v3.11 (нет wolf finish) — выгружаю по SSH: не закрывай крышку и не "
+           "выключай интернет, пока идёт выгрузка.", "warn", key="core.old_script")
+    _shutdown_over_ssh(ui, iid, ip, t0)
+    return _verify_and_delete(ui, iid, wolf_status(ip), t0)
+
+
+def _alive(iid):
+    """Есть ли машина в списке Vast: True/False, None — не удалось узнать (нет интернета и т.п.).
+    Пока машина сама делает работу, сбой связи отсюда — не повод обрывать слежение."""
+    try:
+        return iid in [i["id"] for i in list_instances()]
+    except VastgameError:
+        return None
+
+
+def _follow_finish(ui, iid, ip, t0):
+    """Следить за wolf finish на машине по /json, перепроверить итог и убедиться, что машина удалена.
+    Машина удаляет себя сама («ok self:»); если не может («ok app:») или не удалила — удаляем отсюда."""
+    deadline = time.time() + SHUTDOWN_MIN * 60
+    seen, last_check, fin, s = {}, time.time(), None, {}
+    while True:
+        s = wolf_status(ip)
+        if s is None and _alive(iid) is False:
+            # Машины нет, а итог мы не видели: удалена не этой командой (или связь пропадала,
+            # а машина успела закончить сама — тогда в облаке всё есть, но проверить отсюда нельзя)
+            raise VastgameError(f"!!! Инстанс {iid} исчез до того, как я увидел итог выгрузки.",
+                                key="core.gone_before_result", id=iid)
+        for name, (ts, state, text) in sorted((s or {}).items()):
+            if name == "finish":
+                if state == "up" and ts < t0:
+                    t0 = ts        # finish уже шёл (продолжаем после перерыва) — проверяем с его начала
+                elif ts >= t0 and state in ("ok", "err"):
+                    fin = (ts, state, text)
+                continue
+            if ts >= t0 and seen.get(name) != (state, text):
+                ui.archive(name, state, text)
+                seen[name] = (state, text)
+        if fin:
+            break
+        if time.time() - last_check > 60:
+            last_check = time.time()
+            if _alive(iid) is False:
+                raise VastgameError(f"!!! Инстанс {iid} удалён во время выгрузки (не этой командой).\n"
+                                    "Что успело выгрузиться — выше; остальное не дошло до Drive.",
+                                    key="core.deleted_during", id=iid)
+        if time.time() > deadline:
+            raise VastgameError(f"!!! Выгрузка на машине не закончилась за {SHUTDOWN_MIN} минут. Машина "
+                                "продолжает сама и удалит себя, если выгрузка подтвердится. Посмотри /var/log/wolf.log.",
+                                key="core.finish_timeout", min=SHUTDOWN_MIN)
+        time.sleep(5)
+    if fin[1] == "err":
+        raise VastgameError(f"!!! Выгрузка НЕ подтверждена (проверка на машине): {fin[2]}\nИнстанс НЕ удалён.",
+                            key="core.finish_failed", text=fin[2])
+    return _verify_and_delete(ui, iid, s, t0, self_delete=fin[2].startswith("self"))
+
+
+def _shutdown_over_ssh(ui, iid, ip, t0):
+    """Старый способ (скрипт до v3.11): wolf shutdown по SSH — обрыв связи его прерывает."""
     proc = ssh(ip, "wolf shutdown")
     # Вывод wolf читаем параллельно: если ждать конца, канал может переполниться, и ssh встанет
     output = []
@@ -438,14 +502,18 @@ def stop(ui, dry_run=False):
         raise VastgameError(f"!!! SSH/wolf shutdown завершился с кодом {proc.returncode}: {tail}\nНЕ удаляю.",
                             key="core.shutdown_failed", code=proc.returncode, out=tail)
 
+
+
+def _verify_and_delete(ui, iid, after, t0, self_delete=False):
+    """Перепроверить выгрузку по /json и удалить машину. self_delete — машина удаляет себя сама:
+    ждём, пока она пропадёт из списка Vast; не пропала — удаляем отсюда."""
     # ---- Проверка по /json: wolf shutdown всегда отвечает 0, верим только статусам архивов.
     # Учитываем записи новее запуска shutdown: старые ошибки живут в /json до перезагрузки
     ui.stage("verify", "Проверяю выгрузку...")
-    after = wolf_status(ip)
     if after is None:
         raise VastgameError("!!! Страница статуса не отвечает после выгрузки — НЕ удаляю.",
                             key="core.no_status_after")
-    fresh = {n: v for n, v in after.items() if v[0] >= t0 and n != "boot"}
+    fresh = {n: v for n, v in after.items() if v[0] >= t0 and n not in ("boot", "finish")}
     bad = {n: v for n, v in fresh.items() if v[1] in ("up", "down", "err")}
     old_err = {n: v for n, v in after.items() if v[0] < t0 and v[1] == "err"}
     uploaded = sorted(n for n, v in fresh.items() if v[1] == "ok")
@@ -468,6 +536,16 @@ def stop(ui, dry_run=False):
     # ---- Удаление — сразу, без вопроса (решение 2026-09-24), но только после подтверждённой выгрузки:
     # если выгрузка не подтвердилась, выше уже VastgameError и машина остаётся
     ui.say("Всё выгружено.", "ok", key="core.all_uploaded")
+    if self_delete:
+        ui.say("Машина удаляет себя сама (своим ключом Vast) — жду, пока она пропадёт из списка.", "info",
+               key="core.self_deleting")
+        for _ in range(SELF_DELETE_WAIT // 10):
+            time.sleep(10)
+            if _alive(iid) is False:
+                history.ended(iid)
+                ui.stage("deleted", f"Инстанс {iid} удалён.")
+                return {"iid": iid, "uploaded": uploaded, "deleted": True}
+        ui.say("Машина не удалила себя — удаляю отсюда.", "warn", key="core.self_delete_failed")
     ui.say(f"Удаляю инстанс {iid}.", "info", key="core.deleting", id=iid)
     ok, msg = delete_instance(iid)
     if not ok:

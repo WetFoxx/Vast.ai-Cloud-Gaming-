@@ -212,14 +212,36 @@ class TestPlay(unittest.TestCase):
             self.api.session_seen()
             self.assertFalse(gui.Api().state()["task"]["unseen"])     # посмотрел — больше не показываем
 
-    def test_dead_worker_becomes_error(self):
-        gui.jobs.FileJob("stop", pid=999999)         # «процесс» записал ход и умер, блокировку не держит
-        p = self.api.session_progress()
-        self.assertTrue(p["done"])
-        self.assertEqual(p["error"]["key"], "progress.lost")
-        self.assertIsNone(self.api.play(5).get("error"))   # и новую операцию это не блокирует
+    def test_interrupted_play_resumes_without_renting_again(self):
+        # «Компьютер выключился» после аренды: в job.json есть номер машины, процесса нет
+        job = gui.jobs.FileJob("play", pid=999999, args={"offer_id": 5, "lang": "ru"})
+        job.say("x", key="core.vast_status")
+        job.set_meta(iid=42, t0=time.time(), offer=dict(OFFER, id=5))
         self.gate.set()
-        wait_done(self.api, session=True)
+        with mock.patch.object(gui.jobs.core, "list_instances", lambda: [{"id": 42}]):
+            p = self.api.session_progress()                      # окно открыли — продолжение само
+            self.assertFalse(p["done"])
+            p = wait_done(self.api, session=True)
+        self.assertIsNone(p["error"])
+        self.assertEqual(self.rented, [])                        # вторую машину НЕ арендовали
+        keys = [e["key"] for e in gui.jobs.load()["events"]]
+        self.assertEqual(keys[:2], ["core.vast_status", "progress.resuming"])   # один непрерывный ход
+        self.assertEqual(SENT[-1][0], "Машина готова")
+
+    def test_interrupted_before_rent_is_not_resumed(self):
+        gui.jobs.FileJob("play", pid=999999, args={"offer_id": 5})   # номера машины нет
+        p = self.api.session_progress()
+        self.assertEqual((p["done"], p["error"]["key"]), (True, "progress.lost"))
+        self.assertEqual(self.rented, [])
+
+    def test_resume_gives_up_after_limit(self):
+        job = gui.jobs.FileJob("play", pid=999999, args={"offer_id": 5})
+        job.set_meta(iid=42, t0=0, offer=OFFER)
+        d = gui.jobs.load()
+        d["resumes"] = gui.jobs.MAX_RESUMES
+        gui.jobs.save(d)
+        p = self.api.session_progress()
+        self.assertEqual(p["error"]["key"], "progress.lost")     # не крутиться вечно
 
 
 class TestStop(unittest.TestCase):
@@ -254,6 +276,32 @@ class TestStop(unittest.TestCase):
             p = wait_done(self.api, session=True)
         self.assertEqual(p["error"]["key"], "core.upload_unconfirmed")
         self.assertEqual(SENT[-1][0], "Завершить не удалось")
+
+    def test_interrupted_stop_resumes(self):
+        calls = []
+        with mock.patch.object(gui.jobs.core, "stop", lambda ui, dry_run=False: calls.append(1) or self.fake_stop(ui)):
+            gui.jobs.FileJob("stop", pid=999999, args={"lang": "ru"})
+            self.api.session_progress()
+            p = wait_done(self.api, session=True)
+        self.assertEqual((calls, p["result"]["deleted"]), ([1], True))
+
+    def test_resumed_stop_machine_already_gone(self):
+        def gone(ui, dry_run=False):
+            raise VastgameError("нет", key="core.no_instances")
+        with mock.patch.object(gui.jobs.core, "stop", gone):
+            gui.jobs.FileJob("stop", pid=999999, args={})
+            self.api.session_progress()
+            p = wait_done(self.api, session=True)
+        self.assertIsNone(p["error"])                            # машина закончила и удалила себя сама
+        self.assertTrue(p["result"]["gone"])
+
+    def test_fresh_stop_without_machine_is_error(self):
+        def gone(ui, dry_run=False):
+            raise VastgameError("нет", key="core.no_instances")
+        with mock.patch.object(gui.jobs.core, "stop", gone):
+            self.api.stop()
+            p = wait_done(self.api, session=True)
+        self.assertEqual(p["error"]["key"], "core.no_instances")   # не продолжение — это ошибка
 
     def test_emergency_only_when_idle_and_by_id(self):
         gate = threading.Event()

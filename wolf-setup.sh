@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.10 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.11 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -156,10 +156,19 @@ fi
 if [ -f /etc/environment ]; then
   sed -i -E '/^(export[[:space:]]+)?(RCLONE_REFRESH_TOKEN|TAILSCALE_AUTHKEY)=/d' /etc/environment
 fi
+# [v3.11] Ограниченный ключ Vast ЭТОГО инстанса (Vast кладёт его в CONTAINER_API_KEY: им можно
+# только запустить, остановить или удалить этот инстанс) — для «wolf finish»: удалить себя после
+# подтверждённой выгрузки, даже если связь с компьютером пропала. Копия — в файл 600 root.
+# Из /etc/environment не убираем: не знаем, не нужен ли он там самому Vast.
+if [ -n "${CONTAINER_API_KEY:-}" ]; then
+  printf '%s' "$CONTAINER_API_KEY" > /etc/wolf/vastkey
+  chown root:root /etc/wolf/vastkey; chmod 600 /etc/wolf/vastkey
+fi
+VI="${CONTAINER_ID:-}"                          # номер инстанса в Vast (не секрет)
 umask 022
 
-# /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf)
-declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD > /etc/wolf/env
+# /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf, ключ Vast -> vastkey)
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD VI > /etc/wolf/env
 chmod 600 /etc/wolf/env
 
 # Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
@@ -219,6 +228,8 @@ w /usr/local/bin/wolf <<'WOLF'
 #   wolf boot              полный цикл загрузки (wolf-boot.service)
 #   wolf state | games     синхронизация (таймеры, гейт по /run/wolf/boot-done)
 #   wolf shutdown          корректно закрыть Steam и сразу выгрузить всё
+#   wolf finish            [v3.11] выгрузить всё, проверить и удалить инстанс — отдельной
+#                          службой: обрыв связи с компьютером её не прерывает
 #   wolf restore ИМЯ...    восстановить архивы (FORCE=1 — даже если актуальны)
 #   wolf push ИМЯ...       сразу выгрузить указанные архивы (при выходе из игры);
 #                          FORCE=1 — снова выгружать архив, убранный из облака
@@ -994,13 +1005,65 @@ bk() {
   return 0
 }
 
+# ------------------------------------------------------------------- finish ---
+# [v3.11] Завершение сессии, которое не зависит от связи с компьютером. «wolf finish» только
+# запускает «wolf finish-run» отдельной службой (systemd-run) и сразу отвечает — обрыв SSH,
+# выключенный свет или интернет у человека выгрузку уже не прервут. finish-run:
+#   1. выгружает всё (wolf shutdown);
+#   2. проверяет по статусам: записи новее старта в состоянии up/down/err — выгрузка НЕ
+#      подтверждена, инстанс НЕ удаляется (finish err);
+#   3. удаляет инстанс ограниченным ключом Vast (/etc/wolf/vastkey). Статус finish: «ok self: …» —
+#      удалит себя (через 30 с, чтобы приложение успело прочитать итог); «ok app: …» — ключа нет
+#      или Vast не удалил: удалит приложение, когда связь вернётся.
+finish_start() {
+  if systemctl is-active --quiet wolf-finish; then echo "finish: уже идёт"; return 0; fi
+  systemctl reset-failed wolf-finish 2>/dev/null
+  systemd-run --unit=wolf-finish --collect /usr/local/bin/wolf finish-run >/dev/null \
+    && echo "finish: запущено" || { echo "finish: не удалось запустить"; return 1; }
+}
+
+finish_run() {
+  local t0 f n ts s rest r i bad=()
+  t0=$(date +%s)
+  st finish up "выгрузка"
+  "$0" shutdown
+  for f in "$S"/st/*; do
+    n=${f##*/}
+    case $n in boot|finish) continue ;; esac
+    IFS='|' read -r ts s rest < "$f"
+    [ "${ts:-0}" -ge "$t0" ] && case $s in up|down|err) bad+=("$n") ;; esac
+  done
+  if [ ${#bad[@]} -gt 0 ]; then
+    st finish err "выгрузка не подтверждена: ${bad[*]} — инстанс НЕ удаляю"
+    return 1
+  fi
+  if [ ! -s /etc/wolf/vastkey ] || [ -z "$VI" ]; then
+    st finish ok "app: всё выгружено; ключа инстанса нет — удалит приложение"
+    return 0
+  fi
+  st finish ok "self: всё выгружено; инстанс удалит себя через 30 с"
+  sleep 30
+  for i in 1 2 3; do
+    # Ключ — через stdin (curl -K -), а не аргументом: не виден в списке процессов
+    r=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat /etc/wolf/vastkey)" \
+        | curl -sS -m 60 -K - -X DELETE -H 'Content-Type: application/json' -d '{}' \
+          "https://console.vast.ai/api/v0/instances/$VI/" 2>&1)
+    log "finish: удаление, ответ Vast: $(printf '%s' "$r" | tr -d '\n' | head -c 200)"
+    [[ $r =~ \"success\"[[:space:]]*:[[:space:]]*true ]] && return 0
+    sleep 20
+  done
+  st finish ok "app: всё выгружено; Vast не удалил инстанс — удалит приложение"
+}
+
 case ${1:-} in
   boot)                                      boot ;;
+  finish)                                    finish_start ;;
+  finish-run)                                finish_run ;;
   state|games|shutdown|restore|push|forget)  bk "$@" ;;
   watch)                                     watch_games ;;
   firewall)                                  setup_sunshine_firewall ;;
   display)                                   xenv && setup_display ;;
-  *) echo "использование: wolf boot|state|games|shutdown|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|watch|firewall|display"; exit 2 ;;
+  *) echo "использование: wolf boot|state|games|shutdown|finish|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|watch|firewall|display"; exit 2 ;;
 esac
 WOLF
 
@@ -1247,4 +1310,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.10 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.11 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

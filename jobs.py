@@ -36,6 +36,7 @@ STATE = config_dir() / "job.json"     # ход последней операци
 LOCK = config_dir() / "job.lock"      # держит работающий фоновый процесс
 LOG = config_dir() / "job.log"        # вывод фонового процесса (на случай неожиданной ошибки)
 START_GRACE = 30                      # с, за которые фоновый процесс должен успеть стартовать
+MAX_RESUMES = 3                       # сколько раз продолжать прерванную операцию (защита от петли)
 DISK_MIN, DISK_MAX = 50, 1000         # пределы ползунка диска, ГБ (система и Steam занимают ~30 ГБ)
 
 
@@ -128,9 +129,23 @@ class Job:
 class FileJob(Job):
     """Job фонового процесса: после каждого изменения записывает себя в job.json — окно читает оттуда."""
 
-    def __init__(self, kind, pid=None):
+    def __init__(self, kind, pid=None, args=None, carry=None):
+        """carry — прежнее содержимое job.json: продолжаем прерванную операцию с теми же
+        событиями, архивами и данными (номер машины), чтобы окно видело один непрерывный ход."""
         super().__init__(kind)
         self.pid = pid
+        self.args = dict(args or {})
+        self.meta = {}                   # что уже сделано: {"iid", "t0", "offer"} после аренды
+        self.resumes = 0
+        self.spawned = time.time()
+        if carry:
+            self.started, self.events, self.archives = carry["started"], carry["events"], carry["archives"]
+            self.stage_key, self.meta = carry.get("stage"), carry.get("meta") or {}
+            self.resumes, self.spawned = carry.get("resumes", 0), carry.get("spawned", self.spawned)
+        self._changed()
+
+    def set_meta(self, **kw):
+        self.meta.update(kw)
         self._changed()
 
     def confirm(self, question, key=None, **params):
@@ -143,7 +158,8 @@ class FileJob(Job):
         with self._lock:
             data = {"kind": self.kind, "pid": self.pid, "started": self.started, "stage": self.stage_key,
                     "events": self.events, "archives": self.archives, "result": self.result,
-                    "error": self.error, "done": self.done, "ended": self.ended, "seen": False}
+                    "error": self.error, "done": self.done, "ended": self.ended, "seen": False,
+                    "args": self.args, "meta": self.meta, "resumes": self.resumes, "spawned": self.spawned}
             tmp = STATE.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False))
             os.replace(tmp, STATE)        # окно никогда не прочитает наполовину записанный файл
@@ -160,12 +176,22 @@ def disk_size(disk, tpl):
 def run_play(job, offer_id, sync=None, disk=None, lang=None):
     """Аренда (человек уже ответил «да» в окне) и ожидание готовности."""
     try:
-        core.require_no_machine()                        # ещё раз — прямо перед арендой
-        tpl = core.template()
-        size = disk_size(disk, tpl)
-        settings.set("disk", size)
-        o = core.offer_by_id(int(offer_id), size)       # свежая цена и наличие
-        iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
+        m = getattr(job, "meta", {})
+        if m.get("iid"):
+            # Продолжение после перерыва: машина уже арендована — только досмотреть запуск
+            iid, t0, o = m["iid"], m["t0"], m["offer"]
+            if iid not in [i["id"] for i in core.list_instances()]:
+                raise VastgameError(f"Машины {iid} уже нет — её удалили, пока компьютер был выключен.",
+                                    key="progress.resume_gone", id=iid)
+        else:
+            core.require_no_machine()                        # ещё раз — прямо перед арендой
+            tpl = core.template()
+            size = disk_size(disk, tpl)
+            settings.set("disk", size)
+            o = core.offer_by_id(int(offer_id), size)       # свежая цена и наличие
+            iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
+            if hasattr(job, "set_meta"):
+                job.set_meta(iid=iid, t0=t0, offer=o)       # чтобы продолжить, если компьютер выключится
         r = core.wait_ready(iid, t0, o, job)
         job.finish(result={"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
                            "notes": [{"level": lv, "key": k, "params": p, "text": tx}
@@ -182,7 +208,12 @@ def run_stop(job, lang=None):
         r = core.stop(job)
         job.finish(result={"uploaded": r["uploaded"], "deleted": r["deleted"], "iid": r["iid"]})
     except VastgameError as e:
-        job.finish(error=error_data(e))
+        if e.key == "core.no_instances" and getattr(job, "resumes", 0):
+            # Продолжаем после перерыва, а машины уже нет: wolf finish закончил и удалил её сам
+            # (удаляет он только после подтверждённой выгрузки) — или её удалили на сайте
+            job.finish(result={"uploaded": [], "deleted": True, "iid": None, "gone": True})
+        else:
+            job.finish(error=error_data(e))
     except Exception as e:
         job.finish(error=unexpected(e))
 
@@ -226,13 +257,33 @@ def state():
     if not d:
         return None
     alive = running()
-    fresh = d.get("pid") is None and time.time() - d.get("started", 0) < START_GRACE
+    fresh = d.get("pid") is None and time.time() - d.get("spawned", d.get("started", 0)) < START_GRACE
     if not d["done"] and not alive and not fresh:
-        d.update(done=True, ended=time.time(),
-                 error={"key": "progress.lost", "params": {}, "text": "фоновый процесс завершился"})
-        save(d)
+        # Процесс пропал посреди операции: компьютер выключался, перезагружался или процесс упал.
+        # Продолжаем с того же места; не получается — честно показать, что операция прервалась
+        if resume(d):
+            d = load()
+        else:
+            d.update(done=True, ended=time.time(),
+                     error={"key": "progress.lost", "params": {}, "text": "фоновый процесс завершился"})
+            save(d)
     d["active"] = not d["done"]
     return d
+
+
+def resume(d):
+    """Продолжить прерванную операцию d (из job.json) новым фоновым процессом. False — нельзя:
+    слишком много попыток или запуск прервался до аренды (тогда продолжать нечего)."""
+    if d.get("resumes", 0) >= MAX_RESUMES:
+        return False
+    if d["kind"] == "play" and not (d.get("meta") or {}).get("iid"):
+        return False
+    job = FileJob(d["kind"], args=d.get("args"), carry=dict(d, resumes=d.get("resumes", 0) + 1,
+                                                                  spawned=time.time()))
+    job.say("Операция прервалась (компьютер выключался или пропадала связь) — продолжаю.", "warn",
+            key="progress.resuming")
+    _launch(d["kind"], dict(d.get("args") or {}, _resume=True))
+    return True
 
 
 def save(d):
@@ -253,7 +304,7 @@ def spawn(kind, **args):
     """Запустить операцию в фоновом процессе, который переживёт закрытие окна. False — уже идёт другая."""
     if running() or (state() or {}).get("active"):
         return False
-    FileJob(kind)            # сразу «началось» в job.json — окно не покажет результат прошлой операции
+    FileJob(kind, args=args)  # сразу «началось» в job.json — окно не покажет результат прошлой операции
     _launch(kind, args)
     return True
 
@@ -274,8 +325,10 @@ def work(kind, args, log=lambda text: None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return False                          # другая операция уже идёт — ничего не трогаем
-        log(f"[{time.strftime('%F %T')}] {kind} pid={os.getpid()}")
-        job = FileJob(kind, pid=os.getpid())
+        args = dict(args)
+        carry = load() if args.pop("_resume", False) else None
+        log(f"[{time.strftime('%F %T')}] {kind} pid={os.getpid()}" + (" (продолжение)" if carry else ""))
+        job = FileJob(kind, pid=os.getpid(), args=args, carry=carry)
         RUNNERS[kind](job, **args)
         log(f"[{time.strftime('%F %T')}] {kind} done, error={(job.error or {}).get('key')}")
         notify.job_finished(kind, job.result, job.error, args.get("lang"))
@@ -283,7 +336,11 @@ def work(kind, args, log=lambda text: None):
 
 
 def main():
-    """Точка входа фонового процесса: python jobs.py play|stop '<json с параметрами>'."""
+    """Точка входа фонового процесса: python jobs.py play|stop '<json с параметрами>'.
+    python jobs.py resume — продолжить прерванную операцию, если она есть (для автозапуска при входе)."""
+    if sys.argv[1] == "resume":
+        state()
+        return
     if not work(sys.argv[1], json.loads(sys.argv[2]), log=lambda text: print(text, flush=True)):
         sys.exit("другая операция уже идёт")
 

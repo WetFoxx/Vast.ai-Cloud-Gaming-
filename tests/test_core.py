@@ -274,6 +274,127 @@ class TestStop(Base):
         self.assertEqual(ui.stages, [])
 
 
+class TestFinish(Base):
+    """«Закончить» с wolf finish (v3.11): машина выгружает, проверяет и удаляет себя сама."""
+
+    def setup_machine(self, pages, gone_after=None):
+        """pages — ответы /json по очереди (последний повторяется); gone_after — после скольких
+        проверок списка Vast машина пропадает (удалила себя); None — не пропадает."""
+        self.alive = [42]
+        checks = {"n": 0}
+
+        def list_instances():
+            checks["n"] += 1
+            if gone_after is not None and checks["n"] > gone_after:
+                self.alive.clear()
+            return [{"id": i} for i in self.alive]
+        self.patch(core, "list_instances", list_instances)
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "vastai-gaming.tail.ts.net"))
+        self.commands = []
+
+        def ssh_run(ip, command, timeout=180, on_notice=None):
+            self.commands.append(command)
+            if command == "echo ok":
+                return 0, "ok\n"
+            if command == "date +%s":
+                return 0, f"{T0 + 2}\n"
+            if command == "wolf finish":
+                return 0, "finish: запущено\n"
+            return 1, "?"
+        self.patch(core, "ssh_run", ssh_run)
+        self.patch(core, "ssh", lambda ip, command: self.fail("старый путь по SSH не должен запускаться"))
+        before = {"boot": (T0 - 900, "ok", "восстановление завершено")}
+        it = iter([before] + pages)
+        last = {}
+
+        def status(ip):
+            nonlocal last
+            last = next(it, last)
+            return last
+        self.patch(core, "wolf_status", status)
+        self.patch(core, "delete_instance", self.fake_delete(self.alive))
+        return FakeUI(answer=False)
+
+    def test_machine_deletes_itself(self):
+        up = {"finish": (T0 + 3, "up", "выгрузка"), "steam-state": (T0 + 5, "up", "выгрузка")}
+        done = {"finish": (T0 + 60, "ok", "self: всё выгружено"), "steam-state": (T0 + 50, "ok", "выгружено")}
+        ui = self.setup_machine([up, done], gone_after=1)
+        r = core.stop(ui)
+        self.assertEqual(r, {"iid": 42, "uploaded": ["steam-state"], "deleted": True})
+        self.assertIn("wolf finish", self.commands)
+        self.assertEqual(self.deleted, [])                 # удалила себя сама — отсюда не удаляли
+        self.assertIn("core.self_deleting", ui.keys)
+        self.assertEqual(ui.stages, ["shutdown", "verify", "deleted"])
+
+    def test_machine_could_not_delete_itself_app_deletes(self):
+        done = {"finish": (T0 + 60, "ok", "self: всё выгружено"), "steam-state": (T0 + 50, "ok", "")}
+        ui = self.setup_machine([done])                    # так и не пропала из списка
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+        self.assertIn("core.self_delete_failed", ui.keys)
+
+    def test_no_key_on_machine_app_deletes(self):
+        done = {"finish": (T0 + 60, "ok", "app: ключа нет"), "steam-state": (T0 + 50, "ok", "")}
+        ui = self.setup_machine([done])
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+        self.assertNotIn("core.self_deleting", ui.keys)
+
+    def test_machine_says_not_confirmed(self):
+        bad = {"finish": (T0 + 60, "err", "выгрузка не подтверждена: pfx--1"), "pfx--1": (T0 + 50, "err", "")}
+        ui = self.setup_machine([bad])
+        with self.assertRaises(VastgameError) as e:
+            core.stop(ui)
+        self.assertEqual(e.exception.key, "core.finish_failed")
+        self.assertEqual(self.deleted, [])
+
+    def test_app_double_checks_machine_verdict(self):
+        # Машина сказала «ok», но в статусах свежая ошибка — отсюда не удаляем
+        odd = {"finish": (T0 + 60, "ok", "app: всё выгружено"), "pfx--1": (T0 + 50, "err", "ошибка")}
+        ui = self.setup_machine([odd])
+        with self.assertRaises(VastgameError) as e:
+            core.stop(ui)
+        self.assertEqual(e.exception.key, "core.upload_unconfirmed")
+        self.assertEqual(self.deleted, [])
+
+    def test_network_errors_do_not_abort(self):
+        # Интернет у человека пропадает: Vast и /json не отвечают — ждём дальше, машина работает сама
+        up = {"finish": (T0 + 3, "up", "выгрузка")}
+        done = {"finish": (T0 + 60, "ok", "app: всё выгружено"), "steam-state": (T0 + 50, "ok", "")}
+        ui = self.setup_machine([up, None, None, done])
+        real = core.list_instances
+        flaky = {"n": 0}
+
+        def list_instances():
+            flaky["n"] += 1
+            if flaky["n"] in (2, 3):
+                raise VastgameError("нет сети")
+            return real()
+        self.patch(core, "list_instances", list_instances)
+        self.patch(core.time, "time", iter(range(0, 10**6, 70)).__next__)   # каждая проверка — через 70 с
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+
+    def test_resumed_follow_checks_from_finish_start(self):
+        # Продолжение: finish уже шёл до нашего t0; ошибка архива случилась после его старта —
+        # её нельзя списать в «старые»
+        running = {"finish": (T0 - 300, "up", "выгрузка")}
+        done = {"finish": (T0 + 60, "ok", "app: всё выгружено"), "pfx--1": (T0 - 100, "err", "ошибка")}
+        ui = self.setup_machine([running, done])
+        with self.assertRaises(VastgameError) as e:
+            core.stop(ui)
+        self.assertEqual(e.exception.key, "core.upload_unconfirmed")
+        self.assertEqual(self.deleted, [])
+
+    def test_old_finish_result_is_ignored(self):
+        # Итог прошлого finish (до t0) не считается — ждём новый
+        old = {"finish": (T0 - 100, "ok", "self: старое")}
+        new = {"finish": (T0 + 60, "ok", "app: всё выгружено"), "steam-state": (T0 + 50, "ok", "")}
+        ui = self.setup_machine([old, old, new])
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+
+
 class TestRentalBody(unittest.TestCase):
     def test_sync_toggles_go_to_env(self):
         tpl = {"hash_id": "h"}
