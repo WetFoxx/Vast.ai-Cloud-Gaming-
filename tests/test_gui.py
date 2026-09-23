@@ -264,7 +264,7 @@ class TestStop(unittest.TestCase):
             p = wait_done(self.api, session=True)
         self.assertEqual(p["kind"], "stop")
         self.assertIsNone(p["question"])
-        self.assertEqual(p["result"], {"uploaded": ["pfx--1"], "deleted": True, "iid": 42})
+        self.assertEqual(p["result"], {"uploaded": ["pfx--1"], "deleted": True, "iid": 42, "gone": False})
         self.assertEqual(self.deleted, [42])
         self.assertEqual(SENT[-1][0], "Игра закончена")
 

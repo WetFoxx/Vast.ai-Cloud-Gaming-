@@ -386,6 +386,15 @@ class TestFinish(Base):
         self.assertEqual(e.exception.key, "core.upload_unconfirmed")
         self.assertEqual(self.deleted, [])
 
+    def test_offline_the_whole_time_machine_gone_is_success(self):
+        # Wi-Fi выключен: /json не отвечает, а когда связь вернулась — машины уже нет (удалила себя)
+        up = {"finish": (T0 + 3, "up", "выгрузка"), "steam-state": (T0 + 5, "ok", "выгружено")}
+        ui = self.setup_machine([up, None], gone_after=2)
+        r = core.stop(ui)
+        self.assertEqual((r["deleted"], r["gone"], r["uploaded"]), (True, True, ["steam-state"]))
+        self.assertEqual(self.deleted, [])
+        self.assertIn("core.finished_offline", ui.keys)
+
     def test_old_finish_result_is_ignored(self):
         # Итог прошлого finish (до t0) не считается — ждём новый
         old = {"finish": (T0 - 100, "ok", "self: старое")}

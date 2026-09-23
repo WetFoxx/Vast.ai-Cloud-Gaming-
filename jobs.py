@@ -207,7 +207,8 @@ def run_stop(job, lang=None):
     """Выгрузить всё, проверить и удалить машину (удаление — только после подтверждённой выгрузки)."""
     try:
         r = core.stop(job)
-        job.finish(result={"uploaded": r["uploaded"], "deleted": r["deleted"], "iid": r["iid"]})
+        job.finish(result={"uploaded": r["uploaded"], "deleted": r["deleted"], "iid": r["iid"],
+                           "gone": r.get("gone", False)})
     except VastgameError as e:
         if e.key == "core.no_instances" and getattr(job, "resumes", 0):
             # Продолжаем после перерыва, а машины уже нет: wolf finish закончил и удалил её сам

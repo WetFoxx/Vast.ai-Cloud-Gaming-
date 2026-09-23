@@ -432,10 +432,15 @@ def _follow_finish(ui, iid, ip, t0):
     while True:
         s = wolf_status(ip)
         if s is None and _alive(iid) is False:
-            # Машины нет, а итог мы не видели: удалена не этой командой (или связь пропадала,
-            # а машина успела закончить сама — тогда в облаке всё есть, но проверить отсюда нельзя)
-            raise VastgameError(f"!!! Инстанс {iid} исчез до того, как я увидел итог выгрузки.",
-                                key="core.gone_before_result", id=iid)
+            # Машины нет, а итог мы не видели — связи не было, пока она заканчивала. wolf finish уже
+            # был запущен (ответил «запущено»), а удаляет себя машина ТОЛЬКО после подтверждённой
+            # выгрузки — значит, всё в облаке. (Иначе её удалили вручную на сайте — редкость.)
+            ui.say(f"Машины {iid} уже нет: пока не было связи, она закончила выгрузку и удалила себя сама.",
+                   "ok", key="core.finished_offline", id=iid)
+            history.ended(iid)
+            ui.stage("deleted", f"Инстанс {iid} удалён.")
+            return {"iid": iid, "uploaded": sorted(n for n, v in seen.items() if v[0] == "ok"),
+                    "deleted": True, "gone": True}
         for name, (ts, state, text) in sorted((s or {}).items()):
             if name == "finish":
                 if state == "up" and ts < t0:
