@@ -124,6 +124,93 @@ def step_vast_key():
     return False
 
 
+def drive_check(token):
+    """Подключиться к Drive с этим токеном: (почта владельца, число архивов в папке или None, ГБ).
+
+    rclone получает настройки из переменных окружения (RCLONE_CONFIG_<ИМЯ>_...), а не из файла:
+    твой личный конфиг rclone не читается и не меняется, токен никуда не записывается.
+    None — если токен не работает.
+    """
+    import os
+    import tempfile
+    env = dict(os.environ,
+               RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
+               RCLONE_CONFIG_VGDRIVE_TYPE="drive",
+               RCLONE_CONFIG_VGDRIVE_SCOPE="drive",
+               # access_token не пустой + истёкший expiry: rclone сразу обновит его по refresh_token
+               # (так же делает wolf-setup.sh на машине)
+               RCLONE_CONFIG_VGDRIVE_TOKEN=json.dumps({"access_token": "x", "token_type": "Bearer",
+                                                       "refresh_token": token, "expiry": "2000-01-01T00:00:00Z"}))
+
+    def rc(*args):
+        return subprocess.run(["rclone", *args], capture_output=True, text=True, env=env, timeout=120)
+
+    # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её
+    # из метаданных папок в корне Drive: чаще всего встречающийся владелец и есть хозяин диска
+    root = rc("lsjson", "-M", "--max-depth", "1", "vgdrive:")
+    if root.returncode != 0:
+        return None
+    owners = {}
+    for item in json.loads(root.stdout or "[]"):
+        o = (item.get("Metadata") or {}).get("owner")
+        if o:
+            owners[o] = owners.get(o, 0) + 1
+    email = max(owners, key=owners.get) if owners else "не определить (на Drive пусто)"
+    size = rc("size", "vgdrive:vastai-cloud-games", "--json")
+    if size.returncode != 0:          # папки нет
+        return email, None, 0
+    d = json.loads(size.stdout)
+    return email, d.get("count", 0), d.get("bytes", 0) / 1e9
+
+
+def step_google():
+    """Шаг 2: токен Google Drive — в Keychain, проверенный, и в переменных аккаунта Vast."""
+    title(2, "Google Drive")
+    token = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
+    if token:
+        print("  Проверяю сохранённый токен Drive...")
+        info = drive_check(token)
+        if info is None:
+            print("  ✗ Сохранённый токен больше не работает — нужен новый вход.")
+            token = None
+        else:
+            show_drive(info)
+            if ask("  Это нужный аккаунт Google? («нет» — войти заново)"):
+                return push_drive_token()
+            token = None
+
+    print("""
+  Машине нужен доступ к Google Drive: там лежат сохранения, сессия Steam и сетевая личность.
+  Лучше отдельный Google-аккаунт, а не основной: токен даёт полный доступ к Drive,
+  и он будет лежать на чужой арендованной машине.
+  Сейчас откроется браузер — войди в этот аккаунт и нажми «Разрешить».""")
+    input("\n  Нажми Enter, чтобы открыть браузер...")
+    google()                                            # rclone authorize → Keychain
+    token = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
+    info = drive_check(token)
+    if info is None:
+        print("  ✗ С новым токеном Drive не открывается. Попробуй ещё раз: vastgame setup")
+        return False
+    show_drive(info)
+    return push_drive_token()
+
+
+def show_drive(info):
+    email, count, gb = info
+    print(f"  ✓ Drive аккаунта: {email}")
+    if count is None:
+        print("    Папки vastai-cloud-games нет — первая машина начнёт с чистого листа и создаст её.")
+    else:
+        print(f"    Папка vastai-cloud-games: {count} файлов, {gb:.1f} ГБ")
+
+
+def push_drive_token():
+    """Отправить токен из Keychain в переменные аккаунта Vast — оттуда его получает каждая машина."""
+    print("  Отправляю токен в переменные аккаунта Vast (RCLONE_REFRESH_TOKEN)...")
+    vast()
+    return True
+
+
 def wizard():
     print("Первая настройка vastgame. Каждый шаг можно пройти заново: уже настроенное мастер проверит")
     print("и спросит, менять ли. Ключи хранятся в Keychain macOS и на экран не выводятся.")
@@ -131,7 +218,9 @@ def wizard():
         sys.exit("\nИсправь то, что отмечено ✗, и запусти vastgame setup снова.")
     if not step_vast_key():
         sys.exit(1)
-    print("\nШаги 2 (Google Drive) и 3 (Tailscale) пока отдельно: vastgame setup google, vastgame setup vast.")
+    if not step_google():
+        sys.exit(1)
+    print("\nШаг 3 (Tailscale) — следующий; пока его нет в мастере.")
 
 
 def find_refresh_token(x):
@@ -206,8 +295,8 @@ def vast():
     have = call("GET", "secrets/").get("secrets") or {}
     if name not in have:
         sys.exit(f"{name} после записи не видна в Vast — проверь на сайте.")
-    print(f"Готово: {name} {'обновлён' if method == 'PUT' else 'добавлен'} в переменные аккаунта Vast.")
-    print(f"Переменные аккаунта сейчас: {', '.join(sorted(have))}")
+    print(f"  ✓ {name} {'обновлён' if method == 'PUT' else 'добавлен'} в переменные аккаунта Vast.")
+    print(f"    Переменные аккаунта сейчас: {', '.join(sorted(have))}")
 
 
 p = argparse.ArgumentParser(description="Первая настройка vastgame: ключи в Keychain")
