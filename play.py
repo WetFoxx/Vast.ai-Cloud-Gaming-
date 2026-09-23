@@ -217,5 +217,10 @@ print()
 if boot[1] == "err":
     print(f"!!! Восстановление с ошибками: {boot[2]}")
     print(f"    Подробности: http://{ip}:{WOLF_PORT}")
-print(f"Готово за {int((time.time() - t0) / 60)} мин. В Moonlight добавь ПК: {ip}" + (f"  ({dns})" if dns else ""))
-print(f"Страница статуса: http://{ip}:{WOLF_PORT}")
+host = dns or ip   # Moonlight подключают по имени (MagicDNS): оно не меняется между арендами, IP — может
+print(f"Готово за {int((time.time() - t0) / 60)} мин.")
+print(f"Moonlight: {host}")
+if dns and dns.split(".")[0] != NODE:
+    print(f"  Узел получил имя {dns.split('.')[0]}, а не {NODE}: личность Tailscale не восстановилась из облака.")
+    print(f"  Проверь на машине: grep identity /var/log/wolf.log — должна быть строка ok.")
+print(f"Статус: http://{host}:{WOLF_PORT}   (IP {ip})")
