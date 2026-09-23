@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.8 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -58,6 +58,15 @@
 # Если в библиотеке Steam осталась игра, которой нет ни на диске, ни в облаке, при
 # загрузке её манифест убирается, и Steam показывает игру неустановленной, а не сломанной.
 #
+# ЧТО СИНХРОНИЗИРОВАТЬ (v3.9). Три выключателя, по умолчанию всё включено:
+#  * SYNC_STEAM_GAMES=0 — игры Steam (sgame--) не скачиваются из облака и не выгружаются:
+#    Steam сам докачает их из магазина;
+#  * SYNC_OTHER_GAMES=0 — игры из папки GAMES_DIR (game--) не скачиваются и не выгружаются;
+#  * SYNC_SAVES=0 — сохранения (префиксы Proton, pfx--) не скачиваются и не выгружаются —
+#    например, если сохранения и так хранит Steam Cloud.
+# Выключенное помечается в статусе «синхронизация выключена». Ручные wolf push/restore/forget
+# работают всегда.
+#
 # ВЫГРУЗКА ПО ВЫХОДУ ИЗ ИГРЫ. wolf-watch.service раз в 5 с смотрит, какие игры запущены
 # (Steam — по процессу reaper с AppId, игры из GAMES_DIR — по пути к их папке у
 # процессов), и через ~10 с после выхода сразу выгружает их архивы: префикс Proton
@@ -79,6 +88,8 @@ export RCLONE_REFRESH_TOKEN="${RCLONE_REFRESH_TOKEN:-}"
 export TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
 export STEAM_FREEZE="${STEAM_FREEZE:-1}"          # 1 = не обновлять клиент Steam при запуске
 export SYNC_STEAM_GAMES="${SYNC_STEAM_GAMES:-1}"  # 1 = синхронизировать сами Steam-игры (0 — перекачивать со Steam)
+export SYNC_OTHER_GAMES="${SYNC_OTHER_GAMES:-1}"  # 1 = синхронизировать игры из GAMES_DIR (не из Steam)
+export SYNC_SAVES="${SYNC_SAVES:-1}"              # 1 = синхронизировать сохранения (префиксы Proton)
 export AUTO_RES="${AUTO_RES:-1}"                  # 1 = управлять разрешением (EDID/xorg + wolf-res)
 
 set -uo pipefail
@@ -97,7 +108,7 @@ ZT="${ZT_NETWORK_ID:-}"                        # сеть ZeroTier (пусто =
 TSH="${TAILSCALE_HOSTNAME:-vastai-gaming}"
 TSX="${TAILSCALE_EXTRA_ARGS:-}"                # доп. флаги tailscale up
 TSS="${TAILSCALE_SSH:-1}"                      # 1 = поднимать Tailscale SSH (root из своей сети)
-SF="$STEAM_FREEZE"; SG="$SYNC_STEAM_GAMES"; AR="$AUTO_RES"
+SF="$STEAM_FREEZE"; SG="$SYNC_STEAM_GAMES"; SO="$SYNC_OTHER_GAMES"; SV="$SYNC_SAVES"; AR="$AUTO_RES"
 SL="${STEAM_LANG:-}"                           # пусто = не передавать -language вообще
 RES="${RES:-1920x1200}"                        # базовое разрешение рабочего стола
 PAR="${PAR:-4}"                                # архивов параллельно
@@ -148,7 +159,7 @@ fi
 umask 022
 
 # /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf)
-declare -p R ZT TSH TSX TSS SF SG AR SL RES PAR ZL ZG NT NS WP DU DH UI GD > /etc/wolf/env
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD > /etc/wolf/env
 chmod 600 /etc/wolf/env
 
 # Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
@@ -498,9 +509,10 @@ watch_games() {
       t=${seen[$k]}; [ $(( now - t )) -ge 10 ] || continue
       unset 'seen[$k]'
       case $k in
-        app:*) a=${k#app:}; arr+=("pfx--$a")
+        app:*) a=${k#app:}
+               [ "$SV" = 1 ] && arr+=("pfx--$a")
                if [ "$SG" = 1 ]; then d=$(idir "$a"); [ -n "$d" ] && arr+=("sgame--$d"); fi ;;
-        dir:*) arr+=("game--${k#dir:}") ;;
+        dir:*) [ "$SO" = 1 ] && arr+=("game--${k#dir:}") ;;
       esac
     done
     if [ ${#arr[@]} -gt 0 ]; then
@@ -852,8 +864,13 @@ boot() {
   st boot down "Steam"
   ( unpack steam-state ) || echo steam-state >> "$FL"
   if sr; then
-    mapfile -t p < <(names '^pfx--')
-    [ ${#p[@]} -gt 0 ] || p=(compatdata)
+    p=()
+    if [ "$SV" = 1 ]; then
+      mapfile -t p < <(names '^pfx--')
+      [ ${#p[@]} -gt 0 ] || p=(compatdata)
+    else
+      log "сохранения: синхронизация выключена (SYNC_SAVES=0) — из облака не восстанавливаю"
+    fi
     pool unpack steam-client steam-cache "${p[@]}"
     if [ -e "$DH/$SR/steam.sh" ]; then
       if [ "$SF" = 1 ]; then
@@ -884,13 +901,17 @@ boot() {
   while IFS= read -r k; do
     case $k in
       sgame--*)
-        if printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
+        if [ "$SG" != 1 ]; then
+          st "$k" ok "синхронизация игр Steam выключена — не восстанавливаю"
+        elif printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
           g+=("$k")
         else
           echo "?" > "$S/v/$k"
           st "$k" ok "игры нет в библиотеке Steam — не восстанавливаю; убрать из облака: sudo wolf forget '$k'"
         fi ;;
-      *) g+=("$k") ;;
+      *)
+        if [ "$SO" = 1 ]; then g+=("$k")
+        else st "$k" ok "синхронизация игр из папки выключена — не восстанавливаю"; fi ;;
     esac
   done < <(names '^s?game--')
   [ ${#g[@]} -gt 0 ] && pool unpack "${g[@]}"
@@ -950,10 +971,10 @@ bk() {
         # подряд не менялся (DB=1): значит, Steam его не пишет и копия целая. При выключении
         # (NOW) — только если Steam уже закрыт.
         { [ -z "${NOW:-}" ] || ! pgrep -x steam >/dev/null; } && n+=(steam-cache)
-        mapfile -tO ${#n[@]} n < <(ld "$DH/$SR/steamapps/compatdata" pfx--)
+        [ "$SV" = 1 ] && mapfile -tO ${#n[@]} n < <(ld "$DH/$SR/steamapps/compatdata" pfx--)
       fi ;;
     games)
-      mapfile -t n < <(ld "$GD" game--; [ "$SG" = 1 ] && [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--) ;;
+      mapfile -t n < <([ "$SO" = 1 ] && ld "$GD" game--; [ "$SG" = 1 ] && [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--) ;;
     push)
       shift; n=("$@") ;;
     restore)
@@ -1219,4 +1240,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.8 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.9 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

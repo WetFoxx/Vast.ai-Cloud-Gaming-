@@ -153,6 +153,7 @@ class Api:
         except VastgameError as e:
             return {"error": error_data(e)}
         return {"disk": disk, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
+                "sync": self._sync(),
                 "offers": [{"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
                             "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
                             "reliability": o["reliability"]} for o in rows[:OFFERS_SHOWN]]}
@@ -169,10 +170,18 @@ class Api:
                 "balance": credit, "hours": credit / o["dph_total"] if o["dph_total"] else None,
                 "bad_reason": core.bad_host_reason(o)}
 
-    def play(self, offer_id):
-        """Арендовать машину (человек уже ответил «да») и следить за запуском в фоне."""
+    def _sync(self):
+        """Тумблеры синхронизации: последний выбор человека, иначе значения по умолчанию."""
+        saved = settings.get("sync") or {}
+        return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
+
+    def play(self, offer_id, sync=None):
+        """Арендовать машину (человек уже ответил «да») и следить за запуском в фоне.
+        sync — тумблеры синхронизации с облаком; запоминаются для следующего раза."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
+        settings.set("sync", sync)
         job = self._job = Job("play")
 
         def run():
@@ -181,7 +190,7 @@ class Api:
                 tpl = core.template()
                 disk = core.template_disk(tpl)
                 o = core.offer_by_id(int(offer_id), disk)       # свежая цена и наличие
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, disk))
+                iid, t0 = core.rent(o["id"], core.rental_body(tpl, disk, sync=sync))
                 r = core.wait_ready(iid, t0, o, job)
                 job.result = {"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
                               "notes": [{"level": lv, "key": k, "params": p, "text": tx}

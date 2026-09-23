@@ -69,6 +69,18 @@ class TestPlay(unittest.TestCase):
         self.assertEqual(p["result"]["minutes"], 7)
         self.assertEqual(self.rented, [5])
 
+    def test_sync_toggles_remembered_and_sent(self):
+        bodies, store = [], {}
+        with mock.patch.object(gui.core, "rent", lambda oid, body: bodies.append(body) or (42, time.time())), \
+             mock.patch.object(gui.settings, "get", lambda k, d=None: store.get(k, d)), \
+             mock.patch.object(gui.settings, "set", lambda k, v: store.__setitem__(k, v)):
+            self.assertEqual(self.api._sync(), {"steam_games": False, "other_games": True, "saves": True})
+            self.api.play(5, {"steam_games": True, "saves": False})
+            self.gate.set()
+            wait_done(self.api)
+            self.assertEqual(self.api._sync(), {"steam_games": True, "other_games": True, "saves": False})
+        self.assertEqual(bodies[0]["env"], {"SYNC_STEAM_GAMES": "1", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
+
     def test_second_click_does_not_rent_twice(self):
         self.api.play(5)
         r = self.api.play(5)                         # пока первая аренда идёт

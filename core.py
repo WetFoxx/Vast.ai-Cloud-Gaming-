@@ -94,12 +94,24 @@ def bad_host_reason(o):
     return b["reason"] if b else None
 
 
-def rental_body(tpl, disk, games=None):
-    """Тело запроса аренды. games — "1"/"0", чтобы перекрыть шаблон только для этой аренды."""
+# Что синхронизировать с облаком (wolf-setup.sh v3.9 читает эти переменные при старте машины)
+SYNC_VARS = {"steam_games": "SYNC_STEAM_GAMES", "other_games": "SYNC_OTHER_GAMES", "saves": "SYNC_SAVES"}
+SYNC_DEFAULTS = {"steam_games": False, "other_games": True, "saves": True}
+
+
+def rental_body(tpl, disk, games=None, sync=None):
+    """Тело запроса аренды. Переменные ниже перекрывают шаблон только для этой аренды:
+    games — "1"/"0" для SYNC_STEAM_GAMES (терминал: --games/--no-games);
+    sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне)."""
     body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
+    env = {}
     if games is not None:
-        # wolf-setup.sh читает SYNC_STEAM_GAMES при старте машины
-        body["env"] = {"SYNC_STEAM_GAMES": games}
+        env["SYNC_STEAM_GAMES"] = games
+    for k, var in SYNC_VARS.items():
+        if sync and k in sync:
+            env[var] = "1" if sync[k] else "0"
+    if env:
+        body["env"] = env
     return body
 
 

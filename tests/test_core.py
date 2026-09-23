@@ -243,6 +243,15 @@ class TestStop(Base):
         self.assertEqual(ui.stages, [])
 
 
+class TestRentalBody(unittest.TestCase):
+    def test_sync_toggles_go_to_env(self):
+        tpl = {"hash_id": "h"}
+        self.assertNotIn("env", core.rental_body(tpl, 100))
+        b = core.rental_body(tpl, 100, sync={"steam_games": False, "other_games": True, "saves": False})
+        self.assertEqual(b["env"], {"SYNC_STEAM_GAMES": "0", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
+        self.assertEqual(core.rental_body(tpl, 100, games="1")["env"], {"SYNC_STEAM_GAMES": "1"})
+
+
 class TestEmergency(Base):
     def test_deletes_only_expected(self):
         alive = [42]

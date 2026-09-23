@@ -165,7 +165,7 @@ const I18N = {
     "games.total": "Всего {size} в архивах: {count}",
     "games.service": "Служебные архивы (сессия Steam, сеть, настройки) не удаляются: {size}",
     "games.kind.sgame": "игра Steam",
-    "games.kind.game": "не из Steam",
+    "games.kind.game": "из папки Games",
     "games.kind.pfx": "сохранения",
     "games.remove": "Убрать",
     "games.confirm.title": "Убрать из облака?",
@@ -186,7 +186,21 @@ const I18N = {
     "col.size": "Размер",
     "col.changed": "Изменён",
     "unit.mb": "{n} МБ",
-    "unit.gb": "{n} ГБ"
+    "unit.gb": "{n} ГБ",
+    "sync.title": "Синхронизация с облаком",
+    "sync.steam_games": "Игры Steam",
+    "sync.steam_games.hint": "Выключено — Steam сам скачает игры из магазина (обычно быстрее).",
+    "sync.other_games": "Игры из папки Games",
+    "sync.other_games.hint": "Игры не из магазина Steam (~/Downloads/Games). Выключено — их не будет на машине.",
+    "sync.saves": "Сохранения",
+    "sync.saves.hint": "Выключай, только если сохранения хранит Steam Cloud: иначе прогресс останется на удалённой машине.",
+    "confirm.rent.sync": "Синхронизация с облаком: {list}.",
+    "sync.none": "ничего",
+    "confirm.rent.saves_off": "Сохранения не будут выгружаться в Google Drive.",
+    "games.search": "Поиск по названию",
+    "games.group": "{kind} — {count}, {size}",
+    "games.pfx_shortcut": "игра не из Steam, добавленная ярлыком (appid {appid})",
+    "games.nothing_found": "Ничего не найдено."
   },
   "en": {
     "app.loading": "loading…",
@@ -351,7 +365,7 @@ const I18N = {
     "games.total": "{size} in {count} archives in total",
     "games.service": "Service archives (Steam session, network, settings) can't be removed: {size}",
     "games.kind.sgame": "Steam game",
-    "games.kind.game": "non-Steam game",
+    "games.kind.game": "from Games folder",
     "games.kind.pfx": "saves",
     "games.remove": "Remove",
     "games.confirm.title": "Remove from the cloud?",
@@ -372,7 +386,21 @@ const I18N = {
     "col.size": "Size",
     "col.changed": "Changed",
     "unit.mb": "{n} MB",
-    "unit.gb": "{n} GB"
+    "unit.gb": "{n} GB",
+    "sync.title": "Cloud sync",
+    "sync.steam_games": "Steam games",
+    "sync.steam_games.hint": "Off — Steam downloads the games from the store itself (usually faster).",
+    "sync.other_games": "Games from the Games folder",
+    "sync.other_games.hint": "Games not from the Steam store (~/Downloads/Games). Off — they won't be on the machine.",
+    "sync.saves": "Saves",
+    "sync.saves.hint": "Turn off only if Steam Cloud keeps your saves — otherwise your progress stays on the deleted machine.",
+    "confirm.rent.sync": "Cloud sync: {list}.",
+    "sync.none": "nothing",
+    "confirm.rent.saves_off": "Saves won't be uploaded to Google Drive.",
+    "games.search": "Search by name",
+    "games.group": "{kind} — {count}, {size}",
+    "games.pfx_shortcut": "non-Steam game added as a shortcut (appid {appid})",
+    "games.nothing_found": "Nothing found."
   },
   "es": {
     "app.loading": "cargando…",
@@ -537,7 +565,7 @@ const I18N = {
     "games.total": "{size} en {count} archivos en total",
     "games.service": "Los archivos de servicio (sesión de Steam, red, ajustes) no se pueden quitar: {size}",
     "games.kind.sgame": "juego de Steam",
-    "games.kind.game": "juego fuera de Steam",
+    "games.kind.game": "de la carpeta Games",
     "games.kind.pfx": "partidas guardadas",
     "games.remove": "Quitar",
     "games.confirm.title": "¿Quitar de la nube?",
@@ -558,7 +586,21 @@ const I18N = {
     "col.size": "Tamaño",
     "col.changed": "Modificado",
     "unit.mb": "{n} MB",
-    "unit.gb": "{n} GB"
+    "unit.gb": "{n} GB",
+    "sync.title": "Sincronización con la nube",
+    "sync.steam_games": "Juegos de Steam",
+    "sync.steam_games.hint": "Desactivado: Steam descarga los juegos de la tienda por sí mismo (suele ser más rápido).",
+    "sync.other_games": "Juegos de la carpeta Games",
+    "sync.other_games.hint": "Juegos que no son de la tienda de Steam (~/Downloads/Games). Desactivado: no estarán en la máquina.",
+    "sync.saves": "Partidas guardadas",
+    "sync.saves.hint": "Desactívalo solo si Steam Cloud guarda tus partidas: si no, el progreso se quedará en la máquina borrada.",
+    "confirm.rent.sync": "Sincronización con la nube: {list}.",
+    "sync.none": "nada",
+    "confirm.rent.saves_off": "Las partidas guardadas no se subirán a Google Drive.",
+    "games.search": "Buscar por nombre",
+    "games.group": "{kind}: {count}, {size}",
+    "games.pfx_shortcut": "juego fuera de Steam añadido como acceso directo (appid {appid})",
+    "games.nothing_found": "No se encontró nada."
   }
 };
 
@@ -592,6 +634,7 @@ function applyStatic() {
   document.documentElement.lang = LANG;
   document.querySelectorAll("[data-i18n]").forEach((el) => (el.textContent = t(el.dataset.i18n)));
   document.querySelectorAll("[data-i18n-title]").forEach((el) => (el.title = t(el.dataset.i18nTitle)));
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => (el.placeholder = t(el.dataset.i18nPlaceholder)));
 }
 
 // Понятное имя архива wolf: identity → «сетевая личность», pfx--1086940 → «сохранения Baldur's Gate 3»

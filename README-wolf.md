@@ -223,7 +223,9 @@ All of these go in Vast's Environment Variables and override the script's defaul
 | | Default | |
 |---|---|---|
 | `STEAM_FREEZE` | 1 | don't let the Steam client update itself on launch |
-| `SYNC_STEAM_GAMES` | 0 | sync the Steam games themselves |
+| `SYNC_STEAM_GAMES` | 1 | sync the Steam games themselves (`sgame--`): restore and upload; 0 — Steam re-downloads them from the store |
+| `SYNC_OTHER_GAMES` | 1 | sync non-Steam games from `GAMES_DIR` (`game--`): restore and upload (v3.9) |
+| `SYNC_SAVES` | 1 | sync saves — Proton prefixes (`pfx--`): restore and upload; 0 — e.g. if Steam Cloud keeps your saves (v3.9) |
 | `AUTO_RES` | 1 | manage resolution |
 | `RES` | 1920x1200 | base desktop resolution |
 | `STEAM_LANG` | empty | force a Steam language (english, german, …); empty means Steam uses its own setting |

@@ -165,8 +165,12 @@ async function openOffers() {
   const data = DEMO ? demoOffers() : await api().offers();
   if (data.error) { showError("offers-error", data.error); return; }
   offersData = data;
+  for (const k of SYNC_KEYS) $("sync-" + k).checked = !!(data.sync || {})[k];
   renderOffers();
 }
+
+const SYNC_KEYS = ["steam_games", "other_games", "saves"];
+function syncChoice() { return Object.fromEntries(SYNC_KEYS.map((k) => [k, $("sync-" + k).checked])); }
 
 function renderOffers() {
   const d = offersData;
@@ -206,11 +210,15 @@ $("rent").addEventListener("click", async () => {
   let text = t("confirm.rent.text", {
     gpu: o.gpu, country: o.country, price: money(o.price), balance: money(o.balance), hours: num(o.hours || 0),
   });
+  const sync = syncChoice();
+  const on = SYNC_KEYS.filter((k) => sync[k]).map((k) => t("sync." + k).toLowerCase());
+  text += "\n\n" + t("confirm.rent.sync", { list: on.join(", ") || t("sync.none") });
+  if (!sync.saves) text += " " + t("confirm.rent.saves_off");
   if (o.bad_reason) text += "\n\n" + t("confirm.badhost", { reason: o.bad_reason });
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
-  const r = await api().play(o.id);
+  const r = await api().play(o.id, sync);
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
 });
@@ -261,10 +269,15 @@ async function openGames() {
   renderGames();
 }
 
+// Номер игры не из Steam, добавленной в Steam ярлыком, — большой (старший бит установлен)
+const SHORTCUT_APPID = 2147483648;
 function gameTitle(g) {
   if (g.kind !== "pfx") return g.title;
-  return g.title ? `${g.title} (appid ${g.appid})` : `appid ${g.appid}`;
+  if (g.title) return `${g.title} (appid ${g.appid})`;
+  return Number(g.appid) >= SHORTCUT_APPID ? t("games.pfx_shortcut", { appid: g.appid }) : `appid ${g.appid}`;
 }
+
+$("games-search").addEventListener("input", renderGames);
 
 function renderGames() {
   const d = gamesData;
@@ -273,9 +286,32 @@ function renderGames() {
   $("games-summary").textContent = d.games.length ? t("games.total", { size: size(total), count: d.games.length }) : t("games.empty");
   $("games-service").textContent = d.service.names.length ? t("games.service", { size: size(d.service.bytes) }) : "";
   $("games-card").hidden = !d.games.length;
+  $("games-search").hidden = d.games.length < 8;          // поиск нужен, когда игр много
+  const q = $("games-search").hidden ? "" : $("games-search").value.trim().toLowerCase();
+  const order = { sgame: 0, game: 1, pfx: 2 };
+  const shown = d.games
+    .filter((g) => !q || gameTitle(g).toLowerCase().includes(q) || g.name.toLowerCase().includes(q))
+    .sort((a, b) => order[a.kind] - order[b.kind] || b.bytes - a.bytes);
   const body = $("games-table").querySelector("tbody");
   body.innerHTML = "";
-  for (const g of d.games) {
+  if (!shown.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="5" class="sub"></td>';
+    tr.firstChild.textContent = t("games.nothing_found");
+    body.appendChild(tr);
+  }
+  let group = null;
+  for (const g of shown) {
+    if (g.kind !== group) {                                  // заголовок группы: тип, сколько, сколько места
+      group = g.kind;
+      const same = shown.filter((x) => x.kind === group);
+      const tr = document.createElement("tr");
+      tr.className = "group";
+      tr.innerHTML = '<td colspan="5"></td>';
+      tr.firstChild.textContent = t("games.group", { kind: t("games.kind." + group), count: same.length,
+        size: size(same.reduce((a, x) => a + x.bytes, 0)) });
+      body.appendChild(tr);
+    }
     const tr = document.createElement("tr");
     tr.style.cursor = "default";
     tr.innerHTML = '<td><span class="kind"></span></td><td></td><td class="num"></td><td class="num"></td><td class="act"><button></button></td>';
@@ -508,7 +544,7 @@ function demoState(kind) {
 function demoOffers() {
   const rows = [["RTX 3060", "Pennsylvania, US", 0.113, 0.039, 0.989], ["RTX 3070", "British Columbia, CA", 0.119, 0.039, 0.999],
     ["RTX 3090", "Latvia, LV", 0.204, 0.0, 0.989], ["RTX 4090", "Iceland, IS", 0.421, 0.0, 0.999], ["RTX 3090", "Czechia, CZ", 0.471, 0.0, 0.995]];
-  return { disk: 100, min_rel: 0.97, count: 37, balance: 3.18,
+  return { disk: 100, min_rel: 0.97, count: 37, balance: 3.18, sync: { steam_games: false, other_games: true, saves: true },
            offers: rows.map((r, i) => ({ id: 100 + i, gpu: r[0], country: r[1], price: r[2], traffic: r[3], total: r[2] + r[3], reliability: r[4] })) };
 }
 function demoCheck() {
@@ -543,7 +579,9 @@ function demoGames() {
   return { games: [g("sgame--Steamworks Shared", "sgame", "Steamworks Shared", null, 25, "2026-09-23"),
                    g("game--3751260", "game", "3751260", null, 184, "2026-09-22"),
                    g("pfx--3751260", "pfx", "The Blood of Dawnwalker", "3751260", 141, "2026-09-23"),
-                   g("pfx--1493710", "pfx", "", "1493710", 109, "2026-09-23")],
+                   g("pfx--1493710", "pfx", "", "1493710", 109, "2026-09-23"),
+                   g("pfx--3001234567", "pfx", "", "3001234567", 12, "2026-09-20"),
+                   ...Array.from({ length: 12 }, (_, i) => g("sgame--Game " + (i + 1), "sgame", "Game " + (i + 1), null, 1000 * (i + 3), "2026-09-1" + (i % 10)))],
            service: { names: ["identity", "steam-cache", "steam-client", "steam-state"], bytes: 1.4e9 } };
 }
 

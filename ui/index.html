@@ -82,6 +82,15 @@
         <tbody></tbody>
       </table>
     </section>
+    <section class="card sync-card">
+      <div class="label" data-i18n="sync.title"></div>
+      <label class="switch-row"><input type="checkbox" id="sync-steam_games">
+        <span><b data-i18n="sync.steam_games"></b><span class="sub" data-i18n="sync.steam_games.hint"></span></span></label>
+      <label class="switch-row"><input type="checkbox" id="sync-other_games">
+        <span><b data-i18n="sync.other_games"></b><span class="sub" data-i18n="sync.other_games.hint"></span></span></label>
+      <label class="switch-row"><input type="checkbox" id="sync-saves">
+        <span><b data-i18n="sync.saves"></b><span class="sub" data-i18n="sync.saves.hint"></span></span></label>
+    </section>
     <div class="error" id="offers-error" hidden></div>
     <div class="actions">
       <button class="primary" id="rent" disabled data-i18n="offers.rent"></button>
@@ -98,6 +107,7 @@
       <div class="sub" data-i18n="tailscale.text"></div>
       <button class="primary" id="games-ts-open" data-i18n="tailscale.open"></button>
     </section>
+    <input type="search" id="games-search" data-i18n-placeholder="games.search" hidden>
     <section class="card table-card" id="games-card" hidden>
       <table id="games-table">
         <thead>
