@@ -17,6 +17,10 @@
 
   <!-- ===== Главный экран ===== -->
   <main id="screen-main">
+    <section class="card attention" id="setup-banner" hidden>
+      <div data-i18n="setup.banner"></div>
+      <button class="primary" id="setup-banner-open" data-i18n="setup.open"></button>
+    </section>
     <section class="card" id="balance-card">
       <div class="label" data-i18n="balance.label"></div>
       <div class="big" id="balance">—</div>
@@ -58,7 +62,10 @@
     </div>
 
     <div class="error" id="error" hidden></div>
-    <button id="open-games" data-i18n="games.open"></button>
+    <div class="actions">
+      <button id="open-games" data-i18n="games.open"></button>
+      <button id="open-setup" data-i18n="setup.open"></button>
+    </div>
     <div class="danger-row"><button class="link danger" id="emergency" hidden data-i18n="btn.emergency"></button></div>
   </main>
 
@@ -95,6 +102,20 @@
     <div class="actions">
       <button class="primary" id="rent" disabled data-i18n="offers.rent"></button>
       <button id="offers-cancel" data-i18n="btn.cancel"></button>
+    </div>
+  </main>
+
+  <!-- ===== Настройка ===== -->
+  <main id="screen-setup" hidden>
+    <h1 data-i18n="setup.title"></h1>
+    <div class="sub" id="setup-summary" data-i18n="setup.loading"></div>
+    <section class="card">
+      <ul class="setup-steps" id="setup-steps"></ul>
+    </section>
+    <div class="error" id="setup-error" hidden></div>
+    <div class="actions">
+      <button id="setup-recheck" data-i18n="setup.recheck"></button>
+      <button class="primary" id="setup-back" data-i18n="btn.back"></button>
     </div>
   </main>
 

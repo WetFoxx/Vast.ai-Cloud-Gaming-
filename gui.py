@@ -23,6 +23,7 @@ import core
 import market
 import moonlight
 import settings
+import setupcheck
 import steamnames
 from vastapi import VastgameError
 
@@ -247,6 +248,14 @@ class Api:
     def answer(self, qid, yes):
         if self._job:
             self._job.answer(qid, yes)
+
+    # ---- Настройка
+    def setup_status(self):
+        """Состояние первой настройки: шаги (готово / нужно внимание / не настроено)."""
+        try:
+            return setupcheck.status()
+        except VastgameError as e:
+            return {"error": error_data(e)}
 
     # ---- Игры в облаке
     def games(self):

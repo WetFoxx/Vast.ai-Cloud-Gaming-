@@ -210,3 +210,16 @@ input[type=search] {
 }
 #games-card { max-height: 420px; overflow: auto; }
 tr.group td { font-weight: 600; font-size: 13px; color: var(--muted); background: var(--bg); position: sticky; top: 0; }
+
+/* ---- Настройка */
+.setup-steps { list-style: none; margin: 0; padding: 0; }
+.setup-steps li { display: flex; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); align-items: flex-start; }
+.setup-steps li:first-child { border-top: none; }
+.setup-steps .icon { width: 22px; height: 22px; border-radius: 50%; flex: none; display: flex; align-items: center;
+  justify-content: center; font-size: 13px; font-weight: 700; color: #fff; }
+.setup-steps .icon.ok { background: var(--ready); }
+.setup-steps .icon.warn { background: var(--starting); }
+.setup-steps .icon.missing { background: var(--error); }
+.setup-steps .body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.setup-steps .body b { font-size: 14px; }
+.setup-steps .actions { margin-top: 6px; }

@@ -31,7 +31,7 @@ function duration(sec) {
 }
 
 function show(screen) {
-  for (const s of ["main", "offers", "progress", "games"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["main", "offers", "progress", "games", "setup"]) $("screen-" + s).hidden = s !== screen;
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -91,7 +91,7 @@ function render(data) {
   if (li) $("moonlight").textContent = li.moonlight;
   if (li && st.state !== "starting") loadMoonlightApps(li.moonlight);
 
-  $("play").disabled = st.state !== "none" || !!data.busy;
+  $("play").disabled = st.state !== "none" || !!data.busy || (setupData && !setupData.ready);
   // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
   $("stop").disabled = !m || !["ready", "syncing", "error"].includes(st.state) || !!data.busy;
   $("emergency").hidden = !m || !!data.busy;
@@ -247,6 +247,53 @@ $("emergency").addEventListener("click", async () => {
   showError("error", { text: r.gone ? t("emergency.done", { id: m.id }) : t("core.delete_pending", { id: m.id }) });
   refresh();
 });
+
+// ---------------------------------------------------------------- настройка
+let setupData = null;   // последний ответ setup_status: {steps, ready}
+const SETUP_ICON = { ok: "✓", warn: "!", missing: "✗" };
+
+$("open-setup").addEventListener("click", openSetup);
+$("setup-banner-open").addEventListener("click", openSetup);
+$("setup-recheck").addEventListener("click", openSetup);
+$("setup-back").addEventListener("click", () => { show("main"); refresh(); });
+
+async function loadSetup() {
+  const d = DEMO ? demoSetup() : await api().setup_status();
+  if (!d.error) setupData = d;
+  $("setup-banner").hidden = !setupData || setupData.ready;
+  if (current) render(current);
+  return d;
+}
+
+async function openSetup() {
+  show("setup");
+  $("setup-summary").textContent = t("setup.loading");
+  $("setup-steps").innerHTML = "";
+  showError("setup-error", null);
+  const d = await loadSetup();
+  if (d.error) { $("setup-summary").textContent = ""; showError("setup-error", d.error); return; }
+  renderSetup();
+}
+
+function renderSetup() {
+  const d = setupData;
+  if (!d) return;
+  $("setup-summary").textContent = t(d.ready ? "setup.ready" : "setup.not_ready");
+  const ul = $("setup-steps");
+  ul.innerHTML = "";
+  for (const st of d.steps) {
+    const li = document.createElement("li");
+    li.dataset.step = st.id;
+    li.innerHTML = '<span class="icon"></span><div class="body"><b></b><span class="sub"></span><div class="actions"></div></div>';
+    li.querySelector(".icon").textContent = SETUP_ICON[st.state];
+    li.querySelector(".icon").classList.add(st.state);
+    li.querySelector("b").textContent = t("setup.step." + st.id);
+    const p = { ...st.params };
+    if ("lang" in p && !p.lang) p.lang = t("setup.lang_default");
+    li.querySelector(".sub").textContent = t(st.key, p);
+    ul.appendChild(li);
+  }
+}
 
 // ---------------------------------------------------------------- игры в облаке
 let gamesData = null;
@@ -520,6 +567,7 @@ $("lang").addEventListener("change", (e) => {
   if (current) render(current);
   if (!$("screen-offers").hidden) renderOffers();
   if (!$("screen-games").hidden) renderGames();
+  if (!$("screen-setup").hidden) renderSetup();
   if (!$("screen-progress").hidden && prog) $("progress-log").textContent = prog.log.map(eventText).join("\n");
   if (!DEMO) api().set_language(LANG, true);   // выбор запоминается
 });
@@ -585,6 +633,15 @@ function demoGames() {
            service: { names: ["identity", "steam-cache", "steam-client", "steam-state"], bytes: 1.4e9 } };
 }
 
+function demoSetup() {
+  const st = (id, state, key, params = {}) => ({ id, state, key, params });
+  return { ready: false, steps: [
+    st("rclone", "ok", "setup.rclone.ok"), st("tailscale_app", "ok", "setup.tailscale_app.ok", { tailnet: "tail3d42c9.ts.net" }),
+    st("moonlight", "missing", "setup.moonlight.missing"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
+    st("google", "warn", "setup.google.old"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),
+    st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.9" })] };
+}
+
 // ---------------------------------------------------------------- старт
 async function start() {
   let saved = null;
@@ -597,7 +654,11 @@ async function start() {
   if (DEMO === "progress") { startProgress(); return; }
   if (DEMO === "stop") { startProgress("stop"); return; }
   if (DEMO === "games") { openGames(); return; }
+  if (DEMO === "setup") { openSetup(); return; }
   await refresh();
+  // Настройка: проверяем в фоне; нет ключа Vast (первый запуск) — сразу открыть экран настройки
+  if (current === null && !DEMO) openSetup();
+  else loadSetup();
   // Окно открыли заново, а операция ещё идёт — показать её ход
   if (!DEMO && current && current.busy) startProgress();   // вид операции уточнит первый ответ progress
   if (!DEMO) setInterval(() => { if (!$("screen-main").hidden) refresh(); }, REFRESH_SEC * 1000);
