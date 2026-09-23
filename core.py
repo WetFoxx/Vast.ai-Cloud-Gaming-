@@ -461,3 +461,24 @@ def stop(ui, dry_run=False):
     ui.stage("deleted", f"Инстанс {iid} удалён." if gone
              else f"Vast принял удаление, но {iid} ещё в списке — проверь через минуту.")
     return {"iid": iid, "uploaded": uploaded, "deleted": gone}
+
+
+def emergency_delete(expected_id):
+    """Удалить машину БЕЗ выгрузки — для зависшей или сломанной. Удаляет только машину с номером
+    expected_id (её человек видел в окне и дважды подтвердил); если сейчас другая — VastgameError.
+    Возвращает True, если машина исчезла из списка, False — если Vast ещё не убрал её."""
+    inst = list_instances()
+    if not inst:
+        raise VastgameError("Инстансов нет — удалять нечего.", key="core.no_instances")
+    ids = [i["id"] for i in inst]
+    if expected_id not in ids:
+        raise VastgameError(f"Машины {expected_id} уже нет (сейчас: {', '.join(map(str, ids))}) — ничего не удаляю.",
+                            key="core.emergency_mismatch", id=expected_id)
+    ok, msg = delete_instance(expected_id)
+    if not ok:
+        raise VastgameError(f"Vast не удалил инстанс: {msg}", key="core.delete_failed", msg=msg or "")
+    for _ in range(6):
+        time.sleep(5)
+        if expected_id not in [i["id"] for i in list_instances()]:
+            return True
+    return False

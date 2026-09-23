@@ -38,7 +38,7 @@ class Job:
     """Фоновая операция с машиной. Это же и «ui» для ядра: say/stage/archive/confirm/tailscale."""
 
     def __init__(self, kind):
-        self.kind = kind                 # "play" (позже — "stop")
+        self.kind = kind                 # "play" или "stop"
         self.started = time.time()
         self.events = []                 # сообщения по порядку: {level, key, params, text}
         self.stage_key = None
@@ -193,6 +193,37 @@ class Api:
 
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
+
+    def stop(self):
+        """«Закончить»: выгрузить всё, проверить, спросить про удаление (вопрос — на странице)."""
+        if self._busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        job = self._job = Job("stop")
+
+        def run():
+            try:
+                r = core.stop(job)
+                job.result = {"uploaded": r["uploaded"], "deleted": r["deleted"], "iid": r["iid"]}
+            except VastgameError as e:
+                job.error = error_data(e)
+            except Exception as e:
+                job.error = {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
+
+    def emergency_delete(self, machine_id):
+        """Удалить машину без выгрузки. Страница уже дважды спросила; удаляем только машину,
+        которую человек видел (machine_id), и только когда не идёт другая операция."""
+        if self._busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        try:
+            gone = core.emergency_delete(int(machine_id))
+        except VastgameError as e:
+            return {"error": error_data(e)}
+        return {"ok": True, "gone": gone}
 
     def progress(self, since=0):
         """События текущей операции начиная с номера since."""

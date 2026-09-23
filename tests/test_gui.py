@@ -117,5 +117,60 @@ class TestPlay(unittest.TestCase):
         self.assertTrue(self.api._on_closing())     # закончилось — можно
 
 
+class TestStop(unittest.TestCase):
+    def setUp(self):
+        self.api = gui.Api()
+        self.deleted = []
+
+    def fake_stop(self, ui, dry_run=False):
+        ui.stage("shutdown", "…")
+        ui.archive("pfx--1", "up", "выгрузка")
+        ui.say("Всё выгружено.", "ok", key="core.all_uploaded")
+        if not ui.confirm("Удалить?", key="core.ask_delete", id=42):
+            raise VastgameError("Не удаляю.", key="core.kept")
+        self.deleted.append(42)
+        ui.stage("deleted", "…")
+        return {"iid": 42, "uploaded": ["pfx--1"], "deleted": True}
+
+    def answer_question(self, yes):
+        for _ in range(200):
+            q = self.api.progress()["question"]
+            if q:
+                self.api.answer(q["id"], yes)
+                return q
+            time.sleep(0.01)
+        raise AssertionError("вопроса не было")
+
+    def test_stop_yes_deletes(self):
+        with mock.patch.object(gui.core, "stop", self.fake_stop):
+            self.assertEqual(self.api.stop(), {"ok": True})
+            q = self.answer_question(True)
+            p = wait_done(self.api)
+        self.assertEqual((q["key"], q["params"]), ("core.ask_delete", {"id": 42}))
+        self.assertEqual(p["kind"], "stop")
+        self.assertEqual(p["result"], {"uploaded": ["pfx--1"], "deleted": True, "iid": 42})
+        self.assertEqual(self.deleted, [42])
+
+    def test_stop_no_keeps_machine(self):
+        with mock.patch.object(gui.core, "stop", self.fake_stop):
+            self.api.stop()
+            self.answer_question(False)
+            p = wait_done(self.api)
+        self.assertEqual(p["error"]["key"], "core.kept")
+        self.assertEqual(self.deleted, [])
+
+    def test_emergency_only_when_idle_and_by_id(self):
+        gate = threading.Event()
+        calls = []
+        with mock.patch.object(gui.core, "stop", lambda ui, dry_run=False: gate.wait(5) and {}), \
+             mock.patch.object(gui.core, "emergency_delete", lambda mid: calls.append(mid) or True):
+            self.api.stop()
+            self.assertEqual(self.api.emergency_delete(42)["error"]["key"], "busy")   # идёт выгрузка
+            gate.set()
+            wait_done(self.api)
+            self.assertEqual(self.api.emergency_delete("42"), {"ok": True, "gone": True})
+        self.assertEqual(calls, [42])
+
+
 if __name__ == "__main__":
     unittest.main()

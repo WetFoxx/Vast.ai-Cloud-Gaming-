@@ -87,6 +87,9 @@ function render(data) {
   if (li) $("moonlight").textContent = li.moonlight;
 
   $("play").disabled = st.state !== "none" || !!data.busy;
+  // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
+  $("stop").disabled = !m || !["ready", "syncing", "error"].includes(st.state) || !!data.busy;
+  $("emergency").hidden = !m || !!data.busy;
 }
 
 async function refresh() {
@@ -176,12 +179,40 @@ $("rent").addEventListener("click", async () => {
   startProgress();
 });
 
-// ---------------------------------------------------------------- ход запуска
-const PLAY_STAGES = ["vast", "tailscale", "restore", "ready"];
+// ---------------------------------------------------------------- «Закончить» и аварийное удаление
+$("stop").addEventListener("click", async () => {
+  const yes = await ask({ title: t("confirm.stop.title"), text: t("confirm.stop.text"), yes: t("confirm.stop.yes"), no: t("btn.cancel") });
+  if (!yes) return;
+  if (DEMO) { startProgress("stop"); return; }
+  const r = await api().stop();
+  if (r.error) { showError("error", r.error); return; }
+  startProgress("stop");
+});
 
-function startProgress() {
+$("emergency").addEventListener("click", async () => {
+  const m = current && current.status.machine;
+  if (!m) return;
+  // Два вопроса: что пропадёт — и что это нельзя отменить
+  if (!(await ask({ title: t("emergency.title1"), text: t("emergency.text1"), yes: t("btn.emergency"), no: t("btn.cancel") }))) return;
+  if (!(await ask({ title: t("emergency.title2"), text: t("emergency.text2", { id: m.id }), yes: t("btn.emergency"), no: t("btn.cancel") }))) return;
+  $("emergency").disabled = true;
+  $("status-text").textContent = t("emergency.working");
+  const r = DEMO ? { ok: true, gone: true } : await api().emergency_delete(m.id);
+  $("emergency").disabled = false;
+  if (r.error) { showError("error", r.error); return; }
+  showError("error", { text: r.gone ? t("emergency.done", { id: m.id }) : t("core.delete_pending", { id: m.id }) });
+  refresh();
+});
+
+// ---------------------------------------------------------------- ход операции
+const STAGES = { play: ["vast", "tailscale", "restore", "ready"], stop: ["shutdown", "verify", "deleted"] };
+
+function startProgress(kind = "play") {
   show("progress");
-  prog = { since: 0, log: [], shownQ: 0 };
+  prog = { since: 0, log: [], shownQ: 0, kind };
+  $("progress-title").textContent = t("progress.title." + kind);
+  $("progress-note").textContent = t(kind === "stop" ? "progress.keep_open_stop" : "progress.keep_open");
+  $("tailscale-box").hidden = true;
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
   $("progress-back").hidden = true;
@@ -196,12 +227,14 @@ function startProgress() {
 function renderStages(stage, failed) {
   const list = $("stages");
   list.innerHTML = "";
-  const idx = PLAY_STAGES.indexOf(stage);
-  PLAY_STAGES.forEach((s, i) => {
+  const stages = STAGES[(prog && prog.kind) || "play"];
+  const idx = stages.indexOf(stage);
+  const last = stages[stages.length - 1];
+  stages.forEach((s, i) => {
     const li = document.createElement("li");
     li.innerHTML = '<span class="mark"></span><span></span>';
     li.lastChild.textContent = t("stage." + s);
-    if (i < idx || (s === "ready" && stage === "ready")) li.className = "done";
+    if (i < idx || (s === last && stage === last)) li.className = "done";
     else if (i === idx || (idx < 0 && i === 0)) li.className = failed ? "failed" : "active";
     list.appendChild(li);
   });
@@ -236,7 +269,17 @@ async function pollOnce() {
   const p = DEMO ? demoProgress() : await api().progress(prog.since);
   if (!p) return;
   if (p.game_names) GAME_NAMES = p.game_names;
-  for (const ev of p.events) prog.log.push(ev);
+  if (p.kind && p.kind !== prog.kind) {          // окно открыли заново посреди операции — узнаём какой
+    prog.kind = p.kind;
+    $("progress-title").textContent = t("progress.title." + p.kind);
+    $("progress-note").textContent = t(p.kind === "stop" ? "progress.keep_open_stop" : "progress.keep_open");
+  }
+  for (const ev of p.events) {
+    prog.log.push(ev);
+    // Tailscale просит подтвердить вход — заметный блок со ссылкой; после «SSH работает» — убрать
+    if (ev.level === "tailscale" && ev.url) { prog.tsUrl = ev.url; $("tailscale-box").hidden = false; }
+    if (ev.key === "core.ssh_ok") $("tailscale-box").hidden = true;
+  }
   prog.since = p.next;
   $("progress-log").textContent = prog.log.map(eventText).join("\n");
   $("progress-elapsed").textContent = t("progress.elapsed", { time: duration(p.elapsed) });
@@ -257,8 +300,25 @@ async function pollOnce() {
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
-    if (p.result) renderResult(p.result);
+    $("tailscale-box").hidden = true;
+    if (p.result) (prog.kind === "stop" ? renderStopResult : renderResult)(p.result);
   }
+}
+
+$("tailscale-open").addEventListener("click", () => { if (prog && prog.tsUrl && !DEMO) api().open_url(prog.tsUrl); });
+
+function renderStopResult(r) {
+  const box = $("progress-result");
+  box.hidden = false;
+  box.innerHTML = "";
+  const ok = document.createElement("div");
+  ok.className = "result-ok";
+  ok.textContent = r.deleted ? t("progress.stopped") : t("core.delete_pending", { id: r.iid });
+  box.appendChild(ok);
+  const up = document.createElement("div");
+  up.className = "sub";
+  up.textContent = r.uploaded.length ? t("core.uploaded", { names: r.uploaded }) : t("core.uploaded_none");
+  box.appendChild(up);
 }
 
 function renderResult(r) {
@@ -337,6 +397,17 @@ function demoCheck() {
 let demoTick = 0;
 function demoProgress() {
   demoTick++;
+  if (prog.kind === "stop") {
+    const stage = demoTick < 2 ? null : demoTick < 6 ? "shutdown" : demoTick < 7 ? "verify" : "deleted";
+    const events = demoTick === 1 ? [{ level: "tailscale", text: "To authenticate, visit: https://login.tailscale.com/a/x", url: "https://login.tailscale.com/a/x" }]
+      : demoTick === 3 ? [{ level: "ok", key: "core.ssh_ok" }] : [];
+    const arch = demoTick < 3 ? {} : { "steam-state": [demoTick < 5 ? "up" : "ok", ""], "pfx--3751260": [demoTick < 6 ? "up" : "ok", ""] };
+    const q = demoTick === 7 ? { id: 1, key: "core.ask_delete", params: { id: 52246512 } } : null;
+    const done = demoTick >= 8;
+    return { kind: "stop", elapsed: demoTick * 20, stage, archives: arch, events, next: 0, question: q, done, error: null,
+             result: done ? { deleted: true, iid: 52246512, uploaded: ["steam-state", "pfx--3751260"] } : null,
+             game_names: { 3751260: "The Blood of Dawnwalker" } };
+  }
   const stage = demoTick < 3 ? "vast" : demoTick < 5 ? "tailscale" : demoTick < 9 ? "restore" : "ready";
   const arch = demoTick < 5 ? {} : { identity: ["ok", ""], "steam-state": ["ok", ""], "steam-client": [demoTick < 8 ? "down" : "ok", ""], "pfx--3751260": [demoTick < 7 ? "down" : "ok", ""] };
   const events = demoTick === 1 ? [{ level: "stage", key: "stage.vast" }, { level: "detail", key: "core.vast_status", params: { status: "loading", msg: "" } }] : [];
@@ -356,9 +427,10 @@ async function start() {
   applyStatic();
   if (DEMO === "offers") { openOffers(); return; }
   if (DEMO === "progress") { startProgress(); return; }
+  if (DEMO === "stop") { startProgress("stop"); return; }
   await refresh();
   // Окно открыли заново, а операция ещё идёт — показать её ход
-  if (!DEMO && current && current.busy) startProgress();
+  if (!DEMO && current && current.busy) startProgress();   // вид операции уточнит первый ответ progress
   if (!DEMO) setInterval(() => { if (!$("screen-main").hidden) refresh(); }, REFRESH_SEC * 1000);
 }
 

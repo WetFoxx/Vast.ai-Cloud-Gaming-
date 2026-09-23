@@ -243,5 +243,18 @@ class TestStop(Base):
         self.assertEqual(ui.stages, [])
 
 
+class TestEmergency(Base):
+    def test_deletes_only_expected(self):
+        alive = [42]
+        self.patch(core, "list_instances", lambda: [{"id": i} for i in alive])
+        self.patch(core, "delete_instance", self.fake_delete(alive))
+        with self.assertRaises(VastgameError) as e:
+            core.emergency_delete(41)                  # в окне была другая машина
+        self.assertEqual(e.exception.key, "core.emergency_mismatch")
+        self.assertEqual(self.deleted, [])
+        self.assertTrue(core.emergency_delete(42))
+        self.assertEqual(self.deleted, [42])
+
+
 if __name__ == "__main__":
     unittest.main()

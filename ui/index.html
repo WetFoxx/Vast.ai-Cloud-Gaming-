@@ -49,10 +49,11 @@
 
     <div class="actions">
       <button class="primary" id="play" disabled data-i18n="btn.play"></button>
-      <button id="stop" disabled data-i18n="btn.stop" data-i18n-title="btn.soon"></button>
+      <button id="stop" disabled data-i18n="btn.stop"></button>
     </div>
 
     <div class="error" id="error" hidden></div>
+    <div class="danger-row"><button class="link danger" id="emergency" hidden data-i18n="btn.emergency"></button></div>
   </main>
 
   <!-- ===== Выбор машины ===== -->
@@ -82,17 +83,22 @@
     </div>
   </main>
 
-  <!-- ===== Ход операции (запуск машины) ===== -->
+  <!-- ===== Ход операции (запуск или завершение) ===== -->
   <main id="screen-progress" hidden>
-    <h1 id="progress-title" data-i18n="progress.title.play"></h1>
+    <h1 id="progress-title"></h1>
     <div class="sub" id="progress-elapsed"></div>
+    <section class="card attention" id="tailscale-box" hidden>
+      <div class="title" data-i18n="tailscale.title"></div>
+      <div class="sub" data-i18n="tailscale.text"></div>
+      <button class="primary" id="tailscale-open" data-i18n="tailscale.open"></button>
+    </section>
     <section class="card">
       <ol class="stages" id="stages"></ol>
     </section>
     <section class="card" id="archives-card" hidden>
       <ul class="archives" id="archives"></ul>
     </section>
-    <div class="note" id="progress-note" data-i18n="progress.keep_open"></div>
+    <div class="note" id="progress-note"></div>
     <section class="card" id="progress-result" hidden></section>
     <div class="error" id="progress-error" hidden></div>
     <details class="details">
