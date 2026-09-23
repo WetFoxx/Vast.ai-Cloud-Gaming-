@@ -16,7 +16,7 @@ import sys
 
 import keyring   # доступ к Keychain («Связка ключей») macOS
 
-from vastapi import KEY_FILE, SERVICE, call, check_key
+from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, call, check_key
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 
@@ -207,8 +207,82 @@ def show_drive(info):
 def push_drive_token():
     """Отправить токен из Keychain в переменные аккаунта Vast — оттуда его получает каждая машина."""
     print("  Отправляю токен в переменные аккаунта Vast (RCLONE_REFRESH_TOKEN)...")
-    vast()
+    push_secret("RCLONE_REFRESH_TOKEN")
     return True
+
+
+TS_KEYS_URL = "https://login.tailscale.com/admin/settings/keys"
+TS_KEY_DAYS = 90   # самый долгий срок ключа, который даёт Tailscale
+
+
+def step_tailscale():
+    """Шаг 3: ключ Tailscale (auth key) — в Keychain и в переменных аккаунта Vast."""
+    import datetime
+    title(3, "Tailscale")
+    key = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY")
+    if key:
+        saved = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY_DATE") or ""
+        age = ""
+        if saved:
+            days = (datetime.date.today() - datetime.date.fromisoformat(saved)).days
+            left = TS_KEY_DAYS - days
+            age = f" (сохранён {saved}; если срок 90 дней — осталось ~{max(left, 0)} дн.)"
+        print(f"  ✓ Ключ Tailscale в Keychain{age}.")
+        if not ask("  Заменить ключ?"):
+            print("  Отправляю ключ в переменные аккаунта Vast (TAILSCALE_AUTHKEY)...")
+            push_secret("TAILSCALE_AUTHKEY")
+            return True
+
+    print(f"""
+  Ключ Tailscale нужен машине, чтобы в первый раз войти в твою сеть. Дальше её «личность»
+  (имя и адрес в сети) приезжает из Google Drive, и ключ используется, только если она потерялась.
+  1. Открой {TS_KEYS_URL}
+  2. Нажми «Generate auth key» и выставь:
+       Reusable     — ВКЛ   (ключ используется при каждом запуске)
+       Ephemeral    — ВЫКЛ  (иначе узел удалится, когда машина выключится, и имя пропадёт)
+       Expiration   — 90 дней (больше Tailscale не даёт; потом мастер напомнит обновить)
+       Pre-approved — ВКЛ, если в сети включено одобрение устройств
+  3. Скопируй ключ (tskey-auth-...) и вставь сюда. Ввод скрыт.""")
+    if ask("\n  Открыть страницу в браузере?"):
+        subprocess.run(["open", TS_KEYS_URL])
+    for _ in range(3):
+        key = getpass.getpass("\n  Ключ Tailscale (вставь и нажми Enter): ").strip()
+        if not key.startswith("tskey-auth-"):
+            print("  ✗ Это не ключ входа Tailscale: он начинается с «tskey-auth-». Попробуй ещё раз.")
+            continue
+        keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY", key)
+        keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY_DATE", datetime.date.today().isoformat())
+        print("  ✓ Ключ сохранён в Keychain.")
+        print("  Отправляю ключ в переменные аккаунта Vast (TAILSCALE_AUTHKEY)...")
+        push_secret("TAILSCALE_AUTHKEY")
+        return True
+    print("  ✗ Ключ так и не введён. Запусти vastgame setup ещё раз.")
+    return False
+
+
+def summary():
+    """Итог: что настроено, и предупреждения."""
+    title(4, "Итог")
+    have = call("GET", "secrets/").get("secrets") or {}
+    vast_ok = keyring.get_password(SERVICE, "VAST_API_KEY") is not None
+    print(f"  {'✓' if vast_ok else '!'} Ключ Vast: {'в Keychain' if vast_ok else f'пока в файле {KEY_FILE} — перенеси (шаг 1)'}")
+    for name, what in (("RCLONE_REFRESH_TOKEN", "Токен Google Drive"), ("TAILSCALE_AUTHKEY", "Ключ Tailscale")):
+        in_kc = keyring.get_password(SERVICE, name) is not None
+        in_vast = name in have
+        mark = "✓" if in_kc and in_vast else "✗"
+        print(f"  {mark} {what}: Keychain — {'да' if in_kc else 'нет'}, аккаунт Vast — {'да' if in_vast else 'нет'}")
+
+    # Ключи в шаблоне: README требует держать их только в аккаунте
+    ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": TEMPLATE_NAME}})})
+    for t in ts.get("templates", []):
+        leaked = [n for n in ("RCLONE_REFRESH_TOKEN", "TAILSCALE_AUTHKEY", "RCLONE_CLIENT_SECRET")
+                  if re.search(rf"-e\s+{n}=", t.get("env") or "")]
+        if leaked:
+            print(f"  ! В шаблоне «{TEMPLATE_NAME}» лежат ключи: {', '.join(leaked)}.")
+            print("    Убери их из шаблона на сайте Vast: машина получит их из аккаунта, а в шаблоне")
+            print("    неизвестно, какой из двух ключей победит.")
+    print("\n  Один раз вручную: после первой аренды в админке Tailscale у узла vastai-gaming")
+    print("  выбери «⋯ → Disable key expiry», иначе через полгода узел выпадет из сети.")
 
 
 def wizard():
@@ -220,7 +294,10 @@ def wizard():
         sys.exit(1)
     if not step_google():
         sys.exit(1)
-    print("\nШаг 3 (Tailscale) — следующий; пока его нет в мастере.")
+    if not step_tailscale():
+        sys.exit(1)
+    summary()
+    print("\nГотово. Дальше: vastgame offers → vastgame play <ID> → играть → vastgame stop")
 
 
 def find_refresh_token(x):
@@ -276,12 +353,16 @@ def google():
 
 
 def vast():
-    """Записать токен Drive из Keychain в Environment Variables аккаунта Vast.
+    """vastgame setup vast — отправить токен Drive из Keychain в аккаунт Vast."""
+    push_secret("RCLONE_REFRESH_TOKEN")
+
+
+def push_secret(name):
+    """Записать секрет из Keychain в Environment Variables аккаунта Vast.
     Vast подставляет их в каждый инстанс — и при аренде через утилиту, и через сайт."""
-    name = "RCLONE_REFRESH_TOKEN"
     token = keyring.get_password(SERVICE, name)
     if not token:
-        sys.exit("В Keychain нет токена Drive — сначала: .venv/bin/python setup.py google")
+        sys.exit(f"В Keychain нет {name} — пройди мастер: vastgame setup")
 
     # Переменные аккаунта: POST secrets/ — создать, PUT — заменить (как в официальном CLI Vast)
     have = call("GET", "secrets/").get("secrets") or {}

@@ -13,6 +13,8 @@ HOST = "https://console.vast.ai/"
 API = HOST + "api/v0/"
 KEY_FILE = Path.home() / ".vast_api_key"   # старое место ключа — до переноса в Keychain
 SERVICE = "vastgame"                        # имя записей в Keychain («Связка ключей»)
+# Шаблон Vast для игровой машины. Ищется по имени: при сохранении на сайте Vast меняет его hash_id
+TEMPLATE_NAME = "WETFOX CLOUD GAME TEST"    # копия WETFOX CLOUD GAME с исправленным портом 41641
 
 
 def read_key():

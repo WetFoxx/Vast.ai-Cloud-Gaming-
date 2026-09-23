@@ -16,11 +16,9 @@ import json
 import sys
 import time
 
-from vastapi import call, list_instances
+from vastapi import TEMPLATE_NAME, call, list_instances
 from wolfnode import NODE, WOLF_PORT, ts_node, wolf_status
 
-# Шаблон ищем по имени при каждой аренде: при сохранении на сайте Vast меняет его hash_id
-TEMPLATE_NAME = "WETFOX CLOUD GAME TEST"        # копия WETFOX CLOUD GAME с исправленным портом 41641
 
 p = argparse.ArgumentParser(description="Арендовать машину и дождаться готовности")
 p.add_argument("offer", type=int, help="ID машины из таблицы offers.py")
