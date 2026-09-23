@@ -66,7 +66,10 @@ def game_archives():
         if kind not in KINDS:
             continue   # служебные архивы (identity, steam-state, ...) — не для удаления
         rest = base.split("--", 1)[1]
-        title = f"{names.get(rest, 'appid ' + rest)} (appid {rest})" if kind == "pfx" else rest
+        if kind == "pfx":   # «Baldur's Gate 3 (appid 1086940)»; если Steam игру не знает — просто номер
+            title = f"{names[rest]} (appid {rest})" if rest in names else f"appid {rest}"
+        else:
+            title = rest
         rows.append((base, KINDS[kind], title, info["size"] / 1e9, info["mtime"], info["files"]))
     return sorted(rows, key=lambda r: (r[1], -r[3])), arch
 

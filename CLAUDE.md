@@ -26,6 +26,7 @@
 - `offers` — таблица подходящих машин: GPU, цена в час, страна, надёжность, трафик (`offers.py`, готово).
 - `play` (`play.py`, готово) — арендовать выбранную машину по шаблону, дождаться готовности, показать адрес для Moonlight. Выключатель «загружать игры из облака» — передаётся при аренде как `SYNC_STEAM_GAMES=0/1` (скрипт читает его только при старте инстанса, поэтому действует со следующей аренды).
 - `stop` — выгрузить всё на инстансе, дождаться подтверждения и только потом удалить инстанс (`stop.py`, готово).
+- `migrate` (`migrate.py`) — перенос архивов из старой папки в папку приложения (разовый, при переходе на свой OAuth-клиент).
 - `games` (`games.py`, готово) — игры и сохранения в облаке с размерами — прямо с Drive через rclone на Mac, машина не нужна; названия сохранений (`pfx--<appid>`) — из публичного API магазина Steam. `games rm <название>` — в корзину Drive (30 дней): при работающей машине через `wolf forget` по SSH (иначе wolf выгрузит заново), без машины — `rclone deletefile --drive-use-trash=true`. Служебные архивы не удаляются.
 - `info` (`info.py`) — адреса работающей машины: Moonlight (имя MagicDNS), кабинет Sunshine `https://<узел>:47990`, статус `:8099`; те же адреса печатает `play` в конце.
 - Всё запускается одной командой `vastgame <команда>` (`vastgame.py` + `bin/vastgame`, ссылка в `/opt/homebrew/bin`). Общий код: `vastapi.py` (Vast), `wolfnode.py` (Tailscale, SSH, /json), `drive.py` (Drive через rclone: настройки в переменных окружения, личный конфиг rclone не трогается).
@@ -69,7 +70,14 @@
 
 - (пока всё нужное проверено)
 
-**Срочно:** общий client_id rclone для Google Drive «is being retired and will stop working during 2026» (предупреждение rclone 2026-09-23). Вся система — на нём. Нужен свой OAuth-клиент Google (In production, scope `drive.file`) — вместе с шагом 5 плана.
+**Свой OAuth-клиент Google (сделано 2026-09-23).** Общий client_id rclone «is being retired and will stop working during 2026». Проект Google Cloud `vastgame` (аккаунт Алексея), клиент «Desktop app», scope `drive.file` (non-sensitive — тяжёлая проверка не нужна), статус In production. Для публикации External-приложения консоль требует home page, privacy policy и authorized domain (не помечены обязательными): `https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-`, `.../blob/main/PRIVACY.md`, `github.com`. Логотип не загружать — запускает проверку.
+- Keychain: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, `RCLONE_REFRESH_TOKEN` (через клиент, `RCLONE_TOKEN_SCOPE=drive.file`), `RCLONE_REFRESH_TOKEN_OLD` (общий клиент rclone, полный доступ — только для `migrate`). В аккаунт Vast уходят `RCLONE_CLIENT_ID`, `RCLONE_CLIENT_SECRET`, `RCLONE_REFRESH_TOKEN`.
+- `rclone authorize drive <blob>`: blob — base64 **без `=`** от JSON `{"client_id","client_secret","scope"}`.
+- `wolf-setup.sh` менять не нужно: `scope = drive` в его rclone.conf не мешает — права задаёт токен (проверено).
+- С `drive.file` приложение видит только своё. Старые архивы переносит `vastgame migrate` (старый токен читает, новый пишет, сверка MD5). 2026-09-23 перенесено 13 файлов из `commission download/vastai-cloud-games` — это резервная копия, Алексей удалит сам.
+- **Грабли:** на Drive бывают папки с одинаковыми именами. Удалять/искать папки только по ID, никогда по пути: `migrate` так унёс в корзину только что перенесённую папку (восстановлена по ID). `drive.set_trashed(id)` — Drive API по ID, но только для созданного приложением; созданное общим клиентом rclone удаляет сам Алексей на сайте.
+- Перенос идёт через домашний интернет (~2.5 МБ/с у Алексея). Для больших библиотек — переносить на арендованной машине.
+- Для новых пользователей: зашить Client ID/secret приложения в код (для Desktop app секрет не секретный), шаг «OAuth-клиент» в мастере убрать, оставить скрытую возможность своего клиента.
 
 ## План
 
