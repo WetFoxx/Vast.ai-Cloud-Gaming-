@@ -13,8 +13,9 @@ HOST = "https://console.vast.ai/"
 API = HOST + "api/v0/"
 KEY_FILE = Path.home() / ".vast_api_key"   # старое место ключа — до переноса в Keychain
 SERVICE = "vastgame"                        # имя записей в Keychain («Связка ключей»)
-# Шаблон Vast для игровой машины. Ищется по имени: при сохранении на сайте Vast меняет его hash_id
-TEMPLATE_NAME = "WETFOX CLOUD GAME TEST"    # копия WETFOX CLOUD GAME с исправленным портом 41641
+# Шаблон Vast для игровой машины: его создаёт мастер (vastgame setup, шаг «Шаблон»).
+# Ищется по имени: при каждом сохранении Vast меняет его hash_id
+TEMPLATE_NAME = "vastgame"
 
 
 def read_key():
@@ -64,6 +65,16 @@ def call(method, path, body=None, params=None, base=API):
             msg = ""
         sys.exit(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip())
     return r.json()
+
+
+def my_template(name=TEMPLATE_NAME):
+    """Мой шаблон с таким именем (dict) или None. Чужие шаблоны с тем же именем не берём."""
+    me = call("GET", "users/current/").get("id")
+    ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}).get("templates", [])
+    mine = [t for t in ts if t.get("creator_id") == me]
+    if len(mine) > 1:
+        sys.exit(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.")
+    return mine[0] if mine else None
 
 
 def list_instances():

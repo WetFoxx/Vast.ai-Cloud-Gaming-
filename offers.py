@@ -6,17 +6,20 @@
 import argparse   # разбор параметров командной строки (--disk 200 и т.п.)
 import re         # регулярные выражения — проверка названия видеокарты
 
-from vastapi import call
+from vastapi import call, my_template
 
 # Параметры, которые можно поменять при запуске
 p = argparse.ArgumentParser(description="Подходящие машины Vast для игр")
-p.add_argument("--disk", type=int, default=100, help="размер диска, ГБ (по умолчанию 100)")
+p.add_argument("--disk", type=int, help="размер диска, ГБ (по умолчанию — из шаблона, иначе 100)")
 p.add_argument("--min-rel", type=float, default=0.98, help="минимальная надёжность (0.98)")
 p.add_argument("--stream-gb", type=float, default=15, help="трафик стрима, ГБ в час (15)")
 p.add_argument("--max-traffic", type=float, default=0.02, help="скрыть машины, где трафик дороже, $/ГБ (0.02)")
 p.add_argument("--free", action="store_true", help="только машины с бесплатным трафиком (до $0.10 за ТБ)")
 p.add_argument("--rows", type=int, default=20, help="сколько строк показать (20)")
 a = p.parse_args()
+if a.disk is None:
+    tpl = my_template()   # размер диска по умолчанию задаётся в мастере и хранится в шаблоне
+    a.disk = int((tpl or {}).get("recommended_disk_space") or 100)
 
 # Фильтры поиска — проверены на живом API (см. CLAUDE.md, раздел Vast API)
 query = {

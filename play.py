@@ -13,17 +13,22 @@
 
 import argparse
 import json
+import re
 import sys
 import time
 
-from vastapi import TEMPLATE_NAME, call, list_instances
+from vastapi import TEMPLATE_NAME, call, list_instances, my_template
 from wolfnode import NODE, WOLF_PORT, ts_node, wolf_status
 
 
 p = argparse.ArgumentParser(description="Арендовать машину и дождаться готовности")
 p.add_argument("offer", type=int, help="ID машины из таблицы offers.py")
-p.add_argument("--disk", type=int, default=100, help="размер диска, ГБ (100)")
-p.add_argument("--no-games", action="store_true", help="не загружать игры из облака (SYNC_STEAM_GAMES=0)")
+p.add_argument("--disk", type=int, help="размер диска, ГБ (по умолчанию — из шаблона)")
+g = p.add_mutually_exclusive_group()
+g.add_argument("--games", dest="games", action="store_const", const="1",
+               help="синхронизировать игры Steam с облаком (SYNC_STEAM_GAMES=1)")
+g.add_argument("--no-games", dest="games", action="store_const", const="0",
+               help="не синхронизировать игры Steam (SYNC_STEAM_GAMES=0); без флага — как в шаблоне")
 p.add_argument("--dry-run", action="store_true", help="только показать, что будет отправлено")
 a = p.parse_args()
 
@@ -32,16 +37,6 @@ def ask(question):
     """Задать вопрос; True — только если человек напечатал «да»."""
     import readline  # noqa: F401 — с ним в ответе работают стрелки и Backspace, а не печатаются ^[[C
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
-
-
-def template_hash(name):
-    """hash_id моего шаблона с таким именем (чужие шаблоны с тем же именем не берём)."""
-    me = call("GET", "users/current/").get("id")
-    ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}).get("templates", [])
-    mine = [t for t in ts if t.get("creator_id") == me]
-    if len(mine) != 1:
-        sys.exit(f"Шаблон «{name}» у тебя в аккаунте найден {len(mine)} раз — нужен ровно один.")
-    return mine[0]["hash_id"]
 
 
 def fail(instance_id, why):
@@ -62,7 +57,14 @@ if running:
     ids = ", ".join(str(i["id"]) for i in running)
     sys.exit(f"У тебя уже есть инстанс ({ids}). Одновременно — только один: общие архивы и личность Tailscale.")
 
-# ---- 2. Свежая цена этой машины (с нашим диском) и баланс
+# ---- 2. Шаблон (создаёт мастер) и размер диска по умолчанию из него
+tpl = my_template()
+if not tpl:
+    sys.exit(f"Нет шаблона «{TEMPLATE_NAME}» — создай его: vastgame setup")
+if a.disk is None:
+    a.disk = int(tpl.get("recommended_disk_space") or 100)
+
+# ---- 3. Свежая цена этой машины (с нашим диском) и баланс
 # Поле id в фильтре поиска не работает (молча находит 0), а ask_contract_id — работает
 found = call("POST", "bundles/", {
     "ask_contract_id": {"eq": a.offer}, "rentable": {"eq": True}, "type": "ondemand",
@@ -79,18 +81,22 @@ credit = call("GET", "users/current/").get("credit", 0)
 
 body = {
     "client_id": "me",
-    "template_hash_id": template_hash(TEMPLATE_NAME),
+    "template_hash_id": tpl["hash_id"],
     "disk": a.disk,
     "label": "vastgame",
-    # Добавляется к переменным шаблона и аккаунта; wolf-setup.sh читает его при старте
-    "env": {"SYNC_STEAM_GAMES": "0" if a.no_games else "1"},
 }
+if a.games is not None:
+    # Перекрывает значение из шаблона только для этой аренды; wolf-setup.sh читает его при старте
+    body["env"] = {"SYNC_STEAM_GAMES": a.games}
+tpl_games = "1" if re.search(r"-e\s+SYNC_STEAM_GAMES=\"?1", tpl.get("env") or "") else "0"
 
 print(f"Машина {a.offer}: {o['gpu_name']}, {(o.get('geolocation') or '?').strip(', ')}, "
       f"надёжность {o['reliability']:.3f}")
 print(f"Цена: ${o['dph_total']:.3f}/ч (с диском {a.disk} ГБ); трафик: ↑ ${o.get('inet_up_cost', 0) * 1000:.2f}/ТБ, "
       f"↓ ${o.get('inet_down_cost', 0) * 1000:.2f}/ТБ")
-print(f"Игры из облака: {'НЕ загружать' if a.no_games else 'загружать'}.  Баланс: ${credit:.2f} "
+games = a.games or tpl_games
+print(f"Игры Steam в облаке: {'синхронизировать' if games == '1' else 'не синхронизировать'}"
+      f"{'' if a.games else ' (как в шаблоне)'}.  Баланс: ${credit:.2f} "
       f"(хватит примерно на {credit / o['dph_total']:.1f} ч)")
 
 if a.dry_run:
@@ -100,7 +106,7 @@ if a.dry_run:
 if not ask("\nАрендовать? Деньги начнут списываться сразу"):
     sys.exit("Отменено, ничего не арендовано.")
 
-# ---- 3. Аренда
+# ---- 4. Аренда
 t0 = time.time()
 r = call("PUT", f"asks/{a.offer}/", body)
 iid = r.get("new_contract")
@@ -109,7 +115,7 @@ if not r.get("success") or not iid:
 print(f"Арендовано: инстанс {iid}. Жду запуска (обычно 3–15 минут: машина качает образ).")
 print("Ctrl+C прервёт ожидание, но НЕ остановит инстанс — он продолжит работать и тратить деньги.")
 
-# ---- 4a. Vast запускает машину
+# ---- 5a. Vast запускает машину
 last = None
 errors = 0
 deadline = time.time() + 30 * 60
@@ -150,7 +156,7 @@ while True:
         fail(iid, "Машина не запустилась за 30 минут.")
     time.sleep(15)
 
-# ---- 4b. Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
+# ---- 5b. Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
 print("Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
 started = time.time()
 deadline = started + 20 * 60
@@ -175,7 +181,7 @@ while True:
     time.sleep(15)
 print(f"Tailscale: {dns or ip} ({ip}) онлайн.")
 
-# ---- 4c. wolf восстанавливает всё из Google Drive; показываем, как меняются архивы
+# ---- 5c. wolf восстанавливает всё из Google Drive; показываем, как меняются архивы
 print("Восстановление из Google Drive:")
 seen = {}
 while True:
@@ -189,7 +195,7 @@ while True:
         break
     time.sleep(10)
 
-# ---- 5. Готово
+# ---- 6. Готово
 print()
 if boot[1] == "err":
     print(f"!!! Восстановление с ошибками: {boot[2]}")

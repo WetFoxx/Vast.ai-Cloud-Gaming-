@@ -16,7 +16,7 @@ import sys
 
 import keyring   # доступ к Keychain («Связка ключей») macOS
 
-from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, call, check_key
+from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, call, check_key, my_template
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 
@@ -260,9 +260,106 @@ def step_tailscale():
     return False
 
 
+# Скрипт wolf-setup.sh — закреплённая ревизия gist (v3.8, совпадает с wolf-setup.sh в проекте).
+# Закреплённая ссылка: изменения в gist не попадут на машины, пока здесь не поменяют ревизию
+SCRIPT_URL = ("https://gist.githubusercontent.com/WetFoxx/792f2333664d95c442fa451063b16436/raw/"
+              "64a7c7aaf56456b5a20ebcf34ff35b82e46e35ed/gistfile1.txt")
+IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
+# Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
+# Tailscale (41641/udp, 3478/udp — STUN)
+PORTS = ["47984:47984", "47989:47989", "48010:48010", "47999:47999/udp", "47998:47998/udp",
+         "48100:48100/udp", "48200:48200/udp", "48000:48000/udp", "1111:1111", "3478:3478/udp",
+         "5900:5900", "6100:6100", "6200:6200", "41641:41641/udp"]
+# Служебные переменные Vast: кнопка Open и доступ к рабочему столу через браузер (как в шаблонах Vast)
+PORTAL = ('-e OPEN_BUTTON_TOKEN=1 -e OPEN_BUTTON_PORT="1111" '
+          '-e PORTAL_CONFIG="localhost:1111:11111:/:Instance Portal|localhost:6100:16100:/:Selkies Low Latency Desktop'
+          '|localhost:6200:16200:/:Apache Guacamole Desktop (VNC)"')
+ONSTART = f"""#!/bin/bash
+URL='{SCRIPT_URL}'
+for _ in {{1..30}}; do
+  curl -fsSL "$URL" -o /root/setup.sh && [ -s /root/setup.sh ] && break
+  sleep 5
+done
+exec bash /root/setup.sh"""
+
+
+def env_value(env, name):
+    """Значение -e ИМЯ=... из строки env шаблона (без кавычек) или None."""
+    m = re.search(rf'-e\s+{name}=("[^"]*"|\S*)', env or "")
+    return m.group(1).strip('"') if m else None
+
+
+def choose(question, current, check=None):
+    """Спросить значение; Enter — оставить текущее. check(v) → текст ошибки или None."""
+    while True:
+        v = input(f"  {question} [{current or 'пусто'}]: ").strip()
+        if not v:
+            return current
+        if v == "-":
+            return ""
+        err = check(v) if check else None
+        if not err:
+            return v
+        print(f"    ✗ {err}")
+
+
+def step_template():
+    """Шаг 4: приватный шаблон Vast с настройками игровой машины — без ключей."""
+    title(4, "Шаблон Vast")
+    old = my_template()
+    env = (old or {}).get("env") or ""
+    print(f"""  Шаблон «{TEMPLATE_NAME}» — рецепт игровой машины: образ KVM, порты, загрузчик wolf-setup.sh
+  и твои настройки. Ключей в нём нет: они приходят из переменных аккаунта Vast.
+  {'Шаблон уже есть — Enter оставит текущее значение.' if old else 'Шаблона ещё нет — создам. Enter — значение по умолчанию.'}
+  «-» очищает значение.
+""")
+    disk = choose("Диск по умолчанию, ГБ (игры + ~20 ГБ)",
+                  str(int((old or {}).get("recommended_disk_space") or 100)),
+                  lambda v: None if v.isdigit() and 30 <= int(v) <= 2000 else "число от 30 до 2000")
+    lang = choose("Язык Steam (russian, english, ...; пусто — как в настройках Steam)",
+                  env_value(env, "STEAM_LANG") or "",
+                  lambda v: None if re.fullmatch(r"[a-z_]+", v) else "одно слово латиницей, например russian")
+    res = choose("Базовое разрешение рабочего стола", env_value(env, "RES") or "1920x1200",
+                 lambda v: None if re.fullmatch(r"\d{3,4}x\d{3,4}", v) else "в виде 1920x1200")
+    games = choose("Синхронизировать игры Steam с облаком? 1 — да, 0 — нет (перекачивать из Steam)",
+                   env_value(env, "SYNC_STEAM_GAMES") or "0",
+                   lambda v: None if v in ("0", "1") else "0 или 1")
+
+    settings = f"-e RES={res} -e SYNC_STEAM_GAMES={games}" + (f" -e STEAM_LANG={lang}" if lang else "")
+    body = {
+        "name": TEMPLATE_NAME,
+        "desc": "vastgame: облачный игровой ПК (Steam + Sunshine + Tailscale + Google Drive)",
+        "image": IMAGE, "tag": IMAGE_TAG, "repo": IMAGE,
+        "href": "https://hub.docker.com/r/vastai/kvm",
+        "env": " ".join(f"-p {x}" for x in PORTS) + " " + PORTAL + " " + settings,
+        "onstart": ONSTART,
+        "runtype": "ssh", "use_ssh": True, "ssh_direct": True, "jup_direct": True,
+        "docker_login_repo": "", "docker_login_user": "", "docker_login_pass": "",
+        "extra_filters": {"compute_cap": {"gte": 750}, "vms_enabled": {"eq": True}},
+        "recommended_disk_space": int(disk),
+        "private": True,
+    }
+    if old:
+        body["hash_id"] = old["hash_id"]      # изменить существующий (как vastai update template)
+    r = call("PUT" if old else "POST", "template/", body)
+    if not r.get("success"):
+        print(f"  ✗ Vast не сохранил шаблон: {r.get('msg') or 'без объяснения'}")
+        return False
+
+    # Проверка: шаблон читается обратно с нашими настройками
+    new = my_template()
+    if not new or new.get("onstart") != ONSTART or env_value(new.get("env"), "RES") != res:
+        print("  ✗ Шаблон сохранён, но читается не так, как ожидалось — проверь на сайте Vast.")
+        return False
+    print(f"  ✓ Шаблон «{TEMPLATE_NAME}» {'обновлён' if old else 'создан'} (приватный): диск {disk} ГБ, "
+          f"разрешение {res}, язык Steam {lang or 'как в Steam'}, игры Steam {'в облаке' if games == '1' else 'из Steam'}.")
+    print(f"    Скрипт: wolf-setup.sh, ревизия gist {SCRIPT_URL.split('/raw/')[1][:7]}")
+    return True
+
+
 def summary():
     """Итог: что настроено, и предупреждения."""
-    title(4, "Итог")
+    title(5, "Итог")
     have = call("GET", "secrets/").get("secrets") or {}
     vast_ok = keyring.get_password(SERVICE, "VAST_API_KEY") is not None
     print(f"  {'✓' if vast_ok else '!'} Ключ Vast: {'в Keychain' if vast_ok else f'пока в файле {KEY_FILE} — перенеси (шаг 1)'}")
@@ -295,6 +392,8 @@ def wizard():
     if not step_google():
         sys.exit(1)
     if not step_tailscale():
+        sys.exit(1)
+    if not step_template():
         sys.exit(1)
     summary()
     print("\nГотово. Дальше: vastgame offers → vastgame play <ID> → играть → vastgame stop")
