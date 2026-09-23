@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vastgame</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <div class="brand">vastgame</div>
+    <div class="updated" id="updated">загрузка…</div>
+  </header>
+
+  <main>
+    <section class="card" id="balance-card">
+      <div class="label">Баланс Vast</div>
+      <div class="big" id="balance">—</div>
+      <div class="sub" id="balance-sub"></div>
+    </section>
+
+    <section class="card" id="machine-card">
+      <div class="status-row">
+        <span class="dot" id="dot"></span>
+        <div>
+          <div class="title" id="status-title">—</div>
+          <div class="sub" id="status-text"></div>
+        </div>
+      </div>
+      <div class="machine" id="machine" hidden></div>
+      <div class="links" id="links" hidden>
+        <div class="link-row">
+          <div>
+            <div class="label">Moonlight — добавь ПК по имени</div>
+            <code id="moonlight"></code>
+          </div>
+          <button class="small" id="copy-moonlight">Копировать</button>
+        </div>
+        <div class="link-row">
+          <div>
+            <div class="label">Кабинет Sunshine — PIN для Moonlight</div>
+          </div>
+          <button class="small" id="open-sunshine">Открыть</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button class="primary" id="play" disabled title="Появится на следующем шаге">Играть</button>
+      <button id="stop" disabled title="Появится на следующем шаге">Закончить</button>
+    </div>
+
+    <div class="error" id="error" hidden></div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

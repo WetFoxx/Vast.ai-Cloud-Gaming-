@@ -136,6 +136,31 @@ class TestWaitReady(Base):
         self.assertEqual(lost[0][0], "warn")
 
 
+class TestStatus(Base):
+    def machine(self, vast="running", msg="", node=True, page=None):
+        self.patch(core, "list_instances", lambda: [{"id": 7, "gpu_name": "RTX 3090", "geolocation": "Latvia, LV",
+                                                     "dph_total": 0.2, "actual_status": vast, "status_msg": msg}])
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "vastai-gaming.t.ts.net") if node else None)
+        self.patch(core, "wolf_status", lambda ip: page)
+        return core.status()
+
+    def test_states(self):
+        self.patch(core, "list_instances", lambda: [])
+        self.assertEqual(core.status()["state"], core.NONE)
+        self.assertEqual(self.machine(vast="loading")["stage"], "vast")
+        self.assertEqual(self.machine(vast="created", msg="Error response from daemon")["state"], core.ERROR)
+        self.assertEqual(self.machine(node=False)["stage"], "tailscale")
+        self.assertEqual(self.machine(page={"boot": (1, "down", "Steam"), "identity": (1, "ok", "")})["stage"], "restore")
+        ok = {"boot": (1, "ok", ""), "steam-state": (2, "ok", "")}
+        r = self.machine(page=ok)
+        self.assertEqual(r["state"], core.READY)
+        self.assertEqual(r["machine"]["country"], "Latvia, LV")
+        self.assertEqual(r["links"]["moonlight"], "vastai-gaming.t.ts.net")
+        self.assertEqual(self.machine(page=dict(ok, **{"pfx--1": (3, "up", "")}))["state"], core.SYNCING)
+        self.assertEqual(self.machine(page=dict(ok, **{"pfx--1": (3, "err", "")}))["state"], core.ERROR)
+        self.assertEqual(self.machine(page={"boot": (1, "err", "ошибки")})["state"], core.ERROR)
+
+
 class TestStop(Base):
     def setup_machine(self, after, shutdown_code=0, answer=True):
         alive = [42]

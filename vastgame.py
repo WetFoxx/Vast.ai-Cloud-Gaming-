@@ -9,6 +9,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 COMMANDS = {
+    "app":     ("gui.py",     "открыть окно приложения"),
     "setup":   ("setup.py",   "первая настройка: ключи Vast, Google Drive, Tailscale"),
     "balance": ("balance.py", "баланс Vast"),
     "offers":  ("offers.py",  "подходящие машины (--free — только с бесплатным трафиком)"),

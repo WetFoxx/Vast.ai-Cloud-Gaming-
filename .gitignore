@@ -7,3 +7,5 @@ __pycache__/
 *.key
 # Служебный файл Finder
 .DS_Store
+# Настройки Claude Code для этого Mac (абсолютные пути)
+.claude/
