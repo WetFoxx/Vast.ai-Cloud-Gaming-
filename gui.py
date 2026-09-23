@@ -170,11 +170,17 @@ class Api:
             credit = core.balance()
         except VastgameError as e:
             return {"error": error_data(e)}
+        try:
+            last = market.last_machine(disk)
+        except VastgameError:
+            last = None          # не удалось проверить последнюю машину — список машин всё равно показать
+        row = lambda o: {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
+                         "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
+                         "reliability": o["reliability"]}
         return {"disk": disk, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
-                "sync": self._sync(),
-                "offers": [{"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
-                            "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
-                            "reliability": o["reliability"]} for o in rows[:OFFERS_SHOWN]]}
+                "sync": self._sync(), "offers": [row(o) for o in rows[:OFFERS_SHOWN]],
+                "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
+                                  "offer": last["offer"] and row(last["offer"])}}
 
     def check_offer(self, offer_id):
         """Свежие данные машины прямо перед подтверждением аренды."""

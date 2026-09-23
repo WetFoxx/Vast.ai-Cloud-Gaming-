@@ -45,6 +45,17 @@ class TestRemove(unittest.TestCase):
         self.assertEqual([g["name"] for g in d["games"]], ["pfx--1"])
         self.assertEqual(d["service"]["names"], ["identity"])
 
+    def test_first_run_creates_folder(self):
+        made = []
+        state = {"arch": None}                        # папки на Drive ещё нет — rclone не может её открыть
+        def ensure():
+            made.append(1); state["arch"] = {}; return True
+        with mock.patch.object(cloudgames.drive, "archives", lambda: state["arch"]), \
+             mock.patch.object(cloudgames.drive, "ensure_folder", ensure):
+            d = cloudgames.listing()
+        self.assertEqual(made, [1])
+        self.assertEqual(d["games"], [])
+
     def test_no_machine_goes_to_trash_with_deltas(self):
         self.machine(running=False, node=False)
         self.assertEqual(cloudgames.remove("pfx--1"), "drive")

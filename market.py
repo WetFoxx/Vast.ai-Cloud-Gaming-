@@ -5,6 +5,7 @@ import datetime
 import json
 import re
 
+import history
 from settings import config_dir
 from vastapi import call
 
@@ -36,8 +37,9 @@ def mark_bad(machine_id, reason):
     BAD_HOSTS.write_text(json.dumps(bad, ensure_ascii=False, indent=1))
 
 
-def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb=STREAM_GB):
+def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb=STREAM_GB, where=None):
     """Подходящие машины, от дешёвых к дорогим по полной цене часа.
+    where — дополнительные фильтры Vast, например {"machine_id": {"eq": 140348}}.
 
     Возвращает список словарей-предложений Vast с добавленными полями:
     _traffic ($/ч за стрим), _total (аренда с диском + трафик).
@@ -53,6 +55,7 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         "disk_space": {"gte": disk},        # на машине хватает места под наш диск
         "allocated_storage": disk,          # чтобы цена в час сразу включала этот диск
         "limit": 1000,
+        **(where or {}),
     }).get("offers", [])
     bad = bad_hosts()
     rows = []
@@ -70,6 +73,18 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         o["_total"] = o["dph_total"] + o["_traffic"]
         rows.append(o)
     return sorted(rows, key=lambda o: (o["_total"], -o["reliability"]))
+
+
+def last_machine(disk):
+    """Машина последней сессии (та же физическая машина хоста, диск у неё будет новый) и её предложение
+    сейчас. None — сессий с известной машиной нет; "offer": None — машина занята или больше не сдаётся.
+    Хосты из чёрного списка пропускаются; надёжность не проверяем — человек выбирает машину сам."""
+    s = history.last_machine(skip=bad_hosts())
+    if not s:
+        return None
+    rows = search(disk, min_rel=0, where={"machine_id": {"eq": s["machine_id"]}})
+    return {"machine_id": s["machine_id"], "gpu": s.get("gpu"), "country": s.get("country"),
+            "start": s.get("start"), "offer": rows[0] if rows else None}
 
 
 def country(o):

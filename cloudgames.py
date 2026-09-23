@@ -22,6 +22,8 @@ def listing():
     if not drive.token():
         raise VastgameError("Нет токена Google Drive — пройди первую настройку: vastgame setup", key="games.no_token")
     arch = drive.archives()
+    if arch is None and drive.ensure_folder():   # папки ещё нет (первый запуск) — создать и открыть пустую
+        arch = drive.archives()
     if arch is None:
         raise VastgameError("Не удалось открыть Google Drive — проверь интернет или пройди шаг 2: vastgame setup",
                             key="games.drive_failed")

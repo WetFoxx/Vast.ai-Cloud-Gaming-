@@ -25,6 +25,32 @@ def wait_done(api, timeout=5):
     raise AssertionError("операция не закончилась")
 
 
+class TestOffers(unittest.TestCase):
+    def setUp(self):
+        row = dict(OFFER, country="Latvia, LV", _traffic=0.01, _total=0.21, reliability=0.99)
+        for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
+                                 (gui.core, "template", lambda: {"recommended_disk_space": 100}),
+                                 (gui.core, "balance", lambda: 3.0),
+                                 (gui.market, "search", lambda disk: [row])]:
+            p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
+        self.row = row
+
+    def test_last_machine_free(self):
+        last = {"gpu": "RTX 3060", "country": "Ohio, US", "start": 5, "offer": dict(self.row, id=77)}
+        with mock.patch.object(gui.market, "last_machine", lambda disk: last):
+            d = gui.Api().offers()
+        self.assertEqual(d["last"]["offer"]["id"], 77)
+        self.assertEqual(d["offers"][0]["id"], 5)
+
+    def test_last_machine_check_fails_but_list_shows(self):
+        def boom(disk):
+            raise VastgameError("429")
+        with mock.patch.object(gui.market, "last_machine", boom):
+            d = gui.Api().offers()
+        self.assertIsNone(d["last"])
+        self.assertEqual(len(d["offers"]), 1)
+
+
 class TestPlay(unittest.TestCase):
     def setUp(self):
         self.rented = []

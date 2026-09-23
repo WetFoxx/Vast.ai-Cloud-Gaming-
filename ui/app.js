@@ -179,15 +179,29 @@ async function openOffers() {
 const SYNC_KEYS = ["steam_games", "other_games", "saves"];
 function syncChoice() { return Object.fromEntries(SYNC_KEYS.map((k) => [k, $("sync-" + k).checked])); }
 
+// Машины в таблице: последняя (если свободна) — первой строкой с пометкой, дальше лучшие по цене
+function offerList(d) {
+  const last = d.last && d.last.offer;
+  return last ? [{ ...last, last: true }, ...d.offers.filter((o) => o.id !== last.id)] : d.offers;
+}
+
 function renderOffers() {
   const d = offersData;
   if (!d) return;
   $("offers-summary").textContent = t("offers.summary", { count: d.count, rel: num(d.min_rel * 100, 0), disk: d.disk });
+  const L = d.last;
+  $("offers-last").hidden = !L;
+  if (L) {
+    const when = L.start ? new Date(L.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—";
+    $("offers-last").textContent = t(L.offer ? "offers.last.free" : "offers.last.busy",
+      { machine: `${L.gpu || "?"} · ${L.country || "?"}`, date: when });
+  }
   const body = $("offers-table").querySelector("tbody");
   body.innerHTML = "";
-  if (!d.offers.length) { showError("offers-error", { key: "offers.none" }); return; }
-  if (selected == null) selected = d.offers[0].id;
-  for (const o of d.offers) {
+  const list = offerList(d);
+  if (!list.length) { showError("offers-error", { key: "offers.none" }); return; }
+  if (selected == null) selected = (d.offers[0] || list[0]).id;   // по умолчанию — самая выгодная, не последняя
+  for (const o of list) {
     const tr = document.createElement("tr");
     tr.className = o.id === selected ? "selected" : "";
     tr.innerHTML = `<td><input type="radio" name="offer"></td><td></td><td></td>
@@ -195,6 +209,7 @@ function renderOffers() {
     const c = tr.children;
     c[0].firstChild.checked = o.id === selected;
     c[1].textContent = o.gpu;
+    if (o.last) { const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = t("offers.last.tag"); c[1].appendChild(tag); }
     c[2].textContent = o.country;
     c[3].textContent = money(o.price);
     c[4].textContent = money(o.traffic);
@@ -796,11 +811,14 @@ function demoState(kind) {
 function demoOffers() {
   const rows = [["RTX 3060", "Pennsylvania, US", 0.113, 0.039, 0.989], ["RTX 3070", "British Columbia, CA", 0.119, 0.039, 0.999],
     ["RTX 3090", "Latvia, LV", 0.204, 0.0, 0.989], ["RTX 4090", "Iceland, IS", 0.421, 0.0, 0.999], ["RTX 3090", "Czechia, CZ", 0.471, 0.0, 0.995]];
-  return { disk: 100, min_rel: 0.97, count: 37, balance: 3.18, sync: { steam_games: false, other_games: true, saves: true },
-           offers: rows.map((r, i) => ({ id: 100 + i, gpu: r[0], country: r[1], price: r[2], traffic: r[3], total: r[2] + r[3], reliability: r[4] })) };
+  const offers = rows.map((r, i) => ({ id: 100 + i, gpu: r[0], country: r[1], price: r[2], traffic: r[3], total: r[2] + r[3], reliability: r[4] }));
+  const busy = new URLSearchParams(location.search).get("last") === "busy";
+  return { disk: 100, min_rel: 0.97, count: 37, balance: 3.18, sync: { steam_games: false, other_games: true, saves: true }, offers,
+           last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
+                   offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", price: 0.162, traffic: 0.05, total: 0.212, reliability: 0.991 } } };
 }
 function demoCheck() {
-  const o = offersData.offers.find((x) => x.id === selected);
+  const o = offerList(offersData).find((x) => x.id === selected);
   return { ...o, balance: 3.18, hours: 3.18 / o.price, bad_reason: null };
 }
 let demoTick = 0;

@@ -122,6 +122,8 @@ td { padding: 8px; border-top: 1px solid var(--border); }
 th.num, td.num { text-align: right; white-space: nowrap; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 6px; font-size: 11px;
+       background: color-mix(in srgb, var(--accent) 22%, transparent); }
 tbody tr.selected { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 input[type=radio] { accent-color: var(--accent); margin: 0; }
 

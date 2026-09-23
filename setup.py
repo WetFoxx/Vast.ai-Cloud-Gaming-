@@ -492,6 +492,7 @@ def google_login():
     keyring.set_password(SERVICE, "RCLONE_TOKEN_SCOPE", drive.SCOPE)   # токен — через клиент приложения
     if keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN") != token:
         raise VastgameError("Не удалось сохранить токен в Keychain.", key="setup.err.keychain")
+    drive.ensure_folder()    # папка архивов — сразу; не вышло (нет интернета) — создаст экран игр или машина
     return len(token)
 
 

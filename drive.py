@@ -93,6 +93,14 @@ def rclone(*args, tok=None, old=None, timeout=300):
     return subprocess.run([paths.need("rclone"), *args], capture_output=True, text=True, env=env, timeout=timeout)
 
 
+def ensure_folder():
+    """Создать папку архивов на Drive, если её нет; True — папка есть.
+
+    С доступом drive.file приложение видит только то, что создало само: папку, сделанную руками на сайте,
+    оно не увидит. Поэтому папку создаёт приложение сразу после входа в Google (а не первая машина)."""
+    return rclone("mkdir", REMOTE + FOLDER, timeout=120).returncode == 0
+
+
 def check(tok, old=None):
     """Проверить токен: (почта владельца Drive, число файлов в папке или None, ГБ) или None, если не работает."""
     # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её

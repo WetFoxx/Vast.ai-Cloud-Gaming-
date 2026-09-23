@@ -28,6 +28,14 @@ class TestHistory(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    def test_last_machine(self):
+        self.assertIsNone(history.last_machine())
+        history.started(7, {"gpu_name": "RTX 3090", "machine_id": 111}, t0=100)
+        history.started(8, {"gpu_name": "RTX 3060", "machine_id": 222}, t0=200)
+        history.started(9, {}, t0=300)                                      # машина неизвестна — пропустить
+        self.assertEqual(history.last_machine()["machine_id"], 222)
+        self.assertEqual(history.last_machine(skip={"222"})["machine_id"], 111)   # хост в чёрном списке
+
     def test_local_sessions(self):
         history.started(7, {"gpu_name": "RTX 3090", "geolocation": "Latvia, LV", "dph_total": 0.2}, t0=100)
         self.assertEqual(history.current(7)["gpu"], "RTX 3090")

@@ -59,6 +59,11 @@ def reconcile(running_ids):
         _save(rows)
 
 
+def last_machine(skip=()):
+    """Последняя сессия с известной машиной хоста (machine_id), кроме машин из skip; или None."""
+    return next((r for r in reversed(_load()) if r.get("machine_id") and str(r["machine_id"]) not in skip), None)
+
+
 def current(iid):
     """Открытая сессия этой машины (для «идёт N мин, ~$X») или None."""
     return next((r for r in reversed(_load()) if r["iid"] == iid and not r["end"]), None)
