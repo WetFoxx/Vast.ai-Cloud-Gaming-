@@ -1,21 +1,137 @@
-# setup.py — настройка: ключи и токены хранятся в Keychain macOS, а не в файлах.
-# Запуск: .venv/bin/python setup.py google    — войти в Google и сохранить токен Drive
-#         .venv/bin/python setup.py vast      — записать токен из Keychain в переменные аккаунта Vast
+# setup.py — первая настройка: мастер по шагам. Ключи и токены хранятся в Keychain macOS.
+# Запуск: vastgame setup           — мастер: проверка Mac, ключ Vast (дальше — Google, Tailscale)
+#         vastgame setup google    — войти в Google и сохранить токен Drive
+#         vastgame setup vast      — записать токен из Keychain в переменные аккаунта Vast
 #
-# Никакие токены не выводятся на экран: только «сохранён, N символов».
+# Никакие ключи и токены не выводятся на экран: только проверки («баланс $3.29»).
 
 import argparse
 import base64
+import getpass    # скрытый ввод — как пароль: вставленное не видно на экране
 import json
 import re
+import shutil     # shutil.which — найти программу на Mac
 import subprocess
 import sys
 
 import keyring   # доступ к Keychain («Связка ключей») macOS
 
-from vastapi import call
+from vastapi import KEY_FILE, SERVICE, call, check_key
 
-SERVICE = "vastgame"   # под этим именем записи видны в приложении «Связка ключей»
+VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
+
+
+def ask(question):
+    """Вопрос да/нет; True — только если человек ответил «да»."""
+    import readline  # noqa: F401 — стрелки и Backspace в ответе
+    return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
+
+
+def title(n, text):
+    print(f"\n━━ Шаг {n}. {text} " + "━" * max(0, 50 - len(text)))
+
+
+def step_mac():
+    """Шаг 0: на Mac есть всё, что нужно утилите. Возвращает True, если можно продолжать."""
+    title(0, "Проверка Mac")
+    ok = True
+    if shutil.which("rclone"):
+        v = subprocess.run(["rclone", "version"], capture_output=True, text=True).stdout.split("\n")[0]
+        print(f"  ✓ rclone: {v.replace('rclone ', '')}")
+    else:
+        ok = False
+        print("  ✗ rclone не установлен — он нужен для входа в Google Drive.")
+        print("    Установи: brew install rclone" if shutil.which("brew")
+              else "    Установи: https://rclone.org/install/")
+    if shutil.which("ssh"):
+        print("  ✓ ssh")
+    else:
+        ok = False
+        print("  ✗ ssh не найден (обычно он есть в macOS всегда)")
+    if not shutil.which("tailscale"):
+        ok = False
+        print("  ✗ Tailscale не установлен — через него идёт стрим и управление машиной.")
+        print("    Установи: https://tailscale.com/download/mac и войди в свою сеть.")
+    else:
+        try:
+            st = json.loads(subprocess.run(["tailscale", "status", "--json"],
+                                           capture_output=True, text=True, timeout=20).stdout)
+        except Exception:
+            st = {}
+        if st.get("BackendState") == "Running":
+            suffix = (st.get("MagicDNSSuffix") or "").rstrip(".")
+            print(f"  ✓ Tailscale: Mac в сети{f' {suffix}' if suffix else ''}")
+            if not (st.get("CurrentTailnet") or {}).get("MagicDNSEnabled", True):
+                print("  ! MagicDNS выключен — Moonlight не найдёт машину по имени.")
+                print("    Включи: login.tailscale.com/admin/dns → Enable MagicDNS")
+        else:
+            ok = False
+            print(f"  ✗ Tailscale установлен, но Mac не в сети (состояние: {st.get('BackendState', 'неизвестно')}).")
+            print("    Открой Tailscale в строке меню и войди.")
+    return ok
+
+
+def step_vast_key():
+    """Шаг 1: ключ API Vast — в Keychain, проверенный."""
+    title(1, "Ключ Vast")
+    saved = keyring.get_password(SERVICE, "VAST_API_KEY")
+    if saved:
+        credit = check_key(saved)
+        if credit is not None:
+            print(f"  ✓ Ключ Vast в Keychain работает. Баланс: ${credit:.2f}")
+            if not ask("  Заменить ключ?"):
+                return True
+        else:
+            print("  ✗ Ключ Vast в Keychain больше не работает (Vast его не принимает) — нужен новый.")
+
+    # Старый файл ~/.vast_api_key — предложить перенести, а не вводить заново
+    elif KEY_FILE.exists():
+        old = KEY_FILE.read_text().strip()
+        credit = check_key(old) if old else None
+        if credit is not None:
+            print(f"  Найден ключ в старом файле {KEY_FILE} — он работает (баланс ${credit:.2f}).")
+            if ask("  Перенести его в Keychain? («нет» — ввести другой ключ)"):
+                keyring.set_password(SERVICE, "VAST_API_KEY", old)
+                print("  ✓ Ключ перенесён в Keychain.")
+                if ask(f"  Удалить файл {KEY_FILE}? Ключ в открытом файле больше не нужен"):
+                    KEY_FILE.unlink()
+                    print("  ✓ Файл удалён.")
+                return True
+
+    print(f"""
+  Утилите нужен API-ключ Vast: им она ищет машины, арендует и удаляет их.
+  1. Открой {VAST_KEYS_URL}
+  2. Нажми «+ New», дай имя (например, vastgame) и создай ключ.
+  3. Скопируй ключ и вставь сюда. Ввод скрыт, как пароль: на экране ничего не появится.""")
+    if ask("\n  Открыть страницу в браузере?"):
+        subprocess.run(["open", VAST_KEYS_URL])
+    for _ in range(3):
+        key = getpass.getpass("\n  Ключ Vast (вставь и нажми Enter): ").strip()
+        if not key:
+            print("  Пусто — попробуй ещё раз.")
+            continue
+        credit = check_key(key)
+        if credit is None:
+            print("  ✗ Vast не принял этот ключ. Проверь, что скопирован целиком.")
+            continue
+        keyring.set_password(SERVICE, "VAST_API_KEY", key)
+        print(f"  ✓ Ключ работает (баланс ${credit:.2f}) и сохранён в Keychain.")
+        if KEY_FILE.exists() and ask(f"  Удалить старый файл {KEY_FILE}? Теперь ключ в Keychain"):
+            KEY_FILE.unlink()
+            print("  ✓ Файл удалён.")
+        return True
+    print("  ✗ Ключ так и не принят. Запусти vastgame setup ещё раз, когда будет ключ.")
+    return False
+
+
+def wizard():
+    print("Первая настройка vastgame. Каждый шаг можно пройти заново: уже настроенное мастер проверит")
+    print("и спросит, менять ли. Ключи хранятся в Keychain macOS и на экран не выводятся.")
+    if not step_mac():
+        sys.exit("\nИсправь то, что отмечено ✗, и запусти vastgame setup снова.")
+    if not step_vast_key():
+        sys.exit(1)
+    print("\nШаги 2 (Google Drive) и 3 (Tailscale) пока отдельно: vastgame setup google, vastgame setup vast.")
 
 
 def find_refresh_token(x):
@@ -94,11 +210,16 @@ def vast():
     print(f"Переменные аккаунта сейчас: {', '.join(sorted(have))}")
 
 
-p = argparse.ArgumentParser(description="Настройка vastgame: ключи в Keychain")
-p.add_argument("what", choices=["google", "vast"],
-               help="google — войти в Google и сохранить токен Drive; vast — записать его в аккаунт Vast")
+p = argparse.ArgumentParser(description="Первая настройка vastgame: ключи в Keychain")
+p.add_argument("what", nargs="?", choices=["google", "vast"],
+               help="без параметра — мастер; google — войти в Google; vast — токен Drive в аккаунт Vast")
 a = p.parse_args()
-if a.what == "google":
+if a.what is None:
+    try:
+        wizard()
+    except (KeyboardInterrupt, EOFError):
+        sys.exit("\n\nНастройка прервана. Уже сохранённое осталось; запусти vastgame setup, чтобы продолжить.")
+elif a.what == "google":
     google()
 elif a.what == "vast":
     vast()

@@ -6,21 +6,34 @@ import json
 import sys
 from pathlib import Path
 
+import keyring
 import requests
 
 HOST = "https://console.vast.ai/"
 API = HOST + "api/v0/"
-KEY_FILE = Path.home() / ".vast_api_key"
+KEY_FILE = Path.home() / ".vast_api_key"   # старое место ключа — до переноса в Keychain
+SERVICE = "vastgame"                        # имя записей в Keychain («Связка ключей»)
 
 
 def read_key():
-    """Прочитать API-ключ из файла. Сам ключ никуда не выводится."""
-    if not KEY_FILE.exists():
-        sys.exit(f"Нет файла с ключом: {KEY_FILE}")
-    key = KEY_FILE.read_text().strip()
+    """API-ключ Vast: из Keychain, а если его там ещё нет — из старого файла. Ключ никуда не выводится."""
+    key = keyring.get_password(SERVICE, "VAST_API_KEY")
+    if not key and KEY_FILE.exists():
+        key = KEY_FILE.read_text().strip()
     if not key:
-        sys.exit(f"Файл {KEY_FILE} пустой")
+        sys.exit("Нет ключа Vast — запусти первую настройку: vastgame setup")
     return key
+
+
+def check_key(key):
+    """Проверить ключ, не сохраняя его: баланс ($) — если ключ рабочий, None — если Vast его не принял."""
+    try:
+        r = requests.get(API + "users/current/", headers={"Authorization": f"Bearer {key}"}, timeout=30)
+    except requests.RequestException as e:
+        sys.exit(f"Не удалось связаться с Vast: {type(e).__name__}")
+    if r.status_code != 200:
+        return None
+    return r.json().get("credit", 0)
 
 
 def call(method, path, body=None, params=None, base=API):
