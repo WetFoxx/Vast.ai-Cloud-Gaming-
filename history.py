@@ -113,7 +113,8 @@ def summary(days=30):
     sessions.sort(key=lambda x: x["start"] or 0, reverse=True)
     total = sum(x["amount"] for x in sessions)
     hours = sum(x["hours"] for x in sessions)
-    return {"days": days, "sessions": sessions,
+    first = min((x["start"] for x in sessions if x["start"]), default=None)
+    return {"days": days, "sessions": sessions, "first": first, "now": int(time.time()),
             "totals": {"amount": round(total, 2), "hours": round(hours, 1), "count": len(sessions),
                        "per_hour": round(total / hours, 3) if hours else None,
                        "gpu": round(sum(x["gpu_cost"] for x in sessions), 2),

@@ -463,8 +463,10 @@ function renderHistory() {
   const d = historyData;
   if (!d) return;
   const tt = d.totals;
-  $("history-summary").hidden = !!tt.count;
-  $("history-summary").textContent = tt.count ? "" : t("history.empty");
+  // Реальный период — от первой сессии до сегодня (выбранные «30 дней» могут начинаться раньше неё)
+  const day = (ts) => new Date(ts * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" });
+  $("history-summary").hidden = false;
+  $("history-summary").textContent = tt.count ? t("history.range", { from: day(d.first), to: day(d.now) }) : t("history.empty");
   $("history-stats").hidden = !tt.count;
   $("h-spent").textContent = money(tt.amount);
   $("h-hours").textContent = num(tt.hours);
@@ -841,7 +843,7 @@ function demoHistory(days) {
   const sessions = Array.from({ length: 8 }, (_, i) => ({ iid: 52264565 - i, start: now - i * 86400 * 1.5,
     gpu: i % 3 ? "RTX 3060" : "RTX 3090", country: i % 3 ? "Pennsylvania, US" : "Latvia, LV", hours: 1 + (i % 4) * 0.7,
     amount: 0.12 + i * 0.05 }));
-  return { days, sessions, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
+  return { days, sessions, first: sessions[sessions.length - 1].start, now, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
 }
 
 // ---------------------------------------------------------------- старт

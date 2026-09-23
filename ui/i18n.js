@@ -312,7 +312,8 @@ const I18N = {
     "col.cost": "Сумма",
     "session.running": "идёт {time} · ≈ {cost}",
     "unit.hm": "{h} ч {m} мин",
-    "unit.m": "{m} мин"
+    "unit.m": "{m} мин",
+    "history.range": "Период: {from} — {to}"
   },
   "en": {
     "app.loading": "loading…",
@@ -624,7 +625,8 @@ const I18N = {
     "col.cost": "Cost",
     "session.running": "running for {time} · ≈ {cost}",
     "unit.hm": "{h} h {m} min",
-    "unit.m": "{m} min"
+    "unit.m": "{m} min",
+    "history.range": "Period: {from} — {to}"
   },
   "es": {
     "app.loading": "cargando…",
@@ -936,7 +938,8 @@ const I18N = {
     "col.cost": "Importe",
     "session.running": "en marcha {time} · ≈ {cost}",
     "unit.hm": "{h} h {m} min",
-    "unit.m": "{m} min"
+    "unit.m": "{m} min",
+    "history.range": "Periodo: {from} — {to}"
   }
 };
 

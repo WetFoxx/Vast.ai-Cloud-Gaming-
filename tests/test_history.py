@@ -45,6 +45,7 @@ class TestHistory(unittest.TestCase):
         seven = s["sessions"][1]
         self.assertEqual((seven["gpu"], seven["hours"], seven["traffic_cost"]), ("RTX 3090", 1.2, 0.001))
         self.assertEqual(s["totals"]["count"], 2)
+        self.assertEqual(s["first"], 900)                                 # реальное начало периода
         self.assertAlmostEqual(s["totals"]["amount"], 0.35)
         self.assertAlmostEqual(s["totals"]["hours"], 1.7)
 
