@@ -13,6 +13,7 @@ COMMANDS = {
     "balance": ("balance.py", "баланс Vast"),
     "offers":  ("offers.py",  "подходящие машины (--free — только с бесплатным трафиком)"),
     "play":    ("play.py",    "арендовать машину и дождаться готовности: vastgame play <ID>"),
+    "info":    ("info.py",    "адреса работающей машины: Moonlight, кабинет Sunshine, статус"),
     "stop":    ("stop.py",    "выгрузить всё в облако и удалить машину"),
 }
 

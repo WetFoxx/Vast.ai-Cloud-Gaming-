@@ -37,6 +37,23 @@ def wolf_status(ip):
         return None
 
 
+SUNSHINE_UI_PORT = 47990   # веб-кабинет Sunshine (HTTPS): пароль, PIN для Moonlight
+
+
+def print_links(ip, dns):
+    """Адреса для подключения: Moonlight, кабинет Sunshine, страница статуса wolf."""
+    host = dns or ip   # имя MagicDNS не меняется между арендами (если личность восстановилась), IP — может
+    print(f"""
+  Moonlight — добавь ПК вручную по имени (не по IP):
+      {host}
+  Кабинет Sunshine — PIN для Moonlight, логин и пароль Sunshine:
+      https://{host}:{SUNSHINE_UI_PORT}
+      (браузер предупредит о сертификате — это нормально: у Sunshine свой, самоподписанный)
+  Статус синхронизации:
+      http://{host}:{WOLF_PORT}
+  Всё открывается только с устройств в твоей сети Tailscale.""")
+
+
 def ssh_run(ip, command, timeout=180):
     """Выполнить короткую команду по Tailscale SSH и вернуть (код, вывод).
 

@@ -18,7 +18,7 @@ import sys
 import time
 
 from vastapi import TEMPLATE_NAME, call, list_instances, my_template
-from wolfnode import NODE, WOLF_PORT, ts_node, wolf_status
+from wolfnode import NODE, print_links, ts_node, wolf_status
 
 
 p = argparse.ArgumentParser(description="Арендовать машину и дождаться готовности")
@@ -199,18 +199,17 @@ while True:
 print()
 if boot[1] == "err":
     print(f"!!! Восстановление с ошибками: {boot[2]}")
-    print(f"    Подробности: http://{ip}:{WOLF_PORT}")
-host = dns or ip   # Moonlight подключают по имени (MagicDNS): оно не меняется между арендами, IP — может
+    print("    Подробности — на странице статуса (адрес ниже).")
 print(f"Готово за {int((time.time() - t0) / 60)} мин.")
-print(f"Moonlight: {host}")
+print_links(ip, dns)
 # Личность Tailscale: смотрим на статус identity, а не на имя. Номер в имени (vastai-gaming-5)
 # бывает и у восстановленного узла — если прежние имена заняты старыми узлами в сети
 ident = (wolf_status(ip) or {}).get("identity")
 short = dns.split(".")[0] if dns else ""
 if not ident or ident[1] == "err" or "нет в облаке" in ident[2]:
-    print(f"  !!! Личность Tailscale не восстановилась ({ident[2] if ident else 'нет данных'}): это новый узел,")
+    print(f"\n  !!! Личность Tailscale не восстановилась ({ident[2] if ident else 'нет данных'}): это новый узел,")
     print("      и в Moonlight его придётся добавить заново. Старый узел можно удалить в админке Tailscale.")
 elif short != NODE:
-    print(f"  Узел прежний, но имя с номером ({short}): имя {NODE} занято старым узлом в сети.")
+    print(f"\n  Узел прежний, но имя с номером ({short}): имя {NODE} занято старым узлом в сети.")
     print("  Удали лишние офлайн-узлы vastai-gaming в админке Tailscale — имя станет короче со следующей аренды.")
-print(f"Статус: http://{host}:{WOLF_PORT}   (IP {ip})")
+print("\nАдреса можно показать снова: vastgame info. Закончил играть — vastgame stop")
