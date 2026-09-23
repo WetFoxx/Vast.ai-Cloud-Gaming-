@@ -9,3 +9,5 @@ __pycache__/
 .DS_Store
 # Настройки Claude Code для этого Mac (абсолютные пути)
 .claude/
+# OAuth-клиент Google приложения — встраивается при сборке, в git не попадает
+oauth_client.json

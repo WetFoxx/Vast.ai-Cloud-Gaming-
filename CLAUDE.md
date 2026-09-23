@@ -43,7 +43,7 @@
 - `gh` (GitHub CLI) установлен, вход — WetFoxx (Keychain). Публикация в публичный репозиторий — только после явного «да» Алексея.
 - Vast отвечает **429** при частых запросах — `vastapi.call` повторяет через 2, 4, 8 с.
 - **Экран «Настройка»:** `setupcheck.status()` — шаги ✓/!/✗ (rclone, Tailscale+MagicDNS, Moonlight, ключ Vast, Google, ключ Tailscale, шаблон); при `missing` — плашка и неактивная «Играть», при первом запуске экран открывается сам. Действия (`gui.Api`): установка через Homebrew (`BREW`: rclone, --cask tailscale-app, --cask moonlight) в фоне, «Скачать с сайта», открыть Tailscale/DNS, ключ Vast (скрытое поле, проверка балансом), перенос из ~/.vast_api_key, свой OAuth-клиент (для продвинутых), вход в Google в фоне (`setup.google_login` + `send_google_to_vast`), ключ Tailscale, форма шаблона, «Обновить шаблон». Внизу — инструкция первого подключения Moonlight по PIN. Функции мастера без печати в `setup.py`; терминальный мастер — поверх них.
-- **Открытый вопрос:** зашить OAuth-клиент Google в приложение — предложено хранить в `oauth_client.json` вне git и встраивать при сборке (правило «ключи не в git»). Ждёт решения Алексея.
+- **Решено 2026-09-24:** OAuth-клиент приложения — `oauth_client.json` вне git, встраивается при сборке; свой клиент человека (Keychain) важнее. В Vast отправляются значения того клиента, через который получен токен.
 - **Грабли:** командные файлы (`games.py`, `offers.py`, `info.py`, `migrate.py`, `balance.py`) выполняются при `import` — не импортировать их из другого кода. `setup.py` защищён (`if __name__ == "__main__"`), его функции можно импортировать.
 - Всё запускается одной командой `vastgame <команда>` (`vastgame.py` + `bin/vastgame`, ссылка в `/opt/homebrew/bin`). Общий код: `vastapi.py` (Vast), `wolfnode.py` (Tailscale, SSH, /json), `drive.py` (Drive через rclone: настройки в переменных окружения, личный конфиг rclone не трогается).
 - `setup` — позже: вход в Google, ключ Tailscale, сохранение секретов в Keychain.
@@ -125,7 +125,7 @@
 
 ## Чтобы работало у всех, а не только на Mac Алексея (проверять перед публикацией)
 
-- [ ] OAuth-клиент Google зашит в приложение; шаг «OAuth-клиент» в мастере скрыт (свой клиент — для продвинутых).
+- [~] OAuth-клиент Google: `oauth_client.json` в папке проекта (в .gitignore, права 600), `drive.client()` берёт свой клиент из Keychain, иначе этот файл. Осталось: встроить файл в `.app` при сборке (шаг 9).
 - [x] `wolf-setup.sh` в репозитории проекта (`WetFoxx/Vast.ai-Cloud-Gaming-`, коммит `b9909e7` = v3.9); `SCRIPT_URL` закреплён на коммит. Публичный шаблон `WETFOX CLOUD GAME` и README на GitHub пока ссылаются на старый gist (v3.7).
 - [ ] Приложение собрано (`.app` / `.exe`) со своим Python и библиотеками; не нужен `.venv`, `bin/vastgame`, `/opt/homebrew/bin`.
 - [x] Программы (rclone, tailscale, ssh, brew) ищутся не только в PATH: у приложения из Finder/Dock PATH без Homebrew — `paths.find` смотрит `/opt/homebrew/bin`, `/usr/local/bin`, `Tailscale.app/Contents/MacOS`.

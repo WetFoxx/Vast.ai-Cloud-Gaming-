@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 import keyring
 import requests
@@ -24,10 +25,22 @@ SCOPE = "drive.file"            # доступ только к файлам, к�
 #                               Нужен только для переноса архивов из старой папки.
 
 
+# Клиент приложения лежит рядом с кодом (в собранном приложении — внутри него); в git не попадает
+BUNDLED_CLIENT = Path(__file__).resolve().parent / "oauth_client.json"
+
+
 def client():
-    """(client_id, client_secret) OAuth-клиента приложения или (None, None)."""
-    return (keyring.get_password(SERVICE, "GOOGLE_CLIENT_ID"),
-            keyring.get_password(SERVICE, "GOOGLE_CLIENT_SECRET"))
+    """(client_id, client_secret) OAuth-клиента или (None, None).
+    Сначала свой клиент человека (Keychain, для продвинутых), иначе — клиент приложения (oauth_client.json)."""
+    cid = keyring.get_password(SERVICE, "GOOGLE_CLIENT_ID")
+    secret = keyring.get_password(SERVICE, "GOOGLE_CLIENT_SECRET")
+    if cid and secret:
+        return cid, secret
+    try:
+        d = json.loads(BUNDLED_CLIENT.read_text())
+        return d.get("client_id"), d.get("client_secret")
+    except (OSError, ValueError):
+        return None, None
 
 
 def token():

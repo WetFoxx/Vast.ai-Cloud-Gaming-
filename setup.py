@@ -215,9 +215,9 @@ def show_drive(info):
 def push_drive_token():
     """Отправить клиент и токен из Keychain в переменные аккаунта Vast — оттуда их получает каждая машина."""
     print("  Отправляю доступ к Drive в переменные аккаунта Vast...")
-    push_secret("RCLONE_CLIENT_ID", "GOOGLE_CLIENT_ID")
-    push_secret("RCLONE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET")
-    push_secret("RCLONE_REFRESH_TOKEN")
+    how, names = send_google_to_vast()
+    print(f"  ✓ Доступ к Drive (клиент и токен) {how} в переменных аккаунта Vast.")
+    print(f"    Переменные аккаунта сейчас: {', '.join(names)}")
     return True
 
 
@@ -503,9 +503,10 @@ def google():
 
 
 def send_google_to_vast():
-    """Клиент и токен Drive из Keychain — в переменные аккаунта Vast (оттуда их получает каждая машина)."""
-    send_secret("RCLONE_CLIENT_ID", "GOOGLE_CLIENT_ID")
-    send_secret("RCLONE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET")
+    """Клиент (свой или приложения) и токен Drive — в переменные аккаунта Vast (оттуда их получает машина)."""
+    cid, secret = drive.client()
+    send_secret("RCLONE_CLIENT_ID", value=cid)
+    send_secret("RCLONE_CLIENT_SECRET", value=secret)
     return send_secret("RCLONE_REFRESH_TOKEN")
 
 
@@ -514,11 +515,11 @@ def vast():
     push_secret("RCLONE_REFRESH_TOKEN")
 
 
-def send_secret(name, keychain_name=None):
+def send_secret(name, keychain_name=None, value=None):
     """Записать секрет из Keychain (запись keychain_name, по умолчанию — name) в Environment Variables
     аккаунта Vast под именем name. Vast подставляет их в каждый инстанс — и через утилиту, и через сайт.
     Ничего не печатает. Возвращает (добавлен или обновлён, имена переменных аккаунта)."""
-    token = keyring.get_password(SERVICE, keychain_name or name)
+    token = value or keyring.get_password(SERVICE, keychain_name or name)
     if not token:
         raise VastgameError(f"В Keychain нет {name} — пройди мастер: vastgame setup", key="setup.err.no_secret", name=name)
     # Переменные аккаунта: POST secrets/ — создать, PUT — заменить (как в официальном CLI Vast)
