@@ -12,6 +12,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import gui  # noqa: E402
 from vastapi import VastgameError  # noqa: E402
 
+
+def setUpModule():
+    """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
+    import tempfile
+    import history, market, settings
+    tmp = Path(tempfile.mkdtemp())
+    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS")]:
+        p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
+        p.start()
+        unittest.addModuleCleanup(p.stop)
+
 OFFER = {"id": 5, "gpu_name": "RTX 3090", "geolocation": "Latvia, LV", "dph_total": 0.2, "machine_id": 9}
 
 
@@ -42,6 +53,12 @@ class TestOffers(unittest.TestCase):
         self.assertEqual(d["last"]["offer"]["id"], 77)
         self.assertEqual(d["offers"][0]["id"], 5)
 
+    def test_disk_limits(self):
+        with mock.patch.object(gui.market, "last_machine", lambda disk: None):
+            self.assertEqual(gui.Api().offers(20)["disk"], gui.DISK_MIN)
+            self.assertEqual(gui.Api().offers(5000)["disk"], gui.DISK_MAX)
+            self.assertEqual(gui.Api().offers(300)["disk"], 300)
+
     def test_last_machine_check_fails_but_list_shows(self):
         def boom(disk):
             raise VastgameError("429")
@@ -71,6 +88,7 @@ class TestPlay(unittest.TestCase):
 
     def fake_rent(self, offer_id, body, offer=None):
         self.rented.append(offer_id)
+        self.body = body
         return 42, time.time()
 
     def fake_wait(self, iid, t0, o, ui):
@@ -81,6 +99,13 @@ class TestPlay(unittest.TestCase):
         ui.stage("ready", "…")
         return {"links": {"moonlight": "m", "sunshine": "s", "status": "st"}, "minutes": 7,
                 "boot": (0, "ok", ""), "identity": None, "ip": "1", "dns": "m"}
+
+    def test_disk_from_slider_goes_to_rental(self):
+        self.gate.set()
+        self.assertEqual(self.api.play(5, None, 300), {"ok": True})
+        wait_done(self.api)
+        self.assertEqual(self.body["disk"], 300)
+        self.assertEqual(gui.settings.get("disk"), 300)            # запомнен (во временном файле теста)
 
     def test_normal_play(self):
         self.assertEqual(self.api.play(5), {"ok": True})

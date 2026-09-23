@@ -9,6 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import market  # noqa: E402
 
+
+def setUpModule():
+    """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
+    import tempfile
+    import history, market, settings
+    tmp = Path(tempfile.mkdtemp())
+    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS")]:
+        p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
+        p.start()
+        unittest.addModuleCleanup(p.stop)
+
 OFFER = {"id": 41118946, "machine_id": 222, "gpu_name": "RTX 3060", "dph_total": 0.12, "reliability": 0.95,
          "inet_up_cost": 0.001, "inet_down_cost": 0.001}
 
@@ -35,6 +46,12 @@ class TestLastMachine(unittest.TestCase):
         self.assertEqual(q["machine_id"], {"eq": 222})
         self.assertEqual(q["vms_enabled"], {"eq": True})                 # остальные фильтры (KVM, диск) на месте
         self.assertEqual(q["allocated_storage"], 100)
+
+    def test_failed_host_is_flagged_not_hidden(self):
+        with mock.patch.object(market, "bad_hosts", lambda: {"222": {"reason": "exited"}}), self.fake_call([OFFER]):
+            rows = market.search(100)
+        self.assertEqual(len(rows), 1)                                   # не спрятан
+        self.assertEqual(rows[0]["_failed"], "exited")                   # а помечен
 
     def test_busy(self):
         with self.fake_call([]):

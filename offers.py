@@ -23,7 +23,6 @@ if a.disk is None:
     a.disk = int((tpl or {}).get("recommended_disk_space") or 100)
 
 rows = market.search(a.disk, a.min_rel, a.free, a.max_traffic, a.stream_gb)
-bad = market.bad_hosts()
 
 if not rows:
     print("Подходящих машин нет — попробуй ослабить фильтры (--disk, --min-rel, --max-traffic)")
@@ -33,5 +32,5 @@ else:
     market.print_table(rows[:a.rows])
     print("\nЦены в $ за час; аренда уже включает диск. Трафик = стрим × цена исходящего ГБ.")
     print("Арендовать самую выгодную: vastgame play   (или конкретную: vastgame play ID)")
-if bad:
-    print(f"Скрыто хостов, которые раньше не смогли запустить машину: {len(bad)} ({market.BAD_HOSTS})")
+if any(o.get("_failed") for o in rows[:a.rows]):
+    print("«!» — на этом хосте машина раньше не запустилась; может не запуститься снова (пометка снимется после удачного запуска).")

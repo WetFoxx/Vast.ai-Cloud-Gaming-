@@ -189,6 +189,10 @@ td.act { text-align: right; }
 td.act button { padding: 4px 10px; font-size: 12px; border-radius: 8px; }
 
 /* ---- Тумблеры синхронизации */
+.disk-card { display: flex; flex-direction: column; gap: 8px; }
+.disk-row { display: flex; justify-content: space-between; align-items: baseline; }
+.disk-card input[type=range] { width: 100%; accent-color: var(--accent); }
+.tag.warn { background: var(--warn-bg); }
 .sync-card { display: flex; flex-direction: column; gap: 10px; }
 .switch-row { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
 .switch-row b { display: block; font-weight: 600; font-size: 14px; }

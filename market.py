@@ -18,7 +18,9 @@ MAX_TRAFFIC = 0.02    # машины с трафиком дороже, $ за Г
 GAMING = re.compile(r"^(RTX|GTX) \d{4}(?!Ada)")
 
 
-BAD_HOSTS = config_dir() / "bad_hosts.json"   # {machine_id: {"reason": ..., "date": ...}}
+# Хосты, которые не смогли запустить машину: {machine_id: {"reason": ..., "date": ...}}. Их НЕ прячем —
+# сбой бывает временным, — а помечаем в списке; пометка снимается, когда машина на этом хосте запустилась.
+BAD_HOSTS = config_dir() / "bad_hosts.json"
 
 
 def bad_hosts():
@@ -29,12 +31,19 @@ def bad_hosts():
 
 
 def mark_bad(machine_id, reason):
-    """Запомнить хост, который не смог запустить машину, — больше его не предлагать."""
+    """Запомнить хост, который не смог запустить машину: в списке он будет с пометкой."""
     if not machine_id:
         return
     bad = bad_hosts()
     bad[str(machine_id)] = {"reason": reason[:200], "date": datetime.date.today().isoformat()}
     BAD_HOSTS.write_text(json.dumps(bad, ensure_ascii=False, indent=1))
+
+
+def clear_bad(machine_id):
+    """Машина на этом хосте запустилась — снять пометку."""
+    bad = bad_hosts()
+    if bad.pop(str(machine_id), None) is not None:
+        BAD_HOSTS.write_text(json.dumps(bad, ensure_ascii=False, indent=1))
 
 
 def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb=STREAM_GB, where=None):
@@ -60,8 +69,9 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
     bad = bad_hosts()
     rows = []
     for o in offers:
-        if not GAMING.match(o["gpu_name"]) or str(o.get("machine_id")) in bad:
+        if not GAMING.match(o["gpu_name"]):
             continue
+        o["_failed"] = (bad.get(str(o.get("machine_id"))) or {}).get("reason")   # раньше не запустилась
         up = o.get("inet_up_cost") or 0       # $ за ГБ исходящего трафика (стрим идёт с машины к тебе)
         down = o.get("inet_down_cost") or 0   # $ за ГБ входящего (скачивание игр с Google Drive)
         # «Бесплатный» — дешевле $0.10 за ТБ: у таких хостов в API стоят копейки вроде 0.000003 $/ГБ
@@ -78,7 +88,8 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
 def last_machine(disk):
     """Машина последней сессии (та же физическая машина хоста, диск у неё будет новый) и её предложение
     сейчас. None — сессий с известной машиной нет; "offer": None — машина занята или больше не сдаётся.
-    Хосты из чёрного списка пропускаются; надёжность не проверяем — человек выбирает машину сам."""
+    Берётся последняя машина, которая в итоге запустилась (помеченные сбоем пропускаются);
+    надёжность не проверяем — человек выбирает машину сам."""
     s = history.last_machine(skip=bad_hosts())
     if not s:
         return None
@@ -99,4 +110,5 @@ def print_table(rows, numbered=False):
         num = f"{n:>3}" if numbered else ""
         print(f"{num}{o['id']:>9}  {o['gpu_name']:<16} {o['dph_total']:>7.3f} {o['_traffic']:>7.3f} {o['_total']:>7.3f}  "
               f"{(o.get('inet_up_cost') or 0) * 1000:>7.2f} {(o.get('inet_down_cost') or 0) * 1000:>7.2f}  "
-              f"{o['reliability']:>6.3f}  {o['disk_space']:>5.0f}  {country(o)}")
+              f"{o['reliability']:>6.3f}  {o['disk_space']:>5.0f}  {country(o)}"
+              + ("   ! раньше не запустилась" if o.get("_failed") else ""))

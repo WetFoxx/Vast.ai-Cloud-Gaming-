@@ -160,21 +160,31 @@ $("open-sunshine").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- выбор машины
-$("play").addEventListener("click", openOffers);
+$("play").addEventListener("click", () => openOffers());
 
-async function openOffers() {
+let offersReq = 0;   // номер последнего запроса списка: ответ на устаревший (другой диск) не показывать
+async function openOffers(disk) {
+  const reload = disk != null;       // смена диска: тумблеры синхронизации не сбрасывать
   show("offers");
   offersData = null; selected = null;
   $("rent").disabled = true;
   $("offers-summary").textContent = t("offers.loading");
   $("offers-table").querySelector("tbody").innerHTML = "";
   showError("offers-error", null);
-  const data = DEMO ? demoOffers() : await api().offers();
+  const my = ++offersReq;
+  const data = DEMO ? demoOffers(disk) : await api().offers(disk ?? null);
+  if (my !== offersReq) return;
   if (data.error) { showError("offers-error", data.error); return; }
   offersData = data;
-  for (const k of SYNC_KEYS) $("sync-" + k).checked = !!(data.sync || {})[k];
+  const slider = $("disk");
+  slider.min = data.disk_min; slider.max = data.disk_max; slider.value = data.disk;
+  if (!reload) for (const k of SYNC_KEYS) $("sync-" + k).checked = !!(data.sync || {})[k];
   renderOffers();
 }
+
+// Ползунок диска: число меняется сразу, список машин (цены зависят от диска) — когда отпустили
+$("disk").addEventListener("input", () => { $("disk-value").textContent = t("disk.value", { gb: $("disk").value }); });
+$("disk").addEventListener("change", () => openOffers(Number($("disk").value)));
 
 const SYNC_KEYS = ["steam_games", "other_games", "saves"];
 function syncChoice() { return Object.fromEntries(SYNC_KEYS.map((k) => [k, $("sync-" + k).checked])); }
@@ -189,6 +199,7 @@ function renderOffers() {
   const d = offersData;
   if (!d) return;
   $("offers-summary").textContent = t("offers.summary", { count: d.count, rel: num(d.min_rel * 100, 0), disk: d.disk });
+  $("disk-value").textContent = t("disk.value", { gb: d.disk });
   const L = d.last;
   $("offers-last").hidden = !L;
   if (L) {
@@ -209,7 +220,13 @@ function renderOffers() {
     const c = tr.children;
     c[0].firstChild.checked = o.id === selected;
     c[1].textContent = o.gpu;
-    if (o.last) { const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = t("offers.last.tag"); c[1].appendChild(tag); }
+    const addTag = (cls, text, title) => {
+      const tag = document.createElement("span");
+      tag.className = cls; tag.textContent = text; if (title) tag.title = title;
+      c[1].appendChild(tag);
+    };
+    if (o.last) addTag("tag", t("offers.last.tag"));
+    if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке
     c[2].textContent = o.country;
     c[3].textContent = money(o.price);
     c[4].textContent = money(o.traffic);
@@ -226,12 +243,14 @@ $("rent").addEventListener("click", async () => {
   if (selected == null) return;
   $("rent").disabled = true;
   $("offers-summary").textContent = t("confirm.rent.checking");
-  const o = DEMO ? demoCheck() : await api().check_offer(selected);   // свежая цена прямо перед «да»
+  const disk = offersData.disk;
+  const o = DEMO ? demoCheck() : await api().check_offer(selected, disk);   // свежая цена прямо перед «да»
   renderOffers();
   if (o.error) { showError("offers-error", o.error); $("rent").disabled = false; return; }
   let text = t("confirm.rent.text", {
     gpu: o.gpu, country: o.country, price: money(o.price), balance: money(o.balance), hours: num(o.hours || 0),
   });
+  text += "\n" + t("confirm.rent.disk", { gb: disk });
   const sync = syncChoice();
   const on = SYNC_KEYS.filter((k) => sync[k]).map((k) => t("sync." + k).toLowerCase());
   text += "\n\n" + t("confirm.rent.sync", { list: on.join(", ") || t("sync.none") });
@@ -240,7 +259,7 @@ $("rent").addEventListener("click", async () => {
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
-  const r = await api().play(o.id, sync);
+  const r = await api().play(o.id, sync, disk);
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
 });
@@ -808,12 +827,15 @@ function demoState(kind) {
            session: s.machine ? { elapsed: 4870, cost: 0.276 } : null,
            game_names: { 3751260: "The Blood of Dawnwalker" } };
 }
-function demoOffers() {
+function demoOffers(disk) {
   const rows = [["RTX 3060", "Pennsylvania, US", 0.113, 0.039, 0.989], ["RTX 3070", "British Columbia, CA", 0.119, 0.039, 0.999],
     ["RTX 3090", "Latvia, LV", 0.204, 0.0, 0.989], ["RTX 4090", "Iceland, IS", 0.421, 0.0, 0.999], ["RTX 3090", "Czechia, CZ", 0.471, 0.0, 0.995]];
-  const offers = rows.map((r, i) => ({ id: 100 + i, gpu: r[0], country: r[1], price: r[2], traffic: r[3], total: r[2] + r[3], reliability: r[4] }));
+  disk = disk || 100;
+  const k = 1 + (disk - 100) / 2000;     // в демо цена чуть растёт с диском
+  const offers = rows.map((r, i) => ({ id: 100 + i, gpu: r[0], country: r[1], price: r[2] * k, traffic: r[3], total: r[2] * k + r[3], reliability: r[4],
+                                       failed: i === 2 ? "Машина перешла в состояние «exited» и не запустится." : null }));
   const busy = new URLSearchParams(location.search).get("last") === "busy";
-  return { disk: 100, min_rel: 0.97, count: 37, balance: 3.18, sync: { steam_games: false, other_games: true, saves: true }, offers,
+  return { disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: Math.max(3, 37 - Math.floor(disk / 40)), balance: 3.18, sync: { steam_games: false, other_games: true, saves: true }, offers,
            last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
                    offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", price: 0.162, traffic: 0.05, total: 0.212, reliability: 0.991 } } };
 }

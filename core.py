@@ -144,13 +144,13 @@ def delete_instance(iid):
 
 
 def _failed_start(iid, why, o, ui, bad_host, key, **params):
-    """Машина уже платная, но не запустилась: запомнить хост, предложить удалить, VastgameError.
+    """Машина уже платная, но не запустилась: пометить хост, предложить удалить, VastgameError.
     why — причина по-русски (терминал и чёрный список), key/params — она же для перевода в окне."""
     ui.say(f"!!! {why}", "error", key=key, **params)
     if bad_host:
         market.mark_bad(o.get("machine_id"), why)
-        ui.say(f"Этот хост (machine {o.get('machine_id')}) больше не будет предлагаться.", "warn",
-               key="core.blacklisted", machine=o.get("machine_id"))
+        ui.say(f"Хост (machine {o.get('machine_id')}) помечен: в списке он будет с пометкой «может не запуститься».",
+               "warn", key="core.marked", machine=o.get("machine_id"))
     ui.say(f"Инстанс {iid} арендован и тратит деньги.", "warn", key="core.costs", id=iid)
     if ui.confirm("Удалить его сейчас? На нём ещё ничего не сохранялось", key="core.ask_delete_unused"):
         ok, msg = delete_instance(iid)
@@ -187,6 +187,7 @@ def wait_ready(iid, t0, o, ui):
             ui.say(f"  Vast: {st or 'создаётся'}  {vmsg}", "detail", key="core.vast_status", status=st or "…", msg=vmsg)
             last = st
         if st == "running":
+            market.clear_bad(o.get("machine_id"))     # хост справился — прежний сбой был временным
             # Диагностика: что реально попало на машину. Только ИМЕНА переменных — значения (ключи)
             # не показываем. Порты (-p ...) тоже лежат в extra_env — их пропускаем. Секретные
             # переменные (ключи из аккаунта, OPEN_BUTTON_TOKEN) API не показывает — это нормально.

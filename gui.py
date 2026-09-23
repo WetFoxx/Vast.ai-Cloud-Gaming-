@@ -36,6 +36,7 @@ from vastapi import VastgameError, my_template
 HERE = Path(__file__).resolve().parent
 LOW_BALANCE = 1.0   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_SHOWN = 10   # сколько машин показывать в выборе
+DISK_MIN, DISK_MAX = 50, 1000   # пределы ползунка диска, ГБ (система и Steam занимают ~30 ГБ)
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
 
@@ -160,12 +161,17 @@ class Api:
         return bool(self._job and not self._job.done)
 
     # ---- «Играть»: выбор машины
-    def offers(self):
-        """Подходящие машины (лучшие по полной цене часа), диск из шаблона и баланс."""
+    def _disk(self, disk, tpl):
+        """Размер диска: переданный с ползунка, иначе последний выбранный, иначе из шаблона; в пределах."""
+        disk = disk or settings.get("disk") or core.template_disk(tpl)
+        return max(DISK_MIN, min(DISK_MAX, int(disk)))
+
+    def offers(self, disk=None):
+        """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс."""
         try:
             core.require_no_machine()
             tpl = core.template()
-            disk = core.template_disk(tpl)
+            disk = self._disk(disk, tpl)
             rows = market.search(disk)
             credit = core.balance()
         except VastgameError as e:
@@ -176,22 +182,22 @@ class Api:
             last = None          # не удалось проверить последнюю машину — список машин всё равно показать
         row = lambda o: {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
                          "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
-                         "reliability": o["reliability"]}
-        return {"disk": disk, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
+                         "reliability": o["reliability"], "failed": o.get("_failed")}
+        return {"disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows[:OFFERS_SHOWN]],
                 "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
                                   "offer": last["offer"] and row(last["offer"])}}
 
-    def check_offer(self, offer_id):
+    def check_offer(self, offer_id, disk=None):
         """Свежие данные машины прямо перед подтверждением аренды."""
         try:
-            disk = core.template_disk(core.template())
+            disk = self._disk(disk, core.template())
             o = core.offer_by_id(int(offer_id), disk)
             credit = core.balance()
         except VastgameError as e:
             return {"error": error_data(e)}
         return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o), "price": o["dph_total"],
-                "balance": credit, "hours": credit / o["dph_total"] if o["dph_total"] else None,
+                "disk": disk, "balance": credit, "hours": credit / o["dph_total"] if o["dph_total"] else None,
                 "bad_reason": core.bad_host_reason(o)}
 
     def _sync(self):
@@ -199,9 +205,9 @@ class Api:
         saved = settings.get("sync") or {}
         return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
 
-    def play(self, offer_id, sync=None):
+    def play(self, offer_id, sync=None, disk=None):
         """Арендовать машину (человек уже ответил «да») и следить за запуском в фоне.
-        sync — тумблеры синхронизации с облаком; запоминаются для следующего раза."""
+        sync — тумблеры синхронизации с облаком, disk — ГБ с ползунка; запоминаются для следующего раза."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
@@ -212,9 +218,10 @@ class Api:
             try:
                 core.require_no_machine()                        # ещё раз — прямо перед арендой
                 tpl = core.template()
-                disk = core.template_disk(tpl)
-                o = core.offer_by_id(int(offer_id), disk)       # свежая цена и наличие
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, disk, sync=sync), o)
+                size = self._disk(disk, tpl)
+                settings.set("disk", size)
+                o = core.offer_by_id(int(offer_id), size)       # свежая цена и наличие
+                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
                 r = core.wait_ready(iid, t0, o, job)
                 job.result = {"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
                               "notes": [{"level": lv, "key": k, "params": p, "text": tx}

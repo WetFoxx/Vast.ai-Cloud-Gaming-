@@ -15,6 +15,17 @@ import market  # noqa: E402
 from vastapi import VastgameError  # noqa: E402
 
 
+def setUpModule():
+    """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
+    import tempfile
+    import history, market, settings
+    tmp = Path(tempfile.mkdtemp())
+    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS")]:
+        p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
+        p.start()
+        unittest.addModuleCleanup(p.stop)
+
+
 class FakeUI:
     """ui, который запоминает, что ему говорили, и отвечает на вопросы заранее заданным ответом."""
 
@@ -99,8 +110,12 @@ class TestWaitReady(Base):
             last = next(json_pages, last)
             return last
         self.patch(core, "wolf_status", status)
+        market.mark_bad(999, "раньше не запустилась")      # прошлый сбой на этом хосте
+        market.mark_bad(555, "другой хост")
         ui = FakeUI()
         r = core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual(list(market.bad_hosts()), ["555"])   # запустилась — пометка снята только с неё
+        market.clear_bad(555)
         self.assertEqual(ui.stages, ["vast", "tailscale", "restore", "ready"])
         self.assertEqual(r["boot"][1], "ok")
         self.assertEqual(r["links"]["sunshine"], "https://vastai-gaming.tail.ts.net:47990")
@@ -118,7 +133,7 @@ class TestWaitReady(Base):
         ui = FakeUI(answer=True)
         with self.assertRaises(VastgameError):
             core.wait_ready(42, T0, OFFER, ui)
-        self.assertIn("999", market.bad_hosts())          # хост в чёрном списке
+        self.assertIn("999", market.bad_hosts())          # хост помечен
         self.assertEqual(self.deleted, [42])               # удалён после «да»
         self.assertEqual(len(ui.questions), 1)
 
