@@ -32,7 +32,7 @@
 ## Как устроена система (уже работает, не ломать)
 
 - На инстансе работает `wolf-setup.sh` — он лежит в этой папке (v3.8). Это «агент»: восстанавливает из Google Drive сессию Steam, сохранения и сетевую личность, выгружает изменения обратно, управляет разрешением экрана. **Читай его, когда нужно понять, что происходит на инстансе.**
-- Vast: образ `docker.io/vastai/kvm:ubuntu_desktop_22.04` (нужен именно KVM, не контейнер). Публичный шаблон: `template_id=49faada2e6e7fe3e15bef0ea1999420a`. Скрипт скачивается загрузчиком из gist, ссылка закреплена на ревизии.
+- Vast: образ `docker.io/vastai/kvm:ubuntu_desktop_22.04` (нужен именно KVM, не контейнер). Шаблон для утилиты: `WETFOX CLOUD GAME TEST`, `hash_id=f72a6cd3e6edbc9c1adf8d603b3c9075` (id 738391) — копия прежнего с исправленным портом `41641/udp`. Прежний `WETFOX CLOUD GAME`: `hash_id=49faada2e6e7fe3e15bef0ea1999420a`. При сохранении шаблона на сайте меняется `hash_id` — искать через `GET template/` с `select_filters={"name": {"eq": ...}}`. Скрипт скачивается загрузчиком из gist, ссылка закреплена на ревизии.
 - Секреты на инстанс сейчас попадают из Environment Variables аккаунта Vast: `RCLONE_REFRESH_TOKEN`, `TAILSCALE_AUTHKEY`; необязательные — `RCLONE_CLIENT_ID`, `RCLONE_CLIENT_SECRET`, `ZT_NETWORK_ID`, `SYNC_STEAM_GAMES`, `STEAM_LANG`, `TAILSCALE_SSH` и другие (полный список — в `wolf-setup.sh`).
 - Сеть: Tailscale, узел `vastai-gaming`, MagicDNS. Полное имя — `vastai-gaming.<tailnet>.ts.net` (точное имя моего узла я скажу сам). Мой Mac тоже в этой сети.
 - Tailscale SSH включён: с Mac можно выполнить команду на инстансе через `ssh root@<узел>`. **Это первый способ управлять инстансом из утилиты** — без нового API на инстансе.
@@ -77,7 +77,7 @@
 
 ## Решения и грабли, которые уже известны
 
-- Шаблон `WETFOX CLOUD GAME` (id 737724): образ `docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21`, `extra_filters` — `compute_cap >= 750` и `vms_enabled`, onstart качает `wolf-setup.sh` из gist. В портах опечатка `-p 741641:741641/udp` (порта > 65535 не бывает; видимо, `41641` — порт Tailscale) — поправить в шаблоне.
+- Шаблон `WETFOX CLOUD GAME` (id 737724): образ `docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21`, `extra_filters` — `compute_cap >= 750` и `vms_enabled`, onstart качает `wolf-setup.sh` из gist. В портах была опечатка `-p 741641:741641/udp` — исправлена в шаблоне `WETFOX CLOUD GAME TEST`.
 - В Tailscale копятся узлы `vastai-gaming` от прошлых аренд (было 5, все офлайн): личность восстанавливается не всегда или создаётся новый узел, DNS-имя становится `vastai-gaming-N`. `play` ищет узел, который онлайн, и показывает IP. Чистка — шаг 6.
 
 - Только KVM: в контейнере нельзя управлять X-сервером и EDID, картинку не получить.

@@ -21,7 +21,8 @@ import requests
 
 from vastapi import call, list_instances
 
-TEMPLATE = "49faada2e6e7fe3e15bef0ea1999420a"   # шаблон WETFOX CLOUD GAME
+TEMPLATE = "f72a6cd3e6edbc9c1adf8d603b3c9075"   # шаблон WETFOX CLOUD GAME TEST (исправлен порт 41641)
+                                                # прежний WETFOX CLOUD GAME: 49faada2e6e7fe3e15bef0ea1999420a
 NODE = "vastai-gaming"                          # имя узла в Tailscale (TAILSCALE_HOSTNAME в wolf-setup.sh)
 WOLF_PORT = 8099                                # страница статуса wolf на инстансе
 
