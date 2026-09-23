@@ -336,6 +336,17 @@ def resume_when_online(log=lambda text: None, wait=600, step=15):
     return True
 
 
+def watch_balance():
+    """Для службы автозапуска: уведомление «баланс ниже $1», когда окно закрыто (во время игры
+    человек смотрит в Moonlight, а не в окно). Нет ключа или сети — молча до следующего раза."""
+    try:
+        credit = core.balance()
+        inst = core.list_instances()
+    except (VastgameError, OSError):
+        return
+    notify.low_balance(credit, inst[0].get("dph_total") if inst else None)
+
+
 def spawn(kind, **args):
     """Запустить операцию в фоновом процессе, который переживёт закрытие окна. False — уже идёт другая."""
     if running() or (state() or {}).get("active"):
@@ -376,6 +387,7 @@ def main():
     python jobs.py resume — продолжить прерванную операцию, если она есть (для автозапуска при входе)."""
     if sys.argv[1] == "resume":
         resume_when_online(log=lambda text: print(text, flush=True))
+        watch_balance()
         return
     if not work(sys.argv[1], json.loads(sys.argv[2]), log=lambda text: print(text, flush=True)):
         sys.exit("другая операция уже идёт")

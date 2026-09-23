@@ -10,7 +10,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import settings
+
 HERE = Path(__file__).resolve().parent
+LOW_BALANCE = 1.0   # $: ниже — уведомление «баланс заканчивается»
 
 
 def texts(lang):
@@ -54,3 +57,30 @@ def job_finished(kind, result, error, lang):
         text = (t(tr, "progress.stop_gone") if result.get("gone") else t(tr, "notify.stopped.text")
                 if result.get("deleted") else t(tr, "core.delete_pending", id=result.get("iid")))
         send(t(tr, "notify.stopped.title"), text)
+
+
+def language():
+    """Язык уведомлений, когда окна нет: выбранный человеком, иначе последний язык окна."""
+    return settings.get("language") or settings.get("ui_language") or "en"
+
+
+def low_balance(credit, price=None, lang=None):
+    """Баланс опустился ниже LOW_BALANCE — уведомить ОДИН раз; снова — только после пополнения.
+    price — цена часа работающей машины (тогда в тексте — на сколько часов хватит).
+    Зовут окно (при каждом обновлении) и служба автозапуска (раз в 5 минут). True — уведомили."""
+    was = settings.get("low_balance_notified", False)
+    if credit >= LOW_BALANCE:
+        if was:
+            settings.set("low_balance_notified", False)     # пополнили — в следующий раз снова предупредить
+        return False
+    if was:
+        return False
+    tr = texts(lang or language())
+    money = f"${credit:.2f}"
+    if price:
+        text = t(tr, "notify.low_balance.playing", balance=money, hours=f"{credit / price:.1f}")
+    else:
+        text = t(tr, "notify.low_balance.idle", balance=money)
+    send(t(tr, "notify.low_balance.title"), text)
+    settings.set("low_balance_notified", True)
+    return True

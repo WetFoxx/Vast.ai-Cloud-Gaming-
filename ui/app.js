@@ -106,7 +106,7 @@ function render(data) {
 
 async function refresh() {
   try {
-    render(DEMO ? demoState(DEMO) : await api().state());
+    render(DEMO ? demoState(DEMO) : await api().state(LANG));
   } catch (e) {
     render({ error: { text: t("app.error_state", { error: e }) } });
   }
@@ -404,9 +404,11 @@ function setupActions(st, li) {
   const id = st.id, key = st.key;
   if (key.endsWith(".needs_vast")) return;
 
-  if (id === "autostart") {
-    if (st.state === "ok") box.appendChild(button(t("setup.act.disable"), () => act(li, () => api().autostart_uninstall())));
-    else box.appendChild(button(t("setup.act.enable"), () => act(li, () => api().autostart_install()), true));
+  if (id === "autostart" || id === "open_at_login") {
+    const name = id === "autostart" ? "resume" : "app";
+    const on = id === "autostart" ? st.state === "ok" : key === "setup.open_at_login.on";
+    if (on) box.appendChild(button(t("setup.act.disable"), () => act(li, () => api().autostart_uninstall(name))));
+    else box.appendChild(button(t("setup.act.enable"), () => act(li, () => api().autostart_install(name)), id === "autostart"));
     return;
   }
 
@@ -893,7 +895,7 @@ function demoSetup() {
     st("moonlight", "missing", "setup.moonlight.missing"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
     st("google", "warn", "setup.google.old"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),
     st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.11" }),
-    st("autostart", "warn", "setup.autostart.off")] };
+    st("autostart", "warn", "setup.autostart.off"), st("open_at_login", "ok", "setup.open_at_login.off")] };
 }
 
 function demoHistory(days, all) {

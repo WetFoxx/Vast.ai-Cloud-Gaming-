@@ -114,15 +114,18 @@ def template():
                  version=setup.SCRIPT_VERSION)
 
 
-def autostart_step():
-    """Служба «продолжать после перезагрузки». Не обязательна (играть можно и без неё) — поэтому warn,
-    а не missing. На системах, где её пока нет (Windows), шаг не показываем."""
-    st = autostart.status()
+def autostart_steps():
+    """Службы автозапуска. «Продолжать после перезагрузки» не обязательна (играть можно и без неё) —
+    поэтому warn, а не missing. «Открывать при входе» — просто выбор человека (по умолчанию выключено),
+    всегда ok. На системах, где служб пока нет (Windows), шаги не показываем."""
+    st = autostart.status("resume")
     if st == "unsupported":
-        return None
-    if st == "on":
-        return _step("autostart", "ok", "setup.autostart.ok")
-    return _step("autostart", "warn", "setup.autostart.off")
+        return []
+    resume = (_step("autostart", "ok", "setup.autostart.ok") if st == "on"
+              else _step("autostart", "warn", "setup.autostart.off"))
+    app = _step("open_at_login", "ok",
+                "setup.open_at_login.on" if autostart.status("app") != "off" else "setup.open_at_login.off")
+    return [resume, app]
 
 
 def status():
@@ -136,8 +139,6 @@ def status():
     else:
         secrets = _vast_secrets()
         steps += [google(secrets), tailscale_key(secrets), template()]
-    a = autostart_step()
-    if a:
-        steps.append(a)
+    steps += autostart_steps()
     return {"steps": steps, "ready": all(s["state"] != "missing" for s in steps),
             "brew": bool(paths.find("brew")), "platform": sys.platform}

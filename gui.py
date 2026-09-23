@@ -27,6 +27,7 @@ import history
 import jobs
 import market
 import moonlight
+import notify
 import settings
 import paths
 import setup
@@ -37,7 +38,7 @@ from jobs import Job, error_data
 from vastapi import VastgameError, my_template
 
 HERE = Path(__file__).resolve().parent
-LOW_BALANCE = 1.0   # $: ниже — предупреждение «баланс заканчивается»
+LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_SHOWN = 10   # сколько машин показывать в выборе
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
@@ -65,8 +66,10 @@ class Api:
             settings.set("language", lang)
 
     # ---- главный экран
-    def state(self):
-        """Баланс и состояние машины для главного экрана."""
+    def state(self, lang=None):
+        """Баланс и состояние машины для главного экрана. lang — язык окна (для уведомлений без окна)."""
+        if lang in settings.LANGUAGES and settings.get("ui_language") != lang:
+            settings.set("ui_language", lang)
         try:
             st = core.status()
             credit = core.balance()
@@ -84,6 +87,7 @@ class Api:
             pass   # запись истории не должна ломать главный экран
         d = jobs.state()
         task = d and {"kind": d["kind"], "active": d["active"], "unseen": d["done"] and not d.get("seen")}
+        notify.low_balance(credit, price, lang)
         return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session, "task": task,
                 "hours_left": credit / price if price else None, "status": st,
                 "game_names": self._game_names(st["archives"]), "busy": self._busy()}
@@ -274,14 +278,19 @@ class Api:
         """Вход в Google (браузер) и отправка доступа в аккаунт Vast — в фоне."""
         return self._background("google", lambda: (setup.google_login(), setup.send_google_to_vast()) and True)
 
-    def autostart_install(self):
-        """Поставить службу «продолжать после перезагрузки» (человек нажал «Включить»)."""
-        if not autostart.install():
+    def autostart_install(self, name="resume"):
+        """Включить службу автозапуска (человек нажал «Включить»): "resume" — продолжать после
+        перезагрузки и следить за балансом, "app" — открывать окно при входе в систему."""
+        if name not in autostart.NAMES:
+            return {"error": {"key": None, "params": {}, "text": "unknown service"}}
+        if not autostart.install(name):
             return {"error": {"key": "setup.err.autostart", "params": {}, "text": "launchctl bootstrap failed"}}
         return {"ok": True}
 
-    def autostart_uninstall(self):
-        autostart.uninstall()
+    def autostart_uninstall(self, name="resume"):
+        if name not in autostart.NAMES:
+            return {"error": {"key": None, "params": {}, "text": "unknown service"}}
+        autostart.uninstall(name)
         return {"ok": True}
 
     def send_google(self):
