@@ -269,10 +269,12 @@ def step_tailscale():
     return False
 
 
-# Скрипт wolf-setup.sh — закреплённая ревизия gist (v3.8, совпадает с wolf-setup.sh в проекте).
-# Закреплённая ссылка: изменения в gist не попадут на машины, пока здесь не поменяют ревизию
-SCRIPT_URL = ("https://gist.githubusercontent.com/WetFoxx/792f2333664d95c442fa451063b16436/raw/"
-              "64a7c7aaf56456b5a20ebcf34ff35b82e46e35ed/gistfile1.txt")
+# Скрипт wolf-setup.sh — в репозитории проекта на GitHub, ссылка закреплена на коммит (v3.9,
+# побайтно совпадает с wolf-setup.sh в проекте). Изменения в репозитории не попадут на машины,
+# пока здесь не поменяют коммит и не обновят шаблон (vastgame setup → шаг «Шаблон»).
+SCRIPT_VERSION = "v3.9"
+SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
+              "b9909e75d3d58ea8c9839ee9d073f4c63bee4a31/wolf-setup.sh")
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
 # Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
 # Tailscale (41641/udp, 3478/udp — STUN)
@@ -334,6 +336,16 @@ def step_template():
                    env_value(env, "SYNC_STEAM_GAMES") or "0",
                    lambda v: None if v in ("0", "1") else "0 или 1")
 
+    ok, msg = save_template(disk, lang, res, games)
+    print(("  ✓ " if ok else "  ✗ ") + msg)
+    if ok:
+        print(f"    Скрипт: wolf-setup.sh {SCRIPT_VERSION} ({SCRIPT_URL.split('/')[5][:7]})")
+    return ok
+
+
+def save_template(disk, lang, res, games):
+    """Создать или обновить шаблон vastgame с этими настройками. (успех, сообщение)."""
+    old = my_template()
     settings = f"-e RES={res} -e SYNC_STEAM_GAMES={games}" + (f" -e STEAM_LANG={lang}" if lang else "")
     body = {
         "name": TEMPLATE_NAME,
@@ -352,18 +364,24 @@ def step_template():
         body["hash_id"] = old["hash_id"]      # изменить существующий (как vastai update template)
     r = call("PUT" if old else "POST", "template/", body)
     if not r.get("success"):
-        print(f"  ✗ Vast не сохранил шаблон: {r.get('msg') or 'без объяснения'}")
-        return False
-
+        return False, f"Vast не сохранил шаблон: {r.get('msg') or 'без объяснения'}"
     # Проверка: шаблон читается обратно с нашими настройками
     new = my_template()
     if not new or new.get("onstart") != ONSTART or env_value(new.get("env"), "RES") != res:
-        print("  ✗ Шаблон сохранён, но читается не так, как ожидалось — проверь на сайте Vast.")
-        return False
-    print(f"  ✓ Шаблон «{TEMPLATE_NAME}» {'обновлён' if old else 'создан'} (приватный): диск {disk} ГБ, "
-          f"разрешение {res}, язык Steam {lang or 'как в Steam'}, игры Steam {'в облаке' if games == '1' else 'из Steam'}.")
-    print(f"    Скрипт: wolf-setup.sh, ревизия gist {SCRIPT_URL.split('/raw/')[1][:7]}")
-    return True
+        return False, "Шаблон сохранён, но читается не так, как ожидалось — проверь на сайте Vast."
+    return True, (f"Шаблон «{TEMPLATE_NAME}» {'обновлён' if old else 'создан'} (приватный): диск {disk} ГБ, "
+                  f"разрешение {res}, язык Steam {lang or 'как в Steam'}, "
+                  f"игры Steam {'в облаке' if games == '1' else 'из Steam'}.")
+
+
+def refresh_template():
+    """Пересохранить шаблон с текущими настройками — например, чтобы подхватить новый SCRIPT_URL."""
+    old = my_template()
+    if not old:
+        return False, "Шаблона нет — пройди мастер: vastgame setup"
+    env = old.get("env") or ""
+    return save_template(int(old.get("recommended_disk_space") or 100), env_value(env, "STEAM_LANG") or "",
+                         env_value(env, "RES") or "1920x1200", env_value(env, "SYNC_STEAM_GAMES") or "0")
 
 
 def summary():

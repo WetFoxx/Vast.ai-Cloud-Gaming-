@@ -3,6 +3,7 @@
 # чтобы чтение ключа и запросы не повторялись в каждом файле.
 
 import json
+import time
 from pathlib import Path
 
 import keyring
@@ -63,14 +64,19 @@ def call(method, path, body=None, params=None, base=API):
     method — "GET", "POST" и т.д.; path — например "users/current/"; body — JSON для POST/PUT.
     """
     try:
-        r = requests.request(
-            method,
-            base + path,
-            headers={"Authorization": f"Bearer {read_key()}"},
-            json=body,
-            params=params,
-            timeout=30,
-        )
+        # 429 — Vast просит не спешить: подождать и повторить (2, 4, 8 с), а не падать
+        for wait in (2, 4, 8, None):
+            r = requests.request(
+                method,
+                base + path,
+                headers={"Authorization": f"Bearer {read_key()}"},
+                json=body,
+                params=params,
+                timeout=30,
+            )
+            if r.status_code != 429 or wait is None:
+                break
+            time.sleep(wait)
     except requests.RequestException as e:
         raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}", key="vast.network",
                             error=type(e).__name__)
