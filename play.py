@@ -13,18 +13,14 @@
 
 import argparse
 import json
-import subprocess   # запуск программ на Mac — здесь команды tailscale
 import sys
 import time
 
-import requests
-
 from vastapi import call, list_instances
+from wolfnode import NODE, WOLF_PORT, ts_node, wolf_status
 
 # Шаблон ищем по имени при каждой аренде: при сохранении на сайте Vast меняет его hash_id
 TEMPLATE_NAME = "WETFOX CLOUD GAME TEST"        # копия WETFOX CLOUD GAME с исправленным портом 41641
-NODE = "vastai-gaming"                          # имя узла в Tailscale (TAILSCALE_HOSTNAME в wolf-setup.sh)
-WOLF_PORT = 8099                                # страница статуса wolf на инстансе
 
 p = argparse.ArgumentParser(description="Арендовать машину и дождаться готовности")
 p.add_argument("offer", type=int, help="ID машины из таблицы offers.py")
@@ -38,33 +34,6 @@ def ask(question):
     """Задать вопрос; True — только если человек напечатал «да»."""
     import readline  # noqa: F401 — с ним в ответе работают стрелки и Backspace, а не печатаются ^[[C
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
-
-
-def ts_node():
-    """Найти узел NODE в Tailscale на Mac, который сейчас онлайн. Возвращает (True, IP, DNS-имя) или None.
-
-    Узлов с именем vastai-gaming в сети может быть несколько — старые, от прошлых аренд
-    (их DNS-имена vastai-gaming-1, -2...). Нам нужен тот, что онлайн.
-    """
-    try:
-        out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=20)
-        peers = json.loads(out.stdout).get("Peer") or {}
-    except Exception:
-        return None
-    for peer in peers.values():
-        if peer.get("HostName") == NODE and peer.get("Online"):
-            ips = peer.get("TailscaleIPs") or [""]
-            return True, ips[0], (peer.get("DNSName") or "").rstrip(".")
-    return None
-
-
-def wolf_status(ip):
-    """Статусы архивов со страницы /json на инстансе: {имя: (время, состояние, текст)}."""
-    try:
-        r = requests.get(f"http://{ip}:{WOLF_PORT}/json", timeout=5)
-        return {x["name"]: (x["ts"], x["state"], x["text"]) for x in r.json()}
-    except Exception:
-        return None
 
 
 def template_hash(name):
