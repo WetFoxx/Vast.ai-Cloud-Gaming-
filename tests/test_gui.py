@@ -198,6 +198,37 @@ class TestGames(unittest.TestCase):
         self.assertEqual((p["kind"], p["result"], removed), ("games", {"how": "drive"}, ["pfx--1"]))
 
 
+class TestSetupActions(unittest.TestCase):
+    def test_install_uses_brew_cask_in_background(self):
+        api, calls = gui.Api(), []
+
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+        with mock.patch.object(gui.paths, "find", lambda n: "/opt/homebrew/bin/brew"), \
+             mock.patch.object(gui.subprocess, "run", lambda cmd, **k: calls.append(cmd) or R()):
+            self.assertEqual(api.install_tool("moonlight"), {"ok": True})
+            wait_done(api)
+        self.assertEqual(calls, [["/opt/homebrew/bin/brew", "install", "--cask", "moonlight"]])
+        self.assertEqual(api.install_tool("rm -rf /")["error"]["text"], "unknown tool")   # только известные
+
+    def test_no_brew(self):
+        with mock.patch.object(gui.paths, "find", lambda n: None):
+            self.assertEqual(gui.Api().install_tool("rclone")["error"]["key"], "setup.err.no_brew")
+
+    def test_bad_vast_key_is_translated_error(self):
+        with mock.patch.object(gui.setup, "check_key", lambda k: None):
+            self.assertEqual(gui.Api().save_vast_key("nope")["error"]["key"], "setup.err.vast_key")
+
+    def test_template_validation(self):
+        api = gui.Api()
+        self.assertEqual(api.save_template("5", "", "1920x1200")["error"]["key"], "setup.err.disk")
+        self.assertEqual(api.save_template("100", "Рус", "1920x1200")["error"]["key"], "setup.err.lang")
+        self.assertEqual(api.save_template("100", "", "big")["error"]["key"], "setup.err.res")
+
+    def test_tailscale_key_format(self):
+        self.assertEqual(gui.Api().save_tailscale_key("abc")["error"]["key"], "setup.err.ts_key")
+
+
 class TestMoonlight(unittest.TestCase):
     def test_apps_and_stream_remembers_choice(self):
         api = gui.Api()

@@ -291,7 +291,137 @@ function renderSetup() {
     const p = { ...st.params };
     if ("lang" in p && !p.lang) p.lang = t("setup.lang_default");
     li.querySelector(".sub").textContent = t(st.key, p);
+    setupActions(st, li);
     ul.appendChild(li);
+  }
+  // Подсказка про первое подключение Moonlight — всегда внизу
+  const li = document.createElement("li");
+  li.innerHTML = '<span class="icon info">i</span><div class="body"><b></b><span class="sub pre"></span></div>';
+  li.querySelector("b").textContent = t("setup.pair.title");
+  li.querySelector(".sub").textContent = t("setup.pair.text");
+  ul.appendChild(li);
+}
+
+// ---- Действия шагов настройки
+const DOWNLOAD = { rclone: "https://rclone.org/downloads/", tailscale_app: "https://tailscale.com/download",
+                   moonlight: "https://moonlight-stream.org" };
+const KEYS_URL = { vast: "https://cloud.vast.ai/manage-keys/", tailscale_key: "https://login.tailscale.com/admin/settings/keys" };
+const DNS_URL = "https://login.tailscale.com/admin/dns";
+const TOOL_NAME = { rclone: "rclone", tailscale_app: "Tailscale", moonlight: "Moonlight" };
+
+function el(tag, attrs = {}, text) {
+  const e = document.createElement(tag);
+  Object.assign(e, attrs);
+  if (text != null) e.textContent = text;
+  return e;
+}
+function button(label, onclick, primary = false) {
+  const b = el("button", { className: "small" + (primary ? " primary" : "") }, label);
+  b.addEventListener("click", onclick);
+  return b;
+}
+function openUrl(url) { if (!DEMO) api().open_url(url); }
+
+// Сообщение под шагом (ход действия или ошибка)
+function stepMsg(li, text, isError = false) {
+  let m = li.querySelector(".step-msg");
+  if (!m) { m = el("div", { className: "step-msg" }); li.querySelector(".body").appendChild(m); }
+  m.className = "step-msg" + (isError ? " err" : "");
+  m.textContent = text;
+}
+
+// Быстрое действие: вызвать, при успехе — перепроверить всё; при ошибке — показать под шагом
+async function act(li, call) {
+  stepMsg(li, t("setup.working"));
+  const r = DEMO ? { ok: true } : await call();
+  if (r && r.error) { stepMsg(li, errText(r.error), true); return; }
+  openSetup();
+}
+
+// Долгое действие в фоне (установка, вход в Google): ждём конца через progress()
+async function actBackground(li, start, waitText) {
+  const r = DEMO ? { ok: true } : await start();
+  if (r.error) { stepMsg(li, errText(r.error), true); return; }
+  stepMsg(li, waitText);
+  if (DEMO) return;
+  const timer = setInterval(async () => {
+    const p = await api().progress(0);
+    if (!p || !p.done) return;
+    clearInterval(timer);
+    if (p.error) stepMsg(li, errText(p.error), true);
+    else openSetup();
+  }, 1500);
+}
+
+function field(placeholder, type = "text", value = "") {
+  return el("input", { type, placeholder, value, className: "field", autocomplete: "off", spellcheck: false });
+}
+
+function setupActions(st, li) {
+  const box = li.querySelector(".actions");
+  const hint = (key) => li.querySelector(".body").insertBefore(el("span", { className: "sub hint" }, t(key)), box);
+  const id = st.id, key = st.key;
+  if (key.endsWith(".needs_vast")) return;
+
+  if (id in TOOL_NAME && st.state === "missing" && key !== "setup.tailscale_app.offline") {
+    if (setupData.brew && setupData.platform === "darwin") {
+      box.appendChild(button(t("setup.act.install"), async () => {
+        const name = TOOL_NAME[id];
+        if (!(await ask({ title: t("setup.confirm.install.title", { name }), text: t("setup.confirm.install.text"),
+                           yes: t("setup.act.install"), no: t("btn.cancel") }))) return;
+        actBackground(li, () => api().install_tool(id), t("setup.working"));
+      }, true));
+    }
+    box.appendChild(button(t("setup.act.download"), () => openUrl(DOWNLOAD[id])));
+  }
+  if (key === "setup.tailscale_app.offline") box.appendChild(button(t("setup.act.open_tailscale"), () => !DEMO && api().open_tailscale(), true));
+  if (key === "setup.tailscale_app.no_magicdns") box.appendChild(button(t("setup.act.open_dns"), () => openUrl(DNS_URL)));
+
+  if (id === "vast" && st.state === "missing") {
+    hint("setup.hint.vast");
+    const f = field(t("setup.field.vast_key"), "password");
+    box.append(f, button(t("setup.act.save"), () => act(li, () => api().save_vast_key(f.value)), true),
+               button(t("setup.act.keys_page"), () => openUrl(KEYS_URL.vast)));
+  }
+  if (key === "setup.vast.file") {
+    box.appendChild(button(t("setup.act.move_key"), async () => {
+      if (await ask({ title: t("setup.confirm.move.title"), text: t("setup.confirm.move.text") })) act(li, () => api().move_vast_key());
+    }, true));
+  }
+
+  if (key === "setup.google.no_client") {
+    hint("setup.hint.client");
+    const a = field(t("setup.field.client_id")), b = field(t("setup.field.client_secret"), "password");
+    box.append(a, b, button(t("setup.act.save"), () => act(li, () => api().save_google_client(a.value, b.value)), true));
+  } else if (["setup.google.missing", "setup.google.bad", "setup.google.old"].includes(key)) {
+    hint("setup.hint.google");
+    box.appendChild(button(t("setup.act.login"), () => actBackground(li, () => api().google_login(), t("setup.login_wait")), true));
+  } else if (key === "setup.google.not_in_vast") {
+    box.appendChild(button(t("setup.act.send_vast"), () => act(li, () => api().send_google()), true));
+  } else if (key === "setup.google.ok") {
+    box.appendChild(button(t("setup.act.relogin"), () => actBackground(li, () => api().google_login(), t("setup.login_wait"))));
+  }
+
+  if (id === "tailscale_key" && (st.state === "missing" || key === "setup.tailscale_key.expiring")) {
+    hint("setup.hint.ts");
+    const f = field(t("setup.field.ts_key"), "password");
+    box.append(f, button(t("setup.act.save"), () => act(li, () => api().save_tailscale_key(f.value)), true),
+               button(t("setup.act.keys_page"), () => openUrl(KEYS_URL.tailscale_key)));
+  }
+
+  if (id === "template") {
+    const form = () => {
+      box.innerHTML = "";
+      const p = st.params || {};
+      const disk = field(t("setup.field.disk"), "number", p.disk || 100);
+      const lang = field(t("setup.field.lang"), "text", p.lang || "");
+      const res = field(t("setup.field.res"), "text", p.res || "1920x1200");
+      box.append(disk, lang, res, button(t(key === "setup.template.missing" ? "setup.act.create_template" : "setup.act.save"),
+        () => act(li, () => api().save_template(disk.value, lang.value, res.value)), true));
+    };
+    if (key === "setup.template.missing") form();
+    else if (key === "setup.template.outdated") box.appendChild(button(t("setup.act.update_template"), () => act(li, () => api().refresh_template()), true));
+    else box.appendChild(button(t("setup.act.edit"), form));
   }
 }
 
@@ -635,7 +765,7 @@ function demoGames() {
 
 function demoSetup() {
   const st = (id, state, key, params = {}) => ({ id, state, key, params });
-  return { ready: false, steps: [
+  return { ready: false, brew: true, platform: "darwin", steps: [
     st("rclone", "ok", "setup.rclone.ok"), st("tailscale_app", "ok", "setup.tailscale_app.ok", { tailnet: "tail3d42c9.ts.net" }),
     st("moonlight", "missing", "setup.moonlight.missing"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
     st("google", "warn", "setup.google.old"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),

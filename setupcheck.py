@@ -9,6 +9,7 @@
 import datetime
 import json
 import subprocess
+import sys
 
 import keyring
 
@@ -123,4 +124,5 @@ def status():
     else:
         secrets = _vast_secrets()
         steps += [google(secrets), tailscale_key(secrets), template()]
-    return {"steps": steps, "ready": all(s["state"] != "missing" for s in steps)}
+    return {"steps": steps, "ready": all(s["state"] != "missing" for s in steps),
+            "brew": bool(paths.find("brew")), "platform": sys.platform}

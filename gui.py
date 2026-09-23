@@ -11,6 +11,8 @@
 
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -23,13 +25,18 @@ import core
 import market
 import moonlight
 import settings
+import paths
+import setup
 import setupcheck
+from vastapi import KEY_FILE
 import steamnames
-from vastapi import VastgameError
+from vastapi import VastgameError, my_template
 
 HERE = Path(__file__).resolve().parent
 LOW_BALANCE = 1.0   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_SHOWN = 10   # сколько машин показывать в выборе
+# Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
+BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
 
 
 def error_data(e):
@@ -256,6 +263,99 @@ class Api:
             return setupcheck.status()
         except VastgameError as e:
             return {"error": error_data(e)}
+
+    def _simple(self, fn, *args):
+        """Вызвать функцию мастера; ошибку — странице с ключом перевода."""
+        try:
+            return {"ok": True, "result": fn(*args)}
+        except VastgameError as e:
+            return {"error": error_data(e)}
+
+    def _background(self, kind, fn):
+        """Долгое действие настройки (установка, вход в Google) — в фоне; ход — через progress()."""
+        if self._busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        job = self._job = Job(kind)
+
+        def run():
+            try:
+                job.result = fn() or True
+            except VastgameError as e:
+                job.error = error_data(e)
+            except Exception as e:
+                job.error = {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
+
+    def install_tool(self, tool):
+        """Установить rclone / Tailscale / Moonlight через Homebrew (страница уже спросила)."""
+        brew = paths.find("brew")
+        if tool not in BREW:
+            return {"error": {"key": None, "params": {}, "text": "unknown tool"}}
+        if not brew:
+            return {"error": {"key": "setup.err.no_brew", "params": {}, "text": "no brew"}}
+
+        def run():
+            r = subprocess.run([brew, "install", *BREW[tool]], capture_output=True, text=True, timeout=1800)
+            if r.returncode != 0:
+                raise VastgameError("brew install failed", key="setup.err.install_failed", code=r.returncode,
+                                    out=(r.stderr or r.stdout).strip()[-300:])
+        return self._background("install", run)
+
+    def open_tailscale(self):
+        """Открыть приложение Tailscale, чтобы войти в сеть."""
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-a", "Tailscale"])
+
+    def save_vast_key(self, key):
+        return self._simple(setup.save_vast_key, key)
+
+    def move_vast_key(self):
+        """Перенести ключ из старого файла ~/.vast_api_key в Keychain и удалить файл (страница спросила)."""
+        def move():
+            credit = setup.save_vast_key(KEY_FILE.read_text())
+            KEY_FILE.unlink()
+            return credit
+        return self._simple(move)
+
+    def save_google_client(self, cid, secret):
+        return self._simple(setup.save_google_client, cid, secret)
+
+    def google_login(self):
+        """Вход в Google (браузер) и отправка доступа в аккаунт Vast — в фоне."""
+        return self._background("google", lambda: (setup.google_login(), setup.send_google_to_vast()) and True)
+
+    def send_google(self):
+        return self._simple(setup.send_google_to_vast)
+
+    def save_tailscale_key(self, key):
+        return self._simple(setup.save_tailscale_key, key)
+
+    def save_template(self, disk, lang, res):
+        """Создать или изменить шаблон; SYNC_STEAM_GAMES в шаблоне не трогаем (его задают тумблеры)."""
+        def save():
+            tpl = my_template()
+            games = setup.env_value((tpl or {}).get("env"), "SYNC_STEAM_GAMES") or "0"
+            ok, msg = setup.save_template(int(disk), (lang or "").strip(), (res or "").strip() or "1920x1200", games)
+            if not ok:
+                raise VastgameError(msg, key="setup.err.template")
+        if not str(disk).isdigit() or not 30 <= int(disk) <= 2000:
+            return {"error": {"key": "setup.err.disk", "params": {}, "text": "disk"}}
+        if lang and not re.fullmatch(r"[a-z_]+", lang.strip()):
+            return {"error": {"key": "setup.err.lang", "params": {}, "text": "lang"}}
+        if res and not re.fullmatch(r"\d{3,4}x\d{3,4}", res.strip()):
+            return {"error": {"key": "setup.err.res", "params": {}, "text": "res"}}
+        return self._simple(save)
+
+    def refresh_template(self):
+        def refresh():
+            ok, msg = setup.refresh_template()
+            if not ok:
+                raise VastgameError(msg, key="setup.err.template")
+        return self._simple(refresh)
 
     # ---- Игры в облаке
     def games(self):

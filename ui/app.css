@@ -223,3 +223,14 @@ tr.group td { font-weight: 600; font-size: 13px; color: var(--muted); background
 .setup-steps .body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .setup-steps .body b { font-size: 14px; }
 .setup-steps .actions { margin-top: 6px; }
+
+.setup-steps .actions { flex-wrap: wrap; gap: 8px; }
+.setup-steps .icon.info { background: var(--syncing); }
+.setup-steps .hint { margin-top: 4px; }
+.setup-steps .pre { white-space: pre-line; }
+.field {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; min-width: 0; flex: 1 1 160px;
+}
+.step-msg { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.step-msg.err { color: var(--error); }
