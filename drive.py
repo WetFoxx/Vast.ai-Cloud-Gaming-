@@ -38,6 +38,29 @@ def is_old_token():
     return keyring.get_password(SERVICE, "RCLONE_TOKEN_SCOPE") != SCOPE
 
 
+def _remote(name, tok, old):
+    """Переменные окружения, которые описывают rclone «диск» name (без файла конфига)."""
+    cid, secret = (None, None) if old else client()
+    p = f"RCLONE_CONFIG_{name.upper()}_"
+    return {p + "TYPE": "drive",
+            p + "SCOPE": "drive" if old else SCOPE,
+            p + "CLIENT_ID": cid or "",
+            p + "CLIENT_SECRET": secret or "",
+            # access_token не пустой + истёкший expiry: rclone сразу обновит его по refresh_token
+            # (так же делает wolf-setup.sh на машине)
+            p + "TOKEN": json.dumps({"access_token": "x", "token_type": "Bearer",
+                                     "refresh_token": tok or "", "expiry": "2000-01-01T00:00:00Z"})}
+
+
+def rclone_both(*args, capture=True, timeout=None):
+    """rclone сразу с двумя «дисками»: vgold: — старый доступ (весь Drive), vgdrive: — клиент приложения.
+    Для переноса архивов из старой папки в новую. capture=False — вывод rclone (прогресс) идёт на экран."""
+    old_tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if not is_old_token() else token()
+    env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),
+               **_remote("vgold", old_tok, True), **_remote("vgdrive", token(), False))
+    return subprocess.run(["rclone", *args], capture_output=capture, text=True, env=env, timeout=timeout)
+
+
 def rclone(*args, tok=None, old=None, timeout=300):
     """Запустить rclone с доступом к Drive. Возвращает CompletedProcess (stdout/stderr — текстом).
 
@@ -50,17 +73,8 @@ def rclone(*args, tok=None, old=None, timeout=300):
         old = is_old_token() if tok in (None, saved) else False
     if tok is None:
         tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if old and not is_old_token() else saved
-    cid, secret = (None, None) if old else client()
-    env = dict(os.environ,
-               RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
-               RCLONE_CONFIG_VGDRIVE_TYPE="drive",
-               RCLONE_CONFIG_VGDRIVE_SCOPE="drive" if old else SCOPE,
-               RCLONE_CONFIG_VGDRIVE_CLIENT_ID=cid or "",
-               RCLONE_CONFIG_VGDRIVE_CLIENT_SECRET=secret or "",
-               # access_token не пустой + истёкший expiry: rclone сразу обновит его по refresh_token
-               # (так же делает wolf-setup.sh на машине)
-               RCLONE_CONFIG_VGDRIVE_TOKEN=json.dumps({"access_token": "x", "token_type": "Bearer",
-                                                       "refresh_token": tok or "", "expiry": "2000-01-01T00:00:00Z"}))
+    env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
+               **_remote("vgdrive", tok, old))
     return subprocess.run(["rclone", *args], capture_output=True, text=True, env=env, timeout=timeout)
 
 
