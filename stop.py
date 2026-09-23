@@ -76,7 +76,15 @@ print("Закрываю Steam и выгружаю всё в Google Drive (мож
 proc = ssh(ip, "wolf shutdown")
 seen = {}
 deadline = time.time() + 30 * 60
+last_check = time.time()
 while True:
+    # Раз в минуту — жив ли инстанс: его могли удалить в консоли Vast посреди выгрузки
+    if time.time() - last_check > 60:
+        last_check = time.time()
+        if iid not in [i["id"] for i in list_instances()]:
+            proc.kill()
+            sys.exit(f"\n!!! Инстанс {iid} удалён во время выгрузки (не этой командой).\n"
+                     "Что успело выгрузиться — выше; остальное не дошло до Drive.")
     s = wolf_status(ip) or {}
     for name, (ts, state, text) in sorted(s.items()):
         if ts >= t0 and seen.get(name) != (state, text):

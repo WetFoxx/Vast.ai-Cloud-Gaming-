@@ -94,7 +94,10 @@ def ssh(ip, command):
     return subprocess.Popen(
         ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
          "-o", "UserKnownHostsFile=/dev/null",
-         "-o", "ConnectTimeout=20", f"root@{ip}", command],
+         "-o", "ConnectTimeout=20",
+         # машина пропала (удалили, упала) — ssh заметит за ~1 минуту, а не будет ждать вечно
+         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+         f"root@{ip}", command],
         # LogLevel=ERROR не ставим: он прячет и баннер со ссылкой подтверждения Tailscale.
         # stdin закрыт — ssh не должен забирать ввод из терминала
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
