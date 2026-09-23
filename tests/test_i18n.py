@@ -1,5 +1,5 @@
-# Переводы: во всех языках одни и те же ключи и одни и те же подстановки {имя} —
-# чтобы ни одна строка не потерялась при добавлении нового текста.
+# Переводы окна (ui/i18n.js): во всех языках одни и те же ключи и подстановки {имя},
+# и для каждого ключа, который используют ядро и vastapi, есть перевод.
 
 import json
 import re
@@ -9,8 +9,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-import i18n  # noqa: E402
 
 PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
@@ -23,20 +21,23 @@ def ui_texts():
 
 
 class TestI18n(unittest.TestCase):
-    def check(self, texts, where):
-        self.assertEqual(set(texts), {"ru", "en", "es"}, where)
+    def test_same_keys_and_placeholders(self):
+        texts = ui_texts()
+        self.assertEqual(set(texts), {"ru", "en", "es"})
         for lang in ("ru", "es"):
-            self.assertEqual(set(texts[lang]), set(texts["en"]), f"{where}: ключи {lang} ≠ en")
+            self.assertEqual(set(texts[lang]), set(texts["en"]), f"ключи {lang} ≠ en")
             for key, text in texts["en"].items():
                 self.assertEqual(set(PLACEHOLDER.findall(texts[lang][key])), set(PLACEHOLDER.findall(text)),
-                                 f"{where}: подстановки в {lang}/{key}")
-                self.assertTrue(texts[lang][key].strip(), f"{where}: пусто {lang}/{key}")
+                                 f"подстановки в {lang}/{key}")
+                self.assertTrue(texts[lang][key].strip(), f"пусто {lang}/{key}")
 
-    def test_window(self):
-        self.check(ui_texts(), "ui/i18n.js")
-
-    def test_python(self):
-        self.check(i18n.TEXTS, "i18n.py")
+    def test_python_keys_translated(self):
+        """Каждый key="..." в core.py и vastapi.py есть в словаре, и подстановки совпадают по именам."""
+        texts = ui_texts()["en"]
+        for f in ("core.py", "vastapi.py"):
+            src = (ROOT / f).read_text()
+            for key in set(re.findall(r'key="([a-z_.]+)"', src)) | set(re.findall(r'"(core\.[a-z_]+)"', src)):
+                self.assertIn(key, texts, f"{f}: нет перевода для {key}")
 
     def test_status_kinds_translated(self):
         """Для каждого вида состояния из core.status есть фраза, для каждого состояния — заголовок."""
@@ -46,6 +47,8 @@ class TestI18n(unittest.TestCase):
             self.assertIn("status.text." + kind, texts)
         for state in ("none", "starting", "ready", "syncing", "stopping", "error"):
             self.assertIn("status.title." + state, texts)
+        for stage in ("vast", "tailscale", "restore", "ready"):
+            self.assertIn("stage." + stage, texts)
 
 
 if __name__ == "__main__":

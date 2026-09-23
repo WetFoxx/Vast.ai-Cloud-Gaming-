@@ -12,8 +12,8 @@ def ask(question):
 
 
 class ConsoleUI:
-    def say(self, text, level="info"):
-        print(text, flush=True)
+    def say(self, text, level="info", key=None, **params):
+        print(text, flush=True)   # терминал — всегда русский текст; key/params нужны окну
 
     def stage(self, key, text):
         print(text, flush=True)
@@ -21,7 +21,7 @@ class ConsoleUI:
     def archive(self, name, state, text):
         print(f"  {name:<28} {state:<5} {text}", flush=True)
 
-    def confirm(self, question):
+    def confirm(self, question, key=None, **params):
         return ask(question)
 
     def tailscale(self, text):

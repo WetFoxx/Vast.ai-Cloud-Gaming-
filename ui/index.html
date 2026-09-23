@@ -15,7 +15,8 @@
     </div>
   </header>
 
-  <main>
+  <!-- ===== Главный экран ===== -->
+  <main id="screen-main">
     <section class="card" id="balance-card">
       <div class="label" data-i18n="balance.label"></div>
       <div class="big" id="balance">—</div>
@@ -47,12 +48,73 @@
     </section>
 
     <div class="actions">
-      <button class="primary" id="play" disabled data-i18n="btn.play" data-i18n-title="btn.soon"></button>
+      <button class="primary" id="play" disabled data-i18n="btn.play"></button>
       <button id="stop" disabled data-i18n="btn.stop" data-i18n-title="btn.soon"></button>
     </div>
 
     <div class="error" id="error" hidden></div>
   </main>
+
+  <!-- ===== Выбор машины ===== -->
+  <main id="screen-offers" hidden>
+    <h1 data-i18n="offers.title"></h1>
+    <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
+    <div class="note" data-i18n="offers.latency"></div>
+    <section class="card table-card">
+      <table id="offers-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th data-i18n="col.gpu"></th>
+            <th data-i18n="col.country"></th>
+            <th class="num" data-i18n="col.price"></th>
+            <th class="num" data-i18n="col.traffic"></th>
+            <th class="num" data-i18n="col.reliability"></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <div class="error" id="offers-error" hidden></div>
+    <div class="actions">
+      <button class="primary" id="rent" disabled data-i18n="offers.rent"></button>
+      <button id="offers-cancel" data-i18n="btn.cancel"></button>
+    </div>
+  </main>
+
+  <!-- ===== Ход операции (запуск машины) ===== -->
+  <main id="screen-progress" hidden>
+    <h1 id="progress-title" data-i18n="progress.title.play"></h1>
+    <div class="sub" id="progress-elapsed"></div>
+    <section class="card">
+      <ol class="stages" id="stages"></ol>
+    </section>
+    <section class="card" id="archives-card" hidden>
+      <ul class="archives" id="archives"></ul>
+    </section>
+    <div class="note" id="progress-note" data-i18n="progress.keep_open"></div>
+    <section class="card" id="progress-result" hidden></section>
+    <div class="error" id="progress-error" hidden></div>
+    <details class="details">
+      <summary data-i18n="progress.details"></summary>
+      <pre id="progress-log"></pre>
+    </details>
+    <div class="actions">
+      <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
+    </div>
+  </main>
+
+  <!-- ===== Вопрос (да/нет) ===== -->
+  <div class="modal" id="modal" hidden>
+    <div class="dialog">
+      <div class="title" id="modal-title"></div>
+      <div class="modal-text" id="modal-text"></div>
+      <div class="actions">
+        <button class="primary" id="modal-yes"></button>
+        <button id="modal-no"></button>
+      </div>
+    </div>
+  </div>
 
   <script src="i18n.js"></script>
   <script src="app.js"></script>

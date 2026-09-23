@@ -9,9 +9,8 @@ import argparse
 import shlex   # безопасно подставить имя с пробелами в команду для машины
 import sys
 
-import requests
-
 import drive
+import steamnames
 from vastapi import list_instances
 from wolfnode import ssh_run, ts_node
 
@@ -37,21 +36,6 @@ def size(gb):
     return f"{gb:.1f} ГБ" if gb >= 1 else f"{gb * 1000:.0f} МБ"
 
 
-def steam_names(appids):
-    """Названия игр Steam по номерам (appid) — публичный API магазина Steam, без ключа."""
-    names = {}
-    for appid in appids:
-        try:
-            r = requests.get("https://store.steampowered.com/api/appdetails",
-                             params={"appids": appid, "filters": "basic"}, timeout=10)
-            d = r.json().get(appid) or {}
-            if d.get("success"):
-                names[appid] = d["data"]["name"]
-        except Exception:
-            pass
-    return names
-
-
 def game_archives():
     """[(имя архива, тип, название для человека, ГБ, дата, файлы)] — только игры и сохранения."""
     if not drive.token():
@@ -59,7 +43,7 @@ def game_archives():
     arch = drive.archives()
     if arch is None:
         sys.exit("Не удалось открыть Google Drive — проверь интернет или пройди шаг 2: vastgame setup")
-    names = steam_names([n[5:] for n in arch if n.startswith("pfx--")])
+    names = steamnames.for_archives(arch)
     rows = []
     for base, info in arch.items():
         kind = base.split("--")[0] if "--" in base else None

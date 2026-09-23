@@ -19,10 +19,11 @@ class FakeUI:
     """ui, который запоминает, что ему говорили, и отвечает на вопросы заранее заданным ответом."""
 
     def __init__(self, answer=True):
-        self.answer, self.log, self.stages, self.questions = answer, [], [], []
+        self.answer, self.log, self.stages, self.questions, self.keys = answer, [], [], [], []
 
-    def say(self, text, level="info"):
+    def say(self, text, level="info", key=None, **params):
         self.log.append((level, text))
+        self.keys.append(key)
 
     def stage(self, key, text):
         self.stages.append(key)
@@ -30,8 +31,9 @@ class FakeUI:
     def archive(self, name, state, text):
         self.log.append(("archive", f"{name} {state}"))
 
-    def confirm(self, question):
+    def confirm(self, question, key=None, **params):
         self.questions.append(question)
+        self.keys.append(key)
         return self.answer
 
     def tailscale(self, text):

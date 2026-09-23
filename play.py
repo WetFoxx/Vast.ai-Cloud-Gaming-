@@ -97,6 +97,6 @@ if result["boot"][1] == "err":
     print(f"!!! Восстановление с ошибками: {result['boot'][2]}")
     print("    Подробности — на странице статуса (адрес ниже).")
 print_links(result["ip"], result["dns"])
-for level, text in core.identity_notes(result):
+for level, text, *_ in core.identity_notes(result):
     print(f"\n  {text}")
 print("\nАдреса можно показать снова: vastgame info. Закончил играть — vastgame stop")
