@@ -1,0 +1,5 @@
+#!/bin/bash
+# Запуск vastgame из любой папки: находит папку проекта (даже через символьную ссылку)
+# и запускает vastgame.py Python'ом из её виртуального окружения .venv
+DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+exec "$DIR/.venv/bin/python" "$DIR/vastgame.py" "$@"
