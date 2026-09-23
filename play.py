@@ -145,6 +145,18 @@ while True:
         print(f"  Vast: {st or 'создаётся'}  {(inst.get('status_msg') or '').strip()[:80]}")
         last = st
     if st == "running":
+        # Диагностика: что реально попало на машину. Только ИМЕНА переменных — значения
+        # (ключи Tailscale и Google) не печатаем. Сравнить с тем, что ждёт wolf-setup.sh.
+        names = sorted(e[0] for e in inst.get("extra_env") or [] if e)
+        print(f"  Переменные на машине: {', '.join(names) or 'НЕТ'}")
+        for need in ("RCLONE_REFRESH_TOKEN", "TAILSCALE_AUTHKEY"):
+            if need not in names:
+                print(f"  !!! нет {need} среди переменных инстанса (возможно, аккаунтные передаются иначе)")
+        for k in sorted(inst):
+            if "onstart" in k or "template" in k:
+                v = inst[k]
+                print(f"  {k}: " + (f"{len(v)} символов" if isinstance(v, str) and len(v) > 40 else repr(v)))
+        ip_pub = inst.get("public_ipaddr") or "?"
         break
     # Из этих состояний машина уже не дойдёт до running (см. документацию Vast)
     if st in ("exited", "offline", "unknown"):
@@ -154,9 +166,19 @@ while True:
     time.sleep(15)
 
 # ---- 4b. Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
-print("Машина запущена. Жду узел vastai-gaming в Tailscale (установка пакетов, 3–10 минут).")
-deadline = time.time() + 20 * 60
+print("Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
+started = time.time()
+deadline = started + 20 * 60
+warned = False
 while True:
+    # Обычно узел появляется за 5–7 минут; через 10 — подсказать, где искать причину
+    if not warned and time.time() - started > 10 * 60:
+        warned = True
+        print(f"\n  Узла нет уже 10 минут — это дольше обычного. Публичный IP машины: {ip_pub}")
+        print("  Посмотри на машине (консоль Vast → Instances → Open → терминал):")
+        print("    tail -n 30 /var/log/wolf-setup.log     # установка")
+        print("    tail -n 30 /var/log/wolf.log           # восстановление из Drive")
+        print("  Жду ещё до 20 минут.\n")
     node = ts_node()
     if node and node[0] and wolf_status(node[1]) is not None:
         online, ip, dns = node
