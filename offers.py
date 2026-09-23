@@ -24,6 +24,7 @@ query = {
     "rentable": {"eq": True},
     "num_gpus": {"eq": 1},
     "vms_enabled": {"eq": True},        # машина умеет запускать KVM-образы
+    "compute_cap": {"gte": 750},        # как в шаблоне: видеокарты от GTX 16xx / RTX 20xx
     "reliability": {"gte": a.min_rel},
     "disk_space": {"gte": a.disk},      # на машине хватает места под наш диск
     "allocated_storage": a.disk,        # чтобы цена в час сразу включала этот диск
