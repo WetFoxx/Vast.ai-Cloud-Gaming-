@@ -35,7 +35,10 @@ a = p.parse_args()
 
 def ask(question):
     """Задать вопрос; True — только если человек напечатал «да»."""
-    import readline  # noqa: F401 — с ним в ответе работают стрелки и Backspace, а не печатаются ^[[C
+    try:
+        import readline  # noqa: F401 — стрелки и Backspace в ответе (на Windows модуля нет)
+    except ImportError:
+        pass
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
 
 

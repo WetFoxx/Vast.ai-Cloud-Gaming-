@@ -24,7 +24,10 @@ a = p.parse_args()
 
 
 def ask(question):
-    import readline  # noqa: F401 — стрелки и Backspace в ответе
+    try:
+        import readline  # noqa: F401 — стрелки и Backspace в ответе (на Windows модуля нет)
+    except ImportError:
+        pass
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
 
 

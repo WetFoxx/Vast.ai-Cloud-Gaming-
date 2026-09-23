@@ -13,9 +13,11 @@ import re
 import shutil     # shutil.which — найти программу на Mac
 import subprocess
 import sys
+import webbrowser   # открыть ссылку в браузере (Mac и Windows)
 
 import keyring   # доступ к Keychain («Связка ключей») macOS
 
+import drive
 from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, call, check_key, my_template
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
@@ -23,7 +25,10 @@ VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 
 def ask(question):
     """Вопрос да/нет; True — только если человек ответил «да»."""
-    import readline  # noqa: F401 — стрелки и Backspace в ответе
+    try:
+        import readline  # noqa: F401 — стрелки и Backspace в ответе (на Windows модуля нет)
+    except ImportError:
+        pass
     return input(f"{question} [да/нет]: ").strip().lower() in ("да", "yes", "y", "д")
 
 
@@ -104,7 +109,7 @@ def step_vast_key():
   2. Нажми «+ New», дай имя (например, vastgame) и создай ключ.
   3. Скопируй ключ и вставь сюда. Ввод скрыт, как пароль: на экране ничего не появится.""")
     if ask("\n  Открыть страницу в браузере?"):
-        subprocess.run(["open", VAST_KEYS_URL])
+        webbrowser.open(VAST_KEYS_URL)
     for _ in range(3):
         key = getpass.getpass("\n  Ключ Vast (вставь и нажми Enter): ").strip()
         if not key:
@@ -124,52 +129,13 @@ def step_vast_key():
     return False
 
 
-def drive_check(token):
-    """Подключиться к Drive с этим токеном: (почта владельца, число архивов в папке или None, ГБ).
-
-    rclone получает настройки из переменных окружения (RCLONE_CONFIG_<ИМЯ>_...), а не из файла:
-    твой личный конфиг rclone не читается и не меняется, токен никуда не записывается.
-    None — если токен не работает.
-    """
-    import os
-    import tempfile
-    env = dict(os.environ,
-               RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
-               RCLONE_CONFIG_VGDRIVE_TYPE="drive",
-               RCLONE_CONFIG_VGDRIVE_SCOPE="drive",
-               # access_token не пустой + истёкший expiry: rclone сразу обновит его по refresh_token
-               # (так же делает wolf-setup.sh на машине)
-               RCLONE_CONFIG_VGDRIVE_TOKEN=json.dumps({"access_token": "x", "token_type": "Bearer",
-                                                       "refresh_token": token, "expiry": "2000-01-01T00:00:00Z"}))
-
-    def rc(*args):
-        return subprocess.run(["rclone", *args], capture_output=True, text=True, env=env, timeout=120)
-
-    # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её
-    # из метаданных папок в корне Drive: чаще всего встречающийся владелец и есть хозяин диска
-    root = rc("lsjson", "-M", "--max-depth", "1", "vgdrive:")
-    if root.returncode != 0:
-        return None
-    owners = {}
-    for item in json.loads(root.stdout or "[]"):
-        o = (item.get("Metadata") or {}).get("owner")
-        if o:
-            owners[o] = owners.get(o, 0) + 1
-    email = max(owners, key=owners.get) if owners else "не определить (на Drive пусто)"
-    size = rc("size", "vgdrive:vastai-cloud-games", "--json")
-    if size.returncode != 0:          # папки нет
-        return email, None, 0
-    d = json.loads(size.stdout)
-    return email, d.get("count", 0), d.get("bytes", 0) / 1e9
-
-
 def step_google():
     """Шаг 2: токен Google Drive — в Keychain, проверенный, и в переменных аккаунта Vast."""
     title(2, "Google Drive")
     token = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
     if token:
         print("  Проверяю сохранённый токен Drive...")
-        info = drive_check(token)
+        info = drive.check(token)
         if info is None:
             print("  ✗ Сохранённый токен больше не работает — нужен новый вход.")
             token = None
@@ -188,7 +154,7 @@ def step_google():
     input("\n  Нажми Enter, чтобы открыть браузер...")
     google()                                            # rclone authorize → Keychain
     token = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
-    info = drive_check(token)
+    info = drive.check(token)
     if info is None:
         print("  ✗ С новым токеном Drive не открывается. Попробуй ещё раз: vastgame setup")
         return False
@@ -245,7 +211,7 @@ def step_tailscale():
        Pre-approved — ВКЛ, если в сети включено одобрение устройств
   3. Скопируй ключ (tskey-auth-...) и вставь сюда. Ввод скрыт.""")
     if ask("\n  Открыть страницу в браузере?"):
-        subprocess.run(["open", TS_KEYS_URL])
+        webbrowser.open(TS_KEYS_URL)
     for _ in range(3):
         key = getpass.getpass("\n  Ключ Tailscale (вставь и нажми Enter): ").strip()
         if not key.startswith("tskey-auth-"):
