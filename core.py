@@ -243,49 +243,57 @@ NONE, STARTING, READY, SYNCING, ERROR = "none", "starting", "ready", "syncing", 
 def status():
     """Что сейчас с машиной — для главного экрана и значка. Только читает, ничего не меняет.
 
-    {"state": none|starting|ready|syncing|error,
-     "stage": vast|tailscale|restore (пока starting), "text": что показать человеку,
+    {"state": none|starting|ready|syncing|error       — цвет значка,
+     "kind": none|many|vast_error|vast|tailscale|boot_error|restore|sync_error|syncing|ready
+                                                       — что именно; окно по нему собирает фразу,
+     "stage": vast|tailscale|restore (пока starting),
+     "text": то же по-русски (для терминала),
      "machine": {"id", "gpu", "country", "price"} или None,
      "links": адреса (когда узел в сети), "archives": {имя: (время, состояние, текст)},
-     "busy": [архивы в работе], "errors": [архивы с ошибкой]}
+     "busy": [архивы в работе], "errors": [архивы с ошибкой], "done": сколько восстановлено,
+     "count": машин (для kind=many), "vast_status", "detail": исходный текст (Vast или wolf)}
     Выключение (wolf shutdown) снаружи не видно — его показывает окно, которое его запустило.
     """
-    out = {"state": NONE, "stage": None, "text": "Машины нет", "machine": None,
-           "links": None, "archives": {}, "busy": [], "errors": []}
+    out = {"state": NONE, "kind": "none", "stage": None, "text": "Машины нет", "machine": None,
+           "links": None, "archives": {}, "busy": [], "errors": [], "done": 0,
+           "count": 0, "vast_status": None, "detail": ""}
     inst = list_instances()
+    out["count"] = len(inst)
     if not inst:
         return out
     if len(inst) > 1:
-        return dict(out, state=ERROR, text=f"Машин несколько ({len(inst)}) — разберись в консоли Vast")
+        return dict(out, state=ERROR, kind="many", text=f"Машин несколько ({len(inst)}) — разберись в консоли Vast")
     i = inst[0]
     out["machine"] = {"id": i["id"], "gpu": i.get("gpu_name") or "?", "country": market.country(i),
                       "price": i.get("dph_total") or 0}
     st, msg = i.get("actual_status"), (i.get("status_msg") or "").strip()
+    out.update(vast_status=st, detail=msg[:200])
     if st in ("exited", "offline", "unknown") or (st != "running" and "error" in msg.lower()):
-        return dict(out, state=ERROR, text=f"Vast: {st or '?'} {msg[:120]}".strip())
+        return dict(out, state=ERROR, kind="vast_error", text=f"Vast: {st or '?'} {msg[:120]}".strip())
     if st != "running":
-        return dict(out, state=STARTING, stage="vast", text="Vast запускает машину")
+        return dict(out, state=STARTING, kind="vast", stage="vast", text="Vast запускает машину")
     node = ts_node()
     s = wolf_status(node[1]) if node else None
     if s is None:
-        return dict(out, state=STARTING, stage="tailscale", text="Машина запущена, жду её в Tailscale")
+        return dict(out, state=STARTING, kind="tailscale", stage="tailscale",
+                    text="Машина запущена, жду её в Tailscale")
     _, ip, dns = node
-    out.update(links=links(ip, dns), archives=s)
     busy = sorted(n for n, v in s.items() if n != "boot" and v[1] in ("up", "down"))
     errors = sorted(n for n, v in s.items() if n != "boot" and v[1] == "err")
-    out.update(busy=busy, errors=errors)
+    done = sum(1 for n, v in s.items() if n != "boot" and v[1] == "ok")
+    out.update(links=links(ip, dns), archives=s, busy=busy, errors=errors, done=done, detail="")
     boot = s.get("boot")
     if boot and boot[1] == "err":
-        return dict(out, state=ERROR, text=f"Восстановление с ошибками: {boot[2]}")
+        return dict(out, state=ERROR, kind="boot_error", detail=boot[2],
+                    text=f"Восстановление с ошибками: {boot[2]}")
     if not boot or boot[1] != "ok":
-        done = sum(1 for n, v in s.items() if n != "boot" and v[1] == "ok")
-        return dict(out, state=STARTING, stage="restore",
+        return dict(out, state=STARTING, kind="restore", stage="restore",
                     text=f"Восстановление из Google Drive: готово {done}, в работе {len(busy)}")
     if errors:
-        return dict(out, state=ERROR, text=f"Ошибка синхронизации: {', '.join(errors)}")
+        return dict(out, state=ERROR, kind="sync_error", text=f"Ошибка синхронизации: {', '.join(errors)}")
     if busy:
-        return dict(out, state=SYNCING, text=f"Синхронизация: {', '.join(busy)}")
-    return dict(out, state=READY, text="Готова к игре")
+        return dict(out, state=SYNCING, kind="syncing", text=f"Синхронизация: {', '.join(busy)}")
+    return dict(out, state=READY, kind="ready", text="Готова к игре")
 
 
 # ------------------------------------------------------------------------ остановка ---

@@ -12,6 +12,8 @@ from pathlib import Path
 import webview   # pywebview: окно с веб-страницей (на Mac — системный WebKit, на Windows — Edge WebView2)
 
 import core
+import i18n
+import settings
 from vastapi import VastgameError
 
 HERE = Path(__file__).resolve().parent
@@ -21,13 +23,27 @@ LOW_BALANCE = 1.0   # $: ниже — предупреждение «балан�
 class Api:
     """Функции для страницы. Возвращают словари — pywebview передаёт их в JavaScript как объекты."""
 
+    def __init__(self):
+        self._lang = "en"   # (с «_» — pywebview не показывает это странице) язык окна: его сообщает страница (сохранённый выбор или язык системы)
+
+    def settings(self):
+        """Сохранённые настройки окна (язык — только если его выбрали сами)."""
+        return {"language": settings.get("language")}
+
+    def set_language(self, lang, remember=False):
+        """Язык сообщений из Python; remember — запомнить выбор человека."""
+        if lang in settings.LANGUAGES:
+            self._lang = lang
+            if remember:
+                settings.set("language", lang)
+
     def state(self):
         """Баланс и состояние машины для главного экрана."""
         try:
             st = core.status()
             credit = core.balance()
         except VastgameError as e:   # подвид SystemExit — ловим явно, иначе поток тихо завершится
-            return {"error": str(e)}
+            return {"error": i18n.error_text(self._lang, e)}
         price = st["machine"]["price"] if st["machine"] else None
         return {
             "balance": credit,

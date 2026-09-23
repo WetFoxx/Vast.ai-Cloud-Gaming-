@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,12 +9,15 @@
 <body>
   <header>
     <div class="brand">vastgame</div>
-    <div class="updated" id="updated">загрузка…</div>
+    <div class="header-right">
+      <span class="updated" id="updated" data-i18n="app.loading"></span>
+      <select id="lang" aria-label="Language"></select>
+    </div>
   </header>
 
   <main>
     <section class="card" id="balance-card">
-      <div class="label">Баланс Vast</div>
+      <div class="label" data-i18n="balance.label"></div>
       <div class="big" id="balance">—</div>
       <div class="sub" id="balance-sub"></div>
     </section>
@@ -31,28 +34,27 @@
       <div class="links" id="links" hidden>
         <div class="link-row">
           <div>
-            <div class="label">Moonlight — добавь ПК по имени</div>
+            <div class="label" data-i18n="links.moonlight"></div>
             <code id="moonlight"></code>
           </div>
-          <button class="small" id="copy-moonlight">Копировать</button>
+          <button class="small" id="copy-moonlight" data-i18n="btn.copy"></button>
         </div>
         <div class="link-row">
-          <div>
-            <div class="label">Кабинет Sunshine — PIN для Moonlight</div>
-          </div>
-          <button class="small" id="open-sunshine">Открыть</button>
+          <div class="label" data-i18n="links.sunshine"></div>
+          <button class="small" id="open-sunshine" data-i18n="btn.open"></button>
         </div>
       </div>
     </section>
 
     <div class="actions">
-      <button class="primary" id="play" disabled title="Появится на следующем шаге">Играть</button>
-      <button id="stop" disabled title="Появится на следующем шаге">Закончить</button>
+      <button class="primary" id="play" disabled data-i18n="btn.play" data-i18n-title="btn.soon"></button>
+      <button id="stop" disabled data-i18n="btn.stop" data-i18n-title="btn.soon"></button>
     </div>
 
     <div class="error" id="error" hidden></div>
   </main>
 
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

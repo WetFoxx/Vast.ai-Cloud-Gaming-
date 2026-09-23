@@ -160,6 +160,23 @@ class TestStatus(Base):
         self.assertEqual(self.machine(page=dict(ok, **{"pfx--1": (3, "err", "")}))["state"], core.ERROR)
         self.assertEqual(self.machine(page={"boot": (1, "err", "ошибки")})["state"], core.ERROR)
 
+    def test_kinds(self):
+        """kind — что именно происходит; по нему окно собирает фразу на своём языке."""
+        self.patch(core, "list_instances", lambda: [])
+        self.assertEqual(core.status()["kind"], "none")
+        self.patch(core, "list_instances", lambda: [{"id": 1}, {"id": 2}])
+        self.assertEqual((core.status()["kind"], core.status()["count"]), ("many", 2))
+        self.assertEqual(self.machine(vast="exited")["kind"], "vast_error")
+        self.assertEqual(self.machine(vast="loading")["kind"], "vast")
+        self.assertEqual(self.machine(node=False)["kind"], "tailscale")
+        r = self.machine(page={"boot": (1, "down", ""), "identity": (1, "ok", ""), "pfx--1": (2, "down", "")})
+        self.assertEqual((r["kind"], r["done"], r["busy"]), ("restore", 1, ["pfx--1"]))
+        self.assertEqual(self.machine(page={"boot": (1, "err", "ошибки: pfx")})["detail"], "ошибки: pfx")
+        ok = {"boot": (1, "ok", ""), "steam-state": (2, "ok", "")}
+        self.assertEqual(self.machine(page=dict(ok, x=(3, "err", "")))["kind"], "sync_error")
+        self.assertEqual(self.machine(page=dict(ok, x=(3, "up", "")))["kind"], "syncing")
+        self.assertEqual(self.machine(page=ok)["kind"], "ready")
+
 
 class TestStop(Base):
     def setup_machine(self, after, shutdown_code=0, answer=True):

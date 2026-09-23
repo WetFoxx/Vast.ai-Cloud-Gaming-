@@ -3,11 +3,9 @@
 
 import datetime
 import json
-import os
 import re
-import sys
-from pathlib import Path
 
+from settings import config_dir
 from vastapi import call
 
 MIN_REL = 0.97        # надёжность машины не ниже (доля времени, когда хост был доступен)
@@ -17,18 +15,6 @@ MAX_TRAFFIC = 0.02    # машины с трафиком дороже, $ за Г
 # Игровые видеокарты: "RTX 4090", "GTX 1660 Ti", "RTX 4070S Ti".
 # Не подходят профессиональные: "RTX A4000" (после RTX буква), "RTX 6000Ada" (Ada сразу после цифр).
 GAMING = re.compile(r"^(RTX|GTX) \d{4}(?!Ada)")
-
-
-def config_dir():
-    """Папка настроек утилиты (не секретных): macOS — Application Support, Windows — %APPDATA%."""
-    if sys.platform == "darwin":
-        d = Path.home() / "Library" / "Application Support" / "vastgame"
-    elif os.name == "nt":
-        d = Path(os.environ.get("APPDATA", Path.home())) / "vastgame"
-    else:
-        d = Path.home() / ".config" / "vastgame"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 BAD_HOSTS = config_dir() / "bad_hosts.json"   # {machine_id: {"reason": ..., "date": ...}}

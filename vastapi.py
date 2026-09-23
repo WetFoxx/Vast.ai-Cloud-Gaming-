@@ -20,7 +20,14 @@ class VastgameError(SystemExit):
     Подвид SystemExit: в терминале ведёт себя как sys.exit(сообщение) — печатает и завершает программу;
     окно приложения перехватывает её (except VastgameError) и показывает, не закрываясь.
     Внимание: `except Exception` её НЕ ловит — только явно.
+
+    key и params — для перевода в окне (i18n.py): VastgameError("текст", key="vast.no_key", name=...).
+    Терминал всегда печатает первый аргумент — русский текст.
     """
+
+    def __init__(self, message, key=None, **params):
+        super().__init__(message)
+        self.key, self.params = key, params
 
 
 # Шаблон Vast для игровой машины: его создаёт мастер (vastgame setup, шаг «Шаблон»).
@@ -34,7 +41,7 @@ def read_key():
     if not key and KEY_FILE.exists():
         key = KEY_FILE.read_text().strip()
     if not key:
-        raise VastgameError("Нет ключа Vast — запусти первую настройку: vastgame setup")
+        raise VastgameError("Нет ключа Vast — запусти первую настройку: vastgame setup", key="vast.no_key")
     return key
 
 
@@ -43,7 +50,8 @@ def check_key(key):
     try:
         r = requests.get(API + "users/current/", headers={"Authorization": f"Bearer {key}"}, timeout=30)
     except requests.RequestException as e:
-        raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}")
+        raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}", key="vast.network",
+                            error=type(e).__name__)
     if r.status_code != 200:
         return None
     return r.json().get("credit", 0)
@@ -64,16 +72,18 @@ def call(method, path, body=None, params=None, base=API):
             timeout=30,
         )
     except requests.RequestException as e:
-        raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}")
+        raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}", key="vast.network",
+                            error=type(e).__name__)
     if r.status_code == 401:
-        raise VastgameError("Vast не принял ключ (401) — замени его: vastgame setup")
+        raise VastgameError("Vast не принял ключ (401) — замени его: vastgame setup", key="vast.bad_key")
     if r.status_code != 200:
         # В ошибках Vast кладёт объяснение в поле msg — показываем только его
         try:
             msg = r.json().get("msg") or ""
         except ValueError:
             msg = ""
-        raise VastgameError(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip())
+        raise VastgameError(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip(), key="vast.http",
+                            code=r.status_code, msg=msg)
     return r.json()
 
 
@@ -83,7 +93,8 @@ def my_template(name=TEMPLATE_NAME):
     ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}).get("templates", [])
     mine = [t for t in ts if t.get("creator_id") == me]
     if len(mine) > 1:
-        raise VastgameError(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.")
+        raise VastgameError(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.",
+                            key="vast.templates_many", name=name, count=len(mine))
     return mine[0] if mine else None
 
 
