@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import paths
 from settings import config_dir
 
 AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -35,11 +36,11 @@ def wanted(name="resume"):
     """Каким должен быть файл службы: этот Python и эти файлы (после сборки .app пути другие)."""
     log = str(config_dir() / "job.log")
     if name == "app":
-        return {"Label": label(name), "ProgramArguments": [sys.executable, str(HERE / "vastgame.py"), "app"],
+        return {"Label": label(name), "ProgramArguments": paths.self_cmd(),
                 "WorkingDirectory": str(HERE), "RunAtLoad": True, "StandardErrorPath": log}
     return {
         "Label": label(name),
-        "ProgramArguments": [sys.executable, str(HERE / "jobs.py"), "resume"],
+        "ProgramArguments": paths.self_cmd("resume"),
         "WorkingDirectory": str(HERE),
         "RunAtLoad": True,
         "StartInterval": INTERVAL,

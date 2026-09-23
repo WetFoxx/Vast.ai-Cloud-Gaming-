@@ -1,6 +1,6 @@
 # jobs.py — долгие операции с машиной и их ход.
 #
-# «Играть» и «Закончить» идут в ОТДЕЛЬНОМ фоновом процессе (python jobs.py play|stop ...), который
+# «Играть» и «Закончить» идут в ОТДЕЛЬНОМ фоновом процессе (app_main.py job play|stop ...), который
 # не зависит от окна: окно можно закрыть — запуск или выгрузка с удалением доведутся до конца,
 # а в конце придёт системное уведомление. Процесс пишет свой ход в job.json в папке настроек,
 # окно читает этот файл (Api.session_progress) и при повторном открытии подключается снова.
@@ -359,7 +359,7 @@ def spawn(kind, **args):
 def _launch(kind, args):
     """Запустить фоновый процесс (тесты подменяют его потоком с work)."""
     with open(LOG, "a") as log:
-        subprocess.Popen([sys.executable, str(HERE / "jobs.py"), kind, json.dumps(args)], cwd=HERE,
+        subprocess.Popen(paths.self_cmd("job", kind, json.dumps(args)), cwd=HERE,
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                          start_new_session=True)   # своя сессия: закрытие окна его не завершит
 
@@ -382,16 +382,15 @@ def work(kind, args, log=lambda text: None):
     return True
 
 
-def main():
-    """Точка входа фонового процесса: python jobs.py play|stop '<json с параметрами>'.
-    python jobs.py resume — продолжить прерванную операцию, если она есть (для автозапуска при входе)."""
-    if sys.argv[1] == "resume":
-        resume_when_online(log=lambda text: print(text, flush=True))
+def main(argv):
+    """Точка входа фонового процесса (через app_main.py):
+      job play|stop '<json с параметрами>' — выполнить операцию;
+      resume — продолжить прерванную операцию, если она есть, и проверить баланс (служба автозапуска)."""
+    log = lambda text: print(text, flush=True)   # noqa: E731 — вывод идёт в job.log
+    if argv[0] == "resume":
+        resume_when_online(log=log)
         watch_balance()
-        return
-    if not work(sys.argv[1], json.loads(sys.argv[2]), log=lambda text: print(text, flush=True)):
-        sys.exit("другая операция уже идёт")
-
-
-if __name__ == "__main__":
-    main()
+        return None
+    if not work(argv[1], json.loads(argv[2]), log=log):
+        return "другая операция уже идёт"
+    return None

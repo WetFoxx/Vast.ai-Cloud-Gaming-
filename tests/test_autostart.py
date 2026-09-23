@@ -26,8 +26,7 @@ class TestAutostart(unittest.TestCase):
         self.assertEqual(autostart.status(), "off")
         self.assertTrue(autostart.install())
         d = plistlib.loads(autostart.plist_path("resume").read_bytes())
-        self.assertEqual(d["ProgramArguments"][0], "/app/python")
-        self.assertEqual(d["ProgramArguments"][2], "resume")
+        self.assertEqual(d["ProgramArguments"][-1], "resume")
         self.assertTrue(d["RunAtLoad"] and d["AbandonProcessGroup"])
         self.assertEqual(self.calls[-1][0], "bootstrap")
         self.assertEqual(autostart.status(), "on")
@@ -37,7 +36,7 @@ class TestAutostart(unittest.TestCase):
         self.assertFalse(autostart.plist_path("resume").exists())      # выключенную не включаем сами
         autostart.install()
         d = plistlib.loads(autostart.plist_path("resume").read_bytes())
-        d["ProgramArguments"][0] = "/old/python"         # проект переехал
+        d["ProgramArguments"] = ["/old/python", "resume"]  # проект переехал
         autostart.plist_path("resume").write_bytes(plistlib.dumps(d))
         self.assertEqual(autostart.status(), "outdated")
         autostart.refresh()
@@ -53,7 +52,7 @@ class TestAutostart(unittest.TestCase):
         self.assertEqual(autostart.status("app"), "off")          # по умолчанию выключено
         self.assertTrue(autostart.install("app"))
         d = plistlib.loads(autostart.plist_path("app").read_bytes())
-        self.assertEqual(d["ProgramArguments"][1:], [str(autostart.HERE / "vastgame.py"), "app"])
+        self.assertEqual(d["ProgramArguments"], autostart.paths.self_cmd())   # без параметров — окно
         self.assertNotIn("StartInterval", d)                       # только при входе, не каждые 5 минут
         self.assertNotIn("bootstrap", [c[0] for c in self.calls])  # второе окно прямо сейчас не открыли
         self.assertEqual(autostart.status("resume"), "off")        # другую службу не тронули

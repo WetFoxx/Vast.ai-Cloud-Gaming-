@@ -11,3 +11,5 @@ __pycache__/
 .claude/
 # OAuth-клиент Google приложения — встраивается при сборке, в git не попадает
 oauth_client.json
+build/
+dist/

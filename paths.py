@@ -5,6 +5,12 @@
 import os
 import shutil
 import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)     # запущено из собранного vastgame.app (PyInstaller)
+# Программы, которые едут внутри приложения (сейчас — rclone): папка bin рядом с кодом
+BUNDLED_BIN = Path(getattr(sys, "_MEIPASS", HERE)) / "bin"
 
 EXTRA = {
     "darwin": ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"],
@@ -15,8 +21,19 @@ EXTRA = {
 APP_BINARIES = {"tailscale": ["/Applications/Tailscale.app/Contents/MacOS/Tailscale"]}
 
 
+def self_cmd(*args):
+    """Команда, которой приложение запускает само себя с параметрами (фоновые операции, автозапуск):
+    в собранном .app — его исполняемый файл, из папки проекта — Python с app_main.py."""
+    if FROZEN:
+        return [sys.executable, *args]
+    return [sys.executable, str(HERE / "app_main.py"), *args]
+
+
 def find(name):
-    """Полный путь к программе name или None."""
+    """Полный путь к программе name или None. Своя копия внутри приложения — важнее системной."""
+    bundled = BUNDLED_BIN / (name + (".exe" if sys.platform == "win32" else ""))
+    if bundled.is_file() and os.access(bundled, os.X_OK):
+        return str(bundled)
     p = shutil.which(name)
     if p:
         return p
