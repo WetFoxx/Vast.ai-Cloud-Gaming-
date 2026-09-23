@@ -18,6 +18,7 @@ from pathlib import Path
 
 import webview   # pywebview: окно с веб-страницей (на Mac — системный WebKit, на Windows — Edge WebView2)
 
+import cloudgames
 import core
 import market
 import moonlight
@@ -39,7 +40,7 @@ class Job:
     """Фоновая операция с машиной. Это же и «ui» для ядра: say/stage/archive/confirm/tailscale."""
 
     def __init__(self, kind):
-        self.kind = kind                 # "play" или "stop"
+        self.kind = kind                 # "play", "stop" или "games" (убрать игру из облака)
         self.started = time.time()
         self.events = []                 # сообщения по порядку: {level, key, params, text}
         self.stage_key = None
@@ -237,6 +238,37 @@ class Api:
     def answer(self, qid, yes):
         if self._job:
             self._job.answer(qid, yes)
+
+    # ---- Игры в облаке
+    def games(self):
+        """Игры и сохранения в облаке (прямо с Google Drive, машина не нужна)."""
+        try:
+            data = cloudgames.listing()
+        except VastgameError as e:
+            return {"error": error_data(e)}
+        for g in data["games"]:
+            g.pop("files")                          # странице не нужны
+        return data
+
+    def games_remove(self, name):
+        """Убрать архив из облака (страница уже спросила). Фоновая операция: при работающей машине
+        идёт через wolf по Tailscale SSH, и может понадобиться подтвердить вход по ссылке."""
+        if self._busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        job = self._job = Job("games")
+
+        def run():
+            try:
+                job.result = {"how": cloudgames.remove(str(name), on_notice=job.tailscale)}
+            except VastgameError as e:
+                job.error = error_data(e)
+            except Exception as e:
+                job.error = {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
 
     # ---- Moonlight
     def moonlight_apps(self, host):

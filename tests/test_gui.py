@@ -172,6 +172,20 @@ class TestStop(unittest.TestCase):
         self.assertEqual(calls, [42])
 
 
+class TestGames(unittest.TestCase):
+    def test_listing_hides_files_and_remove_runs_in_background(self):
+        api = gui.Api()
+        data = {"games": [{"name": "pfx--1", "kind": "pfx", "title": "", "appid": "1", "bytes": 5, "mtime": "d",
+                           "files": ["pfx--1.tar.zst"]}], "service": {"names": [], "bytes": 0}}
+        removed = []
+        with mock.patch.object(gui.cloudgames, "listing", lambda: data), \
+             mock.patch.object(gui.cloudgames, "remove", lambda name, on_notice=None: removed.append(name) or "drive"):
+            self.assertNotIn("files", api.games()["games"][0])
+            self.assertEqual(api.games_remove("pfx--1"), {"ok": True})
+            p = wait_done(api)
+        self.assertEqual((p["kind"], p["result"], removed), ("games", {"how": "drive"}, ["pfx--1"]))
+
+
 class TestMoonlight(unittest.TestCase):
     def test_apps_and_stream_remembers_choice(self):
         api = gui.Api()

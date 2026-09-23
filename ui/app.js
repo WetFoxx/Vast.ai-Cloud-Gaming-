@@ -21,13 +21,17 @@ function num(x, digits = 1) {
 }
 function errText(e) { return e && e.key ? t(e.key, e.params || {}) : (e && e.text) || String(e); }
 function showError(id, e) { const el = $(id); el.hidden = !e; el.textContent = e ? errText(e) : ""; }
+// Размер: «340 МБ» или «62,1 ГБ» — сохранения обычно весят мегабайты
+function size(bytes) {
+  return bytes >= 1e9 ? t("unit.gb", { n: num(bytes / 1e9, 1) }) : t("unit.mb", { n: num(bytes / 1e6, 0) });
+}
 function duration(sec) {
   const m = Math.floor(sec / 60), s = sec % 60;
   return LANG === "ru" ? `${m} мин ${s} с` : `${m} min ${s} s`;
 }
 
 function show(screen) {
-  for (const s of ["main", "offers", "progress"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["main", "offers", "progress", "games"]) $("screen-" + s).hidden = s !== screen;
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -236,6 +240,87 @@ $("emergency").addEventListener("click", async () => {
   refresh();
 });
 
+// ---------------------------------------------------------------- игры в облаке
+let gamesData = null;
+let gamesTimer = null;
+
+$("open-games").addEventListener("click", openGames);
+$("games-back").addEventListener("click", () => { clearInterval(gamesTimer); show("main"); refresh(); });
+$("games-ts-open").addEventListener("click", () => { if (gamesData && gamesData.tsUrl && !DEMO) api().open_url(gamesData.tsUrl); });
+
+async function openGames() {
+  show("games");
+  gamesData = null;
+  $("games-card").hidden = true;
+  $("games-service").textContent = "";
+  $("games-summary").textContent = t("games.loading");
+  showError("games-error", null);
+  const d = DEMO ? demoGames() : await api().games();
+  if (d.error) { $("games-summary").textContent = ""; showError("games-error", d.error); return; }
+  gamesData = d;
+  renderGames();
+}
+
+function gameTitle(g) {
+  if (g.kind !== "pfx") return g.title;
+  return g.title ? `${g.title} (appid ${g.appid})` : `appid ${g.appid}`;
+}
+
+function renderGames() {
+  const d = gamesData;
+  if (!d) return;
+  const total = d.games.reduce((a, g) => a + g.bytes, 0);
+  $("games-summary").textContent = d.games.length ? t("games.total", { size: size(total), count: d.games.length }) : t("games.empty");
+  $("games-service").textContent = d.service.names.length ? t("games.service", { size: size(d.service.bytes) }) : "";
+  $("games-card").hidden = !d.games.length;
+  const body = $("games-table").querySelector("tbody");
+  body.innerHTML = "";
+  for (const g of d.games) {
+    const tr = document.createElement("tr");
+    tr.style.cursor = "default";
+    tr.innerHTML = '<td><span class="kind"></span></td><td></td><td class="num"></td><td class="num"></td><td class="act"><button></button></td>';
+    const c = tr.children;
+    c[0].firstChild.textContent = t("games.kind." + g.kind);
+    c[0].firstChild.classList.add(g.kind);
+    c[1].textContent = gameTitle(g);
+    c[2].textContent = size(g.bytes);
+    c[3].textContent = g.mtime;
+    const b = c[4].firstChild;
+    b.textContent = t("games.remove");
+    b.disabled = !!d.removing;
+    b.addEventListener("click", () => removeGame(g));
+    body.appendChild(tr);
+  }
+}
+
+async function removeGame(g) {
+  let text = t("games.confirm.text", { kind: t("games.kind." + g.kind), title: gameTitle(g), size: size(g.bytes) });
+  if (g.kind === "pfx") text = t("games.confirm.saves") + "\n\n" + text;
+  if (!(await ask({ title: t("games.confirm.title"), text, yes: t("games.remove"), no: t("btn.cancel") }))) return;
+  showError("games-error", null);
+  const r = DEMO ? { ok: true } : await api().games_remove(g.name);
+  if (r.error) { showError("games-error", r.error); return; }
+  gamesData.removing = g.name;
+  renderGames();
+  $("games-status").hidden = false;
+  $("games-status").textContent = t("games.removing", { title: gameTitle(g) });
+  clearInterval(gamesTimer);
+  gamesTimer = setInterval(async () => {
+    const p = DEMO ? { events: [], done: true, result: { how: "drive" } } : await api().progress(0);
+    if (!p) return;
+    const ts = p.events.filter((e) => e.level === "tailscale" && e.url).pop();
+    if (ts) { gamesData.tsUrl = ts.url; $("games-ts").hidden = false; }
+    if (!p.done) return;
+    clearInterval(gamesTimer);
+    $("games-ts").hidden = true;
+    if (p.error) { $("games-status").hidden = true; showError("games-error", p.error); gamesData.removing = null; renderGames(); return; }
+    const msg = t("games.removed", { title: gameTitle(g) }) + (p.result.how === "machine" ? " " + t("games.removed_machine") : "");
+    await openGames();
+    $("games-status").hidden = false;
+    $("games-status").textContent = msg;
+  }, 1000);
+}
+
 // ---------------------------------------------------------------- ход операции
 const STAGES = { play: ["vast", "tailscale", "restore", "ready"], stop: ["shutdown", "verify", "deleted"] };
 
@@ -398,6 +483,7 @@ $("lang").addEventListener("change", (e) => {
   applyStatic();
   if (current) render(current);
   if (!$("screen-offers").hidden) renderOffers();
+  if (!$("screen-games").hidden) renderGames();
   if (!$("screen-progress").hidden && prog) $("progress-log").textContent = prog.log.map(eventText).join("\n");
   if (!DEMO) api().set_language(LANG, true);   // выбор запоминается
 });
@@ -452,6 +538,15 @@ function demoProgress() {
            error: null, game_names: { 3751260: "The Blood of Dawnwalker" } };
 }
 
+function demoGames() {
+  const g = (name, kind, title, appid, mb, mtime) => ({ name, kind, title, appid, bytes: mb * 1e6, mtime });
+  return { games: [g("sgame--Steamworks Shared", "sgame", "Steamworks Shared", null, 25, "2026-09-23"),
+                   g("game--3751260", "game", "3751260", null, 184, "2026-09-22"),
+                   g("pfx--3751260", "pfx", "The Blood of Dawnwalker", "3751260", 141, "2026-09-23"),
+                   g("pfx--1493710", "pfx", "", "1493710", 109, "2026-09-23")],
+           service: { names: ["identity", "steam-cache", "steam-client", "steam-state"], bytes: 1.4e9 } };
+}
+
 // ---------------------------------------------------------------- старт
 async function start() {
   let saved = null;
@@ -463,6 +558,7 @@ async function start() {
   if (DEMO === "offers") { openOffers(); return; }
   if (DEMO === "progress") { startProgress(); return; }
   if (DEMO === "stop") { startProgress("stop"); return; }
+  if (DEMO === "games") { openGames(); return; }
   await refresh();
   // Окно открыли заново, а операция ещё идёт — показать её ход
   if (!DEMO && current && current.busy) startProgress();   // вид операции уточнит первый ответ progress
