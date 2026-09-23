@@ -14,8 +14,12 @@ DEFAULT_APP = "Desktop"   # стандартное приложение Sunshine
 def path():
     """Путь к программе Moonlight или None, если она не установлена."""
     if sys.platform == "darwin":
-        p = "/Applications/Moonlight.app/Contents/MacOS/Moonlight"
-        return p if os.path.exists(p) else None
+        # Для всех пользователей Mac (/Applications) или только для этого (~/Applications)
+        for apps_dir in ("/Applications", os.path.expanduser("~/Applications")):
+            p = os.path.join(apps_dir, "Moonlight.app", "Contents", "MacOS", "Moonlight")
+            if os.path.exists(p):
+                return p
+        return None
     if os.name == "nt":
         for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("LOCALAPPDATA", "")):
             p = os.path.join(base, "Moonlight Game Streaming", "Moonlight.exe")
