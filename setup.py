@@ -129,15 +129,56 @@ def step_vast_key():
     return False
 
 
+GOOGLE_CONSOLE_URL = "https://console.cloud.google.com/auth/clients"
+
+
+def ensure_client():
+    """OAuth-клиент Google приложения (Client ID и Client secret) — в Keychain. True — если есть."""
+    cid, secret = drive.client()
+    if cid and secret:
+        print(f"  ✓ OAuth-клиент приложения: {cid[:12]}…{cid[-28:]}")
+        return True
+    print(f"""
+  Приложению нужен свой OAuth-клиент Google — через него идёт вход в Drive с доступом
+  только к своим файлам (drive.file). Его создают один раз в Google Cloud Console:
+  тип «Desktop app», scope …/auth/drive.file, статус публикации In production.
+  Клиенты проекта: {GOOGLE_CONSOLE_URL}""")
+    for _ in range(3):
+        cid = input("\n  Client ID (…apps.googleusercontent.com): ").strip()
+        if not cid.endswith(".apps.googleusercontent.com"):
+            print("  ✗ Client ID заканчивается на «.apps.googleusercontent.com». Попробуй ещё раз.")
+            continue
+        secret = getpass.getpass("  Client secret (ввод скрыт): ").strip()
+        if not secret:
+            print("  ✗ Пусто. Попробуй ещё раз.")
+            continue
+        if not secret.startswith("GOCSPX-"):
+            print("  ! Client secret обычно начинается с «GOCSPX-» — этот выглядит иначе, но сохраняю.")
+        keyring.set_password(SERVICE, "GOOGLE_CLIENT_ID", cid)
+        keyring.set_password(SERVICE, "GOOGLE_CLIENT_SECRET", secret)
+        print("  ✓ OAuth-клиент сохранён в Keychain.")
+        return True
+    print("  ✗ Клиент так и не введён. Запусти vastgame setup ещё раз.")
+    return False
+
+
 def step_google():
-    """Шаг 2: токен Google Drive — в Keychain, проверенный, и в переменных аккаунта Vast."""
+    """Шаг 2: Google Drive — клиент приложения, вход со scope drive.file, токен в Keychain и в аккаунте Vast."""
     title(2, "Google Drive")
-    token = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
-    if token:
-        print("  Проверяю сохранённый токен Drive...")
+    if not ensure_client():
+        return False
+    token = drive.token()
+    if token and drive.is_old_token():
+        print("""
+  Сейчас Drive подключён через общий клиент rclone: Google его скоро отключит, и доступ
+  у него полный — ко всему Drive. Нужно войти заново через клиент приложения.
+  Старая папка с архивами новому входу видна не будет — её можно перенести (vastgame migrate).""")
+        token = None
+    elif token:
+        print("  Проверяю сохранённый вход в Drive...")
         info = drive.check(token)
         if info is None:
-            print("  ✗ Сохранённый токен больше не работает — нужен новый вход.")
+            print("  ✗ Сохранённый вход больше не работает — нужен новый.")
             token = None
         else:
             show_drive(info)
@@ -148,15 +189,14 @@ def step_google():
 
     print("""
   Машине нужен доступ к Google Drive: там лежат сохранения, сессия Steam и сетевая личность.
-  Лучше отдельный Google-аккаунт, а не основной: токен даёт полный доступ к Drive,
-  и он будет лежать на чужой арендованной машине.
+  Лучше отдельный Google-аккаунт для игр: токен будет лежать на чужой арендованной машине.
+  Приложение увидит только папку, которую создаст само, — не весь Drive.
   Сейчас откроется браузер — войди в этот аккаунт и нажми «Разрешить».""")
     input("\n  Нажми Enter, чтобы открыть браузер...")
     google()                                            # rclone authorize → Keychain
-    token = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
-    info = drive.check(token)
+    info = drive.check(drive.token())
     if info is None:
-        print("  ✗ С новым токеном Drive не открывается. Попробуй ещё раз: vastgame setup")
+        print("  ✗ С новым входом Drive не открывается. Попробуй ещё раз: vastgame setup")
         return False
     show_drive(info)
     return push_drive_token()
@@ -172,8 +212,10 @@ def show_drive(info):
 
 
 def push_drive_token():
-    """Отправить токен из Keychain в переменные аккаунта Vast — оттуда его получает каждая машина."""
-    print("  Отправляю токен в переменные аккаунта Vast (RCLONE_REFRESH_TOKEN)...")
+    """Отправить клиент и токен из Keychain в переменные аккаунта Vast — оттуда их получает каждая машина."""
+    print("  Отправляю доступ к Drive в переменные аккаунта Vast...")
+    push_secret("RCLONE_CLIENT_ID", "GOOGLE_CLIENT_ID")
+    push_secret("RCLONE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET")
     push_secret("RCLONE_REFRESH_TOKEN")
     return True
 
@@ -330,11 +372,16 @@ def summary():
     have = call("GET", "secrets/").get("secrets") or {}
     vast_ok = keyring.get_password(SERVICE, "VAST_API_KEY") is not None
     print(f"  {'✓' if vast_ok else '!'} Ключ Vast: {'в Keychain' if vast_ok else f'пока в файле {KEY_FILE} — перенеси (шаг 1)'}")
-    for name, what in (("RCLONE_REFRESH_TOKEN", "Токен Google Drive"), ("TAILSCALE_AUTHKEY", "Ключ Tailscale")):
-        in_kc = keyring.get_password(SERVICE, name) is not None
+    for name, kc, what in (("RCLONE_CLIENT_ID", "GOOGLE_CLIENT_ID", "OAuth-клиент Google"),
+                           ("RCLONE_REFRESH_TOKEN", "RCLONE_REFRESH_TOKEN", "Токен Google Drive"),
+                           ("TAILSCALE_AUTHKEY", "TAILSCALE_AUTHKEY", "Ключ Tailscale")):
+        in_kc = keyring.get_password(SERVICE, kc) is not None
         in_vast = name in have
         mark = "✓" if in_kc and in_vast else "✗"
         print(f"  {mark} {what}: Keychain — {'да' if in_kc else 'нет'}, аккаунт Vast — {'да' if in_vast else 'нет'}")
+
+    if drive.token() and drive.is_old_token():
+        print("  ! Drive подключён через общий клиент rclone (его скоро отключат) — пройди шаг 2 заново.")
 
     # Ключи в шаблоне: README требует держать их только в аккаунте
     ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": TEMPLATE_NAME}})})
@@ -390,11 +437,18 @@ def find_refresh_token(x):
 
 
 def google():
-    print("Откроется браузер: войди в Google-аккаунт для игр и разреши доступ к Drive.")
-    print("(rclone работает со своим стандартным клиентом Google; полный доступ к Drive — как в wolf-setup.sh)\n")
+    """Вход в Google через OAuth-клиент приложения со scope drive.file; токен — в Keychain."""
+    cid, secret = drive.client()
+    if not (cid and secret):
+        sys.exit("Нет OAuth-клиента Google — пройди мастер: vastgame setup")
+    print("  Браузер: войди в Google-аккаунт для игр и разреши доступ (только к файлам приложения).\n")
+    # rclone authorize принимает настройки как base64 от JSON (без «=» в конце) —
+    # так передаём свой клиент и scope drive.file, не создавая файл конфига
+    blob = base64.b64encode(json.dumps({"client_id": cid, "client_secret": secret,
+                                        "scope": drive.SCOPE}).encode()).decode().rstrip("=")
     # stdout перехватываем (там токен), stderr — служебные сообщения rclone — идут на экран как есть
     try:
-        out = subprocess.run(["rclone", "authorize", "drive"], stdout=subprocess.PIPE, text=True, timeout=600)
+        out = subprocess.run(["rclone", "authorize", "drive", blob], stdout=subprocess.PIPE, text=True, timeout=600)
     except FileNotFoundError:
         sys.exit("rclone не найден. Установи: brew install rclone")
     except subprocess.TimeoutExpired:
@@ -410,12 +464,17 @@ def google():
     if not token.startswith("1//"):
         print("Внимание: токен Google обычно начинается с «1//» — этот выглядит иначе, но сохраняю.")
 
+    # Прежний токен (общий клиент rclone, полный доступ) не выбрасываем: он нужен, чтобы перенести
+    # архивы из старой папки — новому клиенту она не видна
+    prev = drive.token()
+    if prev and drive.is_old_token():
+        keyring.set_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD", prev)
     keyring.set_password(SERVICE, "RCLONE_REFRESH_TOKEN", token)
+    keyring.set_password(SERVICE, "RCLONE_TOKEN_SCOPE", drive.SCOPE)   # токен — через клиент приложения
     check = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
     if check != token:
         sys.exit("Не удалось сохранить токен в Keychain.")
-    print(f"\nГотово: токен Google Drive сохранён в Keychain ({len(token)} символов).")
-    print(f"Запись видна в «Связке ключей» по имени «{SERVICE}».")
+    print(f"\n  ✓ Вход выполнен, токен Drive сохранён в Keychain ({len(token)} символов).")
 
 
 def vast():
@@ -423,10 +482,10 @@ def vast():
     push_secret("RCLONE_REFRESH_TOKEN")
 
 
-def push_secret(name):
-    """Записать секрет из Keychain в Environment Variables аккаунта Vast.
-    Vast подставляет их в каждый инстанс — и при аренде через утилиту, и через сайт."""
-    token = keyring.get_password(SERVICE, name)
+def push_secret(name, keychain_name=None):
+    """Записать секрет из Keychain (запись keychain_name, по умолчанию — name) в Environment Variables
+    аккаунта Vast под именем name. Vast подставляет их в каждый инстанс — и через утилиту, и через сайт."""
+    token = keyring.get_password(SERVICE, keychain_name or name)
     if not token:
         sys.exit(f"В Keychain нет {name} — пройди мастер: vastgame setup")
 

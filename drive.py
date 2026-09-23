@@ -13,6 +13,19 @@ from vastapi import SERVICE
 
 FOLDER = "vastai-cloud-games"   # папка на Drive, с которой работает wolf-setup.sh
 REMOTE = "vgdrive:"             # имя «диска» для rclone — только внутри утилиты
+SCOPE = "drive.file"            # доступ только к файлам, которые создало само приложение
+
+# Записи в Keychain:
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — OAuth-клиент приложения (Google Cloud Console, «Desktop app»)
+#   RCLONE_REFRESH_TOKEN      — токен Drive, полученный через этот клиент со scope drive.file
+#   RCLONE_REFRESH_TOKEN_OLD  — прежний токен: общий клиент rclone, полный доступ (scope drive).
+#                               Нужен только для переноса архивов из старой папки.
+
+
+def client():
+    """(client_id, client_secret) OAuth-клиента приложения или (None, None)."""
+    return (keyring.get_password(SERVICE, "GOOGLE_CLIENT_ID"),
+            keyring.get_password(SERVICE, "GOOGLE_CLIENT_SECRET"))
 
 
 def token():
@@ -20,13 +33,30 @@ def token():
     return keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
 
 
-def rclone(*args, tok=None, timeout=300):
-    """Запустить rclone с доступом к Drive. Возвращает CompletedProcess (stdout/stderr — текстом)."""
-    tok = tok or token()
+def is_old_token():
+    """True — если RCLONE_REFRESH_TOKEN ещё старый (общий клиент rclone), а не через клиент приложения."""
+    return keyring.get_password(SERVICE, "RCLONE_TOKEN_SCOPE") != SCOPE
+
+
+def rclone(*args, tok=None, old=None, timeout=300):
+    """Запустить rclone с доступом к Drive. Возвращает CompletedProcess (stdout/stderr — текстом).
+
+    old=True — старый доступ: общий клиент rclone, scope drive (для чтения старой папки).
+    Иначе — клиент приложения и scope drive.file. По умолчанию — как у сохранённого токена.
+    """
+    saved = token()
+    if old is None:
+        # Сохранённый токен — с тем клиентом, через который получен; любой другой переданный — новый
+        old = is_old_token() if tok in (None, saved) else False
+    if tok is None:
+        tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if old and not is_old_token() else saved
+    cid, secret = (None, None) if old else client()
     env = dict(os.environ,
                RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
                RCLONE_CONFIG_VGDRIVE_TYPE="drive",
-               RCLONE_CONFIG_VGDRIVE_SCOPE="drive",
+               RCLONE_CONFIG_VGDRIVE_SCOPE="drive" if old else SCOPE,
+               RCLONE_CONFIG_VGDRIVE_CLIENT_ID=cid or "",
+               RCLONE_CONFIG_VGDRIVE_CLIENT_SECRET=secret or "",
                # access_token не пустой + истёкший expiry: rclone сразу обновит его по refresh_token
                # (так же делает wolf-setup.sh на машине)
                RCLONE_CONFIG_VGDRIVE_TOKEN=json.dumps({"access_token": "x", "token_type": "Bearer",
@@ -34,11 +64,11 @@ def rclone(*args, tok=None, timeout=300):
     return subprocess.run(["rclone", *args], capture_output=True, text=True, env=env, timeout=timeout)
 
 
-def check(tok):
+def check(tok, old=None):
     """Проверить токен: (почта владельца Drive, число файлов в папке или None, ГБ) или None, если не работает."""
     # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её
     # из метаданных папок в корне Drive: чаще всего встречающийся владелец и есть хозяин диска
-    root = rclone("lsjson", "-M", "--max-depth", "1", REMOTE, tok=tok, timeout=120)
+    root = rclone("lsjson", "-M", "--max-depth", "1", REMOTE, tok=tok, old=old, timeout=120)
     if root.returncode != 0:
         return None
     owners = {}
@@ -46,8 +76,9 @@ def check(tok):
         o = (item.get("Metadata") or {}).get("owner")
         if o:
             owners[o] = owners.get(o, 0) + 1
-    email = max(owners, key=owners.get) if owners else "не определить (на Drive пусто)"
-    size = rclone("size", REMOTE + FOLDER, "--json", tok=tok, timeout=120)
+    # С drive.file в корне видны только папки, созданные приложением, — может не найтись ни одной
+    email = max(owners, key=owners.get) if owners else "не определить (приложение ещё ничего не создало)"
+    size = rclone("size", REMOTE + FOLDER, "--json", tok=tok, old=old, timeout=120)
     if size.returncode != 0:          # папки нет
         return email, None, 0
     d = json.loads(size.stdout)
