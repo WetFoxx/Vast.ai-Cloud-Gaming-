@@ -175,7 +175,8 @@ def step_google():
             token = None
         else:
             show_drive(info)
-            if ask("  Это нужный аккаунт Google? («нет» — войти заново)"):
+            # Вопрос — как на остальных шагах: «нет» оставляет всё как есть
+            if not ask("  Войти в другой аккаунт Google?"):
                 return push_drive_token()
             token = None
 
