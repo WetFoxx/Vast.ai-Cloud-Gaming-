@@ -313,7 +313,11 @@ const I18N = {
     "session.running": "идёт {time} · ≈ {cost}",
     "unit.hm": "{h} ч {m} мин",
     "unit.m": "{m} мин",
-    "history.range": "Период: {from} — {to}"
+    "history.range": "Период: {from} — {to}",
+    "history.other": "Другие машины этого аккаунта (арендованы не из приложения): {count}, {amount}.",
+    "history.all_shown": "Показаны все машины аккаунта, включая арендованные не из приложения.",
+    "history.other_show": "Показать",
+    "history.other_hide": "Только игровые"
   },
   "en": {
     "app.loading": "loading…",
@@ -626,7 +630,11 @@ const I18N = {
     "session.running": "running for {time} · ≈ {cost}",
     "unit.hm": "{h} h {m} min",
     "unit.m": "{m} min",
-    "history.range": "Period: {from} — {to}"
+    "history.range": "Period: {from} — {to}",
+    "history.other": "Other machines on this account (not rented from the app): {count}, {amount}.",
+    "history.all_shown": "Showing all machines on the account, including ones not rented from the app.",
+    "history.other_show": "Show",
+    "history.other_hide": "Gaming only"
   },
   "es": {
     "app.loading": "cargando…",
@@ -939,7 +947,11 @@ const I18N = {
     "session.running": "en marcha {time} · ≈ {cost}",
     "unit.hm": "{h} h {m} min",
     "unit.m": "{m} min",
-    "history.range": "Periodo: {from} — {to}"
+    "history.range": "Periodo: {from} — {to}",
+    "history.other": "Otras máquinas de esta cuenta (no alquiladas desde la app): {count}, {amount}.",
+    "history.all_shown": "Se muestran todas las máquinas de la cuenta, incluidas las no alquiladas desde la app.",
+    "history.other_show": "Mostrar",
+    "history.other_hide": "Solo juego"
   }
 };
 

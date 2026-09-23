@@ -73,7 +73,7 @@ def charges(days):
     params = {"select_filters": json.dumps({"day": {"gte": now - days * 86400, "lte": now}}),
               "limit": 100, "format": "tree"}
     out = defaultdict(lambda: {"amount": 0.0, "gpu": 0.0, "disk": 0.0, "traffic": 0.0, "hours": 0.0,
-                               "first": None, "last": None})
+                               "first": None, "last": None, "label": None})
     while True:
         r = call("GET", "api/v0/charges/", params=params, base=HOST)
         for x in r.get("results", []):
@@ -82,6 +82,7 @@ def charges(days):
                 continue
             c = out[int(m.group(1))]
             c["amount"] += x.get("amount") or 0
+            c["label"] = c["label"] or (x.get("metadata") or {}).get("label")
             c["first"] = min(filter(None, [c["first"], x.get("start")]))
             c["last"] = max(filter(None, [c["last"], x.get("start")]))
             for y in x.get("items") or []:
@@ -96,14 +97,22 @@ def charges(days):
         params["after_token"] = r["next_token"]
 
 
-def summary(days=30):
-    """История за days дней: сессии (свежие сверху) и итоги."""
+def summary(days=30, all_machines=False):
+    """История за days дней: сессии (свежие сверху) и итоги.
+
+    Игровые — машины с меткой vastgame (её ставит аренда из приложения) или записанные в своей истории
+    сессий. Остальные машины аккаунта (например, для других задач на Vast) по умолчанию не смешиваются
+    с играми: они считаются отдельно в "other", а all_machines=True включает их в список и итоги."""
     ch = charges(days)
     local = {r["iid"]: r for r in _load()}
-    sessions = []
+    sessions, other = [], {"count": 0, "amount": 0.0}
     for iid, c in ch.items():
         if c["amount"] < 0.0005:
             continue   # машина не запустилась — ничего не стоила, в истории не нужна
+        if not all_machines and c["label"] != "vastgame" and iid not in local:
+            other["count"] += 1
+            other["amount"] += c["amount"]
+            continue
         s = local.get(iid, {})
         sessions.append({"iid": iid, "start": s.get("start") or c["first"], "end": s.get("end"),
                          "gpu": s.get("gpu"), "country": s.get("country"), "price": s.get("price"),
@@ -114,7 +123,9 @@ def summary(days=30):
     total = sum(x["amount"] for x in sessions)
     hours = sum(x["hours"] for x in sessions)
     first = min((x["start"] for x in sessions if x["start"]), default=None)
-    return {"days": days, "sessions": sessions, "first": first, "now": int(time.time()),
+    other["amount"] = round(other["amount"], 2)
+    return {"days": days, "all": all_machines, "other": other, "sessions": sessions, "first": first,
+            "now": int(time.time()),
             "totals": {"amount": round(total, 2), "hours": round(hours, 1), "count": len(sessions),
                        "per_hour": round(total / hours, 3) if hours else None,
                        "gpu": round(sum(x["gpu_cost"] for x in sessions), 2),

@@ -368,10 +368,11 @@ class Api:
         return self._simple(refresh)
 
     # ---- История и траты
-    def history(self, days=30):
-        """Сессии и траты за days дней: реальные списания Vast + своя запись сессий."""
+    def history(self, days=30, all_machines=False):
+        """Сессии и траты за days дней: реальные списания Vast + своя запись сессий.
+        all_machines — включить и неигровые машины аккаунта."""
         try:
-            return history.summary(int(days))
+            return history.summary(int(days), bool(all_machines))
         except VastgameError as e:
             return {"error": error_data(e)}
 

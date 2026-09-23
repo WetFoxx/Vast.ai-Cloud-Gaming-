@@ -11,12 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import history  # noqa: E402
 
 TREE = {"results": [
-    {"type": "instance", "source": "instance-7", "start": 1000, "amount": 0.25, "items": [
+    {"type": "instance", "source": "instance-7", "start": 1000, "amount": 0.25, "metadata": {"label": "vastgame"}, "items": [
         {"type": "gpu", "description": "1.2 hours at $0.200/hour", "amount": 0.24},
         {"type": "disk", "description": "1.3 hours at $0.004/hour", "amount": 0.005},
         {"type": "bwu", "description": "0.3 GB Uploaded at $0.003/GB", "amount": 0.001}]},
     {"type": "instance", "source": "instance-8", "start": 2000, "amount": 0.0, "items": []},     # не запустилась
-    {"type": "instance", "source": "instance-9", "start": 3000, "amount": 0.1, "items": [
+    {"type": "instance", "source": "instance-5", "start": 500, "amount": 2.0, "metadata": {"label": "ml-job"}, "items": []},
+    {"type": "instance", "source": "instance-9", "start": 3000, "amount": 0.1, "metadata": {"label": "vastgame"}, "items": [
         {"type": "gpu", "description": "0.5 hours at $0.200/hour", "amount": 0.1}]}],
     "next_token": None}
 
@@ -48,6 +49,10 @@ class TestHistory(unittest.TestCase):
         self.assertEqual(s["first"], 900)                                 # реальное начало периода
         self.assertAlmostEqual(s["totals"]["amount"], 0.35)
         self.assertAlmostEqual(s["totals"]["hours"], 1.7)
+        self.assertEqual(s["other"], {"count": 1, "amount": 2.0})           # чужая машина — отдельно
+        with mock.patch.object(history, "call", lambda *a, **k: TREE):
+            everything = history.summary(30, all_machines=True)
+        self.assertEqual(everything["totals"]["count"], 3)
 
 
 if __name__ == "__main__":

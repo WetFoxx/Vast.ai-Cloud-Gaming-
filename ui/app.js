@@ -433,9 +433,10 @@ function setupActions(st, li) {
 }
 
 // ---------------------------------------------------------------- история и траты
-let historyData = null, historyDays = 30;
+let historyData = null, historyDays = 30, historyAll = false;
 $("open-history").addEventListener("click", () => openHistory(historyDays));
 $("history-back").addEventListener("click", () => { show("main"); refresh(); });
+$("history-other-toggle").addEventListener("click", (e) => { e.preventDefault(); historyAll = !historyAll; openHistory(historyDays); });
 
 async function openHistory(days) {
   show("history");
@@ -451,9 +452,11 @@ async function openHistory(days) {
   $("history-summary").textContent = t("history.loading");
   $("history-stats").hidden = $("history-card").hidden = true;
   $("history-breakdown").textContent = "";
+  $("history-other").hidden = true;
   showError("history-error", null);
-  const d = DEMO ? demoHistory(days) : await api().history(days);
-  if (days !== historyDays) return;             // пока считали, выбрали другой период
+  const all = historyAll;
+  const d = DEMO ? demoHistory(days, all) : await api().history(days, all);
+  if (days !== historyDays || all !== historyAll) return;   // пока считали, выбрали другой период
   if (d.error) { $("history-summary").hidden = true; showError("history-error", d.error); return; }
   historyData = d;
   renderHistory();
@@ -487,6 +490,11 @@ function renderHistory() {
     c[3].textContent = money(x.amount);
     body.appendChild(tr);
   }
+  // Неигровые машины аккаунта (без метки vastgame) по умолчанию не смешиваются с играми — но и не прячутся молча
+  const o = d.other || { count: 0 };
+  $("history-other").hidden = !o.count && !d.all;
+  $("history-other").firstElementChild.textContent = d.all ? t("history.all_shown") : t("history.other", { count: o.count, amount: money(o.amount) });
+  $("history-other-toggle").textContent = t(d.all ? "history.other_hide" : "history.other_show");
 }
 
 // ---------------------------------------------------------------- игры в облаке
@@ -838,12 +846,12 @@ function demoSetup() {
     st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.9" })] };
 }
 
-function demoHistory(days) {
+function demoHistory(days, all) {
   const now = Date.now() / 1000;
   const sessions = Array.from({ length: 8 }, (_, i) => ({ iid: 52264565 - i, start: now - i * 86400 * 1.5,
     gpu: i % 3 ? "RTX 3060" : "RTX 3090", country: i % 3 ? "Pennsylvania, US" : "Latvia, LV", hours: 1 + (i % 4) * 0.7,
     amount: 0.12 + i * 0.05 }));
-  return { days, sessions, first: sessions[sessions.length - 1].start, now, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
+  return { days, all, other: all ? { count: 0, amount: 0 } : { count: 3, amount: 1.27 }, sessions, first: sessions[sessions.length - 1].start, now, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
 }
 
 // ---------------------------------------------------------------- старт
