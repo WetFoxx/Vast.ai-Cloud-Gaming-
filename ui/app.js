@@ -404,6 +404,12 @@ function setupActions(st, li) {
   const id = st.id, key = st.key;
   if (key.endsWith(".needs_vast")) return;
 
+  if (id === "autostart") {
+    if (st.state === "ok") box.appendChild(button(t("setup.act.disable"), () => act(li, () => api().autostart_uninstall())));
+    else box.appendChild(button(t("setup.act.enable"), () => act(li, () => api().autostart_install()), true));
+    return;
+  }
+
   if (id in TOOL_NAME && st.state === "missing" && key !== "setup.tailscale_app.offline") {
     if (setupData.brew && setupData.platform === "darwin") {
       box.appendChild(button(t("setup.act.install"), async () => {
@@ -886,7 +892,8 @@ function demoSetup() {
     st("rclone", "ok", "setup.rclone.ok"), st("tailscale_app", "ok", "setup.tailscale_app.ok", { tailnet: "tail3d42c9.ts.net" }),
     st("moonlight", "missing", "setup.moonlight.missing"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
     st("google", "warn", "setup.google.old"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),
-    st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.9" })] };
+    st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.11" }),
+    st("autostart", "warn", "setup.autostart.off")] };
 }
 
 function demoHistory(days, all) {

@@ -15,6 +15,12 @@ def step(id_, state):
 
 
 class TestStatus(unittest.TestCase):
+    def setUp(self):
+        # Шаг службы автозапуска по умолчанию «выключено» — не зависеть от того, что стоит на этом Mac
+        p = mock.patch.object(setupcheck.autostart, "status", lambda: "off")
+        p.start()
+        self.addCleanup(p.stop)
+
     def patch(self, **kw):
         for name, value in kw.items():
             p = mock.patch.object(setupcheck, name, value)
@@ -26,13 +32,21 @@ class TestStatus(unittest.TestCase):
         r = setupcheck.status()
         self.assertFalse(r["ready"])
         self.assertEqual([s["key"] for s in r["steps"][2:]],
-                         ["setup.google.needs_vast", "setup.tailscale_key.needs_vast", "setup.template.needs_vast"])
+                         ["setup.google.needs_vast", "setup.tailscale_key.needs_vast", "setup.template.needs_vast",
+                          "setup.autostart.off"])
 
     def test_warn_does_not_block(self):
         self.patch(tools=lambda: [step("rclone", "ok")], vast_key=lambda: step("vast", "warn"),
                    _vast_secrets=lambda: set(), google=lambda s: step("google", "warn"),
                    tailscale_key=lambda s: step("tailscale_key", "ok"), template=lambda: step("template", "ok"))
-        self.assertTrue(setupcheck.status()["ready"])
+        r = setupcheck.status()
+        self.assertTrue(r["ready"])                     # служба выключена (warn) — играть всё равно можно
+        self.assertEqual(r["steps"][-1]["id"], "autostart")
+
+    def test_autostart_hidden_where_unsupported(self):
+        self.patch(tools=lambda: [], vast_key=lambda: step("vast", "missing"))
+        with mock.patch.object(setupcheck.autostart, "status", lambda: "unsupported"):
+            self.assertNotIn("autostart", [s["id"] for s in setupcheck.status()["steps"]])
 
 
 if __name__ == "__main__":

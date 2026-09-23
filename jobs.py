@@ -27,6 +27,7 @@ from pathlib import Path
 
 import core
 import notify
+import paths
 import settings
 from settings import config_dir
 from vastapi import VastgameError
@@ -300,6 +301,40 @@ def mark_seen():
         save(d)
 
 
+def interrupted():
+    """Есть прерванная операция: не закончена, процесса нет, и это не только что запущенная."""
+    d = load()
+    return bool(d and not d["done"] and not running()
+                and not (d.get("pid") is None and time.time() - d.get("spawned", d.get("started", 0)) < START_GRACE))
+
+
+def online():
+    """Сеть готова для продолжения: Vast отвечает и Tailscale на этом компьютере подключён."""
+    try:
+        core.balance()
+        st = json.loads(subprocess.run([paths.need("tailscale"), "status", "--json"],
+                                       capture_output=True, text=True, timeout=20).stdout or "{}")
+        return st.get("BackendState") == "Running"
+    except (VastgameError, OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def resume_when_online(log=lambda text: None, wait=600, step=15):
+    """Для службы автозапуска: если операция прервалась — дождаться сети (после включения Mac
+    интернет и Tailscale поднимаются не сразу) и продолжить. Нечего продолжать — выйти сразу."""
+    if not interrupted():
+        return False
+    end = time.time() + wait
+    while not online():
+        if time.time() > end:
+            log(f"[{time.strftime('%F %T')}] resume: сети нет {wait // 60} мин — попробую при следующем запуске")
+            return False
+        time.sleep(step)
+    log(f"[{time.strftime('%F %T')}] resume: продолжаю прерванную операцию")
+    state()        # сама проверка и продолжение — как при открытии окна
+    return True
+
+
 def spawn(kind, **args):
     """Запустить операцию в фоновом процессе, который переживёт закрытие окна. False — уже идёт другая."""
     if running() or (state() or {}).get("active"):
@@ -339,7 +374,7 @@ def main():
     """Точка входа фонового процесса: python jobs.py play|stop '<json с параметрами>'.
     python jobs.py resume — продолжить прерванную операцию, если она есть (для автозапуска при входе)."""
     if sys.argv[1] == "resume":
-        state()
+        resume_when_online(log=lambda text: print(text, flush=True))
         return
     if not work(sys.argv[1], json.loads(sys.argv[2]), log=lambda text: print(text, flush=True)):
         sys.exit("другая операция уже идёт")

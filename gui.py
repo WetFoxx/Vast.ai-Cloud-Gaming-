@@ -20,6 +20,7 @@ from pathlib import Path
 
 import webview   # pywebview: окно с веб-страницей (на Mac — системный WebKit, на Windows — Edge WebView2)
 
+import autostart
 import cloudgames
 import core
 import history
@@ -273,6 +274,16 @@ class Api:
         """Вход в Google (браузер) и отправка доступа в аккаунт Vast — в фоне."""
         return self._background("google", lambda: (setup.google_login(), setup.send_google_to_vast()) and True)
 
+    def autostart_install(self):
+        """Поставить службу «продолжать после перезагрузки» (человек нажал «Включить»)."""
+        if not autostart.install():
+            return {"error": {"key": "setup.err.autostart", "params": {}, "text": "launchctl bootstrap failed"}}
+        return {"ok": True}
+
+    def autostart_uninstall(self):
+        autostart.uninstall()
+        return {"ok": True}
+
     def send_google(self):
         return self._simple(setup.send_google_to_vast)
 
@@ -385,6 +396,7 @@ class Api:
 
 
 def main():
+    autostart.refresh()      # служба стоит, но проект переехал — поправить пути (выключенную не трогаем)
     api = Api()
     window = webview.create_window("vastgame", str(HERE / "ui" / "index.html"), js_api=api,
                                    width=620, height=760, min_size=(520, 600))

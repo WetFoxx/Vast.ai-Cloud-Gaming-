@@ -13,6 +13,7 @@ import sys
 
 import keyring
 
+import autostart
 import drive
 import moonlight
 import paths
@@ -113,6 +114,17 @@ def template():
                  version=setup.SCRIPT_VERSION)
 
 
+def autostart_step():
+    """Служба «продолжать после перезагрузки». Не обязательна (играть можно и без неё) — поэтому warn,
+    а не missing. На системах, где её пока нет (Windows), шаг не показываем."""
+    st = autostart.status()
+    if st == "unsupported":
+        return None
+    if st == "on":
+        return _step("autostart", "ok", "setup.autostart.ok")
+    return _step("autostart", "warn", "setup.autostart.off")
+
+
 def status():
     """Все шаги по порядку и общий итог: ready — можно арендовать (нет ни одного missing)."""
     steps = tools()
@@ -124,5 +136,8 @@ def status():
     else:
         secrets = _vast_secrets()
         steps += [google(secrets), tailscale_key(secrets), template()]
+    a = autostart_step()
+    if a:
+        steps.append(a)
     return {"steps": steps, "ready": all(s["state"] != "missing" for s in steps),
             "brew": bool(paths.find("brew")), "platform": sys.platform}
