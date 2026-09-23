@@ -21,8 +21,8 @@ import requests
 
 from vastapi import call, list_instances
 
-TEMPLATE = "f72a6cd3e6edbc9c1adf8d603b3c9075"   # шаблон WETFOX CLOUD GAME TEST (исправлен порт 41641)
-                                                # прежний WETFOX CLOUD GAME: 49faada2e6e7fe3e15bef0ea1999420a
+# Шаблон ищем по имени при каждой аренде: при сохранении на сайте Vast меняет его hash_id
+TEMPLATE_NAME = "WETFOX CLOUD GAME TEST"        # копия WETFOX CLOUD GAME с исправленным портом 41641
 NODE = "vastai-gaming"                          # имя узла в Tailscale (TAILSCALE_HOSTNAME в wolf-setup.sh)
 WOLF_PORT = 8099                                # страница статуса wolf на инстансе
 
@@ -67,6 +67,16 @@ def wolf_status(ip):
         return None
 
 
+def template_hash(name):
+    """hash_id моего шаблона с таким именем (чужие шаблоны с тем же именем не берём)."""
+    me = call("GET", "users/current/").get("id")
+    ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}).get("templates", [])
+    mine = [t for t in ts if t.get("creator_id") == me]
+    if len(mine) != 1:
+        sys.exit(f"Шаблон «{name}» у тебя в аккаунте найден {len(mine)} раз — нужен ровно один.")
+    return mine[0]["hash_id"]
+
+
 def fail(instance_id, why):
     """Что-то пошло не так после аренды: машина уже платная — предложить удалить."""
     print(f"\n!!! {why}")
@@ -102,7 +112,7 @@ credit = call("GET", "users/current/").get("credit", 0)
 
 body = {
     "client_id": "me",
-    "template_hash_id": TEMPLATE,
+    "template_hash_id": template_hash(TEMPLATE_NAME),
     "disk": a.disk,
     "label": "vastgame",
     # Добавляется к переменным шаблона и аккаунта; wolf-setup.sh читает его при старте
