@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.10 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -278,6 +278,10 @@ rver() {
 }
 names() { sed -n 's/\.tar\.zst\t.*//p' "$LS" | grep -E "$1"; }
 ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null; }
+# Папка для игр не из Steam (v3.10): если её нет — создать пустой. Зовётся при загрузке и каждые
+# GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
+# при этом не страдает — выгружаются только папки, которые есть на диске.
+mkgd()  { [ -d "$GD" ] || { u mkdir -p "$GD" && log "папка для игр $GD создана"; }; }
 sz()    { tr '\0' '\n' < "$1" | awk -F'\t' '{s+=$3} END{printf "%.0f", s}'; }
 # Архив одной игры: его можно убрать из облака (wolf forget или вручную на Drive)
 gamearch() { case $1 in game--*|sgame--*|pfx--*) return 0 ;; esac; return 1; }
@@ -916,6 +920,8 @@ boot() {
   done < <(names '^s?game--')
   [ ${#g[@]} -gt 0 ] && pool unpack "${g[@]}"
 
+  mkgd   # папка для игр не из Steam — после восстановления архивов (они создают свои подпапки)
+
   # Манифест есть, а игры нет ни на диске, ни в облаке (архив удалили с Drive или инстанс
   # удалили раньше, чем игра успела выгрузиться) — убираем манифест, и Steam покажет игру
   # неустановленной, а не сломанной. Только при полном списке облака и восстановленном
@@ -974,6 +980,7 @@ bk() {
         [ "$SV" = 1 ] && mapfile -tO ${#n[@]} n < <(ld "$DH/$SR/steamapps/compatdata" pfx--)
       fi ;;
     games)
+      mkgd
       mapfile -t n < <([ "$SO" = 1 ] && ld "$GD" game--; [ "$SG" = 1 ] && [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--) ;;
     push)
       shift; n=("$@") ;;
@@ -1240,4 +1247,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.9 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.10 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
