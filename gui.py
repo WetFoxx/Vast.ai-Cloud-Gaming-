@@ -302,6 +302,13 @@ class Api:
         autostart.uninstall(name)
         return {"ok": True}
 
+    def reset_local(self):
+        """«Сбросить vastgame на этом Mac» (страница дважды спросила). Нельзя, пока идёт запуск или
+        завершение игры — фоновой операции нужны и ключи, и её файл хода."""
+        if self._busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        return {"ok": True, "deleted": setup.reset_local()}
+
     def send_google(self):
         return self._simple(setup.send_google_to_vast)
 

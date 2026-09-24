@@ -1,6 +1,8 @@
 # Питоновская часть окна (gui.Api) с поддельным ядром: без денег, без сети, без окна.
 
 import sys
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -328,6 +330,30 @@ class TestSafe(unittest.TestCase):
         with mock.patch.object(gui.setupcheck, "status", mock.Mock(side_effect=keyring.errors.KeyringLocked("-128"))), \
              mock.patch.object(gui, "_log_error", lambda where: None):
             self.assertEqual(gui.Api().setup_status()["error"]["key"], "keychain.denied")
+
+
+class TestReset(unittest.TestCase):
+    def test_reset_removes_local_data_only(self):
+        tmp = Path(tempfile.mkdtemp()) / "cfg"
+        tmp.mkdir()
+        (tmp / "settings.json").write_text("{}")
+        cmds, removed = [], []
+        left = [3]
+
+        def run(cmd, timeout, env=None):
+            cmds.append(cmd[:2])
+            if left[0]:
+                left[0] -= 1
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 44, "", "not found")
+        with mock.patch.object(gui.setup.paths, "run", run), \
+             mock.patch.object(gui.setup.settings, "config_dir", lambda: tmp), \
+             mock.patch("autostart.uninstall", lambda name: removed.append(name)):
+            r = gui.Api().reset_local()
+        self.assertEqual(r, {"ok": True, "deleted": 3})
+        self.assertTrue(all(c == ["security", "delete-generic-password"] for c in cmds))   # только Связка ключей
+        self.assertEqual(removed, ["resume", "app"])
+        self.assertFalse(tmp.exists())
 
 
 class TestGames(unittest.TestCase):

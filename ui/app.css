@@ -189,6 +189,8 @@ td.act { text-align: right; }
 td.act button { padding: 4px 10px; font-size: 12px; border-radius: 8px; }
 
 /* ---- Тумблеры синхронизации */
+.reset-card { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+button.danger { color: var(--error); }
 .disk-card { display: flex; flex-direction: column; gap: 8px; }
 .disk-row { display: flex; justify-content: space-between; align-items: baseline; }
 .disk-card input[type=range] { width: 100%; accent-color: var(--accent); }

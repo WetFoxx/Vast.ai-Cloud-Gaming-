@@ -345,6 +345,19 @@ function renderSetup() {
   ul.appendChild(li);
 }
 
+// Сброс vastgame на этом Mac: два вопроса — что удалится и что это не отменить
+$("setup-reset").addEventListener("click", async () => {
+  if (!(await ask({ title: t("setup.reset.confirm1.title"), text: t("setup.reset.confirm1.text"),
+                    yes: t("setup.reset.button"), no: t("btn.cancel") }))) return;
+  if (!(await ask({ title: t("setup.reset.confirm2.title"), text: t("setup.reset.confirm2.text"),
+                    yes: t("setup.reset.confirm2.yes"), no: t("btn.cancel") }))) return;
+  if (DEMO) return;
+  const r = await api().reset_local();
+  if (r.error) { showError("setup-error", r.error); return; }
+  setupData = null;
+  openSetup();                       // теперь — как после первой установки
+});
+
 // ---- Действия шагов настройки
 const DOWNLOAD = { rclone: "https://rclone.org/downloads/", tailscale_app: "https://tailscale.com/download",
                    moonlight: "https://moonlight-stream.org" };

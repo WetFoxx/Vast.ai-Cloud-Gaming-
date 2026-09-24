@@ -19,6 +19,7 @@ import keyring   # доступ к Keychain («Связка ключей») macO
 
 import drive
 import paths
+import settings
 from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
@@ -383,6 +384,24 @@ def refresh_template():
     env = old.get("env") or ""
     return save_template(int(old.get("recommended_disk_space") or 100), env_value(env, "STEAM_LANG") or "",
                          env_value(env, "RES") or "1920x1200", env_value(env, "SYNC_STEAM_GAMES") or "0")
+
+
+def reset_local():
+    """Удалить всё, что vastgame хранит на ЭТОМ Mac: записи «vastgame» в Связке ключей, службы
+    автозапуска, папку настроек (настройки, история сессий, журналы). После этого приложение ведёт
+    себя как после первой установки. Аккаунты Vast/Google/Tailscale, шаблон и переменные в Vast,
+    игры и сохранения на Drive — не трогает. Возвращает число удалённых записей Связки ключей.
+
+    Записи удаляются системной командой security по имени службы: так не нужно читать их значения,
+    и macOS не спрашивает доступ, даже если записи создала прежняя сборка приложения."""
+    import autostart
+    n = 0
+    while n < 50 and paths.run(["security", "delete-generic-password", "-s", SERVICE], 30).returncode == 0:
+        n += 1
+    for name in autostart.NAMES:
+        autostart.uninstall(name)
+    shutil.rmtree(settings.config_dir(), ignore_errors=True)
+    return n
 
 
 def summary():
