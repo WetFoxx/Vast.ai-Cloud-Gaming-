@@ -2,6 +2,8 @@
 #
 # Обычно при первом подключении Moonlight показывает 4 цифры, а человек вводит их в кабинете
 # Sunshine на машине. Здесь всё делает приложение:
+#   0. проверяет, что кабинет Sunshine принимает наш логин; нет — задаёт его и ждёт перезапуска Sunshine
+#      (ДО связки: перезапуск обрывает начатую связку);
 #   1. придумывает PIN и запускает «Moonlight pair <машина> --pin PIN» — Moonlight ждёт подтверждения;
 #   2. отдаёт тот же PIN Sunshine через его API (https://<машина>:47990/api/pin, только через
 #      Tailscale) по логину кабинета Sunshine;
@@ -54,16 +56,44 @@ def set_creds_on_machine(ip, on_notice=None):
                             key="pair.creds_failed", out=out.strip()[-200:])
 
 
+def _login_ok(ip):
+    """Принимает ли кабинет Sunshine наш логин: True / False (401) / None (не отвечает — перезапускается)."""
+    try:
+        r = requests.get(f"https://{ip}:{PORT}/api/config", auth=creds(), verify=False, timeout=10)
+    except requests.RequestException:
+        return None
+    return None if r.status_code >= 500 else r.status_code != 401
+
+
+def ensure_login(ip, on_notice=None, wait=90):
+    """До связки: кабинет должен принимать наш логин. Нет — задать его на машине и дождаться, пока
+    Sunshine перезапустится. ВАЖНО делать это ДО «Moonlight pair»: перезапуск Sunshine обрывает
+    начатую связку, и Moonlight ждёт вечно (так было в первом живом тесте 2026-09-25)."""
+    ok = _login_ok(ip)
+    if ok:
+        return
+    if ok is None:
+        raise VastgameError("Кабинет Sunshine на машине не отвечает.", key="pair.no_sunshine")
+    set_creds_on_machine(ip, on_notice)
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(3)
+        if _login_ok(ip):
+            return
+    raise VastgameError("Sunshine не принял новый логин после перезапуска.", key="pair.creds_failed",
+                        out="timeout")
+
+
 def _send_pin(ip, pin):
-    """Отдать PIN Sunshine. True — принял; False — неверный логин (401); None — не сейчас (нет связи,
-    Moonlight ещё не постучался)."""
+    """Отдать PIN Sunshine. True — принял; False — не принял (Moonlight ещё не постучался); "401" —
+    неверный логин; None — нет связи."""
     try:
         r = requests.post(f"https://{ip}:{PORT}/api/pin", json={"pin": pin, "name": "vastgame"},
                           auth=creds(), verify=False, timeout=10)
     except requests.RequestException:
         return None
     if r.status_code == 401:
-        return False
+        return "401"
     try:
         return bool(r.json().get("status"))
     except ValueError:
@@ -76,18 +106,16 @@ def pair(host, ip, on_notice=None):
     exe = moonlight.path()
     if not exe:
         raise VastgameError("Moonlight не установлен", key="moonlight.missing")
+    ensure_login(ip, on_notice)          # сначала логин кабинета (с перезапуском Sunshine), потом связка
     pin = f"{secrets.randbelow(10000):04d}"
-    creds_set = False
     with tempfile.NamedTemporaryFile("w+", suffix=".log") as log:
         p = subprocess.Popen([exe, "pair", host, "--pin", pin], stdin=subprocess.DEVNULL, stdout=log,
                              stderr=subprocess.STDOUT, env=paths.tailscale_env(), start_new_session=True)
         try:
             end = time.time() + PAIR_WAIT
             while time.time() < end and p.poll() is None:
-                ok = _send_pin(ip, pin)
-                if ok is False and not creds_set:        # кабинет не наш — задать наш логин и повторить
-                    set_creds_on_machine(ip, on_notice)
-                    creds_set = True
+                if _send_pin(ip, pin) == "401":          # логин вдруг перестал подходить — не ждать зря
+                    raise VastgameError("Кабинет Sunshine не принял логин.", key="pair.creds_failed", out="401")
                 time.sleep(2)
             if p.poll() is None:
                 raise VastgameError("Moonlight не связался с машиной за полторы минуты.", key="pair.timeout")
