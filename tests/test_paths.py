@@ -45,6 +45,17 @@ class TestRun(unittest.TestCase):
             steps = {s["id"]: s["key"] for s in setupcheck.tools()}
         self.assertEqual(steps["tailscale_app"], "setup.tailscale_app.missing")
 
+    def test_tailscale_gets_term_even_from_finder(self):
+        seen = {}
+
+        def run(cmd, timeout, env=None):
+            seen["env"] = env
+            return subprocess.CompletedProcess(cmd, 0, '{"BackendState": "Running"}', "")
+        with mock.patch.dict(paths.os.environ, {}, clear=True), \
+             mock.patch.object(paths, "find", lambda n: "/x/Tailscale"), mock.patch.object(paths, "run", run):
+            self.assertEqual(paths.tailscale_status(), {"BackendState": "Running"})
+        self.assertTrue(seen["env"]["TERM"])           # без TERM Tailscale открывается окном и молчит
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,7 @@ def apps(host, timeout=25):
     if not exe:
         return None
     try:
-        r = paths.run([exe, "list", host], timeout)
+        r = paths.run([exe, "list", host], timeout, env=paths.tailscale_env())
     except (subprocess.TimeoutExpired, OSError):
         return None
     if r.returncode != 0:
@@ -52,6 +52,6 @@ def stream(host, app):
     exe = path()
     if not exe:
         return False
-    subprocess.Popen([exe, "stream", host, app], stdin=subprocess.DEVNULL,
+    subprocess.Popen([exe, "stream", host, app], stdin=subprocess.DEVNULL, env=paths.tailscale_env(),
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     return True

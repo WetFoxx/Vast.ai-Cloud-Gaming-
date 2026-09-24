@@ -88,6 +88,13 @@ def run(cmd, timeout, env=None):
                                            err.read().decode(errors="replace"))
 
 
+def tailscale_env():
+    """Окружение для программы Tailscale. Tailscale для Mac работает как команда, только если задан
+    TERM; у приложения, открытого из Finder, его нет — и она пытается запуститься окном («The
+    Tailscale GUI failed to start»), не отвечая. Поэтому TERM задаём сами."""
+    return {**os.environ, "TERM": os.environ.get("TERM") or "xterm-256color"}
+
+
 TAILSCALE_TIMEOUT = 8   # с: дольше Tailscale не отвечает только когда он не настроен или завис
 
 
@@ -98,6 +105,7 @@ def tailscale_status():
     if not exe:
         return None
     try:
-        return json.loads(run([exe, "status", "--json"], TAILSCALE_TIMEOUT).stdout or "null") or None
+        return json.loads(run([exe, "status", "--json"], TAILSCALE_TIMEOUT, env=tailscale_env()).stdout
+                          or "null") or None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
