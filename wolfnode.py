@@ -18,11 +18,7 @@ def ts_node():
     Узлов с именем vastai-gaming в сети может быть несколько — старые, от прошлых аренд
     (их DNS-имена vastai-gaming-1, -2...). Нам нужен тот, что онлайн.
     """
-    try:
-        out = subprocess.run([paths.need("tailscale"), "status", "--json"], capture_output=True, text=True, timeout=20)
-        peers = json.loads(out.stdout).get("Peer") or {}
-    except Exception:
-        return None
+    peers = (paths.tailscale_status() or {}).get("Peer") or {}
     for peer in peers.values():
         if peer.get("HostName") == NODE and peer.get("Online"):
             ips = peer.get("TailscaleIPs") or [""]

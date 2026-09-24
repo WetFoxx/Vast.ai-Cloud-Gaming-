@@ -313,9 +313,7 @@ def online():
     """Сеть готова для продолжения: Vast отвечает и Tailscale на этом компьютере подключён."""
     try:
         core.balance()
-        st = json.loads(subprocess.run([paths.need("tailscale"), "status", "--json"],
-                                       capture_output=True, text=True, timeout=20).stdout or "{}")
-        return st.get("BackendState") == "Running"
+        return (paths.tailscale_status() or {}).get("BackendState") == "Running"
     except (VastgameError, OSError, ValueError, subprocess.SubprocessError):
         return False
 

@@ -9,12 +9,14 @@
 # доведётся до конца. Страница раз в секунду забирает её ход из файла (session_progress).
 # Короткие операции (убрать игру, установка, вход в Google) — Job в потоке окна (progress, answer).
 
+import functools
 import os
 import re
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -402,6 +404,38 @@ class Api:
             threading.Thread(target=lambda: self._window.evaluate_js("askClose()"), daemon=True).start()
             return False   # не закрывать
         return True
+
+
+def _safe(fn):
+    """Обёртка для функций страницы: что бы ни случилось, страница получает ответ. Без неё
+    неожиданная ошибка в Python оставляет страницу ждать вечно («Проверяю настройку…»)."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except VastgameError as e:
+            return {"error": error_data(e)}
+        except Exception as e:                  # noqa: BLE001 — показать любую причину
+            _log_error(fn.__name__)
+            return {"error": {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}}
+    return wrapper
+
+
+def _log_error(where):
+    """Записать неожиданную ошибку с подробностями в app.log (папка настроек) — для разбора."""
+    try:
+        log = settings.config_dir() / "app.log"
+        if log.exists() and log.stat().st_size > 1_000_000:
+            log.unlink()
+        with open(log, "a") as f:
+            f.write(f"--- {time.strftime('%F %T')} {where}\n{traceback.format_exc()}\n")
+    except OSError:
+        pass
+
+
+for _name, _fn in list(vars(Api).items()):
+    if callable(_fn) and not _name.startswith("_"):
+        setattr(Api, _name, _safe(_fn))
 
 
 def main():

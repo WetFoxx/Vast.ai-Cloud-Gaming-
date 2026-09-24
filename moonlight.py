@@ -36,7 +36,7 @@ def apps(host, timeout=25):
     if not exe:
         return None
     try:
-        r = subprocess.run([exe, "list", host], capture_output=True, text=True, timeout=timeout)
+        r = paths.run([exe, "list", host], timeout)
     except (subprocess.TimeoutExpired, OSError):
         return None
     if r.returncode != 0:

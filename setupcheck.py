@@ -33,12 +33,10 @@ def tools():
     if not paths.find("tailscale"):
         out.append(_step("tailscale_app", "missing", "setup.tailscale_app.missing"))
     else:
-        try:
-            st = json.loads(subprocess.run([paths.need("tailscale"), "status", "--json"],
-                                           capture_output=True, text=True, timeout=20).stdout)
-        except Exception:
-            st = {}
-        if st.get("BackendState") != "Running":
+        st = paths.tailscale_status()
+        if st is None:
+            out.append(_step("tailscale_app", "missing", "setup.tailscale_app.no_answer"))
+        elif st.get("BackendState") != "Running":
             out.append(_step("tailscale_app", "missing", "setup.tailscale_app.offline",
                              state=st.get("BackendState") or "?"))
         elif not (st.get("CurrentTailnet") or {}).get("MagicDNSEnabled", True):

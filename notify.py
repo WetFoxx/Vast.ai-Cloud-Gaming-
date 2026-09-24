@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import paths
 import settings
 
 HERE = Path(__file__).resolve().parent
@@ -39,7 +40,7 @@ def send(title, text):
     script = ["on run argv", "display notification (item 2 of argv) with title (item 1 of argv)", "end run"]
     cmd = ["osascript"] + [a for line in script for a in ("-e", line)] + [title, text]
     try:
-        subprocess.run(cmd, capture_output=True, timeout=10)
+        paths.run(cmd, 10)
     except (OSError, subprocess.SubprocessError):
         pass
 

@@ -316,6 +316,14 @@ class TestStop(unittest.TestCase):
         self.assertEqual(calls, [42])
 
 
+class TestSafe(unittest.TestCase):
+    def test_unexpected_error_reaches_the_page(self):
+        with mock.patch.object(gui.setupcheck, "status", mock.Mock(side_effect=ValueError("сломалось"))), \
+             mock.patch.object(gui, "_log_error", lambda where: None):
+            r = gui.Api().setup_status()
+        self.assertEqual(r["error"]["text"], "ValueError: сломалось")    # не исключение, а ответ странице
+
+
 class TestGames(unittest.TestCase):
     def test_listing_hides_files_and_remove_runs_in_background(self):
         api = gui.Api()

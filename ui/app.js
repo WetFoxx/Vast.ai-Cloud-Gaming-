@@ -299,7 +299,9 @@ $("setup-recheck").addEventListener("click", openSetup);
 $("setup-back").addEventListener("click", () => { show("main"); refresh(); });
 
 async function loadSetup() {
-  const d = DEMO ? demoSetup() : await api().setup_status();
+  let d;
+  try { d = DEMO ? demoSetup() : await api().setup_status(); }
+  catch (e) { d = { error: { key: null, text: String(e) } }; }   // ответ не пришёл — показать, а не висеть
   if (!d.error) setupData = d;
   $("setup-banner").hidden = !setupData || setupData.ready;
   if (current) render(current);
