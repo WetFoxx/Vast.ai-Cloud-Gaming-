@@ -414,12 +414,31 @@ def stop(ui, dry_run=False):
     # wolf finish (v3.11+): машина сама выгружает, проверяет и удаляет себя отдельной службой —
     # обрыв связи с этим компьютером её уже не прервёт. Мы только следим и перепроверяем.
     code, out = ssh_run(ip, "wolf finish", timeout=60, on_notice=ui.tailscale)
-    if code == 0 and out.strip().startswith("finish:") and "не удалось" not in out:
+    if _finish_started(ip, t0, out):
         return _follow_finish(ui, iid, ip, t0)
+    ui.say(f"Ответ машины на «wolf finish»: {out.strip()[-200:]}", "detail")
     ui.say("На машине скрипт старше v3.11 (нет wolf finish) — выгружаю по SSH: не закрывай крышку и не "
            "выключай интернет, пока идёт выгрузка.", "warn", key="core.old_script")
     _shutdown_over_ssh(ui, iid, ip, t0)
     return _verify_and_delete(ui, iid, wolf_status(ip), t0)
+
+
+def _finish_started(ip, t0, out, wait=30):
+    """Запустился ли на машине wolf finish (v3.11+). В ответ по SSH могут примешаться служебные
+    строки (так 2026-09-25 ответ не распознали, и приложение зря пустило старую выгрузку параллельно),
+    поэтому ищем строку «finish:» среди всех, а если её нет — ждём запись finish в /json: она надёжна.
+    Старый скрипт отвечает «использование: wolf …» — тогда сразу False."""
+    if any(line.strip().startswith("finish:") and "не удалось" not in line for line in out.splitlines()):
+        return True
+    if "использование: wolf" in out:
+        return False
+    end = time.time() + wait
+    while time.time() < end:
+        f = (wolf_status(ip) or {}).get("finish")
+        if f and f[0] >= t0:
+            return True
+        time.sleep(3)
+    return False
 
 
 def _alive(iid):

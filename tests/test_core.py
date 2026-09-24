@@ -233,6 +233,8 @@ class TestStop(Base):
         self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "vastai-gaming.tail.ts.net"))
 
         def ssh_run(ip, command, timeout=180, on_notice=None):
+            if command == "wolf finish":                       # скрипт до v3.11: команды finish нет
+                return 2, "использование: wolf boot|state|games|shutdown|restore ИМЯ..\n"
             return (0, "ok\n") if command == "echo ok" else (0, f"{T0 + 2}\n")
         self.patch(core, "ssh_run", ssh_run)
         self.patch(core, "ssh", lambda ip, command: FakeProc(shutdown_code))
@@ -416,6 +418,29 @@ class TestFinish(Base):
         self.assertEqual((r["deleted"], r["gone"], r["uploaded"]), (True, True, ["steam-state"]))
         self.assertEqual(self.deleted, [])
         self.assertIn("core.finished_offline", ui.keys)
+
+    def test_noisy_answer_still_recognised(self):
+        # Перед «finish: запущено» пришла служебная строка — это всё равно новый путь, без старой выгрузки
+        done = {"finish": (T0 + 60, "ok", "app: всё выгружено"), "steam-state": (T0 + 50, "ok", "")}
+        ui = self.setup_machine([done])
+        real = core.ssh_run
+        self.patch(core, "ssh_run", lambda ip, command, **k: (0, "Running as unit: wolf-finish.service\nfinish: запущено\n")
+                   if command == "wolf finish" else real(ip, command, **k))
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+        self.assertNotIn("core.old_script", ui.keys)
+
+    def test_unknown_answer_but_finish_in_status(self):
+        # Ответ непонятный, но в /json появилась запись finish — значит, wolf finish идёт
+        running = {"finish": (T0 + 3, "up", "выгрузка")}
+        done = {"finish": (T0 + 60, "ok", "app: всё выгружено"), "steam-state": (T0 + 50, "ok", "")}
+        ui = self.setup_machine([running, done])
+        real = core.ssh_run
+        self.patch(core, "ssh_run", lambda ip, command, **k: (1, "что-то странное\n")
+                   if command == "wolf finish" else real(ip, command, **k))
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+        self.assertNotIn("core.old_script", ui.keys)
 
     def test_old_finish_result_is_ignored(self):
         # Итог прошлого finish (до t0) не считается — ждём новый
