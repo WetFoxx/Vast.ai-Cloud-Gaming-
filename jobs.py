@@ -25,6 +25,8 @@ import threading
 import time
 from pathlib import Path
 
+import keyring.errors
+
 import core
 import notify
 import paths
@@ -47,6 +49,11 @@ def error_data(e):
 
 
 def unexpected(e):
+    """Неожиданная ошибка — странице. Отказ в доступе к Связке ключей — понятным текстом: так бывает,
+    когда новая версия приложения (без подписи Apple) читает ключи, сохранённые прежней, а человек
+    нажал «Отказать»."""
+    if isinstance(e, keyring.errors.KeyringError):
+        return {"key": "keychain.denied", "params": {}, "text": f"{type(e).__name__}: {e}"}
     return {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}
 
 

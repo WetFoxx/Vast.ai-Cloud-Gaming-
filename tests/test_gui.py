@@ -323,6 +323,12 @@ class TestSafe(unittest.TestCase):
             r = gui.Api().setup_status()
         self.assertEqual(r["error"]["text"], "ValueError: сломалось")    # не исключение, а ответ странице
 
+    def test_keychain_denied_is_explained(self):
+        import keyring.errors
+        with mock.patch.object(gui.setupcheck, "status", mock.Mock(side_effect=keyring.errors.KeyringLocked("-128"))), \
+             mock.patch.object(gui, "_log_error", lambda where: None):
+            self.assertEqual(gui.Api().setup_status()["error"]["key"], "keychain.denied")
+
 
 class TestGames(unittest.TestCase):
     def test_listing_hides_files_and_remove_runs_in_background(self):

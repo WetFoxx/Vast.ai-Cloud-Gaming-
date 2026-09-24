@@ -417,7 +417,7 @@ def _safe(fn):
             return {"error": error_data(e)}
         except Exception as e:                  # noqa: BLE001 — показать любую причину
             _log_error(fn.__name__)
-            return {"error": {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}}
+            return {"error": jobs.unexpected(e)}
     return wrapper
 
 
