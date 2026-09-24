@@ -145,7 +145,7 @@
 - [~] Приложение собрано (`.app`, arm64, ad-hoc) со своим Python, библиотеками и rclone; проверено на чистом виртуальном Mac (UTM). Осталось: подпись Apple Developer, универсальная сборка для Intel, `.exe`.
 - [x] Программы (rclone, tailscale, ssh, brew) ищутся не только в PATH: у приложения из Finder/Dock PATH без Homebrew — `paths.find` смотрит `/opt/homebrew/bin`, `/usr/local/bin`, `Tailscale.app/Contents/MacOS`.
 - [x] Moonlight ищется в `/Applications` и `~/Applications` (Mac), в Program Files и LOCALAPPDATA (Windows).
-- [ ] Первое подключение Moonlight: мастер/окно проводят через PIN (кабинет Sunshine → PIN из Moonlight); `Moonlight list` без пары не работает — окно показывает «Desktop».
+- [x] Первое подключение Moonlight: без ручного PIN — «Запустить Moonlight» связывает сам (`pairing.py`); **проверено вживую 2026-09-25** (52463283, после исправления прав v3.14 — связка и трансляция).
 - [x] Tailscale SSH: ссылка подтверждения показывается, только если её прислал Tailscale (режим check зависит от сети пользователя).
 - [ ] MagicDNS выключен — адрес по IP; проверить, что Moonlight и Sunshine работают по IP.
 - [ ] Имя узла ≠ vastai-gaming (`TAILSCALE_HOSTNAME`) — утилита его не найдёт; если понадобится — настройка шаблона.
