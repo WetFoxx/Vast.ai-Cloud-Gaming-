@@ -21,7 +21,8 @@ EXTRA = {
               for d in ("Tailscale", "rclone")],
 }
 # Tailscale для Mac — приложение; его программа для командной строки лежит внутри .app
-APP_BINARIES = {"tailscale": ["/Applications/Tailscale.app/Contents/MacOS/Tailscale"]}
+APP_BINARIES = {"tailscale": ["/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                              os.path.expanduser("~/Applications/Tailscale.app/Contents/MacOS/Tailscale")]}
 
 
 def self_cmd(*args):
@@ -32,11 +33,22 @@ def self_cmd(*args):
     return [sys.executable, str(HERE / "app_main.py"), *args]
 
 
+def tailscale_app():
+    """Mac: путь к приложению Tailscale или None. Команда tailscale в /usr/local/bin — лишь ссылка
+    на него и остаётся после удаления приложения, поэтому «установлен» решаем по самому приложению."""
+    for p in APP_BINARIES["tailscale"]:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def find(name):
     """Полный путь к программе name или None. Своя копия внутри приложения — важнее системной."""
     bundled = BUNDLED_BIN / (name + (".exe" if sys.platform == "win32" else ""))
     if bundled.is_file() and os.access(bundled, os.X_OK):
         return str(bundled)
+    if name == "tailscale" and sys.platform == "darwin" and tailscale_app():
+        return tailscale_app()                   # сама программа приложения — надёжнее ссылок на неё
     p = shutil.which(name)
     if p:
         return p

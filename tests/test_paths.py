@@ -29,11 +29,21 @@ class TestRun(unittest.TestCase):
 
     def test_tailscale_not_answering_is_a_setup_step_not_a_hang(self):
         with mock.patch.object(paths, "find", lambda n: "/x/tailscale" if n == "tailscale" else None), \
+             mock.patch.object(paths, "tailscale_app", lambda: "/Applications/Tailscale.app/Contents/MacOS/Tailscale"), \
              mock.patch.object(paths, "run", mock.Mock(side_effect=subprocess.TimeoutExpired("t", 8))):
             self.assertIsNone(paths.tailscale_status())
             with mock.patch.object(setupcheck.moonlight, "path", lambda: None):
                 steps = {s["id"]: s["key"] for s in setupcheck.tools()}
         self.assertEqual(steps["tailscale_app"], "setup.tailscale_app.no_answer")
+
+    def test_leftover_cli_without_app_means_not_installed(self):
+        # Приложение удалили, а служебная команда /usr/local/bin/tailscale осталась
+        with mock.patch.object(paths, "find", lambda n: "/usr/local/bin/tailscale" if n == "tailscale" else None), \
+             mock.patch.object(paths, "tailscale_app", lambda: None), \
+             mock.patch.object(setupcheck.sys, "platform", "darwin"), \
+             mock.patch.object(setupcheck.moonlight, "path", lambda: None):
+            steps = {s["id"]: s["key"] for s in setupcheck.tools()}
+        self.assertEqual(steps["tailscale_app"], "setup.tailscale_app.missing")
 
 
 if __name__ == "__main__":

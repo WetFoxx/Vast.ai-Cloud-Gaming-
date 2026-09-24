@@ -30,7 +30,8 @@ def tools():
     out = []
     out.append(_step("rclone", "ok", "setup.rclone.ok") if paths.find("rclone")
                else _step("rclone", "missing", "setup.rclone.missing"))
-    if not paths.find("tailscale"):
+    mac = sys.platform == "darwin"
+    if not paths.find("tailscale") or (mac and not paths.tailscale_app()):
         out.append(_step("tailscale_app", "missing", "setup.tailscale_app.missing"))
     else:
         st = paths.tailscale_status()

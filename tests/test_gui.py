@@ -363,9 +363,20 @@ class TestSetupActions(unittest.TestCase):
             returncode, stdout, stderr = 0, "", ""
         with mock.patch.object(gui.paths, "find", lambda n: "/opt/homebrew/bin/brew"), \
              mock.patch.object(gui.subprocess, "run", lambda cmd, **k: calls.append(cmd) or R()):
-            self.assertEqual(api.install_tool("moonlight"), {"ok": True})
+            self.assertEqual(api.install_tool("rclone"), {"ok": True})
             wait_done(api)
-        self.assertEqual(calls, [["/opt/homebrew/bin/brew", "install", "--cask", "moonlight"]])
+        self.assertEqual(calls, [["/opt/homebrew/bin/brew", "install", "rclone"]])
+
+    def test_tailscale_and_moonlight_use_official_installer_not_brew(self):
+        api, used = gui.Api(), []
+        with mock.patch.object(gui.installer, "tailscale", lambda: used.append("ts") or True), \
+             mock.patch.object(gui.installer, "moonlight", lambda: used.append("ml") or True), \
+             mock.patch.object(gui.paths, "find", lambda n: None):      # Homebrew нет — не мешает
+            api.install_tool("tailscale_app")
+            wait_done(api)
+            api.install_tool("moonlight")
+            wait_done(api)
+        self.assertEqual(used, ["ts", "ml"])
         self.assertEqual(api.install_tool("rm -rf /")["error"]["text"], "unknown tool")   # только известные
 
     def test_no_brew(self):

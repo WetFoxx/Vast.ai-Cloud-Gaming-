@@ -414,8 +414,9 @@ function setupActions(st, li) {
     return;
   }
 
-  if (id in TOOL_NAME && st.state === "missing" && key !== "setup.tailscale_app.offline") {
-    if (setupData.brew && setupData.platform === "darwin") {
+  const tsInstalled = key === "setup.tailscale_app.offline" || key === "setup.tailscale_app.no_answer";
+  if (id in TOOL_NAME && st.state === "missing" && !tsInstalled) {
+    if (setupData.platform === "darwin" && (id !== "rclone" || setupData.brew)) {
       box.appendChild(button(t("setup.act.install"), async () => {
         const name = TOOL_NAME[id];
         if (!(await ask({ title: t("setup.confirm.install.title", { name }), text: t("setup.confirm.install.text"),
@@ -425,7 +426,7 @@ function setupActions(st, li) {
     }
     box.appendChild(button(t("setup.act.download"), () => openUrl(DOWNLOAD[id])));
   }
-  if (key === "setup.tailscale_app.offline") box.appendChild(button(t("setup.act.open_tailscale"), () => !DEMO && api().open_tailscale(), true));
+  if (tsInstalled) box.appendChild(button(t("setup.act.open_tailscale"), () => !DEMO && api().open_tailscale(), true));
   if (key === "setup.tailscale_app.no_magicdns") box.appendChild(button(t("setup.act.open_dns"), () => openUrl(DNS_URL)));
 
   if (id === "vast" && st.state === "missing") {

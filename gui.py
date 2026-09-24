@@ -26,6 +26,7 @@ import autostart
 import cloudgames
 import core
 import history
+import installer
 import jobs
 import market
 import moonlight
@@ -243,7 +244,13 @@ class Api:
         return {"ok": True}
 
     def install_tool(self, tool):
-        """Установить rclone / Tailscale / Moonlight через Homebrew (страница уже спросила)."""
+        """Установить программу (страница уже спросила). Tailscale и Moonlight — официальные файлы
+        с проверкой подписи (installer.py, Homebrew не нужен); rclone — через Homebrew (в собранном
+        приложении он встроен, установка нужна только при запуске из папки проекта)."""
+        if tool == "tailscale_app":
+            return self._background("install", installer.tailscale)
+        if tool == "moonlight":
+            return self._background("install", installer.moonlight)
         brew = paths.find("brew")
         if tool not in BREW:
             return {"error": {"key": None, "params": {}, "text": "unknown tool"}}
