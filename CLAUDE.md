@@ -141,7 +141,7 @@
 ## Чтобы работало у всех, а не только на Mac Алексея (проверять перед публикацией)
 
 - [~] OAuth-клиент Google: `oauth_client.json` в папке проекта (в .gitignore, права 600), `drive.client()` берёт свой клиент из Keychain, иначе этот файл. Осталось: встроить файл в `.app` при сборке (шаг 9).
-- [x] `wolf-setup.sh` в репозитории проекта (`WetFoxx/Vast.ai-Cloud-Gaming-`, коммит `b6dfe44` = v3.13, опубликован 2026-09-25; v3.12 = `579da4f`, v3.11 = `ed83b6d`, v3.10 = `0c84aa0`, v3.9 = `b9909e7`); `SCRIPT_URL` закреплён на коммит. Публичный шаблон `WETFOX CLOUD GAME` и README на GitHub пока ссылаются на старый gist (v3.7).
+- [x] `wolf-setup.sh` в репозитории проекта (`WetFoxx/Vast.ai-Cloud-Gaming-`, коммит `e009128` = v3.14, опубликован 2026-09-25; v3.13 = `b6dfe44`, v3.12 = `579da4f`, v3.11 = `ed83b6d`, v3.10 = `0c84aa0`, v3.9 = `b9909e7`); `SCRIPT_URL` закреплён на коммит. Публичный шаблон `WETFOX CLOUD GAME` и README на GitHub пока ссылаются на старый gist (v3.7).
 - [~] Приложение собрано (`.app`, arm64, ad-hoc) со своим Python, библиотеками и rclone; проверено на чистом виртуальном Mac (UTM). Осталось: подпись Apple Developer, универсальная сборка для Intel, `.exe`.
 - [x] Программы (rclone, tailscale, ssh, brew) ищутся не только в PATH: у приложения из Finder/Dock PATH без Homebrew — `paths.find` смотрит `/opt/homebrew/bin`, `/usr/local/bin`, `Tailscale.app/Contents/MacOS`.
 - [x] Moonlight ищется в `/Applications` и `~/Applications` (Mac), в Program Files и LOCALAPPDATA (Windows).
