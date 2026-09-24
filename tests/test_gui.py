@@ -495,6 +495,25 @@ class TestMoonlight(unittest.TestCase):
             self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
         self.assertEqual(steps, [("pair", "h", "100.1.1.1"), ("stream", "h", "Desktop")])
 
+    def test_second_click_while_pairing_does_not_stream_twice(self):
+        # Живой тест 2026-09-25: два нажатия во время связки → две трансляции, обе оборвались
+        api, streams = gui.Api(), []
+        inside, release = threading.Event(), threading.Event()
+        def slow_pair(host, ip):
+            inside.set(); release.wait(5)
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: None), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.pairing, "pair", slow_pair), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a: streams.append(a) or True), \
+             mock.patch.object(gui.settings, "set", lambda k, v: None):
+            first = threading.Thread(target=api.open_moonlight, args=("h", "Desktop"))
+            first.start(); inside.wait(5)
+            self.assertEqual(api.open_moonlight("h", "Desktop"), {"ok": True, "busy": True})
+            release.set(); first.join(5)
+            self.assertEqual(streams, ["Desktop"])
+            self.assertEqual(api.open_moonlight("h", "Desktop"), {"ok": True})   # потом — снова можно
+
     def test_not_installed(self):
         with mock.patch.object(gui.moonlight, "path", lambda: None):
             self.assertEqual(gui.Api().moonlight_apps("m"), {"installed": False})

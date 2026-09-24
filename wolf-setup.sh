@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.13 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.14 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -593,7 +593,7 @@ restore_identity_safe() {
     chown -R "$3" "$2" 2>/dev/null
   }
   cp_tree etc/sunshine                 /etc/sunshine            root:root
-  cp_tree "${DH#/}/.config/sunshine"   "$DH/.config/sunshine"   "$DU:$DU"
+  cp_tree "${DH#/}/.config/sunshine"   "$DH/.config/sunshine"   "$DU:"
   rm -rf "$stage"
   man "$n" 2>/dev/null | sha1sum | cut -c1-40 > "$S/h/$n"
   echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
@@ -796,7 +796,7 @@ sunshine_prep() {
     sed -i '/^global_prep_cmd/d' "$cf"
     printf '%s\n' "$want" >> "$cf"
   fi
-  chown -R "$DU:$DU" "$d"
+  chown -R "$DU:" "$d"
 }
 
 # Sunshine перезапускается ПОСЛЕ восстановления identity, иначе Moonlight просит PIN
@@ -1052,6 +1052,9 @@ sunshine_creds() {
   [ -n "$p" ] || { echo "sunshine-creds: пустой пароль"; return 1; }
   hash sunshine 2>/dev/null || { echo "sunshine-creds: Sunshine не установлен"; return 1; }
   xenv
+  # [v3.14] Файлы Sunshine — пользователю: иначе --creds не запишет (у root они оставались из-за
+  # chown на группу «user», которой на машинах Vast нет — основная группа «users»)
+  chown -R "$DU:" "$DH/.config/sunshine" 2>/dev/null
   u sunshine --creds "$user" "$p" >/dev/null 2>&1 || { echo "sunshine-creds: не удалось"; return 1; }
   sunshine_restart >/dev/null 2>&1
   ( NOW=1 "$0" push identity >/dev/null 2>&1 & )
@@ -1364,4 +1367,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.13 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.14 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

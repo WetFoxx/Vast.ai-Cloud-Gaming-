@@ -144,11 +144,17 @@ async function loadMoonlightApps(host) {
 }
 
 async function startMoonlight(host, app) {
+  // Связка в первый раз идёт до минуты — кнопку не нажать второй раз (две трансляции мешают друг другу)
+  $("ml-start").disabled = true;
   $("ml-note").hidden = false;
   $("ml-note").textContent = t("moonlight.starting");
-  const r = DEMO ? { ok: true } : await api().open_moonlight(host, app);
-  $("ml-note").textContent = r.error ? errText(r.error) : "";
-  $("ml-note").hidden = !r.error;
+  try {
+    const r = DEMO ? { ok: true } : await api().open_moonlight(host, app);
+    $("ml-note").textContent = r.error ? errText(r.error) : "";
+    $("ml-note").hidden = !r.error;
+  } finally {
+    $("ml-start").disabled = false;
+  }
 }
 
 $("ml-start").addEventListener("click", () => {

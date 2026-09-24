@@ -60,6 +60,7 @@ class Api:
         self._window = None
         self._force_close = False
         self._ts_url = None       # ссылка входа Tailscale — только в памяти, чтобы открыть её ещё раз
+        self._moonlight_lock = threading.Lock()   # «Запустить Moonlight» — не больше одного сразу
 
     # ---- настройки
     def settings(self):
@@ -434,6 +435,16 @@ class Api:
         if not moonlight.path():
             return {"error": {"key": "moonlight.missing", "params": {}, "text": "Moonlight не установлен"}}
         settings.set("moonlight_app", app)
+        # Второй запуск, пока идёт первый (связка — до минуты), открыл бы вторую трансляцию:
+        # Sunshine отвечает ей «приложение уже запущено», и обе обрываются (живой тест 2026-09-25)
+        if not self._moonlight_lock.acquire(blocking=False):
+            return {"ok": True, "busy": True}
+        try:
+            return self._open_moonlight(host, app)
+        finally:
+            self._moonlight_lock.release()
+
+    def _open_moonlight(self, host, app):
         if moonlight.apps(host) is None:
             # Moonlight ещё не связан с этой машиной — связать самим, без ручного PIN
             node = wolfnode.ts_node()
