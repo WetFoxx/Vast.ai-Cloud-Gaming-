@@ -146,6 +146,7 @@ class FileJob(Job):
         self.meta = {}                   # что уже сделано: {"iid", "t0", "offer"} после аренды
         self.resumes = 0
         self.spawned = time.time()
+        self._opened = set()             # ссылки, уже открытые в браузере
         if carry:
             self.started, self.events, self.archives = carry["started"], carry["events"], carry["archives"]
             self.stage_key, self.meta = carry.get("stage"), carry.get("meta") or {}
@@ -155,6 +156,14 @@ class FileJob(Job):
     def set_meta(self, **kw):
         self.meta.update(kw)
         self._changed()
+
+    def say(self, text, level="info", key=None, **params):
+        super().say(text, level, key, **params)
+        # Ссылку одобрения машины в Tailscale открываем в браузере сами — окно может быть закрыто
+        if key == "core.ts_approve" and params.get("url") and params["url"] not in self._opened:
+            self._opened.add(params["url"])
+            import webbrowser
+            webbrowser.open(params["url"])
 
     def confirm(self, question, key=None, **params):
         # Спросить некого (окно может быть закрыто). Вопросов у play/stop нет; если ядро всё же

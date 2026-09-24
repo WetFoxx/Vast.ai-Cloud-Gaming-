@@ -101,6 +101,20 @@ def ensure_folder():
     return rclone("mkdir", REMOTE + FOLDER, timeout=120).returncode == 0
 
 
+def ts_login_link(iid):
+    """Ссылка одобрения узла Tailscale, которую опубликовала машина iid (wolf-setup.sh v3.12,
+    файл ts-login.url в папке архивов: номер инстанса, ссылка), или None. Чужую (от прошлой машины)
+    и не похожую на ссылку Tailscale — не берём."""
+    try:
+        r = rclone("cat", REMOTE + FOLDER + "/ts-login.url", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = (r.stdout or "").split()
+    if r.returncode != 0 or len(lines) < 2 or lines[0] != str(iid):
+        return None
+    return lines[1] if lines[1].startswith("https://login.tailscale.com/") else None
+
+
 def check(tok, old=None):
     """Проверить токен: (почта владельца Drive, число файлов в папке или None, ГБ) или None, если не работает."""
     # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её

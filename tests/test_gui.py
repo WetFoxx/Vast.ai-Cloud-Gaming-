@@ -246,6 +246,17 @@ class TestPlay(unittest.TestCase):
         self.assertEqual(p["error"]["key"], "progress.lost")     # не крутиться вечно
 
 
+class TestApproveLink(unittest.TestCase):
+    def test_background_job_opens_approve_link_once(self):
+        opened = []
+        with mock.patch("webbrowser.open", lambda u: opened.append(u)):
+            job = gui.jobs.FileJob("play", pid=1)
+            for _ in range(3):   # ядро сообщает ссылку раз, но и повтор не должен открывать вкладки
+                job.say("x", "tailscale", key="core.ts_approve", url="https://login.tailscale.com/a/abc")
+            job.say("y", "tailscale", key="core.other", url="https://login.tailscale.com/a/zzz")
+        self.assertEqual(opened, ["https://login.tailscale.com/a/abc"])
+
+
 class TestStop(unittest.TestCase):
     def setUp(self):
         self.api = gui.Api()

@@ -19,6 +19,7 @@ import re
 import threading
 import time
 
+import drive
 import history
 import market
 from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
@@ -222,8 +223,14 @@ def wait_ready(iid, t0, o, ui):
     # ---- Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
     ui.stage("tailscale", "Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
     started = time.time()
-    warned = False
+    warned, approve_url = False, None
     while True:
+        # Первая машина без личности в облаке и без ключа ждёт одобрения в Tailscale (v3.12):
+        # ссылку она кладёт на Drive — показать/открыть её человеку; пока ждём его, таймер заново
+        url = drive.ts_login_link(iid)
+        if url and url != approve_url:
+            approve_url, started, warned = url, time.time(), False
+            ui.say(f"Одобри машину в своей сети Tailscale: {url}", "tailscale", key="core.ts_approve", url=url)
         if not warned and time.time() - started > TAILSCALE_WARN_MIN * 60:
             warned = True
             ui.say(f"Узла нет уже {TAILSCALE_WARN_MIN} минут — это дольше обычного. "

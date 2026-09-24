@@ -487,7 +487,8 @@ function setupActions(st, li) {
     box.appendChild(button(t("setup.act.relogin"), () => actBackground(li, () => api().google_login(), t("setup.login_wait"))));
   }
 
-  if (id === "tailscale_key" && (st.state === "missing" || key === "setup.tailscale_key.expiring")) {
+  if (id === "tailscale_key" && (st.state === "missing" || key === "setup.tailscale_key.expiring"
+                                 || key === "setup.tailscale_key.optional")) {
     hint("setup.hint.ts");
     const f = field(t("setup.field.ts_key"), "password");
     box.append(f, button(t("setup.act.save"), () => act(li, () => api().save_tailscale_key(f.value)), true),
@@ -758,7 +759,15 @@ async function pollOnce() {
   for (const ev of p.events) {
     prog.log.push(ev);
     // Tailscale просит подтвердить вход — заметный блок со ссылкой; после «SSH работает» — убрать
-    if (ev.level === "tailscale" && ev.url) { prog.tsUrl = ev.url; $("tailscale-box").hidden = false; }
+    const tsUrl = ev.url || (ev.params || {}).url;
+    if (ev.level === "tailscale" && tsUrl) {
+      prog.tsUrl = tsUrl;
+      const approve = ev.key === "core.ts_approve";      // первая машина: одобрить её в сети Tailscale
+      $("tailscale-box").querySelector(".title").textContent = t(approve ? "tailscale.approve.title" : "tailscale.title");
+      $("tailscale-box").querySelector(".sub").textContent = t(approve ? "tailscale.approve.text" : "tailscale.text");
+      $("tailscale-box").hidden = false;
+    }
+    if (ev.key === "core.tailscale_online") $("tailscale-box").hidden = true;
     if (ev.key === "core.ssh_ok") $("tailscale-box").hidden = true;
   }
   prog.since = p.next;

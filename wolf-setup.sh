@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.11 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.12 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -863,6 +863,10 @@ boot() {
   # shellcheck disable=SC2086
   tailscale up --reset --timeout=90s "${ka[@]}" --hostname="$TSH" "${sh[@]}" $TSX \
     || log "tailscale up: ошибка"
+  # [v3.12] Ни личности из облака, ни ключа (первая машина нового человека) — вход по одобрению:
+  # ссылка публикуется в папке на Drive, приложение на Mac открывает её в браузере. В фоне — чтобы
+  # восстановление не ждало человека; узел войдёт в сеть, как только его одобрят.
+  [ "$(ts_state | cut -d' ' -f1)" = Running ] || ( ts_link_publish & )
 
   # 3. Дисплей (EDID/xorg), firewall, Sunshine
   for _ in {1..150}; do ls /tmp/.X11-unix/X* &>/dev/null && [ -S "/run/user/$UI/bus" ] && break; sleep 2; done
@@ -1003,6 +1007,38 @@ bk() {
   [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
   saves_notify
   return 0
+}
+
+# ------------------------------------------------------------ вход по ссылке ---
+# [v3.12] Состояние Tailscale: «BackendState AuthURL» (ссылка пустая, если её нет)
+ts_state() {
+  tailscale status --json 2>/dev/null | python3 -c 'import json,sys
+d = json.load(sys.stdin); print(d.get("BackendState", ""), d.get("AuthURL", ""))' 2>/dev/null
+}
+
+# Опубликовать ссылку одобрения узла для приложения: файл ts-login.url в папке на Drive
+# (видна только владельцу и его приложению; первая строка — номер инстанса, чтобы приложение не
+# открыло ссылку от чужой, прошлой машины). Ждать до часа; после входа — убрать файл.
+ts_link_publish() {
+  local s u sent= f="$T/ts-login.url" end=$(( $(date +%s) + 3600 )) sh=()
+  [ "${TSS:-1}" = 1 ] && sh=(--ssh)
+  while [ "$(date +%s)" -lt "$end" ]; do
+    read -r s u <<< "$(ts_state)"
+    [ "$s" = Running ] && break
+    if [ -z "$u" ]; then
+      # ссылки ещё (или уже) нет — попросить у Tailscale новую
+      # shellcheck disable=SC2086
+      tailscale up --reset --timeout=10s --hostname="$TSH" "${sh[@]}" $TSX >/dev/null 2>&1
+      continue
+    fi
+    if [ "$u" != "$sent" ]; then
+      printf '%s\n%s\n' "${VI:-?}" "$u" > "$f"
+      rc copyto "$f" "$R/ts-login.url" && sent=$u && log "tailscale: ссылка одобрения опубликована для приложения"
+    fi
+    sleep 5
+  done
+  rc deletefile "$R/ts-login.url" >/dev/null 2>&1; rm -f "$f"
+  [ "$s" = Running ] && log "tailscale: узел одобрен и в сети" || log "tailscale: узел так и не одобрили за час"
 }
 
 # ------------------------------------------------------------------- finish ---
@@ -1310,4 +1346,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.11 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.12 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

@@ -24,6 +24,10 @@ def setUpModule():
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
         p.start()
         unittest.addModuleCleanup(p.stop)
+    # Ссылка одобрения Tailscale с Drive — по умолчанию её нет (тесты не ходят в сеть)
+    p = mock.patch.object(core.drive, "ts_login_link", lambda iid: None)
+    p.start()
+    unittest.addModuleCleanup(p.stop)
 
 
 class FakeUI:
@@ -94,6 +98,24 @@ class Base(unittest.TestCase):
 
 
 class TestWaitReady(Base):
+    def test_first_machine_asks_to_approve_in_tailscale(self):
+        # Нет личности и ключа: машина кладёт ссылку одобрения на Drive — приложение её отдаёт ui
+        statuses = iter(["loading", "running"])
+        self.patch(core, "call", lambda *a, **k: {"instances": {"actual_status": next(statuses, "running"),
+                                                                 "status_msg": "", "extra_env": []}})
+        polls = {"n": 0}
+
+        def ts_node():
+            polls["n"] += 1
+            return (True, "100.1.1.1", "vastai-gaming.tail.ts.net") if polls["n"] > 2 else None   # одобрили
+        self.patch(core, "ts_node", ts_node)
+        self.patch(core.drive, "ts_login_link", lambda iid: "https://login.tailscale.com/a/abc" if iid == 42 else None)
+        self.patch(core, "wolf_status", lambda ip: {"boot": (T0 + 60, "ok", "готово")})
+        ui = FakeUI()
+        core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual(ui.keys.count("core.ts_approve"), 1)    # одна ссылка — одно событие, не на каждом круге
+        self.assertEqual(ui.stages, ["vast", "tailscale", "restore", "ready"])
+
     def test_normal_start(self):
         statuses = iter(["loading", "created", "running"])
         self.patch(core, "call", lambda *a, **k: {"instances": {"actual_status": next(statuses), "status_msg": "",

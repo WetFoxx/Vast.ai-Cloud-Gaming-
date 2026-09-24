@@ -92,7 +92,8 @@ def tailscale_key(secrets):
     in_kc = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY") is not None
     in_vast = "TAILSCALE_AUTHKEY" in secrets
     if not in_vast:
-        return _step("tailscale_key", "missing", "setup.tailscale_key.missing")
+        # Не обязателен (v3.12): первая машина войдёт в сеть по одобрению — ссылку откроет приложение
+        return _step("tailscale_key", "ok", "setup.tailscale_key.optional")
     saved = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY_DATE")
     if in_kc and saved:
         left = setup.TS_KEY_DAYS - (datetime.date.today() - datetime.date.fromisoformat(saved)).days

@@ -35,5 +35,20 @@ class TestClient(unittest.TestCase):
             self.assertEqual(drive.client(), (None, None))
 
 
+class TestTsLoginLink(unittest.TestCase):
+    def link(self, text, code=0):
+        import subprocess
+        with mock.patch.object(drive, "rclone", lambda *a, **k: subprocess.CompletedProcess(a, code, text, "")):
+            return drive.ts_login_link(42)
+
+    def test_link_of_this_machine(self):
+        self.assertEqual(self.link("42\nhttps://login.tailscale.com/a/abc\n"), "https://login.tailscale.com/a/abc")
+
+    def test_other_machine_or_garbage_is_ignored(self):
+        self.assertIsNone(self.link("41\nhttps://login.tailscale.com/a/abc\n"))   # прошлая машина
+        self.assertIsNone(self.link("42\nhttps://evil.example/a/abc\n"))         # не Tailscale
+        self.assertIsNone(self.link("", code=3))                                   # файла нет
+
+
 if __name__ == "__main__":
     unittest.main()
