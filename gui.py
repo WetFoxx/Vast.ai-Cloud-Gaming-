@@ -57,6 +57,7 @@ class Api:
         self._names = {}          # {appid: название игры} — для сохранений pfx--<appid>
         self._window = None
         self._force_close = False
+        self._ts_url = None       # ссылка входа Tailscale — только в памяти, чтобы открыть её ещё раз
 
     # ---- настройки
     def settings(self):
@@ -249,7 +250,7 @@ class Api:
         с проверкой подписи (installer.py, Homebrew не нужен); rclone — через Homebrew (в собранном
         приложении он встроен, установка нужна только при запуске из папки проекта)."""
         if tool == "tailscale_app":
-            return self._background("install", self._install_tailscale, with_job=True)
+            return self._background("tailscale", self._install_tailscale, with_job=True)
         if tool == "moonlight":
             return self._background("install", installer.moonlight)
         brew = paths.find("brew")
@@ -265,11 +266,22 @@ class Api:
                                     out=(r.stderr or r.stdout).strip()[-300:])
         return self._background("install", run)
 
-    @staticmethod
-    def _install_tailscale(job):
+    def _open_ts_login(self, url):
+        self._ts_url = url
+        webbrowser.open(url)
+
+    def tailscale_reopen_login(self):
+        """«Открыть страницу входа ещё раз» — вкладка не загрузилась или её закрыли."""
+        if not self._ts_url:
+            return {"error": {"key": "setup.err.ts_no_link", "params": {}, "text": "no link"}}
+        webbrowser.open(self._ts_url)
+        return {"ok": True}
+
+    def _install_tailscale(self, job):
         """Установить Tailscale и довести до входа без кнопок в его окне: открыть Tailscale (macOS
         покажет «разрешить расширение» и «разрешить VPN»), дождаться, пока он заработает, и открыть
         страницу входа в браузере (кнопка входа в окне Tailscale бывает мёртвой)."""
+        job.say("Скачиваю и устанавливаю Tailscale", key="setup.ts_install.installing")
         installer.tailscale()
         job.say("Tailscale установлен — разреши его в окнах macOS", key="setup.ts_install.approve")
         subprocess.Popen(["open", "-a", "Tailscale"])
@@ -278,12 +290,15 @@ class Api:
             raise VastgameError("Tailscale не заработал за 10 минут", key="setup.err.ts_not_ready")
         if state in ("NeedsLogin", "NeedsMachineAuth"):
             job.say("Открыл страницу входа Tailscale", key="setup.ts_login.waiting")
-            setup.tailscale_login(webbrowser.open)
+            setup.tailscale_login(self._open_ts_login)
         return True
 
     def tailscale_login(self):
         """«Войти в Tailscale»: ссылка входа — в браузер, ждём входа в фоне (ход — через progress())."""
-        return self._background("tailscale_login", lambda: setup.tailscale_login(webbrowser.open))
+        def run(job):
+            job.say("Открыл страницу входа Tailscale", key="setup.ts_login.waiting")
+            return setup.tailscale_login(self._open_ts_login)
+        return self._background("tailscale", run, with_job=True)
 
     def open_tailscale(self):
         """Открыть приложение Tailscale, чтобы войти в сеть."""

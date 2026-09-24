@@ -417,7 +417,18 @@ class TestSetupActions(unittest.TestCase):
             p = wait_done(api)
         self.assertIsNone(p["error"])
         self.assertEqual(steps, ["install", "open Tailscale", "wait", "login"])
-        self.assertEqual([e["key"] for e in p["events"]], ["setup.ts_install.approve", "setup.ts_login.waiting"])
+        self.assertEqual([e["key"] for e in p["events"]],
+                         ["setup.ts_install.installing", "setup.ts_install.approve", "setup.ts_login.waiting"])
+
+    def test_sign_in_page_can_be_reopened(self):
+        api, opened = gui.Api(), []
+        self.assertEqual(api.tailscale_reopen_login()["error"]["key"], "setup.err.ts_no_link")
+        with mock.patch.object(gui.webbrowser, "open", lambda u: opened.append(u)), \
+             mock.patch.object(gui.setup, "tailscale_login", lambda open_url: open_url("https://login.tailscale.com/a/x") or True):
+            api.tailscale_login()
+            wait_done(api)
+            self.assertEqual(api.tailscale_reopen_login(), {"ok": True})
+        self.assertEqual(opened, ["https://login.tailscale.com/a/x"] * 2)     # открыли и открыли ещё раз
 
     def test_tailscale_already_signed_in_after_install(self):
         api, steps = gui.Api(), []

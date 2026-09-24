@@ -398,18 +398,30 @@ async function act(li, call) {
 async function actBackground(li, start, waitText) {
   const r = DEMO ? { ok: true } : await start();
   if (r.error) { stepMsg(li, errText(r.error), true); return; }
+  // Пока действие идёт, кнопки шага и его прежний текст («не установлен») только путают — прячем
+  li.querySelector(".actions").hidden = true;
+  const sub = li.querySelector(".sub");
+  sub.hidden = true;
   stepMsg(li, waitText);
   if (DEMO) return;
+  let shownKey = null;
   const timer = setInterval(async () => {
     const p = await api().progress(0);
     if (!p) return;
-    if (!p.done) {                                   // показать последний этап (например, «разреши в окнах macOS»)
+    if (!p.done) {
       const last = (p.events || []).filter((e) => e.key).pop();
-      if (last) stepMsg(li, eventText(last));
+      if (last && last.key !== shownKey) {
+        shownKey = last.key;
+        stepMsg(li, eventText(last));
+        if (last.key === "setup.ts_login.waiting") {       // вкладка не загрузилась или закрыта — открыть снова
+          const b = button(t("setup.act.ts_reopen"), () => api().tailscale_reopen_login());
+          li.querySelector(".step-msg").appendChild(el("div", { className: "actions" })).appendChild(b);
+        }
+      }
       return;
     }
     clearInterval(timer);
-    if (p.error) stepMsg(li, errText(p.error), true);
+    if (p.error) { li.querySelector(".actions").hidden = false; sub.hidden = false; stepMsg(li, errText(p.error), true); }
     else openSetup();
   }, 1500);
 }
