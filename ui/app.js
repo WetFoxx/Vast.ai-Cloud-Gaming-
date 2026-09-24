@@ -439,7 +439,10 @@ function setupActions(st, li) {
     }
     box.appendChild(button(t("setup.act.download"), () => openUrl(DOWNLOAD[id])));
   }
-  if (tsInstalled) box.appendChild(button(t("setup.act.open_tailscale"), () => !DEMO && api().open_tailscale(), true));
+  if (key === "setup.tailscale_app.offline")
+    box.appendChild(button(t("setup.act.ts_login"), () => actBackground(li, () => api().tailscale_login(), t("setup.ts_login.waiting")), true));
+  if (tsInstalled) box.appendChild(button(t("setup.act.open_tailscale"), () => !DEMO && api().open_tailscale(),
+                                          key === "setup.tailscale_app.no_answer"));
   if (key === "setup.tailscale_app.no_magicdns") box.appendChild(button(t("setup.act.open_dns"), () => openUrl(DNS_URL)));
 
   if (id === "vast" && st.state === "missing") {

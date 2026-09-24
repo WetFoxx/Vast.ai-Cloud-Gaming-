@@ -264,6 +264,10 @@ class Api:
                                     out=(r.stderr or r.stdout).strip()[-300:])
         return self._background("install", run)
 
+    def tailscale_login(self):
+        """«Войти в Tailscale»: ссылка входа — в браузер, ждём входа в фоне (ход — через progress())."""
+        return self._background("tailscale_login", lambda: setup.tailscale_login(webbrowser.open))
+
     def open_tailscale(self):
         """Открыть приложение Tailscale, чтобы войти в сеть."""
         if sys.platform == "darwin":

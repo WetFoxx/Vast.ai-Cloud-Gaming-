@@ -56,6 +56,43 @@ class TestRun(unittest.TestCase):
             self.assertEqual(paths.tailscale_status(), {"BackendState": "Running"})
         self.assertTrue(seen["env"]["TERM"])           # без TERM Tailscale открывается окном и молчит
 
+    def test_not_signed_in_is_a_step_not_a_crash(self):
+        # Раньше: TypeError «_step() got multiple values for argument 'state'»
+        with mock.patch.object(paths, "find", lambda n: "/x/tailscale" if n == "tailscale" else None), \
+             mock.patch.object(paths, "tailscale_app", lambda: "/x/Tailscale"), \
+             mock.patch.object(paths, "tailscale_status", lambda: {"BackendState": "NeedsLogin"}), \
+             mock.patch.object(setupcheck.moonlight, "path", lambda: None):
+            step = {s["id"]: s for s in setupcheck.tools()}["tailscale_app"]
+        self.assertEqual((step["state"], step["key"], step["params"]),
+                         ("missing", "setup.tailscale_app.offline", {"state": "NeedsLogin"}))
+
+
+class TestTailscaleLogin(unittest.TestCase):
+    def fake_cli(self):
+        """Поддельная программа tailscale: печатает ссылку входа и ждёт, как настоящая."""
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        exe = d / "tailscale"
+        exe.write_text("#!/bin/sh\necho 'To authenticate, visit:'\necho '\thttps://login.tailscale.com/a/abc123'\nsleep 30\n")
+        exe.chmod(0o755)
+        return str(exe)
+
+    def test_opens_link_and_waits_for_sign_in(self):
+        opened, state = [], {"s": "NeedsLogin"}
+
+        def open_url(u):
+            opened.append(u)
+            state["s"] = "Running"               # человек вошёл в браузере
+        with mock.patch.object(paths, "find", lambda n: self.fake_cli()), \
+             mock.patch.object(paths, "tailscale_status", lambda: {"BackendState": state["s"]}):
+            self.assertTrue(setupcheck.setup.tailscale_login(open_url, wait=10))
+        self.assertEqual(opened, ["https://login.tailscale.com/a/abc123"])
+
+    def test_already_signed_in(self):
+        with mock.patch.object(paths, "find", lambda n: "/usr/bin/true"), \
+             mock.patch.object(paths, "tailscale_status", lambda: {"BackendState": "Running"}):
+            self.assertTrue(setupcheck.setup.tailscale_login(lambda u: self.fail("ссылка не нужна"), wait=5))
+
 
 if __name__ == "__main__":
     unittest.main()

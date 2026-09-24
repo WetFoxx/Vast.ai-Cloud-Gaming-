@@ -14,6 +14,7 @@ import shutil     # shutil.which — найти программу на Mac
 import subprocess
 import sys
 import webbrowser   # открыть ссылку в браузере (Mac и Windows)
+from pathlib import Path
 
 import keyring   # доступ к Keychain («Связка ключей») macOS
 
@@ -384,6 +385,45 @@ def refresh_template():
     env = old.get("env") or ""
     return save_template(int(old.get("recommended_disk_space") or 100), env_value(env, "STEAM_LANG") or "",
                          env_value(env, "RES") or "1920x1200", env_value(env, "SYNC_STEAM_GAMES") or "0")
+
+
+def tailscale_login(open_url, wait=600):
+    """Вход этого Mac в сеть Tailscale из vastgame: «tailscale login» выдаёт ссылку, открываем её
+    в браузере и ждём, пока человек войдёт (до wait секунд). Кнопка входа в окне самого Tailscale
+    иногда ничего не делает (так было 2026-09-24 после переустановки), а команда — работает.
+    Ссылка — одноразовый вход: никуда не пишем, только открываем. True — Mac в сети."""
+    import tempfile
+    import time
+    exe = paths.find("tailscale")
+    if not exe:
+        raise VastgameError("Tailscale не установлен.", key="setup.tailscale_app.missing")
+    with tempfile.NamedTemporaryFile("w+", suffix=".log") as log:
+        p = subprocess.Popen([exe, "login"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             env=paths.tailscale_env(), start_new_session=True)
+        try:
+            url, end = None, time.time() + 30
+            while not url and time.time() < end and p.poll() is None:
+                time.sleep(0.5)
+                m = re.search(r"https://login\.tailscale\.com/\S+", Path(log.name).read_text())
+                url = m.group(0) if m else None
+            running = lambda: (paths.tailscale_status() or {}).get("BackendState") == "Running"   # noqa: E731
+            if not url:
+                if running():
+                    return True                  # уже в сети — входить не нужно
+                out = Path(log.name).read_text().strip()[-200:]
+                raise VastgameError(f"Tailscale не выдал ссылку для входа: {out}", key="setup.err.ts_login_failed",
+                                    out=out)
+            open_url(url)
+            end = time.time() + wait
+            while time.time() < end and not running():
+                time.sleep(2)
+            if not running():
+                raise VastgameError("Вход в Tailscale не завершён.", key="setup.err.ts_login_timeout",
+                                    min=wait // 60)
+            return True
+        finally:
+            if p.poll() is None:
+                p.terminate()
 
 
 def reset_local():

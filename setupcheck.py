@@ -21,8 +21,9 @@ import setup   # функции мастера: при import он НЕ запу
 from vastapi import KEY_FILE, SERVICE, VastgameError, call, check_key, my_template
 
 
-def _step(id_, state, key, **params):
-    return {"id": id_, "state": state, "key": key, "params": params}
+def _step(id_, level, key, **params):
+    """level — ok/warn/missing; params — подстановки в текст (там бывает и {state} — поэтому не «state»)."""
+    return {"id": id_, "state": level, "key": key, "params": params}
 
 
 def tools():
