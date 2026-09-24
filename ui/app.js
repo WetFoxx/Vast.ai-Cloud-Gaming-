@@ -402,7 +402,12 @@ async function actBackground(li, start, waitText) {
   if (DEMO) return;
   const timer = setInterval(async () => {
     const p = await api().progress(0);
-    if (!p || !p.done) return;
+    if (!p) return;
+    if (!p.done) {                                   // показать последний этап (например, «разреши в окнах macOS»)
+      const last = (p.events || []).filter((e) => e.key).pop();
+      if (last) stepMsg(li, eventText(last));
+      return;
+    }
     clearInterval(timer);
     if (p.error) stepMsg(li, errText(p.error), true);
     else openSetup();

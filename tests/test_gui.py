@@ -397,6 +397,8 @@ class TestSetupActions(unittest.TestCase):
         api, used = gui.Api(), []
         with mock.patch.object(gui.installer, "tailscale", lambda: used.append("ts") or True), \
              mock.patch.object(gui.installer, "moonlight", lambda: used.append("ml") or True), \
+             mock.patch.object(gui.subprocess, "Popen", lambda cmd, **k: None), \
+             mock.patch.object(gui.setup, "tailscale_wait_ready", lambda: "Running"), \
              mock.patch.object(gui.paths, "find", lambda n: None):      # Homebrew нет — не мешает
             api.install_tool("tailscale_app")
             wait_done(api)
@@ -404,6 +406,28 @@ class TestSetupActions(unittest.TestCase):
             wait_done(api)
         self.assertEqual(used, ["ts", "ml"])
         self.assertEqual(api.install_tool("rm -rf /")["error"]["text"], "unknown tool")   # только известные
+
+    def test_tailscale_install_leads_to_sign_in(self):
+        api, steps = gui.Api(), []
+        with mock.patch.object(gui.installer, "tailscale", lambda: steps.append("install") or True), \
+             mock.patch.object(gui.subprocess, "Popen", lambda cmd, **k: steps.append("open " + cmd[-1])), \
+             mock.patch.object(gui.setup, "tailscale_wait_ready", lambda: steps.append("wait") or "NeedsLogin"), \
+             mock.patch.object(gui.setup, "tailscale_login", lambda open_url: steps.append("login") or True):
+            api.install_tool("tailscale_app")
+            p = wait_done(api)
+        self.assertIsNone(p["error"])
+        self.assertEqual(steps, ["install", "open Tailscale", "wait", "login"])
+        self.assertEqual([e["key"] for e in p["events"]], ["setup.ts_install.approve", "setup.ts_login.waiting"])
+
+    def test_tailscale_already_signed_in_after_install(self):
+        api, steps = gui.Api(), []
+        with mock.patch.object(gui.installer, "tailscale", lambda: True), \
+             mock.patch.object(gui.subprocess, "Popen", lambda cmd, **k: None), \
+             mock.patch.object(gui.setup, "tailscale_wait_ready", lambda: "Running"), \
+             mock.patch.object(gui.setup, "tailscale_login", lambda open_url: steps.append("login")):
+            api.install_tool("tailscale_app")
+            wait_done(api)
+        self.assertEqual(steps, [])                  # уже в сети — страницу входа не открываем
 
     def test_no_brew(self):
         with mock.patch.object(gui.paths, "find", lambda n: None):

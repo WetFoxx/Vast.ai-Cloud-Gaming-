@@ -387,6 +387,22 @@ def refresh_template():
                          env_value(env, "RES") or "1920x1200", env_value(env, "SYNC_STEAM_GAMES") or "0")
 
 
+TS_READY = ("NeedsLogin", "NeedsMachineAuth", "Running", "Stopped")   # Tailscale работает (вошёл или ждёт входа)
+
+
+def tailscale_wait_ready(wait=600, step=3):
+    """После установки: дождаться, пока Tailscale заработает — человек разрешит в окнах macOS его
+    системное расширение и VPN-конфигурацию. Возвращает состояние (BackendState) или None за wait секунд."""
+    import time
+    end = time.time() + wait
+    while time.time() < end:
+        st = (paths.tailscale_status() or {}).get("BackendState")
+        if st in TS_READY:
+            return st
+        time.sleep(step)
+    return None
+
+
 def tailscale_login(open_url, wait=600):
     """Вход этого Mac в сеть Tailscale из vastgame: «tailscale login» выдаёт ссылку, открываем её
     в браузере и ждём, пока человек войдёт (до wait секунд). Кнопка входа в окне самого Tailscale
