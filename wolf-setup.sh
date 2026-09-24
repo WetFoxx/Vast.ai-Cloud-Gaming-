@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.12 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.13 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -228,6 +228,7 @@ w /usr/local/bin/wolf <<'WOLF'
 #   wolf boot              полный цикл загрузки (wolf-boot.service)
 #   wolf state | games     синхронизация (таймеры, гейт по /run/wolf/boot-done)
 #   wolf shutdown          корректно закрыть Steam и сразу выгрузить всё
+#   wolf sunshine-creds [ЛОГИН]  [v3.13] задать логин кабинета Sunshine, пароль — во вход команды
 #   wolf finish            [v3.11] выгрузить всё, проверить и удалить инстанс — отдельной
 #                          службой: обрыв связи с компьютером её не прерывает
 #   wolf restore ИМЯ...    восстановить архивы (FORCE=1 — даже если актуальны)
@@ -1041,6 +1042,22 @@ ts_link_publish() {
   [ "$s" = Running ] && log "tailscale: узел одобрен и в сети" || log "tailscale: узел так и не одобрили за час"
 }
 
+# ----------------------------------------------------------- логин Sunshine ---
+# [v3.13] Логин кабинета Sunshine от приложения (для автоматической связки Moonlight по PIN):
+# пароль приходит во вход команды (не в аргументах ssh), логин — первым аргументом. Сохраняется
+# в ~/.config/sunshine (едет в облако с identity — выгружаем сразу), затем Sunshine перезапускается.
+sunshine_creds() {
+  local p user="${1:-vastgame}"
+  IFS= read -r p
+  [ -n "$p" ] || { echo "sunshine-creds: пустой пароль"; return 1; }
+  hash sunshine 2>/dev/null || { echo "sunshine-creds: Sunshine не установлен"; return 1; }
+  xenv
+  u sunshine --creds "$user" "$p" >/dev/null 2>&1 || { echo "sunshine-creds: не удалось"; return 1; }
+  sunshine_restart >/dev/null 2>&1
+  ( NOW=1 "$0" push identity >/dev/null 2>&1 & )
+  echo "sunshine-creds: ok"
+}
+
 # ------------------------------------------------------------------- finish ---
 # [v3.11] Завершение сессии, которое не зависит от связи с компьютером. «wolf finish» только
 # запускает «wolf finish-run» отдельной службой (systemd-run) и сразу отвечает — обрыв SSH,
@@ -1094,6 +1111,7 @@ finish_run() {
 case ${1:-} in
   boot)                                      boot ;;
   finish)                                    finish_start ;;
+  sunshine-creds)                            shift; sunshine_creds "$@" ;;
   finish-run)                                finish_run ;;
   state|games|shutdown|restore|push|forget)  bk "$@" ;;
   watch)                                     watch_games ;;
@@ -1346,4 +1364,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.12 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.13 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

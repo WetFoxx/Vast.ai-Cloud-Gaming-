@@ -484,6 +484,17 @@ class TestMoonlight(unittest.TestCase):
             self.assertEqual(api.moonlight_apps("m")["selected"], "Steam Big Picture")  # запомнил
         self.assertEqual(started, [("m", "Steam Big Picture")])
 
+    def test_not_paired_pairs_first_then_streams(self):
+        steps = []
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: None), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.pairing, "pair", lambda host, ip: steps.append(("pair", host, ip)) or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a: steps.append(("stream", h, a)) or True), \
+             mock.patch.object(gui.settings, "set", lambda k, v: None):
+            self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
+        self.assertEqual(steps, [("pair", "h", "100.1.1.1"), ("stream", "h", "Desktop")])
+
     def test_not_installed(self):
         with mock.patch.object(gui.moonlight, "path", lambda: None):
             self.assertEqual(gui.Api().moonlight_apps("m"), {"installed": False})

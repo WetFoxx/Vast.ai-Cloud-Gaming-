@@ -342,6 +342,12 @@ function renderSetup() {
   li.innerHTML = '<span class="icon info">i</span><div class="body"><b></b><span class="sub pre"></span></div>';
   li.querySelector("b").textContent = t("setup.pair.title");
   li.querySelector(".sub").textContent = t("setup.pair.text");
+  const login = el("div", { className: "actions" });
+  login.appendChild(button(t("setup.act.sunshine_login"), async () => {
+    const r = DEMO ? { user: "vastgame", password: "demo" } : await api().sunshine_login();
+    stepMsg(li, r.user ? t("setup.sunshine_login", { user: r.user, password: r.password }) : t("setup.sunshine_login.none"));
+  }));
+  li.querySelector(".body").appendChild(login);
   ul.appendChild(li);
 }
 

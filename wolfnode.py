@@ -60,7 +60,7 @@ def print_links(ip, dns):
   Всё открывается только с устройств в твоей сети Tailscale.""")
 
 
-def ssh_run(ip, command, timeout=180, on_notice=None):
+def ssh_run(ip, command, timeout=180, on_notice=None, stdin_text=None):
     """Выполнить короткую команду по Tailscale SSH и вернуть (код, вывод).
 
     Если политика Tailscale требует подтверждения («Tailscale SSH requires an additional check»),
@@ -71,7 +71,7 @@ def ssh_run(ip, command, timeout=180, on_notice=None):
         def on_notice(text):
             print("  " + text, flush=True)
     import threading
-    proc = ssh(ip, command)
+    proc = ssh(ip, command, stdin_text)
     lines = []
 
     def read():
@@ -93,7 +93,7 @@ def ssh_run(ip, command, timeout=180, on_notice=None):
     return proc.returncode, "".join(lines)
 
 
-def ssh(ip, command):
+def ssh(ip, command, stdin_text=None):
     """Выполнить команду на инстансе как root через Tailscale SSH. Возвращает процесс (Popen).
 
     BatchMode — не задавать вопросов (пароль и т.п.). Подтверждение Tailscale SSH («check»)
@@ -101,7 +101,7 @@ def ssh(ip, command):
     запускаем через ssh_run, который эту ссылку показывает.
     accept-new — ключ хоста каждой новой машины принимается сам (машины каждый раз новые).
     """
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [paths.need("ssh"), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
          "-o", "UserKnownHostsFile=/dev/null",
          "-o", "ConnectTimeout=20",
@@ -109,6 +109,12 @@ def ssh(ip, command):
          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
          f"root@{ip}", command],
         # LogLevel=ERROR не ставим: он прячет и баннер со ссылкой подтверждения Tailscale.
-        # stdin закрыт — ssh не должен забирать ввод из терминала
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        # stdin закрыт — ssh не должен забирать ввод из терминала; stdin_text — передать команде
+        # секрет не в её тексте (он виден в списке процессов), а во вход (пароль Sunshine)
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    if stdin_text is not None:
+        proc.stdin.write(stdin_text)
+        proc.stdin.close()
+    return proc

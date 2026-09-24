@@ -30,6 +30,8 @@ import installer
 import jobs
 import market
 import moonlight
+import pairing
+import wolfnode
 import notify
 import settings
 import paths
@@ -429,10 +431,22 @@ class Api:
         """Открыть трансляцию; выбор приложения запомнить."""
         if not isinstance(host, str) or not host or not isinstance(app, str) or not app:
             return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
-        settings.set("moonlight_app", app)
-        if not moonlight.stream(host, app):
+        if not moonlight.path():
             return {"error": {"key": "moonlight.missing", "params": {}, "text": "Moonlight не установлен"}}
+        settings.set("moonlight_app", app)
+        if moonlight.apps(host) is None:
+            # Moonlight ещё не связан с этой машиной — связать самим, без ручного PIN
+            node = wolfnode.ts_node()
+            if not node:
+                return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
+            pairing.pair(host, node[1])
+        moonlight.stream(host, app)
         return {"ok": True}
+
+    def sunshine_login(self):
+        """Логин кабинета Sunshine, который задало приложение, — показать человеку по его просьбе."""
+        pw = pairing.keyring.get_password(pairing.SERVICE, "SUNSHINE_PASSWORD")
+        return {"user": pairing.USER, "password": pw} if pw else {"user": None}
 
     # ---- прочее
     def open_url(self, url):
