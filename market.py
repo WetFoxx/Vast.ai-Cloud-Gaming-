@@ -20,6 +20,9 @@ MAX_TRAFFIC = None
 GAMING = re.compile(r"^(RTX|GTX) \d{4}(?!Ada)")
 # Docker (образ vastgame-desktop): Sunshine 2026 собрана с CUDA 13 — NVENC работает с драйвером хоста от 580
 DOCKER_DRIVER = 580
+# Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
+# машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
+BLOCKED = {"CN"}
 
 
 # Хосты, которые не смогли запустить машину: {machine_id: {"reason": ..., "date": ...}}. Их НЕ прячем —
@@ -122,6 +125,8 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
             continue
         # Vast снял с хоста допуск к виртуальным машинам (у KVM на Vast часть хостов висит в Create/
         # Loading) — общая отметка verified тут ни при чём: у быстрой машины Алексея она «deverified»
+        if (o.get("geolocation") or "").rsplit(",", 1)[-1].strip().upper() in BLOCKED:
+            continue
         if o.get("is_vm_deverified") and not docker:
             continue
         if docker and driver_major(o) < DOCKER_DRIVER:

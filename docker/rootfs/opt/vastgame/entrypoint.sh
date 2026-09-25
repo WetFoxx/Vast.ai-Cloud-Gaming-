@@ -39,6 +39,9 @@ u() { runuser -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" LANG=C.UTF-
         PATH=/usr/local/bin:/usr/bin:/bin:/usr/games DISPLAY=:0 XDG_RUNTIME_DIR="$XRD" \
         DBUS_SESSION_BUS_ADDRESS="$BUS" "$@"; }
 desktop() { u setsid startxfce4 >/var/log/xfce.log 2>&1 & }
+# Суть ошибки Xorg — строки (EE) без общих «смотри лог» и «сервер завершён»
+xerr() { grep -E "\(EE\)|Fatal" /var/log/Xorg.0.log 2>/dev/null \
+           | grep -vE "Please also check|Server terminated|\(EE\) *$|^\(EE\) *$" | tail -${1:-4}; }
 
 trap 'log "остановка"; pkill -TERM -u "$DU"; pkill -TERM sunshine; pkill -TERM Xorg; tailscale down 2>/dev/null; exit 0' TERM INT
 
@@ -77,7 +80,7 @@ for args in "vt7 -novtswitch -sharevts" "-novtswitch -sharevts -keeptty" "-keept
   setsid Xorg :0 -config /etc/X11/xorg.conf -noreset -nolisten tcp $args >/var/log/xorg.out 2>&1 &
   for i in $(seq 1 20); do DISPLAY=:0 xrandr >/dev/null 2>&1 && break; sleep 0.5; done
   DISPLAY=:0 xrandr >/dev/null 2>&1 && { log "Xorg запущен ($args)"; break; }
-  log "Xorg не запустился с ($args)"; grep -E "\(EE\)|Fatal" /var/log/Xorg.0.log 2>/dev/null | tail -4 | tee -a "$LOG"
+  log "Xorg не запустился с ($args)"; xerr 6 | tee -a "$LOG"
   pkill Xorg; sleep 1
 done
 u /usr/local/bin/wolf-res >/dev/null 2>&1              # базовый режим, экран в 0,0
@@ -129,7 +132,7 @@ if [ -n "$AGENT" ]; then
                  RCLONE_CONFIG_WGD_CLIENT_SECRET="${RCLONE_CLIENT_SECRET:-}" \
                  RCLONE_CONFIG_WGD_TOKEN="{\"access_token\":\"x\",\"token_type\":\"Bearer\",\"refresh_token\":\"${RCLONE_REFRESH_TOKEN:-}\",\"expiry\":\"2000-01-01T00:00:00Z\"}"
           rclone copyto "wgd:${WOLF_SCRIPT_URL#drive:}" "$W" >>/var/log/wolf-fetch.log 2>&1 ) ;;
-      *) curl -fsSL -o "$W" "$WOLF_SCRIPT_URL" 2>>/var/log/wolf-fetch.log ;;
+      *) curl -fsSL --connect-timeout 15 --max-time 90 -o "$W" "$WOLF_SCRIPT_URL" 2>>/var/log/wolf-fetch.log ;;
     esac
     [ -s "$W" ] && head -1 "$W" | grep -q '^#!/bin/bash' && { ok=1; break; }
     log "wolf-setup.sh не скачался (попытка $try): $(fetch_err)"
@@ -159,14 +162,24 @@ else
 fi
 
 # --------------------------------------------------------------------- присмотр
-# Агенту Sunshine и Tailscale перезапускаем только после загрузки (boot-done): до неё ими занят wolf
+# Агенту Sunshine и Tailscale перезапускаем только после загрузки (boot-done): до неё ими занят wolf.
+# Экран не поднимается три раза подряд (на части хостов Xorg в контейнере не стартует — живой случай
+# 2026-09-26, RTX 5060 Ti) — сказать приложению записью «sunshine» на странице wolf: играть здесь нельзя,
+# оно заменит машину. Пишем каждый раз заново: загрузка wolf чистит записи в начале
+xfails=0
 while :; do
   sleep 10
   if ! pgrep -x Xorg >/dev/null; then
-    log "Xorg упал — перезапуск"
+    xfails=$((xfails + 1))
+    log "Xorg упал — перезапуск ($xfails)"
+    [ "$xfails" -le 3 ] && xerr 3 | tee -a "$LOG"
+    if [ -n "$AGENT" ] && [ "$xfails" -ge 3 ] && [ -d /var/lib/wolf/st ]; then
+      echo "$(date +%s)|err|экран не запускается: $(xerr 1 | sed 's/^\[[^]]*\] *//' | cut -c1-120)" \
+        > /var/lib/wolf/st/sunshine
+    fi
     setsid Xorg :0 -config /etc/X11/xorg.conf -noreset -nolisten tcp vt7 -novtswitch -sharevts >/var/log/xorg.out 2>&1 &
     sleep 5; u /usr/local/bin/wolf-res >/dev/null 2>&1
-    desktop
+    pgrep -x Xorg >/dev/null && { xfails=0; desktop; }
   fi
   if [ -z "$AGENT" ] || [ -e /run/wolf/boot-done ]; then
     if ! pgrep -u "$DU" -x sunshine >/dev/null; then

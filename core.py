@@ -375,8 +375,9 @@ def wait_ready(iid, t0, o, ui, docker=False):
         if sun and sun[0] >= t0 - 60 and sun[1] == "err":
             # Без NVENC образ кодирует видео процессором — играть нельзя. Архивы машина ещё не выгружала
             # (первая выгрузка — через 5 минут после загрузки), удалять безопасно
-            _failed_start(iid, f"На этой машине не работает кодировщик видео NVENC ({sun[2][:120]}).", o, ui,
-                          bad_host=True, key="core.fail_nvenc")
+            # (запись пишет и образ, если экран — Xorg — на хосте не поднимается)
+            _failed_start(iid, f"На этой машине не работает видео: {sun[2][:120]}.", o, ui,
+                          bad_host=True, key="core.fail_nvenc", msg=sun[2][:120])
         for name, (ts, state, text) in sorted(s.items()):
             if name == SUNSHINE:
                 continue

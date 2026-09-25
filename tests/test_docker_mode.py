@@ -70,6 +70,14 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(sent["vms_enabled"], {"eq": True})
         self.assertEqual(sorted(ids), [1, 2, 3, 6])     # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь
 
+    def test_china_never_listed(self):
+        # Google Drive и GitHub там заблокированы — машина висит на скачивании скрипта
+        rows = [dict(offer(1), geolocation="Chongqing, CN"), dict(offer(2), geolocation=", CN"), offer(3)]
+        for docker in (True, False):
+            with mock.patch.object(market, "call", lambda *a, **k: {"offers": [dict(o, vms_enabled=True) for o in rows]}), \
+                 mock.patch.object(market, "bad_hosts", lambda: {}):
+                self.assertEqual([o["id"] for o in market.search(60, docker=docker)], [3])
+
     def test_start_times_kept_apart(self):
         with mock.patch.object(market, "STARTS", Path(self.tmp()) / "starts.json"):
             market.record_start(7, 300)
