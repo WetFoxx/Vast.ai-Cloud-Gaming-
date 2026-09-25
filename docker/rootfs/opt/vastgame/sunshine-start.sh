@@ -62,11 +62,16 @@ start() {  # $1 захват  $2 кодировщик
 [ -z "${WOLF_SCRIPT_URL:-}" ] && [ -n "${SUNSHINE_PASSWORD:-}" ] && u sunshine --creds vastgame "$SUNSHINE_PASSWORD" >/dev/null 2>&1
 
 if [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ]; then start nvfbc nvenc; else start x11 nvenc; fi
+# Итог — и приложению: запись «sunshine» на странице wolf (есть только у агента; архивом не считается).
+# NVENC нет — приложение заменит машину на следующую из списка
+report() { [ -d /var/lib/wolf/st ] && echo "$(date +%s)|$1|$2" > /var/lib/wolf/st/sunshine; }
 if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
   echo ok > /run/vastgame/nvenc
   echo "sunshine: NVENC, захват $(sed -n 's/^capture = //p' "$CONF")"
+  report ok "NVENC, захват $(sed -n 's/^capture = //p' "$CONF")"
 else
   echo no > /run/vastgame/nvenc
   echo "sunshine: NVENC на этой машине не работает — захват X11, кодирование процессором (медленно)"
+  report err "NVENC не работает: $(grep -m1 -iE 'nvenc|cuda' "$LOGF" 2>/dev/null | cut -c1-120)"
   start x11 software
 fi
