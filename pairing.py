@@ -8,7 +8,8 @@
 #   2. отдаёт тот же PIN Sunshine через его API (https://<машина>:47990/api/pin, только через
 #      Tailscale) по логину кабинета Sunshine;
 #   3. после связки просит машину сразу выгрузить identity — связка поедет в облако, и следующие
-#      машины будут связаны без PIN.
+#      машины будут связаны без PIN. В фоне: трансляцию это не задерживает (раньше ждали до минуты,
+#      если Tailscale SSH просил подтверждения — живой тест 2026-09-25).
 # Логин кабинета — «vastgame» и случайный пароль в Связке ключей этого компьютера. Если его нет
 # или машина его не принимает (кабинет настраивали вручную, другой компьютер) — приложение задаёт
 # свой на машине: wolf sunshine-creds (wolf-setup.sh v3.13), пароль — во вход команды, не в её текст.
@@ -16,6 +17,7 @@
 import secrets
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -125,6 +127,13 @@ def pair(host, ip, on_notice=None):
         finally:
             if p.poll() is None:
                 p.terminate()
-    # Связка хранится в identity — выгрузить сразу, чтобы следующие машины были связаны без PIN
-    ssh_run(ip, "NOW=1 wolf push identity >/dev/null 2>&1 &", timeout=60, on_notice=on_notice)
+    # Связка хранится в identity — выгрузить сразу, чтобы следующие машины были связаны без PIN.
+    # </dev/null и скобки: команда уходит в фон на машине, и ssh не ждёт конца выгрузки
+    _later(lambda: ssh_run(ip, "(NOW=1 wolf push identity </dev/null >/dev/null 2>&1 &)", timeout=180,
+                           on_notice=on_notice))
     return True
+
+
+def _later(fn):
+    """Сделать в фоне, не задерживая трансляцию (тесты подменяют на «сразу»)."""
+    threading.Thread(target=fn, daemon=True).start()

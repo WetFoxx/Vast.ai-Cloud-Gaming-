@@ -35,6 +35,7 @@ class TestPair(unittest.TestCase):
         for obj, name, value in [(pairing.moonlight, "path", lambda: str(exe)),
                                  (pairing, "creds", lambda: ("vastgame", "secret")),
                                  (pairing, "ssh_run", self.fake_ssh),
+                                 (pairing, "_later", lambda fn: fn()),   # фоновую выгрузку — сразу, для проверки
                                  (pairing.time, "sleep", lambda s: None)]:
             p = mock.patch.object(obj, name, value)
             p.start()

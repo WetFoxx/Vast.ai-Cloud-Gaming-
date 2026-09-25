@@ -67,6 +67,8 @@ class Api:
         self._force_close = False
         self._ts_url = None       # ссылка входа Tailscale — только в памяти, чтобы открыть её ещё раз
         self._moonlight_lock = threading.Lock()   # «Запустить Moonlight» — не больше одного сразу
+        self._opened = set()      # ссылки подтверждения Tailscale SSH, уже открытые в браузере
+        self._display = (0, None) # (когда узнали, родной экран) — system_profiler небыстрый
 
     # ---- настройки
     def settings(self):
@@ -483,7 +485,7 @@ class Api:
         завершение игры — фоновой операции нужны и ключи, и её файл хода."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
-        return {"ok": True, "deleted": setup.reset_local()}
+        return {"ok": True, **setup.reset_local()}
 
     def send_google(self):
         return self._simple(setup.send_google_to_vast)
@@ -587,9 +589,55 @@ class Api:
             node = wolfnode.ts_node()
             if not node:
                 return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
-            pairing.pair(host, node[1])
-        moonlight.stream(host, app)
+            pairing.pair(host, node[1], on_notice=self._ssh_notice)
+        moonlight.stream(host, app, *self._stream_args())
         return {"ok": True}
+
+    def _ssh_notice(self, text):
+        """Tailscale SSH просит подтвердить вход (режим «check») — открыть его страницу в браузере
+        самим, один раз: окно ждёт ответа и ничего показать не может. Только страницы Tailscale."""
+        m = re.search(r"https://login\.tailscale\.com/\S+", text or "")
+        if m and m.group(0) not in self._opened:
+            self._opened.add(m.group(0))
+            webbrowser.open(m.group(0))
+
+    # ---- Разрешение и битрейт трансляции (по умолчанию — родное разрешение экрана и «авто»)
+    def _native(self):
+        when, native = self._display
+        if time.time() - when > 60:          # монитор могли подключить или отключить
+            native = moonlight.native_display()
+            self._display = (time.time(), native)
+        return native
+
+    def stream_settings(self):
+        """Варианты разрешения (родное — первым) и битрейта и выбор человека."""
+        native = self._native()
+        opts = [{"value": "native" if native and i == 0 else f"{w}x{h}", "w": w, "h": h,
+                 "native": bool(native) and i == 0} for i, (w, h) in enumerate(moonlight.resolutions(native))]
+        if not native:                        # экран не узнать — первым «как в настройках Moonlight»
+            opts.insert(0, {"value": "moonlight", "w": None, "h": None, "native": False})
+        saved = settings.get("stream") or {}
+        res = saved.get("resolution", "native")
+        if res not in [o["value"] for o in opts]:
+            res = opts[0]["value"]
+        bitrate = saved.get("bitrate", 0) if saved.get("bitrate", 0) in [0] + moonlight.BITRATES else 0
+        return {"native": native, "resolutions": opts, "resolution": res,
+                "bitrates": moonlight.BITRATES, "bitrate": bitrate}
+
+    def save_stream_settings(self, resolution, bitrate):
+        s = self.stream_settings()
+        if resolution not in [o["value"] for o in s["resolutions"]] or bitrate not in [0] + moonlight.BITRATES:
+            return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
+        settings.set("stream", {"resolution": resolution, "bitrate": bitrate})
+        return {"ok": True}
+
+    def _stream_args(self):
+        """(размер, частота, битрейт Мбит/с) для Moonlight; None — пусть решает сам Moonlight."""
+        s = self.stream_settings()
+        native, res = s["native"], s["resolution"]
+        size = ((native["w"], native["h"]) if res == "native"
+                else tuple(int(x) for x in res.split("x")) if "x" in res else None)
+        return size, (native["fps"] if native and size else None), (s["bitrate"] or None)
 
     def sunshine_login(self):
         """Логин кабинета Sunshine, который задало приложение, — показать человеку по его просьбе."""

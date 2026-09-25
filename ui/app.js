@@ -96,7 +96,7 @@ function render(data) {
   const li = st.links;
   $("links").hidden = !li || st.state === "starting";
   if (li) $("moonlight").textContent = li.moonlight;
-  if (li && st.state !== "starting") loadMoonlightApps(li.moonlight);
+  if (li && st.state !== "starting") { loadMoonlightApps(li.moonlight); loadStreamSettings(); }
 
   $("play").disabled = st.state !== "none" || !!data.busy || (setupData && !setupData.ready);
   // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
@@ -143,18 +143,65 @@ async function loadMoonlightApps(host) {
   sel.value = r.selected;
 }
 
-async function startMoonlight(host, app) {
-  // Связка в первый раз идёт до минуты — кнопку не нажать второй раз (две трансляции мешают друг другу)
-  $("ml-start").disabled = true;
-  $("ml-note").hidden = false;
-  $("ml-note").textContent = t("moonlight.starting");
+// Запуск трансляции с любой кнопки (главный экран, экран «Готово»). Связка в первый раз идёт до
+// минуты — кнопку не нажать второй раз (две трансляции мешают друг другу); уже идёт — так и сказать
+async function launchMoonlight(btn, note, host, app) {
+  btn.disabled = true;
+  note.hidden = false;
+  note.textContent = t("moonlight.starting");
   try {
     const r = DEMO ? { ok: true } : await api().open_moonlight(host, app);
-    $("ml-note").textContent = r.error ? errText(r.error) : "";
-    $("ml-note").hidden = !r.error;
+    if (r.busy) { note.textContent = t("moonlight.busy"); return; }
+    note.textContent = r.error ? errText(r.error) : "";
+    note.hidden = !r.error;
   } finally {
-    $("ml-start").disabled = false;
+    btn.disabled = false;
   }
+}
+function startMoonlight(host, app) { return launchMoonlight($("ml-start"), $("ml-note"), host, app); }
+
+// ---- Разрешение и битрейт: по умолчанию — родное разрешение экрана и «авто» (подбирает Moonlight)
+let streamLoaded = false;
+async function loadStreamSettings() {
+  if (streamLoaded) return;
+  streamLoaded = true;
+  const s = DEMO ? demoStream() : await api().stream_settings();
+  if (!s || s.error) { streamLoaded = false; return; }
+  const res = $("stream-res");
+  res.innerHTML = "";
+  const native = s.resolutions.filter((o) => o.native || o.value === "moonlight");
+  const other = s.resolutions.filter((o) => !native.includes(o));
+  const group = (label, list) => {
+    const g = el("optgroup", { label });
+    for (const o of list) {
+      const text = o.value === "moonlight" ? t("stream.res.moonlight")
+        : o.native ? t("stream.res.native", { w: o.w, h: o.h }) : `${o.w} × ${o.h}`;
+      g.appendChild(el("option", { value: o.value }, text));
+    }
+    res.appendChild(g);
+  };
+  if (native.length) group(t(native[0].native ? "stream.group.native" : "stream.group.default"), native);
+  group(t("stream.group.other"), other);
+  res.value = s.resolution;
+  const br = $("stream-bitrate");
+  br.innerHTML = "";
+  br.appendChild(el("option", { value: 0 }, t("stream.bitrate.auto")));
+  for (const b of s.bitrates) br.appendChild(el("option", { value: b }, t("stream.bitrate.mbps", { n: b })));
+  br.value = s.bitrate;
+  $("stream-set").hidden = false;
+  showStreamHint();
+}
+function showStreamHint() {
+  const native = $("stream-res").value === "native";
+  $("stream-res").classList.toggle("native", native);
+  $("stream-hint").hidden = false;
+  $("stream-hint").textContent = t(native ? "stream.hint.native" : "stream.hint.other");
+}
+for (const id of ["stream-res", "stream-bitrate"]) {
+  $(id).addEventListener("change", () => {
+    showStreamHint();
+    if (!DEMO) api().save_stream_settings($("stream-res").value, Number($("stream-bitrate").value));
+  });
 }
 
 $("ml-start").addEventListener("click", () => {
@@ -484,7 +531,9 @@ $("setup-reset").addEventListener("click", async () => {
   const r = await api().reset_local();
   if (r.error) { showError("setup-error", r.error); return; }
   setupData = null;
-  openSetup();                       // теперь — как после первой установки
+  // Что-то в Связке ключей не стёрлось — сказать прямо, иначе мастер решит, что это ещё настроено
+  if (r.left) { await openSetup(); showError("setup-error", { key: "setup.reset.left", params: { n: r.left } }); return; }
+  openWizard();                      // теперь — как после первой установки
 });
 
 // ---- Действия шагов настройки
@@ -1247,16 +1296,26 @@ function renderResult(r) {
   ok.className = "result-ok";
   ok.textContent = t("progress.ready", { min: r.minutes });
   box.appendChild(ok);
-  // Адреса — тот же блок, что на главном экране
+  // Адреса — тот же блок, что на главном экране. Приложение Sunshine, разрешение и битрейт — как
+  // выбраны на главном; id у копии убираем, чтобы на странице не было двух одинаковых
   const links = $("links").cloneNode(true);
+  const part = (id) => links.querySelector("#" + id);
   links.hidden = false;
+  part("moonlight").textContent = r.links.moonlight;
+  for (const id of ["ml-app", "stream-set", "stream-hint"]) part(id).remove();
+  const btn = part("ml-start"), note = part("ml-note");
+  btn.onclick = async () => {
+    btn.disabled = true;
+    note.hidden = false;
+    note.textContent = t("moonlight.starting");
+    const m = DEMO ? { installed: true, selected: "Desktop" } : await api().moonlight_apps(r.links.moonlight);
+    if (!m.installed) { btn.disabled = false; note.textContent = t("moonlight.missing"); return; }
+    launchMoonlight(btn, note, r.links.moonlight, m.selected);
+  };
+  part("copy-moonlight").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.links.moonlight);
+  part("open-sunshine").onclick = () => !DEMO && api().open_url(r.links.sunshine);
   links.removeAttribute("id");
-  links.querySelector("code").textContent = r.links.moonlight;
-  links.querySelector(".ml-row select").remove();   // приложение — как выбрано на главном экране
-  links.querySelector(".ml-row button").onclick = () =>
-    DEMO || api().moonlight_apps(r.links.moonlight).then((m) => m.installed && api().open_moonlight(r.links.moonlight, m.selected));
-  links.querySelector("#copy-moonlight").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.links.moonlight);
-  links.querySelector("#open-sunshine").onclick = () => !DEMO && api().open_url(r.links.sunshine);
+  links.querySelectorAll("[id]").forEach((e) => e.removeAttribute("id"));
   box.appendChild(links);
   for (const n of r.notes || []) {
     const w = document.createElement("div");
@@ -1386,6 +1445,12 @@ function demoSetup() {
 }
 
 // Простая настройка в демо: ?demo=wizard&wiz=new|ts|done — с нуля, до Tailscale, всё готово
+function demoStream() {
+  return { native: { w: 2560, h: 1600, fps: 60 }, resolution: "native", bitrate: 0, bitrates: [5, 10, 20, 30, 40, 50, 80, 100, 150],
+           resolutions: [{ value: "native", w: 2560, h: 1600, native: true }, { value: "2560x1440", w: 2560, h: 1440 },
+                         { value: "1920x1200", w: 1920, h: 1200 }, { value: "1920x1080", w: 1920, h: 1080 }, { value: "1280x720", w: 1280, h: 720 }] };
+}
+
 let demoWiz = null;      // в демо нажатое считается сделанным (demoWizMark)
 function demoWizState() {
   if (!demoWiz) {
@@ -1440,7 +1505,7 @@ async function start() {
   else if (current === null && !DEMO) openWizard();          // первый запуск (нет ключа Vast) — простая настройка
   else loadSetup().then((d) => {
     // Что-то не настроено — простая настройка, если человек ещё на главном экране
-    if (d && !d.error && !d.ready && !$("screen-main").hidden) openWizard();
+    if (d && !d.error && !d.ready && !DEMO && !$("screen-main").hidden) openWizard();
   });
   if (!DEMO) setInterval(() => { if (!$("screen-main").hidden) refresh(); }, REFRESH_SEC * 1000);
 }

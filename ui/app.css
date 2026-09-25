@@ -293,3 +293,10 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .wiz-status.ok { font-weight: 600; }
 .wiz-foot { display: flex; justify-content: center; margin-top: 6px; }
 #screen-wizard > .actions { justify-content: flex-end; margin-top: 12px; }
+
+/* Разрешение и битрейт трансляции */
+.stream-set { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.stream-set label { display: flex; flex-direction: column; gap: 4px; flex: 1 1 160px; }
+.stream-set select { font-size: 13px; padding: 5px 8px; border-radius: 8px; }
+.stream-set select.native { font-weight: 600; border-color: var(--accent); }
+#stream-hint { margin-top: 6px; }

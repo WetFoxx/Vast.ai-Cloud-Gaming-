@@ -29,7 +29,8 @@ def setUpModule():
     # Фоновый процесс в тестах — поток с той же работой (jobs.work: блокировка, job.json, уведомление)
     for obj, name, value in [(gui.jobs, "_launch", lambda kind, args: threading.Thread(
                                   target=gui.jobs.work, args=(kind, args), daemon=True).start()),
-                             (gui.jobs.notify, "send", lambda title, text: SENT.append((title, text)))]:
+                             (gui.jobs.notify, "send", lambda title, text: SENT.append((title, text))),
+                             (gui.moonlight, "native_display", lambda: None)]:     # не звать system_profiler
         p = mock.patch.object(obj, name, value)
         p.start()
         unittest.addModuleCleanup(p.stop)
@@ -407,28 +408,71 @@ class TestSafe(unittest.TestCase):
             self.assertEqual(gui.Api().setup_status()["error"]["key"], "keychain.denied")
 
 
+class FakeKeychain:
+    """Связка ключей: записи vastgame по именам. app_only — их может стереть только приложение (keyring),
+    а не системная программа security (так было у Алексея 2026-09-25); stuck — не стирает никто."""
+
+    def __init__(self, names, app_only=(), stuck=()):
+        self.items, self.app_only, self.stuck, self.cmds = set(names), set(app_only), set(stuck), []
+
+    def run(self, cmd, timeout, env=None):
+        self.cmds.append(cmd)
+        name = cmd[cmd.index("-a") + 1] if "-a" in cmd else None
+        found = [n for n in sorted(self.items) if name in (None, n)]
+        code = lambda ok: subprocess.CompletedProcess(cmd, 0 if ok else 44, "", "")   # noqa: E731
+        if cmd[1] == "find-generic-password":
+            return code(found)
+        # delete-generic-password: первую подходящую, если security её может стереть
+        if found and found[0] not in self.app_only | self.stuck:
+            self.items.discard(found[0])
+            return code(True)
+        return code(False)
+
+    def delete_password(self, service, name):
+        if name in self.stuck or name not in self.items:
+            raise Exception("denied")
+        self.items.discard(name)
+
+
 class TestReset(unittest.TestCase):
-    def test_reset_removes_local_data_only(self):
+    def reset(self, kc):
         tmp = Path(tempfile.mkdtemp()) / "cfg"
         tmp.mkdir()
         (tmp / "settings.json").write_text("{}")
-        cmds, removed = [], []
-        left = [3]
-
-        def run(cmd, timeout, env=None):
-            cmds.append(cmd[:2])
-            if left[0]:
-                left[0] -= 1
-                return subprocess.CompletedProcess(cmd, 0, "", "")
-            return subprocess.CompletedProcess(cmd, 44, "", "not found")
-        with mock.patch.object(gui.setup.paths, "run", run), \
+        removed = []
+        with mock.patch.object(gui.setup.paths, "run", kc.run), \
+             mock.patch.object(gui.setup.keyring, "delete_password", kc.delete_password), \
              mock.patch.object(gui.setup.settings, "config_dir", lambda: tmp), \
              mock.patch("autostart.uninstall", lambda name: removed.append(name)):
             r = gui.Api().reset_local()
-        self.assertEqual(r, {"ok": True, "deleted": 3})
-        self.assertTrue(all(c == ["security", "delete-generic-password"] for c in cmds))   # только Связка ключей
         self.assertEqual(removed, ["resume", "app"])
         self.assertFalse(tmp.exists())
+        self.assertTrue(all(c[0] == "security" and "-w" not in c and "-g" not in c for c in kc.cmds))  # значения не читаем
+        return r
+
+    def test_reset_removes_everything(self):
+        kc = FakeKeychain(["VAST_API_KEY", "RCLONE_REFRESH_TOKEN", "OLD_UNKNOWN"])
+        self.assertEqual(self.reset(kc), {"ok": True, "deleted": 3, "left": 0})
+        self.assertEqual(kc.items, set())
+
+    def test_entries_security_cannot_delete(self):
+        # Живой случай 2026-09-25: сброс из приложения оставил ключ Vast, вход в Google и пароль Sunshine
+        names = ["VAST_API_KEY", "RCLONE_REFRESH_TOKEN", "RCLONE_TOKEN_SCOPE", "SUNSHINE_PASSWORD", "GOOGLE_CLIENT_ID"]
+        kc = FakeKeychain(names, app_only=names[:4])
+        self.assertEqual(self.reset(kc), {"ok": True, "deleted": 5, "left": 0})
+
+    def test_what_stays_is_reported(self):
+        kc = FakeKeychain(["VAST_API_KEY", "SUNSHINE_PASSWORD"], stuck=["VAST_API_KEY"])
+        self.assertEqual(self.reset(kc), {"ok": True, "deleted": 1, "left": 1})
+
+    def test_names_list_matches_code(self):
+        # Каждая запись, которую код кладёт в Связку ключей, есть в списке сброса
+        import re
+        used = set()
+        for f in Path(gui.__file__).parent.glob("*.py"):
+            used |= set(re.findall(r'set_password\([\w.]*SERVICE,\s*"([A-Z_]+)"', f.read_text()))
+        self.assertTrue(used)
+        self.assertEqual(used - set(gui.setup.KEYCHAIN_NAMES), set())
 
 
 class TestGames(unittest.TestCase):
@@ -533,6 +577,60 @@ class TestSetupActions(unittest.TestCase):
         self.assertEqual(gui.Api().save_tailscale_key("abc")["error"]["key"], "setup.err.ts_key")
 
 
+NATIVE = {"w": 2560, "h": 1600, "fps": 60}
+
+
+class TestStreamSettings(unittest.TestCase):
+    """Разрешение и битрейт трансляции: по умолчанию — родное разрешение экрана и «авто»."""
+
+    def setUp(self):
+        self.store, self.started = {}, []
+        for obj, name, value in [(gui.moonlight, "native_display", lambda: NATIVE),
+                                 (gui.moonlight, "path", lambda: "/x/Moonlight"),
+                                 (gui.moonlight, "apps", lambda host: ["Desktop"]),
+                                 (gui.moonlight, "stream", lambda h, a, size=None, fps=None, bitrate=None:
+                                  self.started.append((size, fps, bitrate)) or True),
+                                 (gui.settings, "get", lambda k, d=None: self.store.get(k, d)),
+                                 (gui.settings, "set", lambda k, v: self.store.__setitem__(k, v))]:
+            p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
+        self.api = gui.Api()
+
+    def test_native_first_and_default(self):
+        s = self.api.stream_settings()
+        self.assertEqual(s["resolutions"][0], {"value": "native", "w": 2560, "h": 1600, "native": True})
+        self.assertFalse(any(o["native"] for o in s["resolutions"][1:]))
+        self.assertTrue(all(o["w"] <= 2560 and o["h"] <= 1600 for o in s["resolutions"]))   # не больше родного
+        self.assertEqual((s["resolution"], s["bitrate"]), ("native", 0))
+        self.api.open_moonlight("m", "Desktop")
+        self.assertEqual(self.started, [((2560, 1600), 60, None)])     # битрейт подберёт Moonlight
+
+    def test_choice_remembered_and_passed(self):
+        self.assertEqual(self.api.save_stream_settings("1920x1080", 30), {"ok": True})
+        self.api.open_moonlight("m", "Desktop")
+        self.assertEqual(self.started, [((1920, 1080), 60, 30)])
+        self.assertEqual(self.api.stream_settings()["resolution"], "1920x1080")
+
+    def test_bad_values_rejected(self):
+        self.assertIn("error", self.api.save_stream_settings("9999x9999", 0))
+        self.assertIn("error", self.api.save_stream_settings("native", 7))
+        self.assertEqual(self.store, {})
+
+    def test_unknown_screen_leaves_it_to_moonlight(self):
+        with mock.patch.object(gui.moonlight, "native_display", lambda: None):
+            api = gui.Api()
+            self.assertEqual(api.stream_settings()["resolution"], "moonlight")
+            api.open_moonlight("m", "Desktop")
+        self.assertEqual(self.started, [(None, None, None)])
+
+    def test_saved_native_follows_the_screen(self):
+        # Выбрано «родное» — на другом мониторе это его родное разрешение, а не прежние цифры
+        self.api.save_stream_settings("native", 0)
+        with mock.patch.object(gui.moonlight, "native_display", lambda: {"w": 3840, "h": 2160, "fps": 120}):
+            api = gui.Api()
+            api.open_moonlight("m", "Desktop")
+        self.assertEqual(self.started[-1], ((3840, 2160), 120, None))
+
+
 class TestMoonlight(unittest.TestCase):
     def test_apps_and_stream_remembers_choice(self):
         api = gui.Api()
@@ -540,7 +638,7 @@ class TestMoonlight(unittest.TestCase):
         started = []
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: ["Desktop", "Steam Big Picture"]), \
-             mock.patch.object(gui.moonlight, "stream", lambda h, a: started.append((h, a)) or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: started.append((h, a)) or True), \
              mock.patch.object(gui.settings, "get", lambda k, d=None: store.get(k, d)), \
              mock.patch.object(gui.settings, "set", lambda k, v: store.__setitem__(k, v)):
             self.assertEqual(api.moonlight_apps("m")["selected"], "Desktop")          # по умолчанию
@@ -553,8 +651,8 @@ class TestMoonlight(unittest.TestCase):
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
-             mock.patch.object(gui.pairing, "pair", lambda host, ip: steps.append(("pair", host, ip)) or True), \
-             mock.patch.object(gui.moonlight, "stream", lambda h, a: steps.append(("stream", h, a)) or True), \
+             mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append(("pair", host, ip)) or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: steps.append(("stream", h, a)) or True), \
              mock.patch.object(gui.settings, "set", lambda k, v: None):
             self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
         self.assertEqual(steps, [("pair", "h", "100.1.1.1"), ("stream", "h", "Desktop")])
@@ -563,13 +661,13 @@ class TestMoonlight(unittest.TestCase):
         # Живой тест 2026-09-25: два нажатия во время связки → две трансляции, обе оборвались
         api, streams = gui.Api(), []
         inside, release = threading.Event(), threading.Event()
-        def slow_pair(host, ip):
+        def slow_pair(host, ip, on_notice=None):
             inside.set(); release.wait(5)
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.pairing, "pair", slow_pair), \
-             mock.patch.object(gui.moonlight, "stream", lambda h, a: streams.append(a) or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: streams.append(a) or True), \
              mock.patch.object(gui.settings, "set", lambda k, v: None):
             first = threading.Thread(target=api.open_moonlight, args=("h", "Desktop"))
             first.start(); inside.wait(5)

@@ -442,22 +442,52 @@ def tailscale_login(open_url, wait=600):
                 p.terminate()
 
 
+# Все записи vastgame в Связке ключей (тест сверяет список с кодом — новая запись не забудется)
+KEYCHAIN_NAMES = ("VAST_API_KEY", "RCLONE_REFRESH_TOKEN", "RCLONE_TOKEN_SCOPE", "RCLONE_REFRESH_TOKEN_OLD",
+                  "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "TAILSCALE_AUTHKEY", "TAILSCALE_AUTHKEY_DATE",
+                  "SUNSHINE_PASSWORD")
+
+
+def _in_keychain(name=None):
+    """Есть ли запись vastgame (с этим именем). Без -w/-g: значение не читается, macOS не спрашивает."""
+    cmd = ["security", "find-generic-password", "-s", SERVICE] + (["-a", name] if name else [])
+    return paths.run(cmd, 30).returncode == 0
+
+
 def reset_local():
     """Удалить всё, что vastgame хранит на ЭТОМ Mac: записи «vastgame» в Связке ключей, службы
     автозапуска, папку настроек (настройки, история сессий, журналы). После этого приложение ведёт
     себя как после первой установки. Аккаунты Vast/Google/Tailscale, шаблон и переменные в Vast,
-    игры и сохранения на Drive — не трогает. Возвращает число удалённых записей Связки ключей.
+    игры и сохранения на Drive — не трогает. Возвращает {"deleted": стёрто записей, "left": осталось}.
 
-    Записи удаляются системной командой security по имени службы: так не нужно читать их значения,
-    и macOS не спрашивает доступ, даже если записи создала прежняя сборка приложения."""
+    Каждую запись стираем по имени двумя способами и не останавливаемся на неудаче. Раньше был один
+    способ — системная программа security «до первой ошибки», и из приложения 2026-09-25 она стёрла
+    не всё: остались ключ Vast, вход в Google и пароль Sunshine, а мастер решил, что они настроены.
+    Записи создавали разные сборки приложения, и доступ к ним разрешён только им (не security):
+      1. само приложение (keyring) — нынешняя сборка ими пользуется, значит, доступ у неё есть;
+      2. если запись осталась — security."""
     import autostart
-    n = 0
-    while n < 50 and paths.run(["security", "delete-generic-password", "-s", SERVICE], 30).returncode == 0:
-        n += 1
+    deleted = 0
+    for name in KEYCHAIN_NAMES:
+        if not _in_keychain(name):
+            continue
+        try:
+            keyring.delete_password(SERVICE, name)
+        except Exception:                    # noqa: BLE001 — нет доступа или записи: пробуем вторым способом
+            pass
+        if _in_keychain(name):
+            paths.run(["security", "delete-generic-password", "-s", SERVICE, "-a", name], 30)
+        deleted += not _in_keychain(name)
+    # Записи с другими именами (от прежних версий) — по одной, пока удаляются
+    for _ in range(50):
+        if paths.run(["security", "delete-generic-password", "-s", SERVICE], 30).returncode != 0:
+            break
+        deleted += 1
+    left = sum(_in_keychain(n) for n in KEYCHAIN_NAMES) or int(_in_keychain())
     for name in autostart.NAMES:
         autostart.uninstall(name)
     shutil.rmtree(settings.config_dir(), ignore_errors=True)
-    return n
+    return {"deleted": deleted, "left": left}
 
 
 def summary():
