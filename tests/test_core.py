@@ -24,6 +24,10 @@ def setUpModule():
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
         p.start()
         unittest.addModuleCleanup(p.stop)
+    # Замер задержки через Tailscale — не запускать настоящий tailscale ping
+    p = mock.patch.object(core.latency, "measure", lambda ip: None)
+    p.start()
+    unittest.addModuleCleanup(p.stop)
     # Машина, которую ждём, по умолчанию есть у Vast (проверка раз в минуту не ходит в сеть)
     p = mock.patch.object(core, "_still_there", lambda iid: True)
     p.start()

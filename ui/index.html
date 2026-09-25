@@ -82,6 +82,19 @@
       <input type="range" id="disk" min="50" max="1000" step="10" value="100">
       <div class="sub" data-i18n="disk.hint"></div>
     </section>
+    <section class="card filters-card">
+      <div class="filters">
+        <label><span class="label" data-i18n="filter.countries"></span>
+          <button id="f-countries-btn" class="filter-btn"></button></label>
+        <label><span class="label" data-i18n="filter.speed"></span><select id="f-speed"></select></label>
+        <label><span class="label" data-i18n="filter.ping"></span><select id="f-ping"></select></label>
+        <label><span class="label" data-i18n="filter.sort"></span><select id="f-sort"></select></label>
+      </div>
+      <div class="countries" id="f-countries" hidden>
+        <div class="countries-head"><button id="f-countries-all" data-i18n="filter.countries.all"></button></div>
+        <div class="countries-list" id="f-countries-list"></div>
+      </div>
+    </section>
     <section class="card table-card">
       <table id="offers-table">
         <thead>
@@ -89,13 +102,17 @@
             <th></th>
             <th data-i18n="col.gpu"></th>
             <th data-i18n="col.country"></th>
+            <th class="num" data-i18n="col.ping"></th>
+            <th class="num" data-i18n="col.net"></th>
             <th class="num" data-i18n="col.price"></th>
-            <th class="num" data-i18n="col.traffic"></th>
             <th class="num" data-i18n="col.reliability"></th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
+      <div class="pager" id="offers-pager" hidden>
+        <button id="page-prev">‹</button><span id="page-info"></span><button id="page-next">›</button>
+      </div>
     </section>
     <section class="card sync-card">
       <div class="label" data-i18n="sync.title"></div>
@@ -214,6 +231,7 @@
       <pre id="progress-log"></pre>
     </details>
     <div class="actions">
+      <button class="primary" id="progress-offers" hidden data-i18n="offers.back_to_list"></button>
       <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
       <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
     </div>

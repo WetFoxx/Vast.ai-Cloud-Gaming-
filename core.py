@@ -21,6 +21,7 @@ import time
 
 import drive
 import history
+import latency
 import market
 import sshkey
 from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
@@ -136,7 +137,15 @@ def rent(offer_id, body, offer=None):
     except VastgameError:
         pass              # проверка не удалась — пробуем арендовать как есть; Vast сам объяснит отказ
     t0 = time.time()
-    r = call("PUT", f"asks/{offer_id}/", body)
+    try:
+        r = call("PUT", f"asks/{offer_id}/", body)
+    except VastgameError as e:
+        # Предложение сняли между выбором и арендой (заняли или хост ещё не освободил машину):
+        # Vast отвечает 400 «no_such_ask … is not available» — сказать это по-человечески
+        if "no_such_ask" in str(e) or "not available" in str(e):
+            raise VastgameError(f"Машина {offer_id} уже недоступна — выбери другую.", key="core.offer_gone",
+                                id=offer_id) from None
+        raise
     iid = r.get("new_contract")
     if not r.get("success") or not iid:
         why = r.get("msg") or r.get("error") or ""
@@ -345,8 +354,13 @@ def wait_ready(iid, t0, o, ui):
         time.sleep(10)
 
     ident = (wolf_status(ip) or {}).get("identity")
+    # Настоящая задержка через Tailscale (тем же путём пойдёт трансляция) — запомнить для списка машин
+    ping = latency.measure(ip)
+    latency.record(ping, o.get("machine_id"), o.get("geolocation"))
+    if ping:
+        ui.say(f"Задержка до машины: {ping} мс.", "info", key="core.ping", ms=ping)
     result = {"ip": ip, "dns": dns, "links": links(ip, dns), "boot": boot, "identity": ident,
-              "minutes": int((time.time() - t0) / 60)}
+              "minutes": int((time.time() - t0) / 60), "ping": ping}
     ui.stage("ready", f"Готово за {result['minutes']} мин.")
     return result
 

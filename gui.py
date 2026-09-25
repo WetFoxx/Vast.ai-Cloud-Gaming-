@@ -24,9 +24,11 @@ import webview   # pywebview: окно с веб-страницей (на Mac �
 
 import autostart
 import cloudgames
+import geo
 import core
 import history
 import installer
+import latency
 import jobs
 import market
 import moonlight
@@ -45,7 +47,9 @@ from vastapi import VastgameError, my_template
 
 HERE = Path(__file__).resolve().parent
 LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
-OFFERS_SHOWN = 10   # сколько машин показывать в выборе
+OFFERS_PAGE = 15    # машин на странице выбора (показываются все подходящие, по страницам)
+# Фильтры списка машин по умолчанию: все страны, любая скорость и пинг, сначала дешёвые
+OFFER_FILTERS = {"countries": [], "speed": 0, "ping": 0, "sort": "price"}
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
@@ -131,11 +135,19 @@ class Api:
             last = market.last_machine(disk)
         except VastgameError:
             last = None          # не удалось проверить последнюю машину — список машин всё равно показать
-        row = lambda o: {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
-                         "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
-                         "reliability": o["reliability"], "failed": o.get("_failed")}
+        remembered, me = latency.known(), geo.home()
+
+        def row(o):
+            geo_ = o.get("geolocation") or ""
+            return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
+                    "cc": geo_.rsplit(",", 1)[-1].strip().upper() or "?",
+                    "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
+                    "reliability": o["reliability"], "failed": o.get("_failed"),
+                    "net_down": round(o.get("inet_down") or 0), "net_up": round(o.get("inet_up") or 0),
+                    "ping": latency.for_offer(o, remembered, me)}
         return {"disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
-                "sync": self._sync(), "offers": [row(o) for o in rows[:OFFERS_SHOWN]],
+                "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
+                "filters": self._offer_filters(),
                 "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
                                   "offer": last["offer"] and row(last["offer"])}}
 
@@ -150,6 +162,20 @@ class Api:
         return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o), "price": o["dph_total"],
                 "disk": disk, "balance": credit, "hours": credit / o["dph_total"] if o["dph_total"] else None,
                 "bad_reason": core.bad_host_reason(o)}
+
+    def _offer_filters(self):
+        saved = settings.get("offer_filters") or {}
+        return {k: saved.get(k, v) for k, v in OFFER_FILTERS.items()}
+
+    def save_offer_filters(self, f):
+        """Запомнить фильтры списка машин (страны, скорость от, пинг до, сортировка)."""
+        if not isinstance(f, dict):
+            return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
+        clean = {"countries": [c for c in f.get("countries") or [] if isinstance(c, str)][:100],
+                 "speed": max(0, int(f.get("speed") or 0)), "ping": max(0, int(f.get("ping") or 0)),
+                 "sort": f.get("sort") if f.get("sort") in ("price", "ping") else "price"}
+        settings.set("offer_filters", clean)
+        return {"ok": True}
 
     def _sync(self):
         """Тумблеры синхронизации: последний выбор человека, иначе значения по умолчанию."""

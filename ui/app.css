@@ -250,3 +250,19 @@ tr.group td { font-weight: 600; font-size: 13px; color: var(--muted); background
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .stats .big { font-size: 22px; }
 #history-card { max-height: 360px; overflow: auto; }
+
+/* Выбор машины: фильтры, пинг, страницы */
+.filters { display: flex; flex-wrap: wrap; gap: 10px 14px; }
+.filters label { display: flex; flex-direction: column; gap: 4px; min-width: 120px; flex: 1 1 120px; }
+.filters select, .filter-btn { font-size: 13px; padding: 5px 8px; border-radius: 8px; text-align: left; }
+.filter-btn { border: 1px solid var(--border); background: var(--card); color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.countries { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.countries-head { margin-bottom: 6px; }
+.countries-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 4px 12px; }
+.countries-list label { display: flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer; }
+.countries-list .count { color: var(--muted); }
+td.ping.estimate, td.ping.unknown { color: var(--muted); }
+td.ping.measured { font-weight: 600; }
+.pager { display: flex; justify-content: center; align-items: center; gap: 12px; padding: 8px 0 2px; font-size: 13px; color: var(--muted); }
+.pager button { min-width: 36px; }

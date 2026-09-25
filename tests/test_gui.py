@@ -21,7 +21,8 @@ def setUpModule():
     import history, market, settings
     tmp = Path(tempfile.mkdtemp())
     for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"),
-                      (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG"), (gui.jobs, "CANCEL")]:
+                      (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG"), (gui.jobs, "CANCEL"),
+                      (gui.latency, "FILE")]:
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.{name}")
         p.start()
         unittest.addModuleCleanup(p.stop)
@@ -66,6 +67,25 @@ class TestOffers(unittest.TestCase):
             d = gui.Api().offers()
         self.assertEqual(d["last"]["offer"]["id"], 77)
         self.assertEqual(d["offers"][0]["id"], 5)
+
+    def test_all_machines_with_ping_speed_and_filters(self):
+        rows = [dict(self.row, id=i, inet_down=500 + i, inet_up=300, geolocation="Japan, JP") for i in range(40)]
+        with mock.patch.object(gui.market, "search", lambda disk: rows), \
+             mock.patch.object(gui.market, "last_machine", lambda disk: None):
+            d = gui.Api().offers()
+        self.assertEqual(len(d["offers"]), 40)                        # все, а не 10 лучших — страницы на экране
+        self.assertEqual(d["page_size"], gui.OFFERS_PAGE)
+        o = d["offers"][0]
+        self.assertEqual((o["cc"], o["net_down"], o["net_up"]), ("JP", 500, 300))
+        self.assertIn(o["ping"]["kind"], ("estimate", "measured", "region"))
+        self.assertEqual(d["filters"], gui.OFFER_FILTERS)             # ничего не выбрано — всё по умолчанию
+
+    def test_filters_remembered_and_cleaned(self):
+        api = gui.Api()
+        self.assertEqual(api.save_offer_filters({"countries": ["JP", 5], "speed": "300", "ping": -1, "sort": "evil"}),
+                         {"ok": True})
+        self.assertEqual(api._offer_filters(), {"countries": ["JP"], "speed": 300, "ping": 0, "sort": "price"})
+        self.assertIn("error", api.save_offer_filters("nope"))
 
     def test_disk_limits(self):
         with mock.patch.object(gui.market, "last_machine", lambda disk: None):

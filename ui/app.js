@@ -195,16 +195,89 @@ $("disk").addEventListener("change", () => openOffers(Number($("disk").value)));
 const SYNC_KEYS = ["steam_games", "other_games", "saves"];
 function syncChoice() { return Object.fromEntries(SYNC_KEYS.map((k) => [k, $("sync-" + k).checked])); }
 
-// Машины в таблице: последняя (если свободна) — первой строкой с пометкой, дальше лучшие по цене
+// ---- Фильтры списка машин: страны, скорость интернета, пинг, сортировка (запоминаются в Python)
+let filters = null, page = 0;
+const SPEEDS = [0, 100, 300, 500, 1000];          // Мбит/с — не ниже (меньшая из скоростей ↓/↑)
+const PINGS = [0, 50, 80, 100, 150, 200];         // мс — не выше
+function netSpeed(o) { return Math.min(o.net_down, o.net_up); }
+function countryName(cc) {
+  try { return new Intl.DisplayNames([LANG], { type: "region" }).of(cc) || cc; } catch (e) { return cc; }
+}
+function saveFilters() { if (!DEMO) api().save_offer_filters(filters); }
+function filtersActive() { return filters.countries.length || filters.speed || filters.ping; }
+
+function applyFilters(list) {
+  const f = filters;
+  const r = list.filter((o) => (!f.countries.length || f.countries.includes(o.cc))
+    && (!f.speed || netSpeed(o) >= f.speed)
+    && (!f.ping || (o.ping.ms != null && o.ping.ms <= f.ping)));
+  // Сервер уже отсортировал по полной цене часа; «по пингу» — неизвестный пинг в конце, при равном — дешевле
+  if (f.sort === "ping") r.sort((a, b) => (a.ping.ms ?? 1e9) - (b.ping.ms ?? 1e9) || a.total - b.total);
+  return r;
+}
+
+// Машины в таблице: последняя (если свободна и проходит фильтры) — первой строкой с пометкой
 function offerList(d) {
   const last = d.last && d.last.offer;
-  return last ? [{ ...last, last: true }, ...d.offers.filter((o) => o.id !== last.id)] : d.offers;
+  const rest = applyFilters(d.offers.filter((o) => !last || o.id !== last.id));
+  return last && applyFilters([last]).length ? [{ ...last, last: true }, ...rest] : rest;
+}
+
+function fillSelect(sel, values, label, value) {
+  sel.innerHTML = "";
+  for (const v of values) sel.appendChild(el("option", { value: v }, label(v)));
+  sel.value = value;
+}
+
+function renderFilters(d) {
+  fillSelect($("f-speed"), SPEEDS, (v) => v ? t("filter.speed.from", { n: v }) : t("filter.any"), filters.speed);
+  fillSelect($("f-ping"), PINGS, (v) => v ? t("filter.ping.to", { n: v }) : t("filter.any"), filters.ping);
+  fillSelect($("f-sort"), ["price", "ping"], (v) => t("filter.sort." + v), filters.sort);
+  const names = filters.countries.map(countryName);
+  $("f-countries-btn").textContent = !names.length ? t("filter.countries.any")
+    : names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "");
+  // Страны — только те, что есть в списке, с числом машин
+  const counts = {};
+  for (const o of d.offers) counts[o.cc] = (counts[o.cc] || 0) + 1;
+  const list = $("f-countries-list");
+  list.innerHTML = "";
+  for (const cc of Object.keys(counts).sort((a, b) => countryName(a).localeCompare(countryName(b), LANG))) {
+    const box = el("input", { type: "checkbox", checked: filters.countries.includes(cc) });
+    box.addEventListener("change", () => {
+      filters.countries = box.checked ? [...filters.countries, cc] : filters.countries.filter((c) => c !== cc);
+      page = 0; saveFilters(); renderOffers();
+    });
+    const lab = el("label");
+    lab.append(box, el("span", {}, countryName(cc)), el("span", { className: "count" }, String(counts[cc])));
+    list.appendChild(lab);
+  }
+}
+
+for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"], ["f-sort", "sort"]]) {
+  $(id).addEventListener("change", () => {
+    filters[key] = key === "sort" ? $(id).value : Number($(id).value);
+    page = 0; saveFilters(); renderOffers();
+  });
+}
+$("f-countries-btn").addEventListener("click", () => { $("f-countries").hidden = !$("f-countries").hidden; });
+$("f-countries-all").addEventListener("click", () => { filters.countries = []; page = 0; saveFilters(); renderOffers(); });
+$("page-prev").addEventListener("click", () => { page--; renderOffers(); });
+$("page-next").addEventListener("click", () => { page++; renderOffers(); });
+
+function pingCell(td, p) {
+  td.classList.add("ping", p.ms == null ? "unknown" : p.kind);
+  td.textContent = p.ms == null ? "—" : (p.kind === "estimate" ? "≈ " : "") + t("unit.ms", { n: p.ms });
+  td.title = t("ping.kind." + (p.ms == null ? "unknown" : p.kind));
 }
 
 function renderOffers() {
   const d = offersData;
   if (!d) return;
-  $("offers-summary").textContent = t("offers.summary", { count: d.count, rel: num(d.min_rel * 100, 0), disk: d.disk });
+  if (!filters) filters = { ...d.filters, countries: [...(d.filters.countries || [])] };
+  renderFilters(d);
+  const list = offerList(d);
+  $("offers-summary").textContent = t("offers.summary", { count: d.count, rel: num(d.min_rel * 100, 0), disk: d.disk })
+    + (filtersActive() ? " · " + t("offers.filtered", { shown: list.length }) : "");
   $("disk-value").textContent = t("disk.value", { gb: d.disk });
   const L = d.last;
   $("offers-last").hidden = !L;
@@ -215,14 +288,26 @@ function renderOffers() {
   }
   const body = $("offers-table").querySelector("tbody");
   body.innerHTML = "";
-  const list = offerList(d);
-  if (!list.length) { showError("offers-error", { key: "offers.none" }); return; }
-  if (selected == null) selected = (d.offers[0] || list[0]).id;   // по умолчанию — самая выгодная, не последняя
-  for (const o of list) {
+  showError("offers-error", null);
+  if (!list.length) {
+    $("offers-pager").hidden = true;
+    $("rent").disabled = true;
+    showError("offers-error", { key: d.offers.length ? "offers.none_filtered" : "offers.none" });
+    return;
+  }
+  // По умолчанию — первая в текущем порядке (самая выгодная или ближняя), не «последняя»
+  if (!list.some((o) => o.id === selected)) selected = (list.find((o) => !o.last) || list[0]).id;
+  const size = d.page_size || 15, pages = Math.ceil(list.length / size);
+  page = Math.max(0, Math.min(page, pages - 1));
+  $("offers-pager").hidden = pages <= 1;
+  $("page-info").textContent = t("offers.page", { page: page + 1, pages });
+  $("page-prev").disabled = page === 0;
+  $("page-next").disabled = page >= pages - 1;
+  for (const o of list.slice(page * size, (page + 1) * size)) {
     const tr = document.createElement("tr");
     tr.className = o.id === selected ? "selected" : "";
     tr.innerHTML = `<td><input type="radio" name="offer"></td><td></td><td></td>
-      <td class="num"></td><td class="num"></td><td class="num"></td>`;
+      <td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td>`;
     const c = tr.children;
     c[0].firstChild.checked = o.id === selected;
     c[1].textContent = o.gpu;
@@ -234,9 +319,11 @@ function renderOffers() {
     if (o.last) addTag("tag", t("offers.last.tag"));
     if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке
     c[2].textContent = o.country;
-    c[3].textContent = money(o.price);
-    c[4].textContent = money(o.traffic);
-    c[5].textContent = num(o.reliability * 100) + "%";
+    pingCell(c[3], o.ping);
+    c[4].textContent = t("unit.mbps", { n: netSpeed(o) });
+    c[4].title = t("net.both", { down: o.net_down, up: o.net_up });
+    c[5].textContent = money(o.price);
+    c[6].textContent = num(o.reliability * 100) + "%";
     tr.addEventListener("click", () => { selected = o.id; renderOffers(); });
     body.appendChild(tr);
   }
@@ -252,6 +339,11 @@ $("rent").addEventListener("click", async () => {
   const disk = offersData.disk;
   const o = DEMO ? demoCheck() : await api().check_offer(selected, disk);   // свежая цена прямо перед «да»
   renderOffers();
+  if (o.error && o.error.key === "core.offer_gone") {   // заняли, пока выбирали — показать свежий список
+    await openOffers(disk);
+    showError("offers-error", o.error);
+    return;
+  }
   if (o.error) { showError("offers-error", o.error); $("rent").disabled = false; return; }
   let text = t("confirm.rent.text", {
     gpu: o.gpu, country: o.country, price: money(o.price), balance: money(o.balance), hours: num(o.hours || 0),
@@ -711,6 +803,7 @@ function startProgress(kind = "play") {
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
   $("progress-back").hidden = true;
+  $("progress-offers").hidden = true;
   $("progress-cancel").hidden = kind !== "play";
   $("progress-cancel").disabled = false;
   $("progress-note").hidden = false;
@@ -808,6 +901,7 @@ async function pollOnce() {
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
+    $("progress-offers").hidden = !(p.error && p.error.key === "core.offer_gone");
     $("tailscale-box").hidden = true;
     if (p.result) (prog.kind === "stop" ? renderStopResult : renderResult)(p.result);
   }
@@ -868,6 +962,7 @@ function renderResult(r) {
   }
 }
 
+$("progress-offers").addEventListener("click", () => { if (!DEMO) api().session_seen(); openOffers(); });
 $("progress-back").addEventListener("click", () => { if (!DEMO) api().session_seen(); show("main"); refresh(); });
 
 // ---------------------------------------------------------------- язык
@@ -912,16 +1007,30 @@ function demoState(kind) {
            game_names: { 3751260: "The Blood of Dawnwalker" } };
 }
 function demoOffers(disk) {
-  const rows = [["RTX 3060", "Pennsylvania, US", 0.113, 0.039, 0.989], ["RTX 3070", "British Columbia, CA", 0.119, 0.039, 0.999],
-    ["RTX 3090", "Latvia, LV", 0.204, 0.0, 0.989], ["RTX 4090", "Iceland, IS", 0.421, 0.0, 0.999], ["RTX 3090", "Czechia, CZ", 0.471, 0.0, 0.995]];
+  // 40 машин из разных стран: страницы, фильтры, пинг трёх видов (измерен / по региону / оценка)
+  const places = [["Pennsylvania, US", 165], ["Quebec, CA", 153], ["Japan, JP", 82], ["South Korea, KR", 67], [", CN", 72],
+    ["Czechia, CZ", 95], ["Iceland, IS", 120], ["California, US", 161], ["United Kingdom, GB", 110], ["Finland, FI", 85]];
+  const gpus = ["RTX 3060", "RTX 3070", "RTX 3080", "RTX 3090", "RTX 4070", "RTX 4090"];
   disk = disk || 100;
   const k = 1 + (disk - 100) / 2000;     // в демо цена чуть растёт с диском
-  const offers = rows.map((r, i) => ({ id: 100 + i, gpu: r[0], country: r[1], price: r[2] * k, traffic: r[3], total: r[2] * k + r[3], reliability: r[4],
-                                       failed: i === 2 ? "Машина перешла в состояние «exited» и не запустится." : null }));
+  const offers = [];
+  for (let i = 0; i < 40; i++) {
+    const [country, est] = places[i % places.length], price = (0.09 + (i * 37 % 40) / 100) * k;
+    const kind = i === 3 ? "measured" : i % 10 === 1 ? "region" : "estimate";
+    offers.push({ id: 100 + i, gpu: gpus[i * 7 % gpus.length], country, cc: country.split(",").pop().trim(),
+                  price, traffic: 0.01, total: price + 0.01, reliability: 0.97 + (i % 3) / 100,
+                  net_down: 90 + (i * 131 % 1800), net_up: 80 + (i * 97 % 1500),
+                  ping: { ms: kind === "estimate" ? est : est + 40, kind },
+                  failed: i === 2 ? "Машина перешла в состояние «exited» и не запустится." : null });
+  }
+  offers.sort((a, b) => a.total - b.total);
   const busy = new URLSearchParams(location.search).get("last") === "busy";
-  return { disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: Math.max(3, 37 - Math.floor(disk / 40)), balance: 3.18, sync: { steam_games: false, other_games: true, saves: true }, offers,
+  return { disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: offers.length, balance: 3.18, page_size: 15,
+           filters: { countries: [], speed: 0, ping: 0, sort: "price" },
+           sync: { steam_games: false, other_games: true, saves: true }, offers,
            last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
-                   offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", price: 0.162, traffic: 0.05, total: 0.212, reliability: 0.991 } } };
+                   offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", cc: "US", price: 0.162, traffic: 0.05, total: 0.212,
+                                          reliability: 0.991, net_down: 900, net_up: 700, ping: { ms: 190, kind: "measured" } } } };
 }
 function demoCheck() {
   const o = offerList(offersData).find((x) => x.id === selected);

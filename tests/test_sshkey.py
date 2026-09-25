@@ -83,6 +83,16 @@ class TestRent(unittest.TestCase):
         iid, calls = self.rent(lambda: order.append("ssh") or True)
         self.assertEqual((iid, order, calls), (7, ["ssh"], [("PUT", "asks/1/")]))
 
+    def test_offer_taken_is_explained(self):
+        # Живой случай 2026-09-25: машину заняли между выбором и арендой — Vast 400 no_such_ask
+        def taken(m, p, b=None):
+            raise VastgameError("Vast ответил ошибкой: HTTP 400 error 404/3603: no_such_ask  Instance type by id 5 "
+                                "is not available.", key="vast.http", code=400, msg="no_such_ask")
+        with mock.patch.object(core.sshkey, "ensure", lambda: False), mock.patch.object(core, "call", taken):
+            with self.assertRaises(VastgameError) as e:
+                core.rent(5, {})
+        self.assertEqual(e.exception.key, "core.offer_gone")
+
     def test_key_check_failure_does_not_block_rent(self):
         def broken():
             raise VastgameError("нет связи", key="vast.network")
