@@ -427,6 +427,9 @@ $("rent").addEventListener("click", async () => {
   text += "\n\n" + t("confirm.rent.sync", { list: on.join(", ") || t("sync.none") });
   if (!sync.saves) text += " " + t("confirm.rent.saves_off");
   if (o.bad_reason) text += "\n\n" + t("confirm.badhost", { reason: o.bad_reason });
+  // Забег: вместе с выбранной запускаются ещё машины из списка, остаётся первая запустившаяся
+  const extra = Math.min(2, offerList(offersData).filter((x) => x.id !== o.id).length);
+  if (extra) text += "\n\n" + t("confirm.rent.race", { n: extra });
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
@@ -1204,6 +1207,8 @@ function renderArchives(archives) {
   }
 }
 
+const RACE_KEYS = ["core.race_start", "core.race_added", "core.race_slow", "core.race_broken", "core.race_won",
+                   "core.race_rent_failed", "core.fail_timeout", "core.fail_host", "core.fail_state"];
 function eventText(ev) { return ev.key ? t(ev.key, ev.params || {}) : ev.text; }
 
 async function pollProgress() {
@@ -1236,13 +1241,13 @@ async function pollOnce() {
       $("tailscale-box").hidden = false;
     }
     if (ev.key === "core.tailscale_online") $("tailscale-box").hidden = true;
-    // Машина не запустилась и её заменили — на видном месте, а не только в «Подробностях»
-    if (["core.fail_timeout", "core.fail_host", "core.fail_state", "core.switching"].includes(ev.key)) {
+    // Забег машин: какие запущены, какая первой дошла, какие убраны — на видном месте, а не только
+    // в «Подробностях»
+    if (RACE_KEYS.includes(ev.key)) {
+      prog.alerts = [...(prog.alerts || []), eventText(ev)].slice(-5);
       $("progress-alert").hidden = false;
-      $("progress-alert").textContent = ev.key === "core.switching"
-        ? [prog.lastFail, eventText(ev)].filter(Boolean).join("\n") : (prog.lastFail = eventText(ev));
+      $("progress-alert").textContent = prog.alerts.join("\n");
     }
-    if (ev.key === "core.tailscale_online") $("progress-alert").hidden = true;
     if (ev.key === "core.ssh_ok") $("tailscale-box").hidden = true;
   }
   prog.since = p.next;

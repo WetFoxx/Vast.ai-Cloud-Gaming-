@@ -19,114 +19,166 @@ def offer(oid, mid):
     return {"id": oid, "machine_id": mid, "gpu_name": f"RTX {oid}", "geolocation": "Japan, JP", "dph_total": 0.2}
 
 
-OFFERS = {1: offer(1, 101), 2: offer(2, 102), 3: offer(3, 103), 4: offer(4, 104), 5: offer(5, 101)}
+OFFERS = {1: offer(1, 101), 2: offer(2, 102), 3: offer(3, 103), 4: offer(4, 104), 5: offer(5, 101), 6: offer(6, 106)}
+NEVER = None
 
 
-class Run(unittest.TestCase):
+class Race(unittest.TestCase):
+    """Забег: сразу до RACE машин, остаётся первая дошедшая до running, остальные удаляются тут же."""
+
     def setUp(self):
         tmp = Path(tempfile.mkdtemp())
-        self.rented, self.alive, self.stuck, self.gone_offers = [], set(), set(), set()
-        self.cancel_on = None
+        self.clock = 1000.0
+        self.run_after = {}          # offer id → через сколько секунд после аренды running (None — никогда)
+        self.broken = set()          # offer id, которые Vast сразу показывает exited
+        self.rented, self.deleted, self.alive = [], [], {}
+        self.rent_fails_on = None
+        self.cancel_at = None
+        self.at_wait = None
         self.job = jobs.Job("play")
         self.job.meta = {}
         self.job.set_meta = lambda **kw: self.job.meta.update(kw)
+        self.job.cancelled = lambda: self.cancel_at is not None and self.clock >= self.cancel_at
         for obj, name, value in [
-            (market, "BAD_HOSTS", tmp / "bad.json"), (jobs.settings, "FILE", tmp / "settings.json"),
+            (market, "BAD_HOSTS", tmp / "bad.json"), (market, "STARTS", tmp / "starts.json"),
+            (jobs.settings, "FILE", tmp / "settings.json"),
             (jobs.core, "template", lambda: {"hash_id": "h", "recommended_disk_space": 100}),
             (jobs.core, "require_no_machine", lambda: None),
             (jobs.core, "offer_by_id", self.offer_by_id),
             (jobs.core, "rent", self.rent),
             (jobs.core, "rental_body", lambda tpl, size, sync=None: {}),
+            (jobs.core, "list_instances", self.list_instances),
+            (jobs.core, "_delete_quietly", self.delete),
             (jobs.core, "wait_ready", self.wait_ready),
             (jobs.core, "identity_notes", lambda r: []),
             (jobs.core, "_still_there", lambda iid: iid in self.alive),
-            (jobs.time, "sleep", lambda s: None)]:
+            (jobs.time, "time", lambda: self.clock),
+            (jobs.time, "sleep", self.sleep)]:
             p = mock.patch.object(obj, name, value)
             p.start()
             self.addCleanup(p.stop)
 
+    def sleep(self, s):
+        self.clock += s
+
     def offer_by_id(self, oid, size):
-        if oid in self.gone_offers or oid not in OFFERS:
+        if oid not in OFFERS:
             raise VastgameError("занята", key="core.offer_gone", id=oid)
         return dict(OFFERS[oid])
 
     def rent(self, oid, body, o):
+        if oid == self.rent_fails_on:
+            raise VastgameError("мало денег", key="core.rent_failed", msg="insufficient credit")
         self.rented.append(oid)
         iid = 1000 + oid
-        self.alive.add(iid)
-        return iid, 0
+        self.alive[iid] = (oid, self.clock)
+        return iid, self.clock
+
+    def delete(self, iid):
+        self.deleted.append(iid)
+        self.alive.pop(iid, None)
+        return True, None
+
+    def list_instances(self):
+        out = []
+        for iid, (oid, t0) in self.alive.items():
+            after = self.run_after.get(oid, NEVER)
+            st = ("exited" if oid in self.broken else
+                  "running" if after is not None and self.clock - t0 >= after else "loading")
+            out.append({"id": iid, "actual_status": st, "status_msg": ""})
+        return out
 
     def wait_ready(self, iid, t0, o, ui):
-        if self.cancel_on == o["id"]:
-            raise VastgameError("отменён", key="core.start_cancelled", id=iid)
-        if o["id"] in self.stuck:                 # как core._failed_start: пометить хост, удалить, «try_another»
-            market.mark_bad(o["machine_id"], "Vast не запустил машину за 10 минут.")
-            self.alive.discard(iid)
-            raise VastgameError("другую", key="core.try_another")
+        self.at_wait = (iid, set(self.alive))      # что было живо, когда начали готовить победителя
         return {"links": {"moonlight": "m"}, "minutes": 5, "boot": (0, "ok", ""), "identity": None}
 
-    def play(self, spare=(2, 3, 4)):
+    def play(self, spare=(2, 3, 4, 6)):
         jobs.run_play(self.job, 1, spare=list(spare))
         return self.job
 
-    def test_first_ok_no_switch(self):
-        self.assertIsNone(self.play().error)
-        self.assertEqual(self.rented, [1])
+    def keys(self):
+        return [e["key"] for e in self.job.events if e["key"] and e["key"].startswith("core.race")]
 
-    def test_stuck_twice_third_starts(self):
-        self.stuck = {1, 2}
+    def test_fastest_wins_rest_deleted_before_setup(self):
+        self.run_after = {1: NEVER, 2: 300, 3: 200}
         job = self.play()
         self.assertIsNone(job.error)
-        self.assertEqual(self.rented, [1, 2, 3])
-        self.assertEqual(job.meta["tried"], [101, 102])
-        self.assertEqual(job.meta["iid"], 1003)                      # отмена и продолжение — про новую машину
-        self.assertEqual([e["params"]["n"] for e in job.events if e["key"] == "core.switching"], [2, 3])
+        self.assertEqual(self.rented, [1, 2, 3])                       # сразу три
+        self.assertEqual(self.at_wait, (1003, {1003}))                 # остальные удалены ДО настройки победителя
+        self.assertEqual(sorted(self.deleted), [1001, 1002])
+        self.assertEqual(market.bad_hosts(), {})                       # медленнее — не значит плохой
+        self.assertEqual(job.meta["iid"], 1003)
+        self.assertEqual(self.keys(), ["core.race_start", "core.race_won"])
 
-    def test_gives_up_after_max_tries(self):
-        self.stuck = {1, 2, 3, 4}
+    def test_stuck_ones_replaced(self):
+        self.run_after = {4: 60}                                       # 1–3 висят, 4 быстрая
+        job = self.play()
+        self.assertIsNone(job.error)
+        self.assertEqual(self.rented, [1, 2, 3, 4, 6])                 # висящих заменили следующими
+        self.assertEqual(self.at_wait[0], 1004)
+        self.assertEqual(set(market.bad_hosts()), {"101", "102", "103"})
+        self.assertIn("core.race_slow", self.keys())
+
+    def test_everything_stuck_gives_up_and_deletes_all(self):
         job = self.play()
         self.assertEqual(job.error["key"], "core.tries_exhausted")
-        self.assertEqual(len(self.rented), jobs.MAX_TRIES)
+        self.assertLessEqual(len(self.rented), jobs.MAX_RENTS)
+        self.assertEqual(self.alive, {})                               # ничего не осталось платить
 
-    def test_taken_spare_skipped(self):
-        self.stuck, self.gone_offers = {1}, {2}
+    def test_broken_host_replaced_at_once(self):
+        self.broken, self.run_after = {1}, {2: 900, 3: 900, 4: 30}
         self.play()
-        self.assertEqual(self.rented, [1, 3])
+        self.assertEqual(self.rented[:4], [1, 2, 3, 4])                # 1 убрали сразу, не ждали 10 минут
+        self.assertIn("core.race_broken", self.keys())
+        self.assertEqual(self.at_wait[0], 1004)
 
-    def test_same_host_and_marked_host_skipped(self):
-        # 5 — другое предложение на том же хосте 101, что завис; 2 — хост помечен раньше
-        self.stuck = {1}
-        market.mark_bad(102, "раньше не запустилась")
-        self.play(spare=(5, 2, 3))
-        self.assertEqual(self.rented, [1, 3])
-
-    def test_not_deleted_no_second_rent(self):
-        # Зависшая не исчезла у Vast — вторую не берём: платили бы за две
-        self.stuck = {1}
-        with mock.patch.object(jobs.core, "_still_there", lambda iid: True), \
-             mock.patch.object(jobs, "GONE_WAIT", 0):
-            job = self.play()
-        self.assertEqual(job.error["key"], "core.switch_blocked")
-        self.assertEqual(self.rented, [1])
-
-    def test_cancel_is_not_retried(self):
-        self.cancel_on = 1
+    def test_cancel_deletes_every_machine(self):
+        self.cancel_at = 1030
         job = self.play()
-        self.assertEqual((job.error["key"], self.rented), ("core.start_cancelled", [1]))
+        self.assertEqual(job.error["key"], "core.start_cancelled")
+        self.assertEqual((self.alive, sorted(self.deleted)), ({}, [1001, 1002, 1003]))
 
-    def test_no_spare_left(self):
-        self.stuck = {1}
+    def test_not_enough_balance_for_more(self):
+        self.rent_fails_on, self.run_after = 2, {1: 120}
+        job = self.play()
+        self.assertIsNone(job.error)
+        self.assertEqual(self.rented, [1])                              # больше не пытались
+        self.assertIn("core.race_rent_failed", self.keys())
+
+    def test_first_rent_failure_is_reported(self):
+        self.rent_fails_on = 1
         job = self.play(spare=())
-        self.assertEqual((job.error["key"], self.rented), ("core.no_spare", [1]))
+        self.assertEqual(job.error["key"], "core.rent_failed")
 
-    def test_resume_then_switch(self):
-        # Mac выключался во время запуска машины 1; после продолжения она зависла — берём следующую
-        self.job.meta = {"iid": 1001, "t0": 0, "offer": dict(OFFERS[1])}
-        self.alive.add(1001)
-        with mock.patch.object(jobs.core, "list_instances", lambda: [{"id": 1001}]):
-            self.stuck = {1}
-            self.play()
-        self.assertEqual(self.rented, [2])
+    def test_same_host_not_twice(self):
+        self.run_after = {1: 60}
+        self.play(spare=(5, 2))                                         # 5 — тот же хост 101
+        self.assertEqual(self.rented, [1, 2])
+
+    def test_resume_race_after_restart(self):
+        # Mac выключался во время забега: машины 1 и 2 уже арендованы — досмотреть, новых не брать
+        for oid in (1, 2):
+            self.alive[1000 + oid] = (oid, self.clock)
+        self.job.meta = {"race": [{"iid": 1000 + o, "t0": self.clock, "offer": dict(OFFERS[o]), "errors": 0}
+                                  for o in (1, 2)], "rents": 2, "used": [101, 102]}
+        self.run_after = {2: 120, 3: 60}
+        with mock.patch.object(jobs, "RACE", 2):
+            job = self.play(spare=(3,))
+        self.assertIsNone(job.error)
+        self.assertEqual((self.rented, self.at_wait[0]), ([], 1002))
+
+
+class TestLastMachine(unittest.TestCase):
+    def test_short_sessions_are_not_last_machine(self):
+        # Проигравшие забег удаляются через секунды — «последней машиной» остаётся та, на которой играли
+        import history
+        rows = [{"iid": 1, "machine_id": 11, "start": 1000, "end": 5000},
+                {"iid": 2, "machine_id": 22, "start": 6000, "end": None},     # победитель, идёт сейчас
+                {"iid": 3, "machine_id": 33, "start": 6001, "end": 6020}]     # проиграл забег
+        with mock.patch.object(history, "_load", lambda: rows):
+            self.assertEqual(history.last_machine()["machine_id"], 22)
+            rows[1]["end"] = 7000
+            self.assertEqual(history.last_machine(skip={"22"})["machine_id"], 11)
 
 
 class TestMarketKvm(unittest.TestCase):

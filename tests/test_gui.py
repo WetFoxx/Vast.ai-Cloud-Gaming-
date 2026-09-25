@@ -117,6 +117,9 @@ class TestPlay(unittest.TestCase):
             "rent": self.fake_rent,
             "wait_ready": self.fake_wait,
             "identity_notes": lambda r: [],
+            # Забег машин: Vast сразу показывает арендованную машину (42) работающей
+            "list_instances": lambda: [{"id": 42, "actual_status": "running", "status_msg": ""}],
+            "_delete_quietly": lambda iid: (True, None),
         }
         for name, value in patches.items():
             p = mock.patch.object(gui.jobs.core, name, value)
@@ -183,13 +186,13 @@ class TestPlay(unittest.TestCase):
         deleted = []
         with mock.patch.object(gui.jobs.core, "wait_ready", self.cancellable_wait), \
              mock.patch.object(gui.core, "_still_there", lambda iid: iid not in deleted), \
-             mock.patch.object(gui.core, "delete_instance", lambda iid: deleted.append(iid) or (True, None)):
+             mock.patch.object(gui.core, "_delete_quietly", lambda iid: deleted.append(iid) or (True, None)):
             self.api.play(5, None, None, "ru")
             for _ in range(100):
                 if (self.api.session_progress() or {}).get("stage") == "vast":
                     break
                 time.sleep(0.02)
-            self.assertEqual(self.api.cancel_start(), {"ok": True, "iid": 42})
+            self.assertEqual(self.api.cancel_start(), {"ok": True, "iid": 42, "iids": [42]})
             p = wait_done(self.api, session=True)
         self.assertEqual(deleted, [42])                               # окно удалило сразу
         self.assertEqual(p["error"]["key"], "core.start_cancelled")
@@ -209,7 +212,7 @@ class TestPlay(unittest.TestCase):
 
     def test_cancel_when_nothing_starts(self):
         gui.jobs.STATE.unlink(missing_ok=True)
-        self.assertEqual(self.api.cancel_start(), {"ok": True, "iid": None})
+        self.assertEqual(self.api.cancel_start(), {"ok": True, "iid": None, "iids": []})
         self.assertFalse(gui.jobs.CANCEL.exists())
 
     def test_progress_since_and_new_window_sees_same_job(self):

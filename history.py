@@ -59,9 +59,16 @@ def reconcile(running_ids):
         _save(rows)
 
 
+LAST_MIN_SEC = 300   # «последняя машина» — та, что проработала хоть 5 минут (не проигравшая забег)
+
+
 def last_machine(skip=()):
-    """Последняя сессия с известной машиной хоста (machine_id), кроме машин из skip; или None."""
-    return next((r for r in reversed(_load()) if r.get("machine_id") and str(r["machine_id"]) not in skip), None)
+    """Последняя сессия с известной машиной хоста (machine_id), кроме машин из skip; или None.
+    Машины, удалённые через секунды (проиграли забег, не запустились), не считаются."""
+    def played(r):
+        return not r.get("end") or r["end"] - r["start"] >= LAST_MIN_SEC
+    return next((r for r in reversed(_load())
+                 if r.get("machine_id") and str(r["machine_id"]) not in skip and played(r)), None)
 
 
 def current(iid):

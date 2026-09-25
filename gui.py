@@ -247,13 +247,13 @@ class Api:
         """«Отменить запуск и удалить машину» (человек подтвердил на странице). Удаляем сразу, если
         машина уже арендована; фоновый процесс увидит флаг и закончит (и удалит сам, если аренда
         ещё шла). Процесс завис или умер — машина всё равно удалена отсюда."""
-        iid = jobs.cancel_play()
-        if iid:
+        iids = jobs.cancel_play() or []
+        for iid in iids:                     # выбранная или все машины забега
             # Удаляем, не глядя в список: сразу после аренды Vast может ещё не показывать там машину
             ok, msg = core.cancel_delete(iid)
             if not ok:
                 return {"error": {"key": "core.delete_failed", "params": {"msg": msg or ""}, "text": msg or ""}}
-        return {"ok": True, "iid": iid}
+        return {"ok": True, "iid": iids[0] if len(iids) == 1 else None, "iids": iids}
 
     def session_seen(self):
         """Человек посмотрел результат запуска/завершения — больше не показывать его при открытии окна."""
