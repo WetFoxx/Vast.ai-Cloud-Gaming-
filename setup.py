@@ -275,9 +275,9 @@ def step_tailscale():
 # Скрипт wolf-setup.sh — в репозитории проекта на GitHub, ссылка закреплена на коммит (v3.9,
 # побайтно совпадает с wolf-setup.sh в проекте). Изменения в репозитории не попадут на машины,
 # пока здесь не поменяют коммит и не обновят шаблон (vastgame setup → шаг «Шаблон»).
-SCRIPT_VERSION = "v4.0"
+SCRIPT_VERSION = "v4.1"
 SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-              "82c6cefda9357e2f42bde71c19a6453edfaee55d/wolf-setup.sh")
+              "580860ad0a4b6506c6591f49b70f9ae8992be182/wolf-setup.sh")
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
 # Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
 # Tailscale (41641/udp, 3478/udp — STUN)
