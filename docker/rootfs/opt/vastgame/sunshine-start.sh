@@ -4,15 +4,25 @@
 # ~/.config/sunshine едет в облако с identity), а захват, кодировщик и режим геймпада — свои (на KVM NvFBC нет,
 # и его sunshine.conf мы не трогаем). NVENC проверяется: нет — захват X11 и кодирование процессором
 # (/run/vastgame/nvenc = no — машину стоит заменить).
+# Зовут: wolf (sunshine_restart, режим Docker), присмотр entrypoint.sh и рабочий стол без агента —
+# под блокировкой, чтобы двое не запустили две Sunshine сразу.
 set -u
+# sunshine-start.sh ensure — только если Sunshine не работает (присмотр: пока он ждал блокировку, её мог поднять wolf;
+# лишний перезапуск оборвал бы начатую связку с Moonlight)
+exec 9>/run/vastgame/sunshine.lock
+flock -w 120 9 || { echo "sunshine: занято другим перезапуском"; exit 1; }
 DU=user
+[ "${1:-}" = ensure ] && pgrep -u "$DU" -x sunshine >/dev/null && exit 0
 DH=/home/user
 C=$DH/.config/sunshine
 CONF=$C/sunshine-docker.conf
 LOGF=/tmp/sunshine.log
 mkdir -p "$C" && chown -R "$DU:" "$DH/.config"
 [ -f "$C/apps.json" ] || { [ -f /usr/share/sunshine/apps.json ] && cp /usr/share/sunshine/apps.json "$C/apps.json" && chown "$DU:" "$C/apps.json"; }
-u() { runuser -u "$DU" -- env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u $DU) HOME="$DH" USER="$DU" \
+# Чистое окружение, как на KVM (env -i): ключи аккаунта Vast из окружения root — не в Sunshine
+XRD=/run/user/$(id -u $DU)
+u() { runuser -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" LANG=C.UTF-8 DISPLAY=:0 \
+        XDG_RUNTIME_DIR="$XRD" DBUS_SESSION_BUS_ADDRESS="unix:path=$XRD/bus" \
         PATH=/usr/local/bin:/usr/bin:/bin:/usr/games "$@"; }
 
 conf() {  # $1 захват  $2 кодировщик
@@ -39,14 +49,16 @@ start() {  # $1 захват  $2 кодировщик
   conf "$1" "$2"
   rm -f "$LOGF"
   if [ "$1" = nvfbc ]; then
-    u setsid env LD_PRELOAD=libvgpad.so LD_LIBRARY_PATH=/opt/fbc sunshine "$CONF" >/dev/null 2>&1 &
+    u setsid env LD_PRELOAD=libvgpad.so LD_LIBRARY_PATH=/opt/fbc sunshine "$CONF" </dev/null >/dev/null 2>&1 9>&- &
   else
-    u setsid env LD_PRELOAD=libvgpad.so sunshine "$CONF" >/dev/null 2>&1 &
+    u setsid env LD_PRELOAD=libvgpad.so sunshine "$CONF" </dev/null >/dev/null 2>&1 9>&- &
   fi
   for i in $(seq 1 40); do grep -qE "Found H.264 encoder|Couldn.t find any working encoder" "$LOGF" 2>/dev/null && break; sleep 0.5; done
 }
 
-[ -n "${SUNSHINE_PASSWORD:-}" ] && u sunshine --creds vastgame "$SUNSHINE_PASSWORD" >/dev/null 2>&1
+# Логин кабинета из переменной — только без агента: у агента логин общий с KVM и приезжает из облака
+# (identity), а задаёт его приложение (wolf sunshine-creds)
+[ -z "${WOLF_SCRIPT_URL:-}" ] && [ -n "${SUNSHINE_PASSWORD:-}" ] && u sunshine --creds vastgame "$SUNSHINE_PASSWORD" >/dev/null 2>&1
 
 if [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ]; then start nvfbc nvenc; else start x11 nvenc; fi
 if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then

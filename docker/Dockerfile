@@ -28,6 +28,7 @@ RUN dpkg --add-architecture i386 && apt-get update -qq && apt-get install -yq --
       xserver-xorg-core x11-xserver-utils x11-utils x11-apps xauth mesa-utils netpbm \
       xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfce4-terminal thunar xfconf \
       adwaita-icon-theme hicolor-icon-theme fonts-dejavu-core fonts-liberation dbus dbus-x11 at-spi2-core \
+      libnotify-bin xfce4-notifyd \
       pulseaudio pulseaudio-utils \
       curl ca-certificates gnupg python3 procps iproute2 pciutils psmisc less nano zstd unzip xz-utils file \
       zenity xdg-utils libibus-1.0-5 libevdev2 libsdl2-2.0-0 evtest \

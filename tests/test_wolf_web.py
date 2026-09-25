@@ -43,7 +43,8 @@ class TestWolfWeb(unittest.TestCase):
         # Как настоящий: --json — только сразу после подкоманды (проверено на Tailscale 1.102, 2026-09-25)
         ts.write_text("#!/bin/sh\n[ \"$2\" = --json ] || { echo 'too many arguments' >&2; exit 1; }\ncase \"$1\" in\n"
                       f"  status) echo '{{\"Self\": {{\"UserID\": {OWNER}}}}}';;\n"
-                      "  whois) echo \"{\\\"UserProfile\\\": {\\\"ID\\\": $(cat " + str(d) + "/who)}, "
+                      "  whois) echo \"$3\" >> " + str(d) + "/whois_args; "
+                      "echo \"{\\\"UserProfile\\\": {\\\"ID\\\": $(cat " + str(d) + "/who)}, "
                       "\\\"Node\\\": {\\\"Tags\\\": $(cat " + str(d) + "/tags)}}\";;\nesac\n")
         # Поддельный wolf: записывает, что его попросили и что пришло на вход
         wolf = d / "wolf"
@@ -65,7 +66,7 @@ class TestWolfWeb(unittest.TestCase):
 
     def setUp(self):
         self.owner(OWNER)
-        for f in ("calls", "stdin"):
+        for f in ("calls", "stdin", "whois_args"):
             (self.d / f).unlink(missing_ok=True)
         p = mock.patch.object(wolfnode, "WOLF_PORT", self.port)
         p.start()
@@ -97,6 +98,20 @@ class TestWolfWeb(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.calls(), ["sunshine-creds vastgame"])
         self.assertEqual((self.d / "stdin").read_text(), "секрет\n")
+
+    def test_loopback_asks_tailscale_with_port(self):
+        # [v4.0] В Docker Tailscale без /dev/net/tun передаёт соединения с 127.0.0.1 — отправителя он
+        # знает только по адресу с портом (proxymap); без порта whois 127.0.0.1 никого бы не нашёл
+        self.assertEqual(self.run_cmd("ping"), (0, "ok\n"))
+        asked = (self.d / "whois_args").read_text().split()
+        self.assertEqual(len(asked), 1)
+        self.assertRegex(asked[0], r"^127\.0\.0\.1:\d+$")
+
+    def test_peer_address_forms(self):
+        peer = load_wolf_web(self.d / "wolf")["peer"]
+        self.assertEqual(peer("100.64.0.5", 5555), "100.64.0.5")           # KVM: как раньше, без порта
+        self.assertEqual(peer("127.0.0.1", 5555), "127.0.0.1:5555")
+        self.assertEqual(peer("::1", 5555), "[::1]:5555")
 
     def test_forget_name_checked(self):
         for bad in ("../etc/passwd", "sgame--a/b", "-rf", "identity", "pfx--1\nfinish"):

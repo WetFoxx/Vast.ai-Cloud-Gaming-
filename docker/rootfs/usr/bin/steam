@@ -5,8 +5,10 @@
 # их откатило и Steam вышел с «Steam now requires user namespaces» (код 71) — заплатка и перезапуск.
 # Геймпад: библиотека vgpad в играх (LD_PRELOAD — Steam передаёт играм сам), SDL ищет джойстики без udev.
 # -cef-disable-gpu-compositing — иначе Big Picture чёрный (GLXBadPixmap).
+# VG (пустая, но заданная) включает условные заплатки Steam (steam-patch.py): без неё — на KVM, куда файлы
+# Steam приезжают из общего облака, — заплатки ведут себя как оригинал.
 ME=$(id -u)
-export LD_PRELOAD="libvgpad.so${LD_PRELOAD:+:$LD_PRELOAD}" SDL_JOYSTICK_DISABLE_UDEV=1
+export LD_PRELOAD="libvgpad.so${LD_PRELOAD:+:$LD_PRELOAD}" SDL_JOYSTICK_DISABLE_UDEV=1 VG=
 # Steam уже работает — передать ему команду (steam://…) и выйти
 if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
 exec 9>"/tmp/steam-run-$ME.lock"
