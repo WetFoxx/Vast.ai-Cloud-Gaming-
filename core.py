@@ -22,6 +22,7 @@ import time
 import drive
 import history
 import market
+import sshkey
 from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
 from wolfnode import NODE, links, ssh, ssh_run, ts_node, wolf_status
 
@@ -127,6 +128,10 @@ def balance():
 def rent(offer_id, body, offer=None):
     """Арендовать. Возвращает (id инстанса, время начала). Деньги начинают списываться сразу.
     offer — данные машины (видеокарта, страна, цена) для истории сессий."""
+    try:
+        sshkey.ensure()   # без SSH-ключа в аккаунте Vast не запускает VM (у друга 2026-09-25)
+    except VastgameError:
+        pass              # проверка не удалась — пробуем арендовать как есть; Vast сам объяснит отказ
     t0 = time.time()
     r = call("PUT", f"asks/{offer_id}/", body)
     iid = r.get("new_contract")

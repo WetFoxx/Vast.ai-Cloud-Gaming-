@@ -480,6 +480,8 @@ function setupActions(st, li) {
     box.append(f, button(t("setup.act.save"), () => act(li, () => api().save_vast_key(f.value)), true),
                button(t("setup.act.keys_page"), () => openUrl(KEYS_URL.vast)));
   }
+  if (key === "setup.sshkey.missing")
+    box.appendChild(button(t("setup.act.add_sshkey"), () => act(li, () => api().add_ssh_key()), true));
   if (key === "setup.vast.file") {
     box.appendChild(button(t("setup.act.move_key"), async () => {
       if (await ask({ title: t("setup.confirm.move.title"), text: t("setup.confirm.move.text") })) act(li, () => api().move_vast_key());
@@ -950,7 +952,7 @@ function demoSetup() {
   return { ready: false, brew: true, platform: "darwin", steps: [
     st("rclone", "ok", "setup.rclone.ok"), st("tailscale_app", "ok", "setup.tailscale_app.ok", { tailnet: "tail3d42c9.ts.net" }),
     st("moonlight", "missing", "setup.moonlight.missing"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
-    st("google", "warn", "setup.google.old"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),
+    st("google", "warn", "setup.google.old"), st("sshkey", "missing", "setup.sshkey.missing"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),
     st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.11" }),
     st("autostart", "warn", "setup.autostart.off"), st("open_at_login", "ok", "setup.open_at_login.off")] };
 }

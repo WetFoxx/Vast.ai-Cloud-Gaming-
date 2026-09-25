@@ -18,6 +18,7 @@ import drive
 import moonlight
 import paths
 import setup   # функции мастера: при import он НЕ запускается (защищён __main__)
+import sshkey
 from vastapi import KEY_FILE, SERVICE, VastgameError, call, check_key, my_template
 
 
@@ -61,6 +62,15 @@ def vast_key():
     if KEY_FILE.exists():
         return _step("vast", "warn", "setup.vast.file")
     return _step("vast", "missing", "setup.vast.missing")
+
+
+def ssh_key():
+    """SSH-ключ в аккаунте Vast: без него Vast не запускает VM (sshkey.py)."""
+    try:
+        n = sshkey.account_keys()
+    except VastgameError:
+        return _step("sshkey", "warn", "setup.sshkey.unknown")
+    return _step("sshkey", "ok", "setup.sshkey.ok", count=n) if n else _step("sshkey", "missing", "setup.sshkey.missing")
 
 
 def _vast_secrets():
@@ -136,10 +146,10 @@ def status():
     steps.append(v)
     if v["state"] == "missing":
         # Без ключа Vast остальное (переменные аккаунта, шаблон) не проверить
-        steps += [_step(i, "missing", f"setup.{i}.needs_vast") for i in ("google", "tailscale_key", "template")]
+        steps += [_step(i, "missing", f"setup.{i}.needs_vast") for i in ("sshkey", "google", "tailscale_key", "template")]
     else:
         secrets = _vast_secrets()
-        steps += [google(secrets), tailscale_key(secrets), template()]
+        steps += [ssh_key(), google(secrets), tailscale_key(secrets), template()]
     steps += autostart_steps()
     return {"steps": steps, "ready": all(s["state"] != "missing" for s in steps),
             "brew": bool(paths.find("brew")), "platform": sys.platform}

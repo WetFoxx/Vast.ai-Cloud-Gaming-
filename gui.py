@@ -37,6 +37,7 @@ import settings
 import paths
 import setup
 import setupcheck
+import sshkey
 from vastapi import KEY_FILE
 import steamnames
 from jobs import Job, error_data
@@ -309,7 +310,16 @@ class Api:
             subprocess.Popen(["open", "-a", "Tailscale"])
 
     def save_vast_key(self, key):
-        return self._simple(setup.save_vast_key, key)
+        r = self._simple(setup.save_vast_key, key)
+        if r.get("ok"):
+            try:
+                sshkey.ensure()          # сразу и SSH-ключ в аккаунт — без него Vast не запустит машину
+            except VastgameError:
+                pass                     # шаг «SSH-ключ» покажет, что не так; перед арендой — ещё попытка
+        return r
+
+    def add_ssh_key(self):
+        return self._simple(sshkey.ensure)
 
     def move_vast_key(self):
         """Перенести ключ из старого файла ~/.vast_api_key в Keychain и удалить файл (страница спросила)."""

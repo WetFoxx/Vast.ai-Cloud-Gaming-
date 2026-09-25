@@ -32,12 +32,13 @@ class TestStatus(unittest.TestCase):
         r = setupcheck.status()
         self.assertFalse(r["ready"])
         self.assertEqual([s["key"] for s in r["steps"][2:]],
-                         ["setup.google.needs_vast", "setup.tailscale_key.needs_vast", "setup.template.needs_vast",
+                         ["setup.sshkey.needs_vast", "setup.google.needs_vast", "setup.tailscale_key.needs_vast", "setup.template.needs_vast",
                           "setup.autostart.off", "setup.open_at_login.off"])
 
     def test_warn_does_not_block(self):
         self.patch(tools=lambda: [step("rclone", "ok")], vast_key=lambda: step("vast", "warn"),
-                   _vast_secrets=lambda: set(), google=lambda s: step("google", "warn"),
+                   _vast_secrets=lambda: set(), ssh_key=lambda: step("sshkey", "ok"),
+                   google=lambda s: step("google", "warn"),
                    tailscale_key=lambda s: step("tailscale_key", "ok"), template=lambda: step("template", "ok"))
         r = setupcheck.status()
         self.assertTrue(r["ready"])                     # служба выключена (warn) — играть всё равно можно
