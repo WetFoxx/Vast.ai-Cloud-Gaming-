@@ -44,12 +44,13 @@ RUN curl -fsSL -o /tmp/sunshine.deb \
     && rm -rf /tmp/sunshine.deb /var/lib/apt/lists/*
 
 # Steam: запускатель + библиотеки из репозитория Valve (иначе steamdeps ждёт sudo в xterm).
-# /usr/games/steam отводим в steam.real — на его место steam-run.sh с заплатками (меню, Big Picture, Sunshine).
+# /usr/bin/steam (его зовут меню, Big Picture, Sunshine) отводим — на его место обёртка с заплатками (rootfs/usr/bin/steam).
 RUN curl -fsSL -o /tmp/steam.deb https://cdn.akamai.steamstatic.com/client/installer/steam.deb \
     && apt-get update -qq && apt-get install -yq /tmp/steam.deb \
     && apt-get update -qq && apt-get install -yq --no-install-recommends steam-libs-amd64:amd64 steam-libs-i386:i386 \
     && rm -rf /tmp/steam.deb /var/lib/apt/lists/* \
-    && dpkg-divert --add --rename --divert /usr/games/steam.real /usr/games/steam
+    && dpkg-divert --add --rename --divert /usr/bin/steam.real /usr/bin/steam \
+    && mkdir -p /opt/vastgame/real && ln -sfn /usr/lib/steam/bin_steam.sh /opt/vastgame/real/steam
 
 # Tailscale (официальный репозиторий) и rclone (официальный установщик)
 RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
@@ -65,7 +66,8 @@ COPY rootfs/ /
 
 # Настройки XFCE по умолчанию (без вопроса о панели при первом входе, без композитора — меньше задержка),
 # папка игр как на KVM (~/Downloads/Games), ярлык на неё на рабочем столе
-RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/games/steam \
+RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/bin/steam \
+    && ln -sfn /usr/bin/steam /usr/games/steam \
     && mkdir -p /home/user/.config/xfce4/xfconf/xfce-perchannel-xml /home/user/Downloads/Games /home/user/Desktop \
     && cp /etc/xdg/xfce4/panel/default.xml /home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
     && cp /opt/vastgame/xfwm4.xml /home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \

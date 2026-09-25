@@ -80,7 +80,7 @@ stage desktop
 u setsid dbus-launch --exit-with-session startxfce4 >/var/log/xfce.log 2>&1 &
 sleep 3
 if [ "${STEAM_AUTOSTART:-1}" = 1 ]; then
-  u setsid /usr/games/steam >/dev/null 2>&1 &
+  u setsid /usr/bin/steam >/tmp/steam-wrapper.log 2>&1 &
   log "Steam запускается"
 fi
 stage ready

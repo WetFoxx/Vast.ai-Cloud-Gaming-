@@ -11,7 +11,7 @@ Sunshine (NVENC + NvFBC), звук, Tailscale без /dev/net/tun, геймпа�
 - `Dockerfile` — сборка (GitHub Actions → `ghcr.io/wetfoxx/vastgame-desktop`).
 - `rootfs/opt/vastgame/entrypoint.sh` — запуск: Tailscale, драйвер под хост (`nvidia-setup.sh`), экран
   (`display-setup.sh`, `wolf-res`), звук, геймпад (`vgpadd.py`), Sunshine (`sunshine-start.sh`), XFCE, Steam.
-- `rootfs/usr/games/steam`, `steam-patch.sh` — Steam без user namespaces (заплатки ставятся сами).
+- `rootfs/usr/bin/steam`, `steam-patch.sh` — Steam без user namespaces (заплатки ставятся сами).
 - `vgpad/` — виртуальный геймпад (LD_PRELOAD) и посредник.
 
 Environment: `RES`, `TS_HOSTNAME`, `TAILSCALE_AUTHKEY`, `SUNSHINE_PASSWORD`, `STEAM_AUTOSTART`,
