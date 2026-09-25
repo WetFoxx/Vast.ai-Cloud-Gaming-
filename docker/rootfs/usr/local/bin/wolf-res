@@ -1,0 +1,41 @@
+#!/bin/bash
+# wolf-res [ШИРИНА ВЫСОТА [ГЦ]] — режим под клиента Moonlight (зовёт Sunshine, global_prep_cmd); без аргументов —
+# базовый (/etc/wolf-res.conf). Как на KVM (wolf-setup.sh), плюс Docker: экран прижать к 0,0 и сжать поле X под
+# режим — иначе монитор оказывается в углу большого виртуального поля и Sunshine снимает пустоту (чёрный экран).
+# Всегда завершается кодом 0: неудача не мешает трансляции. Лог: /var/log/wolf-res.log
+BASE=$(cat /etc/wolf-res.conf 2>/dev/null); BASE=${BASE:-1920x1200}
+log() { echo "[$(date '+%F %T')] $*" >> /var/log/wolf-res.log 2>/dev/null || true; }
+if [ "$(id -u)" = 0 ]; then
+  exec runuser -u user -- env DISPLAY=:0 HOME=/home/user /usr/local/bin/wolf-res "$@"
+fi
+export DISPLAY="${DISPLAY:-:0}"
+log "вызов: ${*:-<без аргументов>}"
+W=${1:-}; H=${2:-}; HZ=${3:-60}
+case "$W" in ''|*[!0-9]*) W=0 ;; esac
+case "$H" in ''|*[!0-9]*) H=0 ;; esac
+case "$HZ" in ''|*[!0-9]*) HZ=60 ;; esac
+[ "$HZ" -ge 24 ] || HZ=60
+if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then TARGET="${W}x${H}"; else TARGET=$BASE; W=${BASE%x*}; H=${BASE#*x}; HZ=60; fi
+xr() { xrandr "$@" 2>/dev/null; }
+OUT=$(xr | awk '/ connected/{print $1; exit}')
+[ -n "$OUT" ] || { log "нет подключённого выхода"; exit 0; }
+cur() { xr | sed -nE "s/^$OUT connected (primary )?([0-9]+x[0-9]+)\+.*/\2/p" | head -1; }
+place() { xr --output "$OUT" --pos 0x0 --fb "$(cur)"; }
+[ "$(cur)" = "$TARGET" ] && { place; log "$TARGET уже активно"; exit 0; }
+ok=0
+if xr | grep -Eq "^[[:space:]]+$TARGET[[:space:]]"; then
+  { xr --output "$OUT" --mode "$TARGET" --rate "$HZ" || xr --output "$OUT" --mode "$TARGET"; } && ok=1
+fi
+if [ $ok = 0 ]; then
+  for hz in $(printf '%s\n' "$HZ" 60 | awk '!s[$0]++'); do
+    if [ "$hz" = 60 ]; then ML=$(cvt -r "$W" "$H" 60 2>/dev/null); else ML=$(cvt "$W" "$H" "$hz" 2>/dev/null); fi
+    NUMS=$(printf '%s\n' "$ML" | sed -n 's/^Modeline *"[^"]*" *//p')
+    [ -n "$NUMS" ] || continue
+    NAME="w${TARGET}_$hz"
+    xr --newmode "$NAME" $NUMS
+    xr --addmode "$OUT" "$NAME"
+    xr --output "$OUT" --mode "$NAME" && { ok=1; break; }
+  done
+fi
+if [ $ok = 1 ]; then place; log "установлено $(cur) (запрос ${TARGET}@${HZ})"; else log "не удалось ${TARGET}@${HZ}"; fi
+exit 0
