@@ -269,8 +269,16 @@ function filtersActive() { return filters.countries.length || filters.speed || f
 
 // Сортировка — нажатием на заголовок колонки; повторное нажатие переворачивает. Первое нажатие —
 // самый полезный порядок: цена и пинг от меньшего, интернет и надёжность от большего.
-const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, rel: (o) => o.reliability };
-const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", rel: "desc" };
+// Модель видеокарты — по номеру серии («RTX 4070» → 4070), внутри серии: обычная < Super < Ti < Ti Super;
+// ноутбучная — ниже настольной с тем же номером. GTX 1660 < RTX 2060 < … < RTX 5090. Первое нажатие — старшие сверху
+function gpuRank(o) {
+  const m = /^(?:RTX|GTX)\s*(\d{3,4})\s*(.*)$/i.exec(o.gpu || "");
+  if (!m) return null;
+  const rest = m[2].toLowerCase(), ti = /\bti\b/.test(rest), sup = /\bs\b|super/.test(rest);
+  return Number(m[1]) * 10 + (ti ? 2 : 0) + (sup ? 1 : 0) - (/laptop|mobile|max-q/.test(rest) ? 5 : 0);
+}
+const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, rel: (o) => o.reliability, gpu: gpuRank };
+const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", rel: "desc", gpu: "desc" };
 
 function applyFilters(list) {
   const f = filters;
