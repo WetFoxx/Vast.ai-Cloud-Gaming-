@@ -851,6 +851,9 @@ sunshine_prep() {
   # нового ключевого (~RTT). Замер 2026-09-25 (~1% потерь на маршруте): 7–20% пропавших кадров → 3.6%.
   # Только если строки нет — свой выбор из кабинета Sunshine не трогаем.
   grep -q '^fec_percentage' "$cf" || printf 'fec_percentage = 50\n' >> "$cf"
+  # [v4.0] Имя для Moonlight одно на KVM и Docker (связка общая — плитка та же): без него KVM назывался
+  # «ubuntu», а контейнер — случайным номером. Своё имя из кабинета Sunshine не трогаем
+  grep -q '^sunshine_name' "$cf" || printf 'sunshine_name = vastai-gaming\n' >> "$cf"
   chown -R "$DU:" "$d"
 }
 

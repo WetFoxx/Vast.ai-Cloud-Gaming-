@@ -31,6 +31,7 @@ conf() {  # $1 захват  $2 кодировщик
 capture = $1
 encoder = $2
 gamepad = x360
+sunshine_name = vastai-gaming
 output_name = 0
 system_tray = disabled
 fec_percentage = 50
