@@ -49,7 +49,8 @@ HERE = Path(__file__).resolve().parent
 LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_PAGE = 15    # машин на странице выбора (показываются все подходящие, по страницам)
 # Фильтры списка машин по умолчанию: все страны, любая скорость и пинг, сначала дешёвые
-OFFER_FILTERS = {"countries": [], "speed": 0, "ping": 0, "sort": "price"}
+OFFER_FILTERS = {"countries": [], "speed": 0, "ping": 0, "sort": "price", "dir": "asc"}
+OFFER_SORTS = ("price", "ping", "net", "rel")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
@@ -168,12 +169,13 @@ class Api:
         return {k: saved.get(k, v) for k, v in OFFER_FILTERS.items()}
 
     def save_offer_filters(self, f):
-        """Запомнить фильтры списка машин (страны, скорость от, пинг до, сортировка)."""
+        """Запомнить фильтры списка машин (страны, скорость от, пинг до, сортировка: колонка и направление)."""
         if not isinstance(f, dict):
             return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
         clean = {"countries": [c for c in f.get("countries") or [] if isinstance(c, str)][:100],
                  "speed": max(0, int(f.get("speed") or 0)), "ping": max(0, int(f.get("ping") or 0)),
-                 "sort": f.get("sort") if f.get("sort") in ("price", "ping") else "price"}
+                 "sort": f.get("sort") if f.get("sort") in OFFER_SORTS else "price",
+                 "dir": "desc" if f.get("dir") == "desc" else "asc"}
         settings.set("offer_filters", clean)
         return {"ok": True}
 

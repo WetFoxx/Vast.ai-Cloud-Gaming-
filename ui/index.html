@@ -88,7 +88,6 @@
           <button id="f-countries-btn" class="filter-btn"></button></label>
         <label><span class="label" data-i18n="filter.speed"></span><select id="f-speed"></select></label>
         <label><span class="label" data-i18n="filter.ping"></span><select id="f-ping"></select></label>
-        <label><span class="label" data-i18n="filter.sort"></span><select id="f-sort"></select></label>
       </div>
       <div class="countries" id="f-countries" hidden>
         <div class="countries-head"><button id="f-countries-all" data-i18n="filter.countries.all"></button></div>
@@ -102,10 +101,10 @@
             <th></th>
             <th data-i18n="col.gpu"></th>
             <th data-i18n="col.country"></th>
-            <th class="num" data-i18n="col.ping"></th>
-            <th class="num" data-i18n="col.net"></th>
-            <th class="num" data-i18n="col.price"></th>
-            <th class="num" data-i18n="col.reliability"></th>
+            <th class="num sortable" data-sort="ping"><span data-i18n="col.ping"></span><span class="arrow"></span></th>
+            <th class="num sortable" data-sort="net"><span data-i18n="col.net"></span><span class="arrow"></span></th>
+            <th class="num sortable" data-sort="price"><span data-i18n="col.price"></span><span class="arrow"></span></th>
+            <th class="num sortable" data-sort="rel"><span data-i18n="col.reliability"></span><span class="arrow"></span></th>
           </tr>
         </thead>
         <tbody></tbody>

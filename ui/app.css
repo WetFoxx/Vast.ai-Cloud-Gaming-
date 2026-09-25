@@ -266,3 +266,6 @@ td.ping.estimate, td.ping.unknown { color: var(--muted); }
 td.ping.measured { font-weight: 600; }
 .pager { display: flex; justify-content: center; align-items: center; gap: 12px; padding: 8px 0 2px; font-size: 13px; color: var(--muted); }
 .pager button { min-width: 36px; }
+th.sortable { cursor: pointer; }
+th.sortable:hover, th.sorted { color: var(--text); }
+th .arrow { display: inline-block; width: 1em; text-align: center; }

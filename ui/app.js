@@ -206,14 +206,33 @@ function countryName(cc) {
 function saveFilters() { if (!DEMO) api().save_offer_filters(filters); }
 function filtersActive() { return filters.countries.length || filters.speed || filters.ping; }
 
+// Сортировка — нажатием на заголовок колонки; повторное нажатие переворачивает. Первое нажатие —
+// самый полезный порядок: цена и пинг от меньшего, интернет и надёжность от большего.
+const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, rel: (o) => o.reliability };
+const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", rel: "desc" };
+
 function applyFilters(list) {
   const f = filters;
   const r = list.filter((o) => (!f.countries.length || f.countries.includes(o.cc))
     && (!f.speed || netSpeed(o) >= f.speed)
     && (!f.ping || (o.ping.ms != null && o.ping.ms <= f.ping)));
-  // Сервер уже отсортировал по полной цене часа; «по пингу» — неизвестный пинг в конце, при равном — дешевле
-  if (f.sort === "ping") r.sort((a, b) => (a.ping.ms ?? 1e9) - (b.ping.ms ?? 1e9) || a.total - b.total);
+  // Цена — только аренда: трафик по реальным списаниям почти не берётся. Неизвестное (пинг «—») — всегда в конце
+  const val = SORT_VALUE[f.sort] || SORT_VALUE.price, dir = f.dir === "desc" ? -1 : 1;
+  r.sort((a, b) => {
+    const x = val(a), y = val(b);
+    if (x == null || y == null) return (x == null) - (y == null) || a.price - b.price;
+    return (x - y) * dir || a.price - b.price;
+  });
   return r;
+}
+
+for (const th of document.querySelectorAll("#offers-table th.sortable")) {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (filters.sort === key) filters.dir = filters.dir === "asc" ? "desc" : "asc";
+    else { filters.sort = key; filters.dir = SORT_FIRST[key]; }
+    page = 0; saveFilters(); renderOffers();
+  });
 }
 
 // Машины в таблице: последняя (если свободна и проходит фильтры) — первой строкой с пометкой
@@ -232,7 +251,12 @@ function fillSelect(sel, values, label, value) {
 function renderFilters(d) {
   fillSelect($("f-speed"), SPEEDS, (v) => v ? t("filter.speed.from", { n: v }) : t("filter.any"), filters.speed);
   fillSelect($("f-ping"), PINGS, (v) => v ? t("filter.ping.to", { n: v }) : t("filter.any"), filters.ping);
-  fillSelect($("f-sort"), ["price", "ping"], (v) => t("filter.sort." + v), filters.sort);
+  for (const th of document.querySelectorAll("#offers-table th.sortable")) {
+    const on = th.dataset.sort === (filters.sort || "price");
+    th.classList.toggle("sorted", on);
+    th.title = t("sort.hint");
+    th.querySelector(".arrow").textContent = on ? (filters.dir === "desc" ? "▼" : "▲") : "";
+  }
   const names = filters.countries.map(countryName);
   $("f-countries-btn").textContent = !names.length ? t("filter.countries.any")
     : names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "");
@@ -253,9 +277,9 @@ function renderFilters(d) {
   }
 }
 
-for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"], ["f-sort", "sort"]]) {
+for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"]]) {
   $(id).addEventListener("change", () => {
-    filters[key] = key === "sort" ? $(id).value : Number($(id).value);
+    filters[key] = Number($(id).value);
     page = 0; saveFilters(); renderOffers();
   });
 }
@@ -274,6 +298,7 @@ function renderOffers() {
   const d = offersData;
   if (!d) return;
   if (!filters) filters = { ...d.filters, countries: [...(d.filters.countries || [])] };
+  if (!SORT_VALUE[filters.sort]) filters.sort = "price";
   renderFilters(d);
   const list = offerList(d);
   $("offers-summary").textContent = t("offers.summary", { count: d.count, rel: num(d.min_rel * 100, 0), disk: d.disk })
@@ -1026,7 +1051,7 @@ function demoOffers(disk) {
   offers.sort((a, b) => a.total - b.total);
   const busy = new URLSearchParams(location.search).get("last") === "busy";
   return { disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: offers.length, balance: 3.18, page_size: 15,
-           filters: { countries: [], speed: 0, ping: 0, sort: "price" },
+           filters: { countries: [], speed: 0, ping: 0, sort: "price", dir: "asc" },
            sync: { steam_games: false, other_games: true, saves: true }, offers,
            last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
                    offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", cc: "US", price: 0.162, traffic: 0.05, total: 0.212,
