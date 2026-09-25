@@ -52,6 +52,7 @@ OFFERS_PAGE = 15    # машин на странице выбора (показ�
 OFFER_FILTERS = {"countries": [], "speed": 0, "ping": 0, "sort": "price", "dir": "asc"}
 OFFER_SORTS = ("price", "ping", "net", "rel")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
+SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
 
@@ -145,7 +146,7 @@ class Api:
             return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
                     "cc": geo_.rsplit(",", 1)[-1].strip().upper() or "?",
                     "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
-                    "reliability": o["reliability"], "failed": o.get("_failed"),
+                    "reliability": o["reliability"], "failed": o.get("_failed"), "start_min": o.get("_start_min"),
                     "net_down": round(o.get("inet_down") or 0), "net_up": round(o.get("inet_up") or 0),
                     "ping": latency.for_offer(o, remembered, me)}
         return {"disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
@@ -186,15 +187,17 @@ class Api:
         saved = settings.get("sync") or {}
         return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
 
-    def play(self, offer_id, sync=None, disk=None, lang=None):
+    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None):
         """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
         закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
-        lang — язык окна для уведомления в конце."""
+        lang — язык окна для уведомления в конце, spare — следующие машины его списка (на замену,
+        если Vast не запустит выбранную)."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
         settings.set("sync", sync)
-        if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang):
+        spare = [int(x) for x in (spare or []) if str(x).isdigit() and int(x) != int(offer_id)][:SPARE]
+        if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 

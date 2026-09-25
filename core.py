@@ -28,7 +28,8 @@ import wolfnode
 from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
 from wolfnode import NODE, links, ssh, ssh_run, ts_node, wolf_status
 
-VAST_START_MIN = 30      # сколько ждать, пока Vast запустит машину
+VAST_START_MIN = 10      # сколько ждать, пока Vast запустит машину (обычно 2–5 мин). Дольше — хост завис
+                         # в Create/Loading (у KVM на Vast такое бывает часто): удалить, взять следующую
 TAILSCALE_WARN_MIN = 10  # после стольких минут без узла — подсказать, где искать причину
 TAILSCALE_MIN = 20       # сколько всего ждать узел в Tailscale
 SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown
@@ -264,6 +265,7 @@ def wait_ready(iid, t0, o, ui):
             last = st
         if st == "running":
             market.clear_bad(o.get("machine_id"))     # хост справился — прежний сбой был временным
+            market.record_start(o.get("machine_id"), time.time() - t0)   # за сколько запустился — в список машин
             # Диагностика: что реально попало на машину. Только ИМЕНА переменных — значения (ключи)
             # не показываем. Порты (-p ...) тоже лежат в extra_env — их пропускаем. Секретные
             # переменные (ключи из аккаунта, OPEN_BUTTON_TOKEN) API не показывает — это нормально.
@@ -289,7 +291,7 @@ def wait_ready(iid, t0, o, ui):
             _failed_start(iid, "Хост не смог запустить машину: " + hmsg, o, ui, bad_host=True,
                           key="core.fail_host", msg=hmsg)
         if time.time() > deadline:
-            _failed_start(iid, f"Машина не запустилась за {VAST_START_MIN} минут.", o, ui, bad_host=True,
+            _failed_start(iid, f"Vast не запустил машину за {VAST_START_MIN} минут.", o, ui, bad_host=True,
                           key="core.fail_timeout", min=VAST_START_MIN)
         time.sleep(15)
 

@@ -389,6 +389,7 @@ function renderOffers() {
       c[1].appendChild(tag);
     };
     if (o.last) addTag("tag", t("offers.last.tag"));
+    if (o.start_min && !o.failed) addTag("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
     if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке
     c[2].textContent = o.country;
     pingCell(c[3], o.ping);
@@ -429,7 +430,10 @@ $("rent").addEventListener("click", async () => {
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
-  const r = await api().play(o.id, sync, disk, LANG);   // язык — для уведомления в конце
+  // Запасные — следующие машины из списка, как он сейчас отфильтрован и отсортирован: если Vast
+  // не запустит выбранную за 10 минут, фоновый процесс сам возьмёт следующую
+  const spare = offerList(offersData).map((x) => x.id).filter((id) => id !== o.id).slice(0, 10);
+  const r = await api().play(o.id, sync, disk, LANG, spare);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
 });
@@ -1153,6 +1157,7 @@ function startProgress(kind = "play") {
   $("progress-title").textContent = t("progress.title." + kind);
   $("progress-note").textContent = t(kind === "stop" ? "progress.background_stop" : "progress.background");
   $("tailscale-box").hidden = true;
+  $("progress-alert").hidden = true;
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
   $("progress-back").hidden = true;
@@ -1231,6 +1236,13 @@ async function pollOnce() {
       $("tailscale-box").hidden = false;
     }
     if (ev.key === "core.tailscale_online") $("tailscale-box").hidden = true;
+    // Машина не запустилась и её заменили — на видном месте, а не только в «Подробностях»
+    if (["core.fail_timeout", "core.fail_host", "core.fail_state", "core.switching"].includes(ev.key)) {
+      $("progress-alert").hidden = false;
+      $("progress-alert").textContent = ev.key === "core.switching"
+        ? [prog.lastFail, eventText(ev)].filter(Boolean).join("\n") : (prog.lastFail = eventText(ev));
+    }
+    if (ev.key === "core.tailscale_online") $("progress-alert").hidden = true;
     if (ev.key === "core.ssh_ok") $("tailscale-box").hidden = true;
   }
   prog.since = p.next;

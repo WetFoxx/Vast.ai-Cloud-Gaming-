@@ -28,7 +28,7 @@ def setUpModule():
     import tempfile
     import history, market, settings
     tmp = Path(tempfile.mkdtemp())
-    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS")]:
+    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"), (market, "STARTS")]:
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
         p.start()
         unittest.addModuleCleanup(p.stop)

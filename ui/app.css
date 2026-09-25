@@ -300,3 +300,4 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .stream-set select { font-size: 13px; padding: 5px 8px; border-radius: 8px; }
 .stream-set select.native { font-weight: 600; border-color: var(--accent); }
 #stream-hint { margin-top: 6px; }
+#progress-alert { white-space: pre-line; margin: 10px 0; }

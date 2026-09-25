@@ -23,6 +23,7 @@ GAMING = re.compile(r"^(RTX|GTX) \d{4}(?!Ada)")
 # Хосты, которые не смогли запустить машину: {machine_id: {"reason": ..., "date": ...}}. Их НЕ прячем —
 # сбой бывает временным, — а помечаем в списке; пометка снимается, когда машина на этом хосте запустилась.
 BAD_HOSTS = config_dir() / "bad_hosts.json"
+STARTS = config_dir() / "starts.json"     # за сколько секунд хосты доходили до running: {machine_id: [с, …]}
 
 
 def bad_hosts():
@@ -48,6 +49,30 @@ def clear_bad(machine_id):
         BAD_HOSTS.write_text(json.dumps(bad, ensure_ascii=False, indent=1))
 
 
+
+def record_start(machine_id, seconds):
+    """Запомнить, за сколько хост дошёл до running (последние 5 раз) — в списке «запуск ~N мин»."""
+    if machine_id is None:
+        return
+    try:
+        d = json.loads(STARTS.read_text())
+    except (OSError, ValueError):
+        d = {}
+    runs = (d.get(str(machine_id)) or [])[-4:] + [int(seconds)]
+    d[str(machine_id)] = runs
+    STARTS.write_text(json.dumps(d))
+
+
+def start_minutes(machine_id, starts=None):
+    """Обычное время запуска хоста в минутах (медиана) или None — ещё не запускали."""
+    if starts is None:
+        try:
+            starts = json.loads(STARTS.read_text())
+        except (OSError, ValueError):
+            starts = {}
+    runs = sorted(starts.get(str(machine_id)) or [])
+    return max(1, round(runs[len(runs) // 2] / 60)) if runs else None
+
 def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb=STREAM_GB, where=None):
     """Подходящие машины, от дешёвых к дорогим по полной цене часа.
     where — дополнительные фильтры Vast, например {"machine_id": {"eq": 140348}}.
@@ -69,11 +94,20 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         **(where or {}),
     }).get("offers", [])
     bad = bad_hosts()
+    try:
+        starts = json.loads(STARTS.read_text())
+    except (OSError, ValueError):
+        starts = {}
     rows = []
     for o in offers:
         if not GAMING.match(o["gpu_name"]):
             continue
+        # Vast снял с хоста допуск к виртуальным машинам (у KVM на Vast часть хостов висит в Create/
+        # Loading) — общая отметка verified тут ни при чём: у быстрой машины Алексея она «deverified»
+        if o.get("is_vm_deverified"):
+            continue
         o["_failed"] = (bad.get(str(o.get("machine_id"))) or {}).get("reason")   # раньше не запустилась
+        o["_start_min"] = start_minutes(o.get("machine_id"), starts)           # обычно запускается за N мин
         up = o.get("inet_up_cost") or 0       # $ за ГБ исходящего трафика (стрим идёт с машины к тебе)
         down = o.get("inet_down_cost") or 0   # $ за ГБ входящего (скачивание игр с Google Drive)
         # «Бесплатный» — дешевле $0.10 за ТБ: у таких хостов в API стоят копейки вроде 0.000003 $/ГБ

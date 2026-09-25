@@ -20,7 +20,7 @@ def setUpModule():
     import tempfile
     import history, market, settings
     tmp = Path(tempfile.mkdtemp())
-    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"),
+    for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"), (market, "STARTS"),
                       (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG"), (gui.jobs, "CANCEL"),
                       (gui.latency, "FILE")]:
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.{name}")
@@ -162,6 +162,13 @@ class TestPlay(unittest.TestCase):
         self.assertEqual(p["result"]["minutes"], 7)
         self.assertEqual(self.rented, [5])
         self.assertEqual(SENT[0][0], "Машина готова")                 # уведомление на языке окна
+
+    def test_spare_list_reaches_background_job(self):
+        # Запасные машины со страницы (на случай, если Vast не запустит выбранную) — в аргументах процесса
+        self.gate.set()
+        self.assertEqual(self.api.play(5, None, None, "ru", [7, "x", 5, 8]), {"ok": True})
+        wait_done(self.api, session=True)
+        self.assertEqual(gui.jobs.load()["args"]["spare"], [7, 8])    # мусор и сама выбранная — выброшены
 
     def cancellable_wait(self, iid, t0, o, ui):
         """Как core.wait_ready при отмене: увидел флаг — закончил с core.start_cancelled."""

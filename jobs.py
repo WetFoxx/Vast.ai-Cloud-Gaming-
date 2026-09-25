@@ -28,6 +28,7 @@ from pathlib import Path
 import keyring.errors
 
 import core
+import market
 import notify
 import paths
 import settings
@@ -195,10 +196,22 @@ def disk_size(disk, tpl):
     return max(DISK_MIN, min(DISK_MAX, int(disk)))
 
 
-def run_play(job, offer_id, sync=None, disk=None, lang=None):
-    """Аренда (человек уже ответил «да» в окне) и ожидание готовности."""
+MAX_TRIES = 3        # машин за один запуск: выбранная и до двух замен, если Vast её не запустил
+GONE_WAIT = 60       # с: ждать, пока удалённая зависшая машина исчезнет у Vast, прежде чем брать другую
+
+
+def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None):
+    """Аренда (человек уже ответил «да» в окне) и ожидание готовности.
+
+    spare — следующие машины из списка человека (с его фильтрами и порядком). Если Vast не довёл
+    выбранную до running за 10 минут или хост не смог её создать (у KVM на Vast часть хостов виснет
+    в Create/Loading), ядро её удаляет — и мы берём следующую, всего не больше MAX_TRIES. До running
+    Vast берёт только за диск (~$0.001 за такую машину — сверено с выпиской 2026-09-25)."""
     try:
         m = getattr(job, "meta", {})
+        tried = list(m.get("tried") or [])               # machine_id хостов, которые уже не запустились
+        tpl = core.template()
+        size = disk_size(disk, tpl)
         if m.get("iid"):
             # Продолжение после перерыва: машина уже арендована — только досмотреть запуск
             iid, t0, o = m["iid"], m["t0"], m["offer"]
@@ -207,14 +220,35 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None):
                                     key="progress.resume_gone", id=iid)
         else:
             core.require_no_machine()                        # ещё раз — прямо перед арендой
-            tpl = core.template()
-            size = disk_size(disk, tpl)
             settings.set("disk", size)
             o = core.offer_by_id(int(offer_id), size)       # свежая цена и наличие
-            iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
-            if hasattr(job, "set_meta"):
-                job.set_meta(iid=iid, t0=t0, offer=o)       # чтобы продолжить, если компьютер выключится
-        r = core.wait_ready(iid, t0, o, job)
+            iid, t0 = _rent(job, o, tpl, size, sync)
+        while True:
+            try:
+                r = core.wait_ready(iid, t0, o, job)
+                break
+            except VastgameError as e:
+                if e.key != "core.try_another":              # отмена, ошибка после running и т.п. — не менять
+                    raise
+                tried.append(o.get("machine_id"))
+                _set_meta(job, tried=tried)
+                if len(tried) >= MAX_TRIES:
+                    raise VastgameError(f"Не запустилась ни одна из {len(tried)} машин — похоже, у Vast сейчас "
+                                        "проблемы с KVM. Попробуй позже или выбери машины в другой стране.",
+                                        key="core.tries_exhausted", n=len(tried)) from None
+                if not _gone(iid):
+                    raise VastgameError(f"Машина {iid} не удалилась — другую не беру, чтобы не платить за две. "
+                                        "Удали её на главном экране или на сайте Vast.",
+                                        key="core.switch_blocked", id=iid) from None
+                nxt = _next_offer(spare, tried, size)
+                if not nxt:
+                    raise VastgameError("Эта машина не запустилась, а других из твоего списка сейчас нет — "
+                                        "выбери другую.", key="core.no_spare") from None
+                job.say(f"Беру следующую машину: {nxt['gpu_name']}, {nxt.get('geolocation')}.", "warn",
+                        key="core.switching", gpu=nxt["gpu_name"], country=(nxt.get("geolocation") or "").strip(", "),
+                        n=len(tried) + 1, max=MAX_TRIES)
+                o = nxt
+                iid, t0 = _rent(job, o, tpl, size, sync)
         job.finish(result={"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
                            "notes": [{"level": lv, "key": k, "params": p, "text": tx}
                                      for lv, tx, k, p in core.identity_notes(r)]})
@@ -222,6 +256,42 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None):
         job.finish(error=error_data(e))
     except Exception as e:                               # неожиданное — тоже показать, не молчать
         job.finish(error=unexpected(e))
+
+
+def _set_meta(job, **kw):
+    if hasattr(job, "set_meta"):
+        job.set_meta(**kw)
+
+
+def _rent(job, o, tpl, size, sync):
+    iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
+    _set_meta(job, iid=iid, t0=t0, offer=o)              # чтобы продолжить, если компьютер выключится
+    return iid, t0
+
+
+def _gone(iid, wait=None):
+    """Удалённая машина исчезла у Vast (иначе вторую не арендуем — платили бы за две)."""
+    end = time.time() + (GONE_WAIT if wait is None else wait)
+    while True:
+        if core._still_there(iid) is False:
+            return True
+        if time.time() > end:
+            return False
+        time.sleep(5)
+
+
+def _next_offer(spare, tried, size):
+    """Следующая машина из списка человека: свежая (цена, наличие), не с того же хоста и не помеченная."""
+    bad = set(market.bad_hosts())
+    for oid in spare or []:
+        try:
+            o = core.offer_by_id(int(oid), size)
+        except (VastgameError, ValueError, TypeError):
+            continue                                   # заняли, не подходит — дальше
+        if o.get("machine_id") in tried or str(o.get("machine_id")) in bad:
+            continue
+        return o
+    return None
 
 
 def run_stop(job, lang=None):
