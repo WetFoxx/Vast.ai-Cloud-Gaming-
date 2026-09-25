@@ -104,5 +104,66 @@ class TestPair(unittest.TestCase):
         self.assertIn(e.exception.key, ("pair.timeout", "pair.failed"))
 
 
+class FakeJSON:
+    def __init__(self, code, data):
+        self.status_code, self._data = code, data
+
+    def json(self):
+        return self._data
+
+
+class TestPairNewSunshine(TestPair):
+    """Sunshine с 2026.906: PIN — только с номером связки (GET /api/pin); прошлая незаконченная попытка
+    висит 5 минут и блокирует новую с того же Mac (409), поэтому её надо отменить до «Moonlight pair»."""
+    STALE, NEW = "a" * 32, "b" * 32
+
+    def setUp(self):
+        super().setUp()
+        self.creds_ok = True
+        self.pending = [self.STALE]                       # старая попытка с этого Mac ещё не истекла
+        self.deleted, self.bodies = [], []
+
+    def moonlight_started(self):
+        return (self.d / "args").exists()
+
+    def fake_get(self, url, auth, verify, timeout):
+        if url.endswith("/api/pin"):
+            if self.moonlight_started() and self.NEW not in self.pending and not (self.d / "ok").exists():
+                if self.STALE in self.pending:                           # как настоящая: 409, Moonlight ждёт зря
+                    return FakeJSON(200, {"pairings": [{"id": i} for i in self.pending]})
+                self.pending.append(self.NEW)                            # наш Moonlight постучался
+            return FakeJSON(200, {"pairings": [{"id": i, "name": "roth", "address": "100.64.0.2"}
+                                               for i in self.pending]})
+        return FakeJSON(200, {"status": True})                           # /api/config — логин подходит
+
+    def fake_delete(self, url, json, auth, verify, timeout):
+        self.deleted.append((json["pairing_id"], self.moonlight_started()))
+        self.pending.remove(json["pairing_id"])
+        return FakeJSON(200, {"status": True})
+
+    def fake_post(self, url, json, auth, verify, timeout):
+        self.bodies.append(dict(json))
+        if "pairing_id" not in json:
+            return FakeJSON(400, {"status": False, "error": "pairing_id must contain exactly 32 hexadecimal characters"})
+        if json["pairing_id"] == self.NEW and self.NEW in self.pending:
+            self.pending.remove(self.NEW)
+            (self.d / "ok").touch()
+            return FakeJSON(200, {"status": True})
+        return FakeJSON(200, {"status": False})
+
+    def test_pairs_with_pairing_id(self):
+        with mock.patch.object(pairing.requests, "post", self.fake_post), \
+             mock.patch.object(pairing.requests, "delete", self.fake_delete):
+            self.assertTrue(pairing.pair("h", "100.1.1.1"))
+        args = (self.d / "args").read_text().split()
+        pin = args[args.index("--pin") + 1]
+        self.assertEqual(self.deleted, [(self.STALE, False)])            # старая отменена ДО Moonlight
+        self.assertEqual(self.bodies[-1], {"pin": pin, "name": "vastgame", "pairing_id": self.NEW})
+        self.assertTrue(all(b.get("pairing_id") != self.STALE for b in self.bodies))
+
+    # Прежние тесты — про старую Sunshine; здесь они не нужны
+    test_pairs_and_sets_own_login_when_needed = test_our_login_already_works = test_moonlight_fails = None
+
+
 if __name__ == "__main__":
     unittest.main()

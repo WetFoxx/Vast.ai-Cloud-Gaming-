@@ -6,7 +6,7 @@
 #      (ДО связки: перезапуск обрывает начатую связку);
 #   1. придумывает PIN и запускает «Moonlight pair <машина> --pin PIN» — Moonlight ждёт подтверждения;
 #   2. отдаёт тот же PIN Sunshine через его API (https://<машина>:47990/api/pin, только через
-#      Tailscale) по логину кабинета Sunshine;
+#      Tailscale) по логину кабинета Sunshine; новая Sunshine (с 2026.906) — вместе с номером связки;
 #   3. после связки просит машину сразу выгрузить identity — связка поедет в облако, и следующие
 #      машины будут связаны без PIN. В фоне: трансляцию это не задерживает (раньше ждали до минуты,
 #      если Tailscale SSH просил подтверждения — живой тест 2026-09-25).
@@ -87,12 +87,61 @@ def ensure_login(ip, on_notice=None, wait=90):
                         out="timeout")
 
 
+OLD_API = "old"      # Sunshine до 2026.906: PIN отдаётся без номера связки
+
+
+def _pending(ip):
+    """Ожидающие связки — номера от старых к новым. С Sunshine 2026.906 PIN принимается только вместе
+    с номером связки (GET /api/pin → {"pairings": [{"id", "name", "address"}]}); старый запрос без
+    номера — 400 (разведка Docker 2026-09-25). OLD_API — Sunshine старая (такого запроса нет);
+    "401" — неверный логин; None — нет связи."""
+    try:
+        r = requests.get(f"https://{ip}:{PORT}/api/pin", auth=creds(), verify=False, timeout=10)
+    except requests.RequestException:
+        return None
+    if r.status_code == 401:
+        return "401"
+    try:
+        items = r.json().get("pairings")
+    except (ValueError, AttributeError):
+        items = None
+    if not isinstance(items, list):
+        return None if r.status_code >= 500 else OLD_API
+    return [p["id"] for p in items if isinstance(p, dict) and p.get("id")]
+
+
+def _cancel_stale(ip):
+    """Перед связкой — отменить ожидающие связки. Прошлая неудачная попытка живёт в Sunshine ещё 5 минут,
+    и новую с этого Mac Sunshine сразу отклоняет (409 «pairing session … already exists»).
+    Разовый сбой связи бывает (живой тест 2026-09-25: первый запрос — без ответа) — до 3 попыток."""
+    for _ in range(3):
+        pend = _pending(ip)
+        if pend is not None:
+            break
+        time.sleep(1)
+    if not isinstance(pend, list):
+        return
+    for pid in pend:
+        try:
+            requests.delete(f"https://{ip}:{PORT}/api/pin", json={"pairing_id": pid}, auth=creds(),
+                            verify=False, timeout=10)
+        except requests.RequestException:
+            pass
+
+
 def _send_pin(ip, pin):
     """Отдать PIN Sunshine. True — принял; False — не принял (Moonlight ещё не постучался); "401" —
     неверный логин; None — нет связи."""
+    pend = _pending(ip)
+    if pend is None or pend == "401":
+        return pend
+    body = {"pin": pin, "name": "vastgame"}
+    if pend != OLD_API:
+        if not pend:
+            return False                      # Moonlight ещё не постучался
+        body["pairing_id"] = pend[-1]         # самая свежая — наш Moonlight (старые отменены перед связкой)
     try:
-        r = requests.post(f"https://{ip}:{PORT}/api/pin", json={"pin": pin, "name": "vastgame"},
-                          auth=creds(), verify=False, timeout=10)
+        r = requests.post(f"https://{ip}:{PORT}/api/pin", json=body, auth=creds(), verify=False, timeout=10)
     except requests.RequestException:
         return None
     if r.status_code == 401:
@@ -110,6 +159,7 @@ def pair(host, ip, on_notice=None):
     if not exe:
         raise VastgameError("Moonlight не установлен", key="moonlight.missing")
     ensure_login(ip, on_notice)          # сначала логин кабинета (с перезапуском Sunshine), потом связка
+    _cancel_stale(ip)
     pin = f"{secrets.randbelow(10000):04d}"
     with tempfile.NamedTemporaryFile("w+", suffix=".log") as log:
         p = subprocess.Popen([exe, "pair", host, "--pin", pin], stdin=subprocess.DEVNULL, stdout=log,
