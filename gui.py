@@ -215,8 +215,9 @@ class Api:
         машина уже арендована; фоновый процесс увидит флаг и закончит (и удалит сам, если аренда
         ещё шла). Процесс завис или умер — машина всё равно удалена отсюда."""
         iid = jobs.cancel_play()
-        if iid and core._still_there(iid) is not False:
-            ok, msg = core.delete_instance(iid)
+        if iid:
+            # Удаляем, не глядя в список: сразу после аренды Vast может ещё не показывать там машину
+            ok, msg = core.cancel_delete(iid)
             if not ok:
                 return {"error": {"key": "core.delete_failed", "params": {"msg": msg or ""}, "text": msg or ""}}
         return {"ok": True, "iid": iid}

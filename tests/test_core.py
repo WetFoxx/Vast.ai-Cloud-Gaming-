@@ -143,15 +143,38 @@ class TestWaitReady(Base):
         self.assertEqual(self.deleted, [42])
 
     def test_cancel_after_window_already_deleted(self):
-        # Окно удалило машину само — процессу остаётся только закончить, не удаляя второй раз
+        # Окно уже удалило машину: Vast на повторное удаление отвечает ошибкой — это не беда, её правда нет
         self.running_machine()
         self.patch(core, "_still_there", lambda iid: False)
-        self.patch(core, "delete_instance", self.fake_delete([]))
+        def already_gone(iid):
+            raise VastgameError("HTTP 404", key="vast.http", code=404, msg="no such instance")
+        self.patch(core, "delete_instance", already_gone)
         ui = FakeUI()
         ui.cancelled = lambda: True
         with self.assertRaises(VastgameError) as e:
             core.wait_ready(42, T0, OFFER, ui)
-        self.assertEqual((e.exception.key, self.deleted), ("core.start_cancelled", []))
+        self.assertEqual(e.exception.key, "core.start_cancelled")
+
+    def test_cancel_right_after_rent_deletes_even_if_not_listed_yet(self):
+        # Сразу после аренды Vast может не показывать машину в списке — удалить всё равно (иначе тратит деньги)
+        self.running_machine()
+        self.patch(core, "_still_there", lambda iid: False)
+        self.patch(core, "delete_instance", self.fake_delete([42]))
+        ui = FakeUI()
+        ui.cancelled = lambda: True
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual((e.exception.key, self.deleted), ("core.start_cancelled", [42]))
+
+    def test_cancel_delete_really_failed(self):
+        self.running_machine()
+        self.patch(core, "_still_there", lambda iid: True)
+        self.patch(core, "delete_instance", lambda iid: (False, "busy"))
+        ui = FakeUI()
+        ui.cancelled = lambda: True
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual(e.exception.key, "core.cancel_delete_failed")
 
     def test_restore_machine_stops_answering(self):
         self.running_machine()

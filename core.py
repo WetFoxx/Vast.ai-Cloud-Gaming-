@@ -181,6 +181,20 @@ def _still_there(iid):
     return _alive(iid)
 
 
+def _delete_quietly(iid):
+    """Удалить машину; отказ Vast — (False, текст), а не исключение (уже удалённую Vast может не найти)."""
+    try:
+        return delete_instance(iid)
+    except VastgameError as e:
+        return False, str(e)
+
+
+def cancel_delete(iid):
+    """Удалить машину при отмене запуска (окно). True — удалена или её правда уже нет."""
+    ok, msg = _delete_quietly(iid)
+    return ok or _still_there(iid) is False, msg
+
+
 class _Watch:
     """Пока ждём машину: человек отменил запуск — удалить её и закончить; раз в минуту — есть ли
     она ещё у Vast (её могли удалить на сайте — тогда ждать нечего; раньше запуск висел до 20 минут
@@ -193,12 +207,14 @@ class _Watch:
 
     def check(self):
         if getattr(self.ui, "cancelled", lambda: False)():
-            if _still_there(self.iid) is not False:   # окно не успело удалить (например, аренда ещё шла)
-                ok, msg = delete_instance(self.iid)
-                if not ok:
-                    raise VastgameError(f"Запуск отменён, но Vast не удалил машину {self.iid}: {msg}. "
-                                        "Удали её на главном экране или на сайте.",
-                                        key="core.cancel_delete_failed", id=self.iid, msg=msg or "")
+            # Удаляем всегда, а не «если есть в списке»: сразу после аренды Vast может ещё не показывать
+            # машину в списке — по списку мы бы решили «уже удалена» и оставили её тратить деньги.
+            # Окно обычно уже удалило её — тогда Vast откажет, и это нормально, если её правда нет.
+            ok, msg = _delete_quietly(self.iid)
+            if not ok and _still_there(self.iid) is not False:
+                raise VastgameError(f"Запуск отменён, но Vast не удалил машину {self.iid}: {msg}. "
+                                    "Удали её на главном экране или на сайте.",
+                                    key="core.cancel_delete_failed", id=self.iid, msg=msg or "")
             history.ended(self.iid)
             raise VastgameError(f"Запуск отменён, машина {self.iid} удалена.", key="core.start_cancelled",
                                 id=self.iid)
