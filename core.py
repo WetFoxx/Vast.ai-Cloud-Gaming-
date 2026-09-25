@@ -39,7 +39,7 @@ RESTORE_QUIET_MIN = 10   # восстановление: /json молчит ст
 RESTORE_MIN = 120        # восстановление: дольше — остановить слежение (машина при этом работает)
 # Docker (экспериментально): образ vastgame-desktop, закреплённый на сборке (как SCRIPT_URL — на коммит).
 # Новая сборка образа не попадёт на машины, пока здесь не поменяют тег
-DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:4b6f2c435ce1b962a47bf2ca8c309a362fba4d0c"
+DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:583f4a6b439432bf2c8c2b04d0ed02bafbac6246"
 SUNSHINE = "sunshine"    # запись образа на странице wolf: заработал ли NVENC (не архив)
 
 
