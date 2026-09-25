@@ -21,7 +21,7 @@ def setUpModule():
     import history, market, settings
     tmp = Path(tempfile.mkdtemp())
     for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"),
-                      (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG")]:
+                      (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG"), (gui.jobs, "CANCEL")]:
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.{name}")
         p.start()
         unittest.addModuleCleanup(p.stop)
@@ -139,6 +139,48 @@ class TestPlay(unittest.TestCase):
         self.assertEqual(p["result"]["minutes"], 7)
         self.assertEqual(self.rented, [5])
         self.assertEqual(SENT[0][0], "Машина готова")                 # уведомление на языке окна
+
+    def cancellable_wait(self, iid, t0, o, ui):
+        """Как core.wait_ready при отмене: увидел флаг — закончил с core.start_cancelled."""
+        ui.stage("vast", "…")
+        for _ in range(250):
+            if ui.cancelled():
+                raise gui.VastgameError("отменён", key="core.start_cancelled", id=iid)
+            time.sleep(0.02)
+        raise AssertionError("отмену не увидели")
+
+    def test_cancel_deletes_machine_and_job_ends_quietly(self):
+        deleted = []
+        with mock.patch.object(gui.jobs.core, "wait_ready", self.cancellable_wait), \
+             mock.patch.object(gui.core, "_still_there", lambda iid: iid not in deleted), \
+             mock.patch.object(gui.core, "delete_instance", lambda iid: deleted.append(iid) or (True, None)):
+            self.api.play(5, None, None, "ru")
+            for _ in range(100):
+                if (self.api.session_progress() or {}).get("stage") == "vast":
+                    break
+                time.sleep(0.02)
+            self.assertEqual(self.api.cancel_start(), {"ok": True, "iid": 42})
+            p = wait_done(self.api, session=True)
+        self.assertEqual(deleted, [42])                               # окно удалило сразу
+        self.assertEqual(p["error"]["key"], "core.start_cancelled")
+        self.assertEqual(SENT, [])                                    # отменил сам — уведомлять незачем
+        self.assertFalse(gui.jobs.CANCEL.exists())                   # флаг убран — следующему запуску не мешает
+
+    def test_old_cancel_flag_does_not_cancel_new_start(self):
+        gui.jobs.CANCEL.write_text("1")                              # осталось от прошлого раза
+        self.api.play(5)
+        for _ in range(100):
+            if (self.api.session_progress() or {}).get("stage") == "vast":
+                break
+            time.sleep(0.02)
+        self.assertFalse(gui.jobs.CANCEL.exists())
+        self.gate.set()
+        self.assertIsNone(wait_done(self.api, session=True)["error"])
+
+    def test_cancel_when_nothing_starts(self):
+        gui.jobs.STATE.unlink(missing_ok=True)
+        self.assertEqual(self.api.cancel_start(), {"ok": True, "iid": None})
+        self.assertFalse(gui.jobs.CANCEL.exists())
 
     def test_progress_since_and_new_window_sees_same_job(self):
         self.api.play(5)

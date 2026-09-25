@@ -31,6 +31,9 @@ TAILSCALE_WARN_MIN = 10  # после стольких минут без узл�
 TAILSCALE_MIN = 20       # сколько всего ждать узел в Tailscale
 SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown
 SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина удалит себя сама (wolf finish ждёт 30 с перед удалением)
+GONE_CHECK_SEC = 60      # пока ждём машину — раз в столько секунд спрашивать Vast, есть ли она ещё
+RESTORE_QUIET_MIN = 10   # восстановление: /json молчит столько минут — машина перестала отвечать
+RESTORE_MIN = 120        # восстановление: дольше — остановить слежение (машина при этом работает)
 
 
 # ------------------------------------------------------------------ подготовка аренды ---
@@ -173,6 +176,43 @@ def _failed_start(iid, why, o, ui, bad_host, key, **params):
     raise VastgameError("Запуск не удался.", key="core.start_failed")
 
 
+def _still_there(iid):
+    """Есть ли машина у Vast (True/False, None — не узнать). Отдельно от _alive — для тестов."""
+    return _alive(iid)
+
+
+class _Watch:
+    """Пока ждём машину: человек отменил запуск — удалить её и закончить; раз в минуту — есть ли
+    она ещё у Vast (её могли удалить на сайте — тогда ждать нечего; раньше запуск висел до 20 минут
+    на Tailscale и бесконечно на восстановлении, а после перезапуска окна — снова)."""
+
+    def __init__(self, iid, ui):
+        self.iid, self.ui = iid, ui
+        self.next = time.time() + GONE_CHECK_SEC      # сразу после аренды машины может ещё не быть в списке
+        self.missing = 0
+
+    def check(self):
+        if getattr(self.ui, "cancelled", lambda: False)():
+            if _still_there(self.iid) is not False:   # окно не успело удалить (например, аренда ещё шла)
+                ok, msg = delete_instance(self.iid)
+                if not ok:
+                    raise VastgameError(f"Запуск отменён, но Vast не удалил машину {self.iid}: {msg}. "
+                                        "Удали её на главном экране или на сайте.",
+                                        key="core.cancel_delete_failed", id=self.iid, msg=msg or "")
+            history.ended(self.iid)
+            raise VastgameError(f"Запуск отменён, машина {self.iid} удалена.", key="core.start_cancelled",
+                                id=self.iid)
+        if time.time() < self.next:
+            return
+        self.next = time.time() + GONE_CHECK_SEC
+        # Нет в списке два раза подряд (минута между проверками) — машину удалили; сбой связи (None) не считается
+        self.missing = self.missing + 1 if _still_there(self.iid) is False else 0
+        if self.missing >= 2:
+            history.ended(self.iid)
+            raise VastgameError(f"Машины {self.iid} больше нет — её удалили (например, на сайте Vast). "
+                                "Запуск остановлен.", key="core.machine_gone", id=self.iid)
+
+
 def wait_ready(iid, t0, o, ui):
     """Дождаться, пока машина готова к игре: Vast → Tailscale → восстановление из Drive.
 
@@ -182,7 +222,9 @@ def wait_ready(iid, t0, o, ui):
     ui.stage("vast", f"Арендовано: инстанс {iid}. Жду запуска (обычно 3–15 минут: машина качает образ).")
     last, errors = None, 0
     deadline = time.time() + VAST_START_MIN * 60
+    watch = _Watch(iid, ui)
     while True:
+        watch.check()
         # Разовый сбой API не должен обрывать ожидание: машина уже платная, следим дальше
         try:
             inst = call("GET", f"instances/{iid}/", params={"owner": "me"}).get("instances") or {}
@@ -230,6 +272,7 @@ def wait_ready(iid, t0, o, ui):
     started = time.time()
     warned, approve_url = False, None
     while True:
+        watch.check()
         # Первая машина без личности в облаке и без ключа ждёт одобрения в Tailscale (v3.12):
         # ссылку она кладёт на Drive — показать/открыть её человеку; пока ждём его, таймер заново
         url = drive.ts_login_link(iid)
@@ -260,8 +303,22 @@ def wait_ready(iid, t0, o, ui):
     # ---- wolf восстанавливает всё из Google Drive
     ui.stage("restore", "Восстановление из Google Drive:")
     seen = {}
+    restore_start = heard = time.time()
     while True:
-        s = wolf_status(ip) or {}
+        watch.check()
+        s = wolf_status(ip)
+        if s is None:
+            if time.time() - heard > RESTORE_QUIET_MIN * 60:
+                raise VastgameError(f"Машина {iid} перестала отвечать ({RESTORE_QUIET_MIN} минут). Она работает и "
+                                    "тратит деньги: закончи игру или удали её на главном экране.",
+                                    key="core.restore_no_answer", id=iid, min=RESTORE_QUIET_MIN)
+            s = {}
+        else:
+            heard = time.time()
+        if time.time() - restore_start > RESTORE_MIN * 60:
+            raise VastgameError(f"Восстановление идёт дольше {RESTORE_MIN} минут — перестаю ждать. Машина работает: "
+                                "посмотри её состояние на главном экране.", key="core.restore_timeout",
+                                id=iid, min=RESTORE_MIN)
         for name, (ts, state, text) in sorted(s.items()):
             if ts >= t0 - 60 and seen.get(name) != (state, text):
                 ui.archive(name, state, text)

@@ -210,6 +210,17 @@ class Api:
                 "archives": d["archives"], "question": None, "result": d["result"], "error": d["error"],
                 "done": d["done"], "game_names": self._game_names(d["archives"])}
 
+    def cancel_start(self):
+        """«Отменить запуск и удалить машину» (человек подтвердил на странице). Удаляем сразу, если
+        машина уже арендована; фоновый процесс увидит флаг и закончит (и удалит сам, если аренда
+        ещё шла). Процесс завис или умер — машина всё равно удалена отсюда."""
+        iid = jobs.cancel_play()
+        if iid and core._still_there(iid) is not False:
+            ok, msg = core.delete_instance(iid)
+            if not ok:
+                return {"error": {"key": "core.delete_failed", "params": {"msg": msg or ""}, "text": msg or ""}}
+        return {"ok": True, "iid": iid}
+
     def session_seen(self):
         """Человек посмотрел результат запуска/завершения — больше не показывать его при открытии окна."""
         jobs.mark_seen()

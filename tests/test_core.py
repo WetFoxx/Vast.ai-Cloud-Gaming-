@@ -24,6 +24,10 @@ def setUpModule():
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.json")
         p.start()
         unittest.addModuleCleanup(p.stop)
+    # Машина, которую ждём, по умолчанию есть у Vast (проверка раз в минуту не ходит в сеть)
+    p = mock.patch.object(core, "_still_there", lambda iid: True)
+    p.start()
+    unittest.addModuleCleanup(p.stop)
     # Ссылка одобрения Tailscale с Drive — по умолчанию её нет (тесты не ходят в сеть)
     p = mock.patch.object(core.drive, "ts_login_link", lambda iid: None)
     p.start()
@@ -98,6 +102,67 @@ class Base(unittest.TestCase):
 
 
 class TestWaitReady(Base):
+    def running_machine(self):
+        self.patch(core, "call", lambda *a, **k: {"instances": {"actual_status": "running", "status_msg": "",
+                                                                 "extra_env": []}})
+
+    def test_deleted_on_site_while_waiting_stops_instead_of_hanging(self):
+        # Живой случай 2026-09-25: машину удалили на сайте — запуск висел (Tailscale — до 20 минут,
+        # восстановление — вечно, и после перезапуска окна снова). Теперь — две проверки «нет» и конец.
+        self.running_machine()
+        self.patch(core, "GONE_CHECK_SEC", 0)
+        self.patch(core, "ts_node", lambda: None)                  # узел так и не появится
+        answers = iter([True, None, False, False])                  # None — сбой связи, не считается
+        self.patch(core, "_still_there", lambda iid: next(answers))
+        ui = FakeUI()
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual(e.exception.key, "core.machine_gone")
+        self.assertEqual(self.deleted, [])                          # удалять нечего — её уже нет
+
+    def test_one_missing_answer_is_not_enough(self):
+        # Сразу после аренды машины может не быть в списке — одного «нет» мало
+        self.running_machine()
+        self.patch(core, "GONE_CHECK_SEC", 0)
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "h"))
+        answers = iter([False, True])
+        self.patch(core, "_still_there", lambda iid: next(answers, True))
+        self.patch(core, "wolf_status", lambda ip: {"boot": (T0 + 60, "ok", "готово")})
+        self.assertEqual(core.wait_ready(42, T0, OFFER, FakeUI())["boot"][1], "ok")
+
+    def test_cancel_deletes_machine_and_stops(self):
+        self.running_machine()
+        alive = [42]
+        self.patch(core, "delete_instance", self.fake_delete(alive))
+        self.patch(core, "_still_there", lambda iid: iid in alive)
+        ui = FakeUI()
+        ui.cancelled = lambda: True
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual(e.exception.key, "core.start_cancelled")
+        self.assertEqual(self.deleted, [42])
+
+    def test_cancel_after_window_already_deleted(self):
+        # Окно удалило машину само — процессу остаётся только закончить, не удаляя второй раз
+        self.running_machine()
+        self.patch(core, "_still_there", lambda iid: False)
+        self.patch(core, "delete_instance", self.fake_delete([]))
+        ui = FakeUI()
+        ui.cancelled = lambda: True
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual((e.exception.key, self.deleted), ("core.start_cancelled", []))
+
+    def test_restore_machine_stops_answering(self):
+        self.running_machine()
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "h"))
+        pages = iter([{"boot": (T0 + 5, "up", "старт")}])          # один ответ, потом тишина
+        self.patch(core, "wolf_status", lambda ip: next(pages, None))
+        self.patch(core, "RESTORE_QUIET_MIN", -1)   # молчание сразу «слишком долгое»
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, FakeUI())
+        self.assertEqual(e.exception.key, "core.restore_no_answer")
+
     def test_first_machine_asks_to_approve_in_tailscale(self):
         # Нет личности и ключа: машина кладёт ссылку одобрения на Drive — приложение её отдаёт ui
         statuses = iter(["loading", "running"])

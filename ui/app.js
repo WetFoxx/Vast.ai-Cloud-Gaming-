@@ -711,6 +711,8 @@ function startProgress(kind = "play") {
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
   $("progress-back").hidden = true;
+  $("progress-cancel").hidden = kind !== "play";
+  $("progress-cancel").disabled = false;
   $("progress-note").hidden = false;
   showError("progress-error", null);
   renderStages(null, false);
@@ -769,6 +771,7 @@ async function pollOnce() {
     prog.kind = p.kind;
     $("progress-title").textContent = t("progress.title." + p.kind);
     $("progress-note").textContent = t(p.kind === "stop" ? "progress.background_stop" : "progress.background");
+    $("progress-cancel").hidden = p.kind !== "play";
   }
   for (const ev of p.events) {
     prog.log.push(ev);
@@ -801,6 +804,7 @@ async function pollOnce() {
 
   if (p.done) {
     clearInterval(progTimer);
+    $("progress-cancel").hidden = true;
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
@@ -808,6 +812,17 @@ async function pollOnce() {
     if (p.result) (prog.kind === "stop" ? renderStopResult : renderResult)(p.result);
   }
 }
+
+// Отменить запуск: машина долго запускается или зависла — удалить её (на ней ещё ничего нет)
+$("progress-cancel").addEventListener("click", async () => {
+  if (!(await ask({ title: t("progress.cancel.confirm.title"), text: t("progress.cancel.confirm.text"),
+                    yes: t("progress.cancel.yes"), no: t("btn.no") }))) return;
+  if (DEMO) return;
+  $("progress-cancel").disabled = true;
+  $("progress-note").textContent = t("progress.cancelling");
+  const r = await api().cancel_start();
+  if (r && r.error) { showError("progress-error", r.error); $("progress-cancel").disabled = false; }
+});
 
 $("tailscale-open").addEventListener("click", () => { if (prog && prog.tsUrl && !DEMO) api().open_url(prog.tsUrl); });
 

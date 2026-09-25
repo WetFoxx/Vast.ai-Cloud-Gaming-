@@ -38,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 STATE = config_dir() / "job.json"     # ход последней операции play/stop
 LOCK = config_dir() / "job.lock"      # держит работающий фоновый процесс
 LOG = config_dir() / "job.log"        # вывод фонового процесса (на случай неожиданной ошибки)
+CANCEL = config_dir() / "job.cancel"  # человек нажал «Отменить запуск» — фоновый процесс увидит и закончит
 START_GRACE = 30                      # с, за которые фоновый процесс должен успеть стартовать
 MAX_RESUMES = 3                       # сколько раз продолжать прерванную операцию (защита от петли)
 DISK_MIN, DISK_MAX = 50, 1000         # пределы ползунка диска, ГБ (система и Steam занимают ~30 ГБ)
@@ -156,6 +157,10 @@ class FileJob(Job):
     def set_meta(self, **kw):
         self.meta.update(kw)
         self._changed()
+
+    def cancelled(self):
+        """Человек отменил запуск в окне (флаг-файл: окно и фоновый процесс — разные процессы)."""
+        return self.kind == "play" and CANCEL.exists()
 
     def say(self, text, level="info", key=None, **params):
         super().say(text, level, key, **params)
@@ -304,6 +309,16 @@ def resume(d):
     return True
 
 
+def cancel_play():
+    """«Отменить запуск»: поставить флаг для фонового процесса. Номер машины, если она уже
+    арендована (окно удалит её сразу, не дожидаясь процесса), иначе None — удалит сам процесс."""
+    d = state()
+    if not d or d["kind"] != "play" or d["done"]:
+        return None
+    CANCEL.write_text(str(os.getpid()))
+    return (d.get("meta") or {}).get("iid")
+
+
 def save(d):
     tmp = STATE.with_suffix(".tmp")
     tmp.write_text(json.dumps({k: v for k, v in d.items() if k != "active"}, ensure_ascii=False))
@@ -388,11 +403,15 @@ def work(kind, args, log=lambda text: None):
             return False                          # другая операция уже идёт — ничего не трогаем
         args = dict(args)
         carry = load() if args.pop("_resume", False) else None
+        if not carry:
+            CANCEL.unlink(missing_ok=True)        # отмена прошлого запуска к новому не относится
         log(f"[{time.strftime('%F %T')}] {kind} pid={os.getpid()}" + (" (продолжение)" if carry else ""))
         job = FileJob(kind, pid=os.getpid(), args=args, carry=carry)
         RUNNERS[kind](job, **args)
         log(f"[{time.strftime('%F %T')}] {kind} done, error={(job.error or {}).get('key')}")
-        notify.job_finished(kind, job.result, job.error, args.get("lang"))
+        if (job.error or {}).get("key") != "core.start_cancelled":   # отменил сам человек — сообщать незачем
+            notify.job_finished(kind, job.result, job.error, args.get("lang"))
+        CANCEL.unlink(missing_ok=True)
     return True
 
 
