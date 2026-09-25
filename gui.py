@@ -49,7 +49,7 @@ HERE = Path(__file__).resolve().parent
 LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_PAGE = 15    # машин на странице выбора (показываются все подходящие, по страницам)
 # Фильтры списка машин по умолчанию: все страны, любая скорость и пинг, сначала дешёвые
-OFFER_FILTERS = {"countries": [], "speed": 0, "ping": 0, "sort": "price", "dir": "asc"}
+OFFER_FILTERS = {"countries": [], "gpus": [], "speed": 0, "ping": 0, "sort": "price", "dir": "asc"}
 OFFER_SORTS = ("price", "ping", "net", "rel", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
@@ -185,6 +185,7 @@ class Api:
         if not isinstance(f, dict):
             return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
         clean = {"countries": [c for c in f.get("countries") or [] if isinstance(c, str)][:100],
+                 "gpus": [g for g in f.get("gpus") or [] if isinstance(g, str)][:100],
                  "speed": max(0, int(f.get("speed") or 0)), "ping": max(0, int(f.get("ping") or 0)),
                  "sort": f.get("sort") if f.get("sort") in OFFER_SORTS else "price",
                  "dir": "desc" if f.get("dir") == "desc" else "asc"}

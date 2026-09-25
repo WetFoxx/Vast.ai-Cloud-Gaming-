@@ -265,7 +265,7 @@ function countryName(cc) {
   try { return new Intl.DisplayNames([LANG], { type: "region" }).of(cc) || cc; } catch (e) { return cc; }
 }
 function saveFilters() { if (!DEMO) api().save_offer_filters(filters); }
-function filtersActive() { return filters.countries.length || filters.speed || filters.ping; }
+function filtersActive() { return filters.countries.length || filters.gpus.length || filters.speed || filters.ping; }
 
 // Сортировка — нажатием на заголовок колонки; повторное нажатие переворачивает. Первое нажатие —
 // самый полезный порядок: цена и пинг от меньшего, интернет и надёжность от большего.
@@ -283,6 +283,7 @@ const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", rel: "desc", gpu: "
 function applyFilters(list) {
   const f = filters;
   const r = list.filter((o) => (!f.countries.length || f.countries.includes(o.cc))
+    && (!f.gpus.length || f.gpus.includes(o.gpu))
     && (!f.speed || netSpeed(o) >= f.speed)
     && (!f.ping || (o.ping.ms != null && o.ping.ms <= f.ping)));
   // Цена — только аренда: трафик по реальным списаниям почти не берётся. Неизвестное (пинг «—») — всегда в конце
@@ -344,6 +345,24 @@ function renderFilters(d) {
     lab.append(box, el("span", {}, countryName(cc)), el("span", { className: "count" }, String(counts[cc])));
     list.appendChild(lab);
   }
+  // Видеокарты — так же: модели из списка с числом машин, от старших к младшим
+  const g = filters.gpus;
+  $("f-gpus-btn").textContent = !g.length ? t("filter.gpus.any") : g.slice(0, 2).join(", ") + (g.length > 2 ? ` +${g.length - 2}` : "");
+  const gcounts = {};
+  for (const o of d.offers) gcounts[o.gpu] = (gcounts[o.gpu] || 0) + 1;
+  const glist = $("f-gpus-list");
+  glist.innerHTML = "";
+  const rank = (name) => gpuRank({ gpu: name }) ?? -1;
+  for (const name of Object.keys(gcounts).sort((a, b) => rank(b) - rank(a) || a.localeCompare(b))) {
+    const box = el("input", { type: "checkbox", checked: g.includes(name) });
+    box.addEventListener("change", () => {
+      filters.gpus = box.checked ? [...filters.gpus, name] : filters.gpus.filter((x) => x !== name);
+      page = 0; saveFilters(); renderOffers();
+    });
+    const lab = el("label");
+    lab.append(box, el("span", {}, name), el("span", { className: "count" }, String(gcounts[name])));
+    glist.appendChild(lab);
+  }
 }
 
 for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"]]) {
@@ -354,6 +373,8 @@ for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"]]) {
 }
 $("f-countries-btn").addEventListener("click", () => { $("f-countries").hidden = !$("f-countries").hidden; });
 $("f-countries-all").addEventListener("click", () => { filters.countries = []; page = 0; saveFilters(); renderOffers(); });
+$("f-gpus-btn").addEventListener("click", () => { $("f-gpus").hidden = !$("f-gpus").hidden; });
+$("f-gpus-all").addEventListener("click", () => { filters.gpus = []; page = 0; saveFilters(); renderOffers(); });
 $("page-prev").addEventListener("click", () => { page--; renderOffers(); });
 $("page-next").addEventListener("click", () => { page++; renderOffers(); });
 
@@ -366,7 +387,7 @@ function pingCell(td, p) {
 function renderOffers() {
   const d = offersData;
   if (!d) return;
-  if (!filters) filters = { ...d.filters, countries: [...(d.filters.countries || [])] };
+  if (!filters) filters = { ...d.filters, countries: [...(d.filters.countries || [])], gpus: [...(d.filters.gpus || [])] };
   if (!SORT_VALUE[filters.sort]) filters.sort = "price";
   renderFilters(d);
   const list = offerList(d);
@@ -1430,7 +1451,7 @@ function demoOffers(disk) {
   offers.sort((a, b) => a.total - b.total);
   const busy = new URLSearchParams(location.search).get("last") === "busy";
   return { disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: offers.length, balance: 3.18, page_size: 15,
-           filters: { countries: [], speed: 0, ping: 0, sort: "price", dir: "asc" },
+           filters: { countries: [], gpus: [], speed: 0, ping: 0, sort: "price", dir: "asc" },
            sync: { steam_games: false, other_games: true, saves: true }, offers,
            last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
                    offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", cc: "US", price: 0.162, traffic: 0.05, total: 0.212,

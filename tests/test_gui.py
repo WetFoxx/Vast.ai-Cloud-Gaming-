@@ -83,9 +83,10 @@ class TestOffers(unittest.TestCase):
 
     def test_filters_remembered_and_cleaned(self):
         api = gui.Api()
-        self.assertEqual(api.save_offer_filters({"countries": ["JP", 5], "speed": "300", "ping": -1, "sort": "evil",
-                                                 "dir": "sideways"}), {"ok": True})
-        self.assertEqual(api._offer_filters(), {"countries": ["JP"], "speed": 300, "ping": 0, "sort": "price", "dir": "asc"})
+        self.assertEqual(api.save_offer_filters({"countries": ["JP", 5], "gpus": ["RTX 3060", None], "speed": "300",
+                                                 "ping": -1, "sort": "evil", "dir": "sideways"}), {"ok": True})
+        self.assertEqual(api._offer_filters(), {"countries": ["JP"], "gpus": ["RTX 3060"], "speed": 300, "ping": 0,
+                                                "sort": "price", "dir": "asc"})
         api.save_offer_filters({"sort": "net", "dir": "desc"})
         self.assertEqual((api._offer_filters()["sort"], api._offer_filters()["dir"]), ("net", "desc"))
         self.assertIn("error", api.save_offer_filters("nope"))
