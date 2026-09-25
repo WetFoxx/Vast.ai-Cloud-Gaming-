@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.0 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.1 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -67,6 +67,11 @@
 #    например, если сохранения и так хранит Steam Cloud.
 # Выключенное помечается в статусе «синхронизация выключена». Ручные wolf push/restore/forget
 # работают всегда.
+#
+# ИГРЫ ИЗ ПАПКИ — В БИБЛИОТЕКЕ STEAM (v4.1). Каждая подпапка GAMES_DIR с .exe появляется в Steam
+# сторонней игрой с Proton (wolf-shortcuts.py): при загрузке и при выключении, когда Steam закрыт.
+# Номер игры считается как у самого Steam, поэтому её сохранения (pfx--<номер>) общие на всех машинах.
+# Игры, добавленные в Steam руками, не трогаются; папку удалили — игра пропадает из библиотеки.
 #
 # ВЫГРУЗКА ПО ВЫХОДУ ИЗ ИГРЫ. wolf-watch.service раз в 5 с смотрит, какие игры запущены
 # (Steam — по процессу reaper с AppId, игры из GAMES_DIR — по пути к их папке у
@@ -893,6 +898,24 @@ steam_go() {
   log "Steam запущен${SL:+ (язык: $SL)}"
 }
 
+# [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за минуту
+steam_off() {
+  pgrep -x steam >/dev/null || return 0
+  u /usr/games/steam -shutdown &>/dev/null
+  for _ in {1..60}; do pgrep -x steam >/dev/null || return 0; sleep 1; done
+  return 1
+}
+# [v4.1] Игры из папки GD — в библиотеку Steam сторонними, с Proton (wolf-shortcuts.py). Только при
+# закрытом Steam: иначе при выходе он вернёт свой список. Код 3 — список изменился
+shortcuts() {
+  local out rc
+  [ -n "$SR" ] || sr || return 0
+  pgrep -x steam >/dev/null && return 0
+  out=$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" 2>&1); rc=$?
+  [ -n "$out" ] && log "$out"
+  return $rc
+}
+
 # --------------------------------------------------------------------- boot ---
 boot() {
   LS=$T/ls.boot FL=$T/fail.boot
@@ -1018,6 +1041,16 @@ boot() {
       log "sgame--$d: игры нет ни на диске, ни в облаке — манифест убран, Steam покажет её неустановленной"
     done
   fi
+  # [v4.1] Игры из папки — в библиотеку Steam. Без синхронизации игр Steam он уже запущен: если есть что
+  # добавить или убрать — закрыть на время записи и запустить снова (обычно это первые минуты, до игры)
+  if [ -n "$SR" ]; then
+    if pgrep -x steam >/dev/null; then
+      u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --check >/dev/null 2>&1
+      if [ $? = 3 ] && steam_off; then shortcuts; steam_go; fi
+    else
+      shortcuts
+    fi
+  fi
   [ "$SG" = 1 ] && steam_go
 
   touch "$L/boot-done"   # [HARDENING #5] снять гейт с таймеров и wolf-watch только теперь
@@ -1041,10 +1074,8 @@ bk() {
   : > "$FL"; sr
   if [ "$m" = shutdown ]; then
     export NOW=1
-    if pgrep -x steam >/dev/null; then
-      u /usr/games/steam -shutdown &>/dev/null
-      for _ in {1..60}; do pgrep -x steam >/dev/null || break; sleep 1; done
-    fi
+    steam_off
+    shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
     "$0" state; "$0" games
     return 0
   fi
@@ -1416,6 +1447,248 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(('', int(os.environ.get('WOLF_PORT', '8099'))), H).serve_forever()
 WEB
 
+# ============================== wolf-shortcuts.py ==============================
+w /usr/local/bin/wolf-shortcuts.py <<'SHORTCUTS'
+#!/usr/bin/env python3
+# [v4.1] Игры из папки GAMES_DIR — в библиотеку Steam сторонними играми (shortcuts.vdf) с Proton.
+#   wolf-shortcuts.py ПАПКА_ИГР КОРЕНЬ_STEAM [--check]   (от пользователя рабочего стола; Steam должен быть
+#                       закрыт — при выходе он перезаписывает оба файла своими данными; --check — только сказать,
+#                       нужно ли что-то менять: код 3 — да, ничего не записывая)
+# Каждая подпапка — одна игра: главный .exe выбирается сам (самый верхний уровень, из них — самый большой;
+# установщики, деинсталляторы и отчёты об ошибках пропускаются). Номер игры — как считает сам Steam
+# (crc32 от "exe" + названия, старший бит), поэтому на любой машине он тот же, и сохранения Proton
+# (compatdata/<номер> → архив pfx--<номер>) остаются общими. Наши записи помечены тегом vastgame: их
+# убираем, когда папки больше нет; добавленные руками не трогаем (и папку с такой игрой пропускаем).
+# Proton — в config/config.vdf (CompatToolMapping): тот, что выбран «для всех игр», иначе Proton Experimental.
+# Код выхода: 0 — ничего не изменилось, 3 — изменилось (Steam нужно перезапустить), 1 — ошибка.
+import binascii, os, re, struct, sys
+
+TAG = "vastgame"
+CHECK = "--check" in sys.argv
+SKIP = re.compile(r"unins|setup|install|redist|vcredist|vc_redist|dxsetup|dotnet|directx|crash|report|"
+                  r"easyanticheat|eac_|beservice|battleye|updater|launcherhelper|ue4prereq|ueprereq|prereq",
+                  re.I)
+
+
+# ------------------------------------------------ двоичный KeyValues (shortcuts.vdf)
+def bkv_read(data, i=0):
+    """{ключ: значение} из двоичного KeyValues; значение — dict, str или ('int', n) / ('u64', n)."""
+    out = {}
+    while True:
+        t = data[i]; i += 1
+        if t == 0x08:
+            return out, i
+        j = data.index(b"\0", i); key = data[i:j].decode("utf-8", "replace"); i = j + 1
+        if t == 0x00:
+            out[key], i = bkv_read(data, i)
+        elif t == 0x01:
+            j = data.index(b"\0", i); out[key] = data[i:j].decode("utf-8", "replace"); i = j + 1
+        elif t == 0x02:
+            out[key] = ("int", struct.unpack_from("<i", data, i)[0]); i += 4
+        elif t == 0x07:
+            out[key] = ("u64", struct.unpack_from("<Q", data, i)[0]); i += 8
+        else:
+            raise ValueError(f"неизвестный тип {t} в shortcuts.vdf")
+
+
+def bkv_write(d):
+    b = b""
+    for k, v in d.items():
+        kb = k.encode() + b"\0"
+        if isinstance(v, dict):
+            b += b"\x00" + kb + bkv_write(v)
+        elif isinstance(v, tuple) and v[0] == "u64":
+            b += b"\x07" + kb + struct.pack("<Q", v[1])
+        elif isinstance(v, tuple):
+            b += b"\x02" + kb + struct.pack("<i", v[1])
+        else:
+            b += b"\x01" + kb + str(v).encode() + b"\0"
+    return b + b"\x08"
+
+
+# ------------------------------------------------ текстовый KeyValues (config.vdf)
+def tkv_parse(text):
+    toks = re.findall(r'"((?:[^"\\]|\\.)*)"|([{}])', re.sub(r"(?m)^\s*//.*$", "", text))
+    pos = 0
+
+    def block():
+        nonlocal pos
+        out = []
+        while pos < len(toks):
+            s, br = toks[pos]; pos += 1
+            if br == "}":
+                return out
+            key = s
+            s2, br2 = toks[pos]; pos += 1
+            out.append([key, block() if br2 == "{" else s2])
+        return out
+    return block()
+
+
+def tkv_dump(items, depth=0):
+    tab, out = "\t" * depth, ""
+    for k, v in items:
+        if isinstance(v, list):
+            out += f'{tab}"{k}"\n{tab}{{\n{tkv_dump(v, depth + 1)}{tab}}}\n'
+        else:
+            out += f'{tab}"{k}"\t\t"{v}"\n'
+    return out
+
+
+def tkv_get(items, key, create=False):
+    for k, v in items:
+        if k.lower() == key.lower() and isinstance(v, list):
+            return v
+    if not create:
+        return None
+    new = []
+    items.append([key, new])
+    return new
+
+
+# ------------------------------------------------ игры
+def main_exe(folder):
+    """Главный .exe папки игры или None: самый верхний уровень (до 4 вглубь), из них — самый большой."""
+    best = None
+    base = folder.count(os.sep)
+    for root, dirs, files in os.walk(folder):
+        depth = root.count(os.sep) - base
+        if depth >= 4:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not SKIP.search(d)]
+        for f in files:
+            if not f.lower().endswith(".exe") or SKIP.search(f):
+                continue
+            p = os.path.join(root, f)
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            key = (depth, -size)
+            if best is None or key < best[0]:
+                best = (key, p)
+    return best and best[1]
+
+
+def appid(exe, name):
+    """Номер сторонней игры, как у Steam: crc32("\"exe\"" + название) со старшим битом (беззнаковый)."""
+    return (binascii.crc32((exe + name).encode()) & 0xFFFFFFFF) | 0x80000000
+
+
+def signed(n):
+    return n - (1 << 32) if n >= 1 << 31 else n
+
+
+def entry(name, exe_q, start_q, aid):
+    return {"appid": ("int", signed(aid)), "AppName": name, "Exe": exe_q, "StartDir": start_q, "icon": "",
+            "ShortcutPath": "", "LaunchOptions": "", "IsHidden": ("int", 0), "AllowDesktopConfig": ("int", 1),
+            "AllowOverlay": ("int", 1), "OpenVR": ("int", 0), "Devkit": ("int", 0), "DevkitGameID": "",
+            "DevkitOverrideAppID": ("int", 0), "LastPlayTime": ("int", 0), "FlatpakAppID": "",
+            "tags": {"0": TAG}}
+
+
+def unq(s):
+    return s.strip().strip('"')
+
+
+def sync_user(cfg_dir, games, changed_ids):
+    """Обновить shortcuts.vdf одного пользователя Steam. True — файл изменился."""
+    path = os.path.join(cfg_dir, "shortcuts.vdf")
+    try:
+        with open(path, "rb") as f:
+            root, _ = bkv_read(f.read(), 0)
+    except FileNotFoundError:
+        root = {}
+    except (ValueError, IndexError, struct.error) as e:
+        print(f"shortcuts: {path} не прочитан ({e}) — не трогаю", file=sys.stderr)
+        return False
+    lst = root.setdefault("shortcuts", {})
+    items = [lst[k] for k in sorted(lst, key=lambda x: int(x) if x.isdigit() else 0)]
+    ours = lambda e: TAG in (e.get("tags") or {}).values()
+    keep, change = [], False
+    for e in items:
+        exe = unq(e.get("Exe") or e.get("exe") or "")
+        if ours(e) and not os.path.isfile(exe):            # папку удалили — убрать и из Steam
+            change = True
+            continue
+        keep.append(e)
+    present = [unq(e.get("Exe") or e.get("exe") or "") for e in keep]
+    for folder, name, exe in games:
+        if any(p == exe or p.startswith(folder + os.sep) for p in present):
+            continue                                        # уже есть (наша или добавлена руками)
+        exe_q, start_q = f'"{exe}"', f'"{os.path.dirname(exe)}/"'
+        aid = appid(exe_q, name)
+        keep.append(entry(name, exe_q, start_q, aid))
+        changed_ids.add(aid)
+        change = True
+    for e in keep:                                          # Proton — и нашим, добавленным раньше
+        if ours(e):
+            changed_ids.add(e["appid"][1] & 0xFFFFFFFF)
+    if change and not CHECK:
+        root["shortcuts"] = {str(n): e for n, e in enumerate(keep)}
+        tmp = path + ".vastgame-tmp"
+        with open(tmp, "wb") as f:
+            f.write(bkv_write(root))
+        os.replace(tmp, path)
+    return change
+
+
+def sync_proton(config_vdf, ids):
+    """Proton для наших игр в CompatToolMapping. True — файл изменился."""
+    if not ids or not os.path.isfile(config_vdf):
+        return False
+    with open(config_vdf, encoding="utf-8", errors="replace") as f:
+        items = tkv_parse(f.read())
+    store = tkv_get(items, "InstallConfigStore", True)
+    steam = tkv_get(tkv_get(tkv_get(store, "Software", True), "Valve", True), "Steam", True)
+    mapping = tkv_get(steam, "CompatToolMapping", True)
+    default = next((dict(v).get("name") for k, v in mapping if k == "0" and isinstance(v, list)), None)
+    tool = default or "proton_experimental"
+    have = {k for k, v in mapping}
+    change = False
+    for aid in sorted(ids):
+        if str(aid) not in have:
+            mapping.append([str(aid), [["name", tool], ["config", ""], ["priority", "250"]]])
+            change = True
+    if change and not CHECK:
+        tmp = config_vdf + ".vastgame-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(tkv_dump(items))
+        os.replace(tmp, config_vdf)
+    return change
+
+
+def main(games_dir, steam_root):
+    games = []
+    for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
+        folder = os.path.join(games_dir, d)
+        if d.startswith(".") or not os.path.isdir(folder):
+            continue
+        exe = main_exe(folder)
+        if exe:
+            games.append((folder, d.replace("_", " ").strip(), exe))
+        else:
+            print(f"shortcuts: в «{d}» нет .exe — пропускаю", file=sys.stderr)
+    users = os.path.join(steam_root, "userdata")
+    changed, ids = False, set()
+    for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
+        cfg = os.path.join(users, u, "config")
+        if u.isdigit() and u != "0" and os.path.isdir(cfg):
+            changed |= sync_user(cfg, games, ids)
+    changed |= sync_proton(os.path.join(steam_root, "config", "config.vdf"), ids)
+    if not CHECK:
+        print(f"shortcuts: игр в папке {len(games)}, изменено: {'да' if changed else 'нет'}")
+    return 3 if changed else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1], sys.argv[2]))
+    except Exception as e:                                  # игры из папки — не повод ломать загрузку
+        print(f"shortcuts: ошибка {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+SHORTCUTS
+
 # ================================== Docker (v4.0) ==============================
 # Без systemd: всё — один процесс «wolf supervise» (страница статуса, наблюдение за играми,
 # загрузка и таймеры) в своей группе процессов. Повторный запуск скрипта снимает прежнюю группу
@@ -1430,7 +1703,7 @@ if [ "$WM" = docker ]; then
   rm -f /run/wolf/boot-done /run/wolf/boot-started
   setsid /usr/local/bin/wolf supervise </dev/null >>/var/log/wolf-supervise.log 2>&1 &
   echo $! > /run/wolf/supervise.pid
-  echo "=== wolf v4.0 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+  echo "=== wolf v4.1 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
   exit 0
 fi
 
@@ -1552,4 +1825,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v4.0 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v4.1 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
