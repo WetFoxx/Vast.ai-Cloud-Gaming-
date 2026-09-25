@@ -13,6 +13,11 @@ Sunshine (NVENC + NvFBC), звук, Tailscale без /dev/net/tun, геймпа�
   (`display-setup.sh`, `wolf-res`), звук, геймпад (`vgpadd.py`), Sunshine (`sunshine-start.sh`), XFCE, Steam.
 - `rootfs/usr/bin/steam`, `steam-patch.sh` — Steam без user namespaces (заплатки ставятся сами).
 - `vgpad/` — виртуальный геймпад (LD_PRELOAD) и посредник.
+- **Агент (v4.0):** с `WOLF_SCRIPT_URL` образ поднимает драйвер, экран, звук, геймпад и рабочий стол, а
+  Tailscale, Sunshine, Steam и облако — `wolf-setup.sh` с `WOLF_MODE=docker`: тот же агент и те же архивы
+  в Google Drive, что на KVM (`tailscaled-start.sh` — Tailscale без /dev/net/tun). Заплатки Steam условные
+  (переменная `VG` из обёртки `/usr/bin/steam`): файлы Steam уезжают в общее с KVM облако и там ведут себя
+  как оригинал. Программы пользователя стартуют с чистым окружением (`env -i`), как на KVM.
 
-Environment: `RES`, `TS_HOSTNAME`, `TAILSCALE_AUTHKEY`, `SUNSHINE_PASSWORD`, `STEAM_AUTOSTART`,
-`VASTGAME_DEBUG_TOKEN` (see `entrypoint.sh`). Requires an NVIDIA driver ≥ 580 on the host (NVENC in Sunshine).
+Environment: `WOLF_SCRIPT_URL` (agent mode), `RES`, `TS_HOSTNAME`, `TAILSCALE_AUTHKEY`, `SUNSHINE_PASSWORD`,
+`STEAM_AUTOSTART`, `VASTGAME_DEBUG_TOKEN` (see `entrypoint.sh`). Requires an NVIDIA driver ≥ 580 on the host (NVENC in Sunshine).

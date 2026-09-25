@@ -1,33 +1,52 @@
 #!/bin/bash
-# vastgame-desktop: главный процесс контейнера (PID 1). Поднимает по очереди Tailscale, драйверные части под хост,
-# экран, звук, посредника геймпада, Sunshine, рабочий стол XFCE и Steam — и дальше следит, чтобы Sunshine и X жили.
-# Настройки — переменные окружения аренды:
+# vastgame-desktop: главный процесс контейнера (PID 1). Поднимает драйверные части под хост, экран, звук,
+# посредника геймпада и рабочий стол XFCE — и дальше присматривает, чтобы X, Sunshine и Tailscale жили.
+#
+# Два режима:
+#  * агент (задан WOLF_SCRIPT_URL — так арендует приложение vastgame): Tailscale, Sunshine, Steam и облако —
+#    wolf-setup.sh с WOLF_MODE=docker: тот же агент, те же архивы в Google Drive и та же страница статуса,
+#    что на KVM (сетевая личность, вход в Steam, сохранения и игры — общие);
+#  * только рабочий стол (без WOLF_SCRIPT_URL) — проверка образа: Tailscale по ссылке, Sunshine, Steam.
+#
+# Переменные окружения аренды:
+#   WOLF_SCRIPT_URL  https://… — wolf-setup.sh по ссылке на коммит (как у шаблона KVM);
+#                    drive:ПАПКА/wolf-setup.sh — с Google Drive этого аккаунта (проверка до публикации)
 #   RES              базовое разрешение (как на KVM, по умолчанию 1920x1200); под клиента — wolf-res
-#   TS_HOSTNAME      имя узла в Tailscale (по умолчанию vastai-gaming, как на KVM)
-#   TAILSCALE_AUTHKEY  необязательно; без него — ссылка на одобрение (/run/vastgame/ts-login.url)
-#   SUNSHINE_PASSWORD  необязательно: логин кабинета Sunshine vastgame/<пароль>
-#   STEAM_AUTOSTART  1 (по умолчанию) — запустить Steam после входа
+#   TS_HOSTNAME      имя узла в Tailscale — только рабочий стол (агент берёт TAILSCALE_HOSTNAME, как KVM)
+#   TAILSCALE_AUTHKEY  необязательно; без него — ссылка на одобрение
+#   SUNSHINE_PASSWORD  только рабочий стол: логин кабинета Sunshine vastgame/<пароль>
+#   STEAM_AUTOSTART  только рабочий стол: 1 (по умолчанию) — запустить Steam после входа
 #   VASTGAME_DEBUG_TOKEN  необязательно: канал команд для отладки (порт 8788, только через Tailscale)
-# Ход — /var/log/vastgame.log, этап — /run/vastgame/stage.
+# Ход — /var/log/vastgame.log (и вывод контейнера), этап — /run/vastgame/stage.
 set -u
 DU=user
 DH=/home/user
 UIDN=$(id -u "$DU")
 XRD=/run/user/$UIDN
+BUS="unix:path=$XRD/bus"                 # сессионная шина пользователя — там же, где на KVM
 RES=${RES:-1920x1200}
 TS_HOSTNAME=${TS_HOSTNAME:-vastai-gaming}
 V=/opt/vastgame
 LOG=/var/log/vastgame.log
+AGENT=
+[ -n "${WOLF_SCRIPT_URL:-}" ] && AGENT=1
 mkdir -p /run/vastgame
 log() { echo "[vastgame $(date '+%F %T')] $*" | tee -a "$LOG"; }
 stage() { echo "$1" > /run/vastgame/stage; log "этап: $1"; }
-# От пользователя рабочего стола, с дисплеем и звуком
-u() { runuser -u "$DU" -- env DISPLAY=:0 XDG_RUNTIME_DIR="$XRD" HOME="$DH" USER="$DU" \
-        PATH=/usr/local/bin:/usr/bin:/bin:/usr/games "$@"; }
+# От пользователя рабочего стола — с чистым окружением, как на KVM (env -i): ключи аккаунта Vast в
+# окружении root (токен Google Drive, ключ инстанса) не должны попасть в Steam и игры
+u() { runuser -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" LANG=C.UTF-8 \
+        PATH=/usr/local/bin:/usr/bin:/bin:/usr/games DISPLAY=:0 XDG_RUNTIME_DIR="$XRD" \
+        DBUS_SESSION_BUS_ADDRESS="$BUS" "$@"; }
+desktop() { u setsid startxfce4 >/var/log/xfce.log 2>&1 & }
 
 trap 'log "остановка"; pkill -TERM -u "$DU"; pkill -TERM sunshine; pkill -TERM Xorg; tailscale down 2>/dev/null; exit 0' TERM INT
 
-log "=== vastgame-desktop: старт ($(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null))"
+log "=== vastgame-desktop: старт ($(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null))${AGENT:+, агент wolf}"
+# Перезапуск контейнера (Stop → Start на Vast): /tmp и /run здесь не tmpfs — старые замок X, сокет шины,
+# метки прошлой загрузки wolf и номер его процесса (теперь это мог бы быть чужой процесс) помешали бы запуску
+rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 "$XRD/bus" /run/vastgame/{stage,nvenc,capture,ts-login.url} \
+      /run/wolf/boot-done /run/wolf/boot-started /run/wolf/supervise.pid 2>/dev/null
 mkdir -p "$XRD" && chown "$DU:" "$XRD" && chmod 700 "$XRD"
 
 # --------------------------------------------------------------------- отладка
@@ -36,17 +55,17 @@ if [ -n "${VASTGAME_DEBUG_TOKEN:-}" ]; then
   log "канал отладки: порт 8788"
 fi
 
-# --------------------------------------------------------------------- Tailscale (без /dev/net/tun)
-stage tailscale
-mkdir -p /var/lib/tailscale /var/run/tailscale
-setsid tailscaled --tun=userspace-networking --port=41641 --state=/var/lib/tailscale/tailscaled.state \
-  --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &
-sleep 2
-( tailscale up --hostname="$TS_HOSTNAME" ${TAILSCALE_AUTHKEY:+--auth-key="$TAILSCALE_AUTHKEY"} 2>&1 \
-    | while read -r l; do
-        echo "[tailscale] $l" >> "$LOG"
-        case "$l" in https://login.tailscale.com/*) echo "$l" > /run/vastgame/ts-login.url; log "одобрить машину: $l" ;; esac
-      done ) &
+# --------------------------------------------------------------------- Tailscale (только рабочий стол)
+# Агенту — нет: wolf поднимет его сам ПОСЛЕ восстановления сетевой личности из облака
+if [ -z "$AGENT" ]; then
+  stage tailscale
+  "$V/tailscaled-start.sh"
+  ( tailscale up --hostname="$TS_HOSTNAME" ${TAILSCALE_AUTHKEY:+--auth-key="$TAILSCALE_AUTHKEY"} 2>&1 \
+      | while read -r l; do
+          echo "[tailscale] $l" >> "$LOG"
+          case "$l" in https://login.tailscale.com/*) echo "$l" > /run/vastgame/ts-login.url; log "одобрить машину: $l" ;; esac
+        done ) &
+fi
 
 # --------------------------------------------------------------------- драйвер, экран
 stage nvidia
@@ -65,41 +84,85 @@ u /usr/local/bin/wolf-res >/dev/null 2>&1              # базовый режи
 DISPLAY=:0 xset s off -dpms 2>/dev/null
 log "экран: $(DISPLAY=:0 xrandr 2>/dev/null | grep ' connected' | cut -d' ' -f1-3)"
 
-# --------------------------------------------------------------------- звук, геймпад
+# --------------------------------------------------------------------- шина, звук, геймпад
 stage audio
+[ -s /etc/machine-id ] || dbus-uuidgen --ensure=/etc/machine-id     # шине нужен; wolf потом ставит свой из identity
+u setsid dbus-daemon --session --address="$BUS" --nofork --nopidfile >/var/log/dbus-session.log 2>&1 &
+for _ in $(seq 1 20); do [ -S "$XRD/bus" ] && break; sleep 0.25; done
 u pulseaudio --start --exit-idle-time=-1 >>"$LOG" 2>&1 && log "звук: PulseAudio запущен"
 mkdir -p /dev/input /run/host && touch /run/host/container-manager    # SDL: джойстики без udev
 setsid python3 "$V/vgpadd.py" >/var/log/vgpadd.log 2>&1 &
 
-# --------------------------------------------------------------------- Sunshine
-stage sunshine
-"$V/sunshine-start.sh" 2>&1 | tee -a "$LOG"
-
-# --------------------------------------------------------------------- рабочий стол, Steam
-stage desktop
-u setsid dbus-launch --exit-with-session startxfce4 >/var/log/xfce.log 2>&1 &
-sleep 3
-if [ "${STEAM_AUTOSTART:-1}" = 1 ]; then
-  u setsid /usr/bin/steam >/tmp/steam-wrapper.log 2>&1 &
-  log "Steam запускается"
+# --------------------------------------------------------------------- Sunshine (только рабочий стол)
+# Агенту — нет: wolf перезапустит её после identity (иначе связка с Moonlight будет чужой)
+if [ -z "$AGENT" ]; then
+  stage sunshine
+  "$V/sunshine-start.sh" 2>&1 | tee -a "$LOG"
 fi
-stage ready
-log "готово: рабочий стол и Sunshine работают"
+
+# --------------------------------------------------------------------- рабочий стол
+stage desktop
+desktop
+sleep 3
+
+if [ -n "$AGENT" ]; then
+  # ------------------------------------------------------------------- агент wolf
+  stage wolf
+  W=/run/vastgame/wolf-setup.sh
+  ok=
+  for try in 1 2 3 4 5; do
+    rm -f "$W"
+    case $WOLF_SCRIPT_URL in
+      drive:*)   # с Google Drive этого аккаунта (тот же токен, что у wolf) — проверка до публикации
+        ( export RCLONE_CONFIG_WGD_TYPE=drive RCLONE_CONFIG_WGD_SCOPE=drive \
+                 RCLONE_CONFIG_WGD_CLIENT_ID="${RCLONE_CLIENT_ID:-}" \
+                 RCLONE_CONFIG_WGD_CLIENT_SECRET="${RCLONE_CLIENT_SECRET:-}" \
+                 RCLONE_CONFIG_WGD_TOKEN="{\"access_token\":\"x\",\"token_type\":\"Bearer\",\"refresh_token\":\"${RCLONE_REFRESH_TOKEN:-}\",\"expiry\":\"2000-01-01T00:00:00Z\"}"
+          rclone copyto "wgd:${WOLF_SCRIPT_URL#drive:}" "$W" >>/var/log/wolf-fetch.log 2>&1 ) ;;
+      *) curl -fsSL -o "$W" "$WOLF_SCRIPT_URL" 2>>/var/log/wolf-fetch.log ;;
+    esac
+    [ -s "$W" ] && head -1 "$W" | grep -q '^#!/bin/bash' && { ok=1; break; }
+    log "wolf-setup.sh не скачался (попытка $try)"
+    sleep 10
+  done
+  if [ -n "$ok" ]; then
+    # Ход агента — и в вывод контейнера: его видно в журнале Vast ещё до Tailscale
+    touch /var/log/wolf.log
+    ( tail -n0 -F /var/log/wolf.log 2>/dev/null | sed -u 's/^/[wolf] /' ) &
+    # Вывод — в файл, не в конвейер: запущенный скриптом «wolf supervise» живёт дальше и может держать
+    # унаследованный конец канала — конвейер тогда не закончился бы никогда, и присмотр ниже не начался бы
+    WOLF_MODE=docker bash "$W" >>"$LOG" 2>&1
+    log "wolf-setup.sh: код $?"
+    stage ready
+    log "агент wolf запущен: восстановление из облака — /var/log/wolf.log"
+  else
+    stage error
+    log "!!! wolf-setup.sh не скачался — работает только рабочий стол (без облака, Tailscale и Sunshine)"
+  fi
+else
+  if [ "${STEAM_AUTOSTART:-1}" = 1 ]; then
+    u setsid /usr/bin/steam >/tmp/steam-wrapper.log 2>&1 &
+    log "Steam запускается"
+  fi
+  stage ready
+  log "готово: рабочий стол и Sunshine работают"
+fi
 
 # --------------------------------------------------------------------- присмотр
+# Агенту Sunshine и Tailscale перезапускаем только после загрузки (boot-done): до неё ими занят wolf
 while :; do
   sleep 10
   if ! pgrep -x Xorg >/dev/null; then
     log "Xorg упал — перезапуск"
     setsid Xorg :0 -config /etc/X11/xorg.conf -noreset -nolisten tcp vt7 -novtswitch -sharevts >/var/log/xorg.out 2>&1 &
     sleep 5; u /usr/local/bin/wolf-res >/dev/null 2>&1
-    u setsid dbus-launch --exit-with-session startxfce4 >/var/log/xfce.log 2>&1 &
+    desktop
   fi
-  if ! pgrep -u "$DU" -x sunshine >/dev/null; then
-    log "Sunshine не работает — перезапуск"
-    "$V/sunshine-start.sh" 2>&1 | tee -a "$LOG"
+  if [ -z "$AGENT" ] || [ -e /run/wolf/boot-done ]; then
+    if ! pgrep -u "$DU" -x sunshine >/dev/null; then
+      log "Sunshine не работает — перезапуск"
+      "$V/sunshine-start.sh" ensure 2>&1 | tee -a "$LOG"     # ensure: уже подняли (wolf) — не трогать
+    fi
+    pgrep -x tailscaled >/dev/null || { log "tailscaled упал — перезапуск"; "$V/tailscaled-start.sh"; }
   fi
-  pgrep -x tailscaled >/dev/null || { log "tailscaled упал — перезапуск"
-    setsid tailscaled --tun=userspace-networking --port=41641 --state=/var/lib/tailscale/tailscaled.state \
-      --socket=/var/run/tailscale/tailscaled.sock >>/var/log/tailscaled.log 2>&1 & }
 done
