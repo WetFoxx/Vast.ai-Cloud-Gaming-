@@ -15,7 +15,15 @@ import market  # noqa: E402
 from vastapi import VastgameError  # noqa: E402
 
 
+def _no_page():
+    """Страница wolf (v3.15) в этих тестах «не отвечает» — проверяется путь по SSH (старые машины)."""
+    p = mock.patch.object(core.wolfnode, "post_cmd", lambda *a, **k: None)
+    p.start()
+    return p
+
+
 def setUpModule():
+    unittest.addModuleCleanup(_no_page().stop)
     """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
     import tempfile
     import history, market, settings

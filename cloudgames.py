@@ -4,11 +4,11 @@
 # Если машина сейчас работает, удаление идёт через `wolf forget` на ней: wolf запоминает, что
 # архив убран, и не выгружает игру заново. Без машины — напрямую через rclone в корзину Drive.
 
-import shlex   # безопасно подставить имя с пробелами в команду для машины
 
 import drive
 import steamnames
 from vastapi import VastgameError, list_instances
+import wolfnode
 from wolfnode import ssh_run, ts_node
 
 KINDS = ("sgame", "game", "pfx")   # игра Steam, игра не из Steam, сохранения (префикс Proton)
@@ -62,7 +62,7 @@ def remove(name, on_notice=None):
     if inst and node:
         # Машина работает — через wolf: он пометит архив и не выгрузит его заново.
         # wolf forget всегда отвечает кодом 0 — результат проверяем по списку ниже
-        code, out = ssh_run(node[1], f"wolf forget {shlex.quote(name)}", timeout=300, on_notice=on_notice)
+        code, out = wolfnode.run(node[1], "forget", [name], timeout=300, on_notice=on_notice, ssh=ssh_run)
         if code != 0:
             raise VastgameError(f"wolf forget не сработал (код {code}): {out.strip()[-300:]}",
                                 key="games.forget_failed", code=code, out=out.strip()[-300:])

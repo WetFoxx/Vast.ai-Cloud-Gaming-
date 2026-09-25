@@ -24,6 +24,7 @@ import history
 import latency
 import market
 import sshkey
+import wolfnode
 from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
 from wolfnode import NODE, links, ssh, ssh_run, ts_node, wolf_status
 
@@ -487,25 +488,26 @@ def stop(ui, dry_run=False):
 
     # Проверка SSH безвредной командой — до того, как что-то запускать.
     # Если Tailscale попросит подтвердить вход — ссылка придёт в ui.tailscale; ждём до 3 минут
-    ui.say("Проверяю Tailscale SSH (если появится ссылка — открой её и подтверди вход)...", key="core.ssh_check")
-    code, out = ssh_run(ip, "echo ok", on_notice=ui.tailscale)
+    ui.say("Проверяю связь с машиной (если появится ссылка Tailscale — открой её и подтверди вход)...",
+           key="core.ssh_check")
+    code, out = _on_machine(ip, "ping", on_notice=ui.tailscale)
     if code != 0 or out.strip() != "ok":
-        raise VastgameError(f"Tailscale SSH не работает (код {code}): {out.strip()[:200]}\n"
+        raise VastgameError(f"Машина не выполняет команды (код {code}): {out.strip()[:200]}\n"
                             "НЕ удаляю. Выгрузи вручную на машине: sudo wolf shutdown",
                             key="core.ssh_failed", code=code, out=out.strip()[:200])
-    ui.say("Tailscale SSH: работает.", "ok", key="core.ssh_ok")
+    ui.say("Связь с машиной: работает.", "ok", key="core.ssh_ok")
     if dry_run:
         return {"iid": iid, "archives": before}
 
     # ---- wolf shutdown; время берём с машины, чтобы сравнивать с ts в /json по одним часам
-    code, out = ssh_run(ip, "date +%s", timeout=60, on_notice=ui.tailscale)
+    code, out = _on_machine(ip, "time", timeout=60, on_notice=ui.tailscale)
     if code != 0 or not out.strip().isdigit():
         raise VastgameError("Не удалось узнать время на машине — НЕ запускаю выгрузку.", key="core.no_clock")
     t0 = int(out.strip()) - 2
     ui.stage("shutdown", "Закрываю Steam и выгружаю всё в Google Drive (может занять несколько минут)...")
     # wolf finish (v3.11+): машина сама выгружает, проверяет и удаляет себя отдельной службой —
     # обрыв связи с этим компьютером её уже не прервёт. Мы только следим и перепроверяем.
-    code, out = ssh_run(ip, "wolf finish", timeout=60, on_notice=ui.tailscale)
+    code, out = _on_machine(ip, "finish", timeout=60, on_notice=ui.tailscale)
     if _finish_started(ip, t0, out):
         return _follow_finish(ui, iid, ip, t0)
     ui.say(f"Ответ машины на «wolf finish»: {out.strip()[-200:]}", "detail")
@@ -513,6 +515,11 @@ def stop(ui, dry_run=False):
            "выключай интернет, пока идёт выгрузка.", "warn", key="core.old_script")
     _shutdown_over_ssh(ui, iid, ip, t0)
     return _verify_and_delete(ui, iid, wolf_status(ip), t0)
+
+
+def _on_machine(ip, cmd, timeout=180, on_notice=None):
+    """Команда на машине: страница wolf (v3.15, без подтверждений Tailscale SSH), старая — по SSH."""
+    return wolfnode.run(ip, cmd, timeout=timeout, on_notice=on_notice, ssh=ssh_run)
 
 
 def _finish_started(ip, t0, out, wait=30):

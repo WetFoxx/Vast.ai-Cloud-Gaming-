@@ -13,6 +13,17 @@ import pairing  # noqa: E402
 from vastapi import VastgameError  # noqa: E402
 
 
+
+def _no_page():
+    """Страница wolf (v3.15) в этих тестах «не отвечает» — проверяется путь по SSH (старые машины)."""
+    p = mock.patch.object(pairing.wolfnode, "post_cmd", lambda *a, **k: None)
+    p.start()
+    return p
+
+
+def setUpModule():
+    unittest.addModuleCleanup(_no_page().stop)
+
 class FakeResponse:
     def __init__(self, code, status=None):
         self.status_code, self._status = code, status

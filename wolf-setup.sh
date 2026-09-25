@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.14 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.15 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -1198,7 +1198,11 @@ w /usr/local/bin/wolf-web.py <<'WEB'
 # Страница статуса (порт из WOLF_PORT, по умолчанию 8099; JSON: /json). Отдельный
 # процесс: только читает /var/lib/wolf/st/* и хвост лога, синхронизацию не блокирует.
 # Слушает все интерфейсы, наружу закрыта цепочкой WOLF_SUN — см. wolf firewall.
-import os, time, html, glob, json
+# [v3.15] POST /cmd — команды от приложения vastgame вместо Tailscale SSH (в сетях Tailscale по
+# умолчанию SSH просит подтверждать вход в браузере раз в несколько часов). Выполняется только
+# короткий закрытый список команд и только от устройства ТОГО ЖЕ владельца в Tailscale, что и эта
+# машина: кто прислал, спрашиваем у самого Tailscale (tailscale whois) — без паролей и ключей.
+import os, time, html, glob, json, re, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ST = '/var/lib/wolf/st/'
 COLOR = {'ok': '#3fb950', 'up': '#58a6ff', 'down': '#58a6ff', 'wait': '#d29922', 'err': '#f85149'}
@@ -1234,7 +1238,63 @@ def page():
             'td{padding:4px 10px;border-bottom:1px solid #21262d}'
             'pre{background:#010409;padding:10px;overflow:auto;font-size:12px}</style>'
             f'<h2>{banner}</h2><table>{rows}</table><h3>Лог</h3><pre>{html.escape(log_tail())}</pre>')
+WOLF = '/usr/local/bin/wolf'
+# Имя архива игры: папки бывают с пробелами («sgame--The Blood of Dawnwalker»); без «/» и управляющих
+# символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
+ARCHIVE = re.compile(r'^(game|sgame|pfx)--[^/\x00-\x1f]{1,200}$')
+LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+def command(c, a):
+    """Закрытый список: (команда, в фоне?) или None — такой команды нет."""
+    arg = a[0] if len(a) == 1 and isinstance(a[0], str) else ''
+    return {'ping': (['echo', 'ok'], False),
+            'time': (['date', '+%s'], False),
+            'finish': ([WOLF, 'finish'], False),                  # сам уходит в фон службой (v3.11)
+            'push-identity': ([WOLF, 'push', 'identity'], True),
+            'forget': ([WOLF, 'forget', arg], False) if ARCHIVE.match(arg) else None,
+            'sunshine-creds': ([WOLF, 'sunshine-creds', arg], False) if LOGIN.match(arg) else None}.get(c)
+def tsjson(sub, *args):
+    # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
+    return json.loads(subprocess.run(['tailscale', sub, '--json', *args], capture_output=True, text=True,
+                                     timeout=10).stdout)
+def same_owner(ip):
+    """Прислал ли команду человек, которому принадлежит эта машина в Tailscale."""
+    try:
+        me = tsjson('status', '--peers=false')['Self']['UserID']
+        who = tsjson('whois', ip)
+        return bool(me) and who['UserProfile']['ID'] == me and not (who.get('Node') or {}).get('Tags')
+    except Exception:
+        return False
 class H(BaseHTTPRequestHandler):
+    def reply(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code); self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_POST(self):
+        if self.path != '/cmd':
+            return self.reply(404, {'error': 'нет такой страницы'})
+        n = int(self.headers.get('Content-Length') or 0)
+        if not 0 < n <= 65536:
+            return self.reply(400, {'error': 'пустой или слишком большой запрос'})
+        try:
+            req = json.loads(self.rfile.read(n))
+            args = req.get('args') or []
+            spec = command(req.get('cmd'), args if isinstance(args, list) else [])
+        except Exception:
+            return self.reply(400, {'error': 'не JSON'})
+        if not spec:
+            return self.reply(400, {'error': 'нет такой команды'})
+        if not same_owner(self.client_address[0]):
+            return self.reply(403, {'error': 'устройство другого владельца в Tailscale'})
+        cmd, background = spec
+        if background:
+            subprocess.Popen(cmd, env={**os.environ, 'NOW': '1'}, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            return self.reply(200, {'code': 0, 'out': 'started'})
+        try:
+            r = subprocess.run(cmd, input=req.get('stdin') or '', capture_output=True, text=True, timeout=600)
+            return self.reply(200, {'code': r.returncode, 'out': (r.stdout + r.stderr)[-4000:]})
+        except subprocess.TimeoutExpired:
+            return self.reply(200, {'code': None, 'out': 'не закончилось за 10 минут'})
     def do_GET(self):
         if self.path.startswith('/json'):
             body = json.dumps([dict(name=n, ts=t, state=s, text=x) for n, t, s, x in items()],
@@ -1367,4 +1427,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.14 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.15 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

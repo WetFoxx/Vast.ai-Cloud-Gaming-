@@ -14,6 +14,17 @@ ARCH = {"pfx--1": {"size": 5, "mtime": "2026-09-23", "files": ["pfx--1.tar.zst",
         "identity": {"size": 1, "mtime": "2026-09-23", "files": ["identity.tar.zst"]}}
 
 
+
+def _no_page():
+    """Страница wolf (v3.15) в этих тестах «не отвечает» — проверяется путь по SSH (старые машины)."""
+    p = mock.patch.object(cloudgames.wolfnode, "post_cmd", lambda *a, **k: None)
+    p.start()
+    return p
+
+
+def setUpModule():
+    unittest.addModuleCleanup(_no_page().stop)
+
 class TestRemove(unittest.TestCase):
     def setUp(self):
         self.cloud = {k: dict(v) for k, v in ARCH.items()}

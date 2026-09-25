@@ -28,6 +28,7 @@ import urllib3
 import moonlight
 import paths
 from vastapi import SERVICE, VastgameError
+import wolfnode
 from wolfnode import ssh_run
 
 USER = "vastgame"
@@ -51,8 +52,8 @@ def creds():
 def set_creds_on_machine(ip, on_notice=None):
     """Задать на машине логин кабинета Sunshine = наш (перезапишет прежний, если был)."""
     user, pw = creds()
-    code, out = ssh_run(ip, f"wolf sunshine-creds {user}", timeout=120, on_notice=on_notice,
-                        stdin_text=pw + "\n")
+    code, out = wolfnode.run(ip, "sunshine-creds", [user], stdin=pw + "\n", timeout=120, on_notice=on_notice,
+                             ssh=ssh_run)
     if code != 0 or "sunshine-creds: ok" not in out:
         raise VastgameError(f"Не удалось задать логин кабинета Sunshine: {out.strip()[-200:]}",
                             key="pair.creds_failed", out=out.strip()[-200:])
@@ -129,8 +130,7 @@ def pair(host, ip, on_notice=None):
                 p.terminate()
     # Связка хранится в identity — выгрузить сразу, чтобы следующие машины были связаны без PIN.
     # </dev/null и скобки: команда уходит в фон на машине, и ssh не ждёт конца выгрузки
-    _later(lambda: ssh_run(ip, "(NOW=1 wolf push identity </dev/null >/dev/null 2>&1 &)", timeout=180,
-                           on_notice=on_notice))
+    _later(lambda: wolfnode.run(ip, "push-identity", timeout=180, on_notice=on_notice, ssh=ssh_run))
     return True
 
 

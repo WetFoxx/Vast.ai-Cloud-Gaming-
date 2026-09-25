@@ -1,7 +1,12 @@
 # wolfnode.py — связь с инстансом через Tailscale: найти узел, прочитать статус wolf,
-# выполнить команду по Tailscale SSH. Используют play.py и stop.py.
+# выполнить команду на машине. Используют play.py и stop.py.
+#
+# Команды (run): с wolf-setup.sh v3.15 — через страницу wolf (POST /cmd). Машина выполняет их только
+# от устройства того же владельца в Tailscale и без Tailscale SSH, который в сетях по умолчанию
+# раз в несколько часов просит подтвердить вход в браузере. Машина со скриптом старее — по SSH.
 
 import json
+import shlex
 import subprocess
 
 import requests
@@ -33,6 +38,48 @@ def wolf_status(ip):
         return {x["name"]: (x["ts"], x["state"], x["text"]) for x in r.json()}
     except Exception:
         return None
+
+
+# Команды, которые понимает страница wolf, и то же самое для старых машин — строкой для SSH
+SHELL = {"ping": lambda a: "echo ok", "time": lambda a: "date +%s", "finish": lambda a: "wolf finish",
+         "push-identity": lambda a: "(NOW=1 wolf push identity </dev/null >/dev/null 2>&1 &)",
+         "forget": lambda a: f"wolf forget {shlex.quote(a[0])}",
+         "sunshine-creds": lambda a: f"wolf sunshine-creds {shlex.quote(a[0])}"}
+
+
+def post_cmd(ip, cmd, args=(), stdin=None, timeout=120):
+    """Команда через страницу wolf: (код, вывод) или None — такой страницы у машины нет (скрипт
+    старее v3.15) или она недоступна; тогда вызывающий идёт по SSH."""
+    from vastapi import VastgameError
+    try:
+        r = requests.post(f"http://{ip}:{WOLF_PORT}/cmd", json={"cmd": cmd, "args": list(args), "stdin": stdin},
+                          timeout=(10, timeout))
+    except requests.Timeout as e:
+        if isinstance(e, requests.ConnectTimeout):
+            return None
+        return None, f"не ответил за {timeout} с"      # команда идёт — повторять по SSH нельзя
+    except requests.RequestException:
+        return None
+    if r.status_code in (404, 405, 501):                # старая страница: POST не умеет
+        return None
+    if r.status_code == 403:
+        raise VastgameError("Машина не приняла команду: это устройство другого владельца в Tailscale.",
+                            key="machine.forbidden")
+    try:
+        d = r.json()
+    except ValueError:
+        return None, r.text[-300:]
+    return (d.get("code"), d.get("out") or "") if r.status_code == 200 else (None, d.get("error") or "")
+
+
+def run(ip, cmd, args=(), stdin=None, timeout=120, on_notice=None, ssh=None):
+    """Команда на машине (cmd — из SHELL): страница wolf, а у старой машины — Tailscale SSH (ssh —
+    функция вида ssh_run, по умолчанию она сама). Возвращает (код, вывод), как ssh_run."""
+    r = post_cmd(ip, cmd, args, stdin, timeout)
+    if r is not None:
+        return r
+    extra = {"stdin_text": stdin} if stdin else {}
+    return (ssh or ssh_run)(ip, SHELL[cmd](list(args)), timeout=timeout, on_notice=on_notice, **extra)
 
 
 SUNSHINE_UI_PORT = 47990   # веб-кабинет Sunshine (HTTPS): пароль, PIN для Moonlight
