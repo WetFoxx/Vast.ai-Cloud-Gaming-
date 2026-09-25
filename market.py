@@ -11,7 +11,9 @@ from vastapi import call
 
 MIN_REL = 0.97        # надёжность машины не ниже (доля времени, когда хост был доступен)
 STREAM_GB = 15        # трафик стрима, ГБ в час — для оценки стоимости трафика
-MAX_TRAFFIC = 0.02    # машины с трафиком дороже, $ за ГБ, не показываем
+# Предела цены трафика нет (решение 2026-09-25): по реальным списаниям трафик почти не берётся ($0.019 за
+# 30 дней при $15.19), а предел $0.02/ГБ отсекал 6 машин. В терминале можно задать: offers --max-traffic
+MAX_TRAFFIC = None
 
 # Игровые видеокарты: "RTX 4090", "GTX 1660 Ti", "RTX 4070S Ti".
 # Не подходят профессиональные: "RTX A4000" (после RTX буква), "RTX 6000Ada" (Ada сразу после цифр).
@@ -77,7 +79,7 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         # «Бесплатный» — дешевле $0.10 за ТБ: у таких хостов в API стоят копейки вроде 0.000003 $/ГБ
         if free and max(up, down) >= 0.0001:
             continue
-        if max(up, down) > max_traffic:
+        if max_traffic is not None and max(up, down) > max_traffic:
             continue
         o["_traffic"] = up * stream_gb
         o["_total"] = o["dph_total"] + o["_traffic"]

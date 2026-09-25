@@ -14,7 +14,7 @@ p.add_argument("--disk", type=int, help="размер диска, ГБ (по у�
 p.add_argument("--min-rel", type=float, default=market.MIN_REL, help=f"минимальная надёжность ({market.MIN_REL})")
 p.add_argument("--stream-gb", type=float, default=market.STREAM_GB, help=f"трафик стрима, ГБ в час ({market.STREAM_GB})")
 p.add_argument("--max-traffic", type=float, default=market.MAX_TRAFFIC,
-               help=f"скрыть машины, где трафик дороже, $/ГБ ({market.MAX_TRAFFIC})")
+               help="скрыть машины, где трафик дороже, $/ГБ (по умолчанию — не скрывать)")
 p.add_argument("--free", action="store_true", help="только машины с бесплатным трафиком (до $0.10 за ТБ)")
 p.add_argument("--rows", type=int, default=20, help="сколько строк показать (20)")
 a = p.parse_args()
