@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.15 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v3.16 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -796,6 +796,11 @@ sunshine_prep() {
     sed -i '/^global_prep_cmd/d' "$cf"
     printf '%s\n' "$want" >> "$cf"
   fi
+  # [v3.16] Запас на восстановление потерянных пакетов видео 50% (по умолчанию 20). Linux-Sunshine не
+  # умеет Reference frame invalidation: после невосстановимой потери Moonlight выкидывает кадры до
+  # нового ключевого (~RTT). Замер 2026-09-25 (~1% потерь на маршруте): 7–20% пропавших кадров → 3.6%.
+  # Только если строки нет — свой выбор из кабинета Sunshine не трогаем.
+  grep -q '^fec_percentage' "$cf" || printf 'fec_percentage = 50\n' >> "$cf"
   chown -R "$DU:" "$d"
 }
 
@@ -1427,4 +1432,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.15 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v3.16 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
