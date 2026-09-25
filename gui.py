@@ -125,18 +125,27 @@ class Api:
     def _disk(self, disk, tpl):
         return jobs.disk_size(disk, tpl)
 
-    def offers(self, disk=None):
-        """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс."""
+    def _docker(self, docker):
+        """Вкладка списка машин: выбор человека (запоминается), иначе прошлый, иначе KVM."""
+        if docker is None:
+            return bool(settings.get("offers_docker"))
+        settings.set("offers_docker", bool(docker))
+        return bool(docker)
+
+    def offers(self, disk=None, docker=None):
+        """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс.
+        docker — вкладка «Docker (экспериментально)» (None — как в прошлый раз)."""
         try:
             core.require_no_machine()
             tpl = core.template()
             disk = self._disk(disk, tpl)
-            rows = market.search(disk)
+            docker = self._docker(docker)
+            rows = market.search(disk, docker=docker)
             credit = core.balance()
         except VastgameError as e:
             return {"error": error_data(e)}
         try:
-            last = market.last_machine(disk)
+            last = market.last_machine(disk, docker)
         except VastgameError:
             last = None          # не удалось проверить последнюю машину — список машин всё равно показать
         remembered, me = latency.known(), geo.home()
@@ -149,17 +158,17 @@ class Api:
                     "reliability": o["reliability"], "failed": o.get("_failed"), "start_min": o.get("_start_min"),
                     "net_down": round(o.get("inet_down") or 0), "net_up": round(o.get("inet_up") or 0),
                     "ping": latency.for_offer(o, remembered, me)}
-        return {"disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
+        return {"docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
                 "filters": self._offer_filters(),
                 "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
                                   "offer": last["offer"] and row(last["offer"])}}
 
-    def check_offer(self, offer_id, disk=None):
+    def check_offer(self, offer_id, disk=None, docker=False):
         """Свежие данные машины прямо перед подтверждением аренды."""
         try:
             disk = self._disk(disk, core.template())
-            o = core.offer_by_id(int(offer_id), disk)
+            o = core.offer_by_id(int(offer_id), disk, bool(docker))
             credit = core.balance()
         except VastgameError as e:
             return {"error": error_data(e)}
@@ -187,17 +196,18 @@ class Api:
         saved = settings.get("sync") or {}
         return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
 
-    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None):
+    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False):
         """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
         закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
         lang — язык окна для уведомления в конце, spare — следующие машины его списка (на замену,
-        если Vast не запустит выбранную)."""
+        если Vast не запустит выбранную), docker — вкладка «Docker (экспериментально)»."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
         settings.set("sync", sync)
         spare = [int(x) for x in (spare or []) if str(x).isdigit() and int(x) != int(offer_id)][:SPARE]
-        if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare):
+        if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare,
+                          docker=bool(docker)):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 

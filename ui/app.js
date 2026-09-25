@@ -216,8 +216,10 @@ $("open-sunshine").addEventListener("click", () => {
 $("play").addEventListener("click", () => openOffers());
 
 let offersReq = 0;   // номер последнего запроса списка: ответ на устаревший (другой диск) не показывать
-async function openOffers(disk) {
+let offersDocker = null;   // вкладка: false — KVM, true — Docker (экспериментально); null — как в прошлый раз
+async function openOffers(disk, docker) {
   const reload = disk != null;       // смена диска: тумблеры синхронизации не сбрасывать
+  if (docker != null) offersDocker = docker;
   show("offers");
   offersData = null; selected = null;
   $("rent").disabled = true;
@@ -225,15 +227,27 @@ async function openOffers(disk) {
   $("offers-table").querySelector("tbody").innerHTML = "";
   showError("offers-error", null);
   const my = ++offersReq;
-  const data = DEMO ? demoOffers(disk) : await api().offers(disk ?? null);
+  showTabs();
+  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await api().offers(disk ?? null, offersDocker);
   if (my !== offersReq) return;
   if (data.error) { showError("offers-error", data.error); return; }
   offersData = data;
+  offersDocker = !!data.docker;
+  showTabs();
   const slider = $("disk");
   slider.min = data.disk_min; slider.max = data.disk_max; slider.value = data.disk;
   if (!reload) for (const k of SYNC_KEYS) $("sync-" + k).checked = !!(data.sync || {})[k];
   renderOffers();
 }
+
+function showTabs() {
+  $("tab-kvm").classList.toggle("active", !offersDocker);
+  $("tab-docker").classList.toggle("active", !!offersDocker);
+  $("offers-docker-note").hidden = !offersDocker;
+}
+// Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
+$("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offersData ? offersData.disk : null, false); });
+$("tab-docker").addEventListener("click", () => { if (!offersDocker) openOffers(offersData ? offersData.disk : null, true); });
 
 // Ползунок диска: число меняется сразу, список машин (цены зависят от диска) — когда отпустили
 $("disk").addEventListener("input", () => { $("disk-value").textContent = t("disk.value", { gb: $("disk").value }); });
@@ -410,7 +424,8 @@ $("rent").addEventListener("click", async () => {
   $("rent").disabled = true;
   $("offers-summary").textContent = t("confirm.rent.checking");
   const disk = offersData.disk;
-  const o = DEMO ? demoCheck() : await api().check_offer(selected, disk);   // свежая цена прямо перед «да»
+  const docker = !!offersData.docker;
+  const o = DEMO ? demoCheck() : await api().check_offer(selected, disk, docker);   // свежая цена прямо перед «да»
   renderOffers();
   if (o.error && o.error.key === "core.offer_gone") {   // заняли, пока выбирали — показать свежий список
     await openOffers(disk);
@@ -430,13 +445,14 @@ $("rent").addEventListener("click", async () => {
   // Забег: вместе с выбранной запускаются ещё машины из списка, остаётся первая запустившаяся
   const extra = Math.min(2, offerList(offersData).filter((x) => x.id !== o.id).length);
   if (extra) text += "\n\n" + t("confirm.rent.race", { n: extra });
+  if (docker) text += "\n\n" + t("confirm.rent.docker");
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
   // Запасные — следующие машины из списка, как он сейчас отфильтрован и отсортирован: если Vast
   // не запустит выбранную за 10 минут, фоновый процесс сам возьмёт следующую
   const spare = offerList(offersData).map((x) => x.id).filter((id) => id !== o.id).slice(0, 10);
-  const r = await api().play(o.id, sync, disk, LANG, spare);   // язык — для уведомления в конце
+  const r = await api().play(o.id, sync, disk, LANG, spare, docker);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
 });

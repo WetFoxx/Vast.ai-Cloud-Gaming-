@@ -82,6 +82,11 @@
     <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
     <div class="note" data-i18n="offers.latency"></div>
     <div class="note" id="offers-last" hidden></div>
+    <div class="tabs" role="tablist">
+      <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
+      <button id="tab-docker" role="tab" data-i18n="offers.mode.docker"></button>
+    </div>
+    <div class="note" id="offers-docker-note" data-i18n="offers.mode.docker_note" hidden></div>
     <section class="card disk-card">
       <div class="disk-row"><span class="label" data-i18n="disk.title"></span><b id="disk-value"></b></div>
       <input type="range" id="disk" min="50" max="1000" step="10" value="100">

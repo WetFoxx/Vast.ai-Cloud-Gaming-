@@ -37,6 +37,10 @@ SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина 
 GONE_CHECK_SEC = 60      # пока ждём машину — раз в столько секунд спрашивать Vast, есть ли она ещё
 RESTORE_QUIET_MIN = 10   # восстановление: /json молчит столько минут — машина перестала отвечать
 RESTORE_MIN = 120        # восстановление: дольше — остановить слежение (машина при этом работает)
+# Docker (экспериментально): образ vastgame-desktop, закреплённый на сборке (как SCRIPT_URL — на коммит).
+# Новая сборка образа не попадёт на машины, пока здесь не поменяют тег
+DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:82c6cefda9357e2f42bde71c19a6453edfaee55d"
+SUNSHINE = "sunshine"    # запись образа на странице wolf: заработал ли NVENC (не архив)
 
 
 # ------------------------------------------------------------------ подготовка аренды ---
@@ -78,7 +82,7 @@ def template_games(tpl):
     return "1" if re.search(r'-e\s+SYNC_STEAM_GAMES="?1', tpl.get("env") or "") else "0"
 
 
-def offer_by_id(offer_id, disk):
+def offer_by_id(offer_id, disk, docker=False):
     """Свежие данные машины с нашим диском. VastgameError, если она не подходит."""
     # Поле id в фильтре поиска не работает (молча находит 0), а ask_contract_id — работает
     found = call("POST", "bundles/", {
@@ -89,7 +93,12 @@ def offer_by_id(offer_id, disk):
         raise VastgameError(f"Машина {offer_id} уже недоступна — подбери другую: vastgame play",
                             key="core.offer_gone", id=offer_id)
     o = found[0]
-    if not o.get("vms_enabled"):
+    if docker:
+        if market.driver_major(o) < market.DOCKER_DRIVER:
+            raise VastgameError(f"На машине {offer_id} драйвер NVIDIA старше {market.DOCKER_DRIVER} — "
+                                "кодировщик видео в Docker на нём не работает.",
+                                key="core.offer_old_driver", id=offer_id, need=market.DOCKER_DRIVER)
+    elif not o.get("vms_enabled"):
         raise VastgameError(f"Машина {offer_id} не поддерживает KVM — шаблон на ней не запустится.",
                             key="core.offer_no_kvm", id=offer_id)
     if o.get("disk_space", 0) < disk:
@@ -109,12 +118,25 @@ SYNC_VARS = {"steam_games": "SYNC_STEAM_GAMES", "other_games": "SYNC_OTHER_GAMES
 SYNC_DEFAULTS = {"steam_games": False, "other_games": True, "saves": True}
 
 
-def rental_body(tpl, disk, games=None, sync=None):
+def rental_body(tpl, disk, games=None, sync=None, docker=False):
     """Тело запроса аренды. Переменные ниже перекрывают шаблон только для этой аренды:
     games — "1"/"0" для SYNC_STEAM_GAMES (терминал: --games/--no-games);
-    sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне)."""
-    body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
-    env = {}
+    sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне).
+    docker — образ vastgame-desktop вместо шаблона KVM: тот же wolf-setup.sh (образ скачивает его по
+    WOLF_SCRIPT_URL), настройки разрешения и языка Steam — из шаблона, порт Tailscale для прямой связи."""
+    if docker:
+        import setup      # адрес скрипта один для KVM и Docker (setup не импортирует core)
+        env = {"WOLF_SCRIPT_URL": setup.SCRIPT_URL, "-p 41641:41641/udp": "1",
+               "SYNC_STEAM_GAMES": template_games(tpl)}
+        for name in ("RES", "STEAM_LANG"):
+            v = setup.env_value(tpl.get("env"), name)
+            if v:
+                env[name] = v
+        body = {"client_id": "me", "image": DOCKER_IMAGE, "disk": disk, "label": "vastgame",
+                "runtype": "args", "args": ["start"], "env": env}
+    else:
+        body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
+        env = {}
     if games is not None:
         env["SYNC_STEAM_GAMES"] = games
     for k, var in SYNC_VARS.items():
@@ -240,8 +262,10 @@ class _Watch:
                                 "Запуск остановлен.", key="core.machine_gone", id=self.iid)
 
 
-def wait_ready(iid, t0, o, ui):
+def wait_ready(iid, t0, o, ui, docker=False):
     """Дождаться, пока машина готова к игре: Vast → Tailscale → восстановление из Drive.
+    docker — контейнер vastgame-desktop: кодировщик NVENC работает не на всех хостах — такую машину
+    заменить (хост помечается, машина удаляется, core.try_another — берётся следующая из списка).
 
     Возвращает {"ip", "dns", "links", "boot", "identity", "minutes"}.
     """
@@ -265,7 +289,7 @@ def wait_ready(iid, t0, o, ui):
             last = st
         if st == "running":
             market.clear_bad(o.get("machine_id"))     # хост справился — прежний сбой был временным
-            market.record_start(o.get("machine_id"), time.time() - t0)   # за сколько запустился — в список машин
+            market.record_start(o.get("machine_id"), time.time() - t0, docker)   # за сколько запустился — в список машин
             # Диагностика: что реально попало на машину. Только ИМЕНА переменных — значения (ключи)
             # не показываем. Порты (-p ...) тоже лежат в extra_env — их пропускаем. Секретные
             # переменные (ключи из аккаунта, OPEN_BUTTON_TOKEN) API не показывает — это нормально.
@@ -347,7 +371,15 @@ def wait_ready(iid, t0, o, ui):
             raise VastgameError(f"Восстановление идёт дольше {RESTORE_MIN} минут — перестаю ждать. Машина работает: "
                                 "посмотри её состояние на главном экране.", key="core.restore_timeout",
                                 id=iid, min=RESTORE_MIN)
+        sun = s.get(SUNSHINE)
+        if sun and sun[0] >= t0 - 60 and sun[1] == "err":
+            # Без NVENC образ кодирует видео процессором — играть нельзя. Архивы машина ещё не выгружала
+            # (первая выгрузка — через 5 минут после загрузки), удалять безопасно
+            _failed_start(iid, f"На этой машине не работает кодировщик видео NVENC ({sun[2][:120]}).", o, ui,
+                          bad_host=True, key="core.fail_nvenc")
         for name, (ts, state, text) in sorted(s.items()):
+            if name == SUNSHINE:
+                continue
             if ts >= t0 - 60 and seen.get(name) != (state, text):
                 ui.archive(name, state, text)
                 seen[name] = (state, text)
@@ -431,10 +463,11 @@ def status():
         return dict(out, state=STARTING, kind="tailscale", stage="tailscale",
                     text="Машина запущена, жду её в Tailscale")
     _, ip, dns = node
-    busy = sorted(n for n, v in s.items() if n != "boot" and v[1] in ("up", "down"))
-    errors = sorted(n for n, v in s.items() if n != "boot" and v[1] == "err")
-    done = sum(1 for n, v in s.items() if n != "boot" and v[1] == "ok")
-    out.update(links=links(ip, dns), archives=s, busy=busy, errors=errors, done=done, detail="")
+    arch = {n: v for n, v in s.items() if n not in ("boot", SUNSHINE)}     # sunshine — запись образа, не архив
+    busy = sorted(n for n, v in arch.items() if v[1] in ("up", "down"))
+    errors = sorted(n for n, v in arch.items() if v[1] == "err")
+    done = sum(1 for v in arch.values() if v[1] == "ok")
+    out.update(links=links(ip, dns), archives={n: v for n, v in s.items() if n != SUNSHINE}, busy=busy, errors=errors, done=done, detail="")
     boot = s.get("boot")
     if boot and boot[1] == "err":
         return dict(out, state=ERROR, kind="boot_error", detail=boot[2],
@@ -645,9 +678,9 @@ def _verify_and_delete(ui, iid, after, t0, self_delete=False):
     if after is None:
         raise VastgameError("!!! Страница статуса не отвечает после выгрузки — НЕ удаляю.",
                             key="core.no_status_after")
-    fresh = {n: v for n, v in after.items() if v[0] >= t0 and n not in ("boot", "finish")}
+    fresh = {n: v for n, v in after.items() if v[0] >= t0 and n not in ("boot", "finish", SUNSHINE)}
     bad = {n: v for n, v in fresh.items() if v[1] in ("up", "down", "err")}
-    old_err = {n: v for n, v in after.items() if v[0] < t0 and v[1] == "err"}
+    old_err = {n: v for n, v in after.items() if v[0] < t0 and v[1] == "err" and n != SUNSHINE}
     uploaded = sorted(n for n, v in fresh.items() if v[1] == "ok")
     if uploaded:
         ui.say(f"Выгружено в этот раз: {len(uploaded)} архив(ов): {', '.join(uploaded)}",

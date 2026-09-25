@@ -46,7 +46,7 @@ class Race(unittest.TestCase):
             (jobs.core, "require_no_machine", lambda: None),
             (jobs.core, "offer_by_id", self.offer_by_id),
             (jobs.core, "rent", self.rent),
-            (jobs.core, "rental_body", lambda tpl, size, sync=None: {}),
+            (jobs.core, "rental_body", lambda tpl, size, sync=None, docker=False: {}),
             (jobs.core, "list_instances", self.list_instances),
             (jobs.core, "_delete_quietly", self.delete),
             (jobs.core, "wait_ready", self.wait_ready),
@@ -61,7 +61,7 @@ class Race(unittest.TestCase):
     def sleep(self, s):
         self.clock += s
 
-    def offer_by_id(self, oid, size):
+    def offer_by_id(self, oid, size, docker=False):
         if oid not in OFFERS:
             raise VastgameError("занята", key="core.offer_gone", id=oid)
         return dict(OFFERS[oid])
@@ -88,7 +88,7 @@ class Race(unittest.TestCase):
             out.append({"id": iid, "actual_status": st, "status_msg": ""})
         return out
 
-    def wait_ready(self, iid, t0, o, ui):
+    def wait_ready(self, iid, t0, o, ui, docker=False):
         self.at_wait = (iid, set(self.alive))      # что было живо, когда начали готовить победителя
         return {"links": {"moonlight": "m"}, "minutes": 5, "boot": (0, "ok", ""), "identity": None}
 
@@ -98,6 +98,34 @@ class Race(unittest.TestCase):
 
     def keys(self):
         return [e["key"] for e in self.job.events if e["key"] and e["key"].startswith("core.race")]
+
+    def test_docker_no_nvenc_winner_replaced_by_next(self):
+        # Вкладка Docker: флаг доходит до проверки, аренды и ожидания; победитель без NVENC (wait_ready →
+        # core.try_another) — новый забег из оставшихся, прежняя машина уже удалена
+        self.run_after = {1: 30, 2: 60, 3: 90, 4: 30}
+        seen, calls = [], []
+        self.patch_many(("offer_by_id", lambda oid, size, docker=False: seen.append(docker) or self.offer_by_id(oid, size)),
+                        ("rental_body", lambda tpl, size, sync=None, docker=False: {"docker": docker}))
+
+        def wait_ready(iid, t0, o, ui, docker=False):
+            calls.append((iid, docker))
+            if len(calls) == 1:
+                self.alive.pop(iid, None)                                  # _failed_start удалил её
+                raise VastgameError("нет NVENC", key="core.try_another")
+            return {"links": {"moonlight": "m"}, "minutes": 3, "boot": (0, "ok", ""), "identity": None}
+        self.patch_many(("wait_ready", wait_ready))
+        jobs.run_play(self.job, 1, spare=[2, 3, 4], docker=True)
+        self.assertIsNone(self.job.error)
+        self.assertTrue(seen and all(seen))
+        self.assertEqual(calls[0], (1001, True))
+        self.assertEqual(calls[1][1], True)
+        self.assertNotEqual(calls[1][0], 1001)                             # другая машина
+
+    def patch_many(self, *pairs):
+        for name, value in pairs:
+            p = mock.patch.object(jobs.core, name, value)
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_fastest_wins_rest_deleted_before_setup(self):
         self.run_after = {1: NEVER, 2: 300, 3: 200}

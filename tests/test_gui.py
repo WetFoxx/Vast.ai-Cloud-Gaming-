@@ -58,21 +58,21 @@ class TestOffers(unittest.TestCase):
         for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
                                  (gui.core, "template", lambda: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
-                                 (gui.market, "search", lambda disk: [row])]:
+                                 (gui.market, "search", lambda disk, docker=False: [row])]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
         self.row = row
 
     def test_last_machine_free(self):
         last = {"gpu": "RTX 3060", "country": "Ohio, US", "start": 5, "offer": dict(self.row, id=77)}
-        with mock.patch.object(gui.market, "last_machine", lambda disk: last):
+        with mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: last):
             d = gui.Api().offers()
         self.assertEqual(d["last"]["offer"]["id"], 77)
         self.assertEqual(d["offers"][0]["id"], 5)
 
     def test_all_machines_with_ping_speed_and_filters(self):
         rows = [dict(self.row, id=i, inet_down=500 + i, inet_up=300, geolocation="Japan, JP") for i in range(40)]
-        with mock.patch.object(gui.market, "search", lambda disk: rows), \
-             mock.patch.object(gui.market, "last_machine", lambda disk: None):
+        with mock.patch.object(gui.market, "search", lambda disk, docker=False: rows), \
+             mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
             d = gui.Api().offers()
         self.assertEqual(len(d["offers"]), 40)                        # все, а не 10 лучших — страницы на экране
         self.assertEqual(d["page_size"], gui.OFFERS_PAGE)
@@ -91,13 +91,13 @@ class TestOffers(unittest.TestCase):
         self.assertIn("error", api.save_offer_filters("nope"))
 
     def test_disk_limits(self):
-        with mock.patch.object(gui.market, "last_machine", lambda disk: None):
+        with mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
             self.assertEqual(gui.Api().offers(20)["disk"], gui.DISK_MIN)
             self.assertEqual(gui.Api().offers(5000)["disk"], gui.DISK_MAX)
             self.assertEqual(gui.Api().offers(300)["disk"], 300)
 
     def test_last_machine_check_fails_but_list_shows(self):
-        def boom(disk):
+        def boom(disk, docker=False):
             raise VastgameError("429")
         with mock.patch.object(gui.market, "last_machine", boom):
             d = gui.Api().offers()
@@ -113,7 +113,7 @@ class TestPlay(unittest.TestCase):
         patches = {
             "require_no_machine": lambda: None,
             "template": lambda: {"hash_id": "h", "recommended_disk_space": 100, "env": ""},
-            "offer_by_id": lambda oid, disk: dict(OFFER, id=oid),
+            "offer_by_id": lambda oid, disk, docker=False: dict(OFFER, id=oid),
             "rent": self.fake_rent,
             "wait_ready": self.fake_wait,
             "identity_notes": lambda r: [],
@@ -141,7 +141,7 @@ class TestPlay(unittest.TestCase):
         self.body = body
         return 42, time.time()
 
-    def fake_wait(self, iid, t0, o, ui):
+    def fake_wait(self, iid, t0, o, ui, docker=False):
         ui.stage("vast", "…")
         ui.say("x", "detail", key="core.vast_status", status="loading", msg="")
         ui.archive("steam-state", "down", "восстановление")
@@ -173,7 +173,7 @@ class TestPlay(unittest.TestCase):
         wait_done(self.api, session=True)
         self.assertEqual(gui.jobs.load()["args"]["spare"], [7, 8])    # мусор и сама выбранная — выброшены
 
-    def cancellable_wait(self, iid, t0, o, ui):
+    def cancellable_wait(self, iid, t0, o, ui, docker=False):
         """Как core.wait_ready при отмене: увидел флаг — закончил с core.start_cancelled."""
         ui.stage("vast", "…")
         for _ in range(250):
@@ -263,7 +263,7 @@ class TestPlay(unittest.TestCase):
     def test_unexpected_question_is_no(self):
         answers = []
 
-        def wait_with_question(iid, t0, o, ui):
+        def wait_with_question(iid, t0, o, ui, docker=False):
             answers.append(ui.confirm("Удалить?"))
             raise VastgameError("Запуск не удался.", key="core.start_failed")
         with mock.patch.object(gui.jobs.core, "wait_ready", wait_with_question):

@@ -202,7 +202,7 @@ RACE_POLL = 10       # с: как часто спрашивать Vast о сос
 GONE_WAIT = 60       # с: ждать, пока удалённая машина исчезнет у Vast, прежде чем брать другую
 
 
-def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None):
+def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False):
     """Аренда (человек уже ответил «да» в окне) и ожидание готовности.
 
     На Vast часть KVM-хостов подолгу (или навсегда) висит в Create/Loading, поэтому машины
@@ -210,7 +210,9 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None):
     (spare — с его фильтрами и порядком). Первая, дошедшая до running, остаётся, остальные
     удаляются в ту же минуту: до установки Tailscale и восстановления из облака (это минуты после
     running) они не доходят. До running Vast берёт только за диск — ~$0.001 за машину (выписка
-    2026-09-25), так что лишние почти ничего не стоят."""
+    2026-09-25), так что лишние почти ничего не стоят.
+    docker — вкладка «Docker (экспериментально)»: контейнер из образа vastgame-desktop вместо KVM; машину
+    без работающего NVENC wait_ready заменяет так же, как не запустившуюся (core.try_another)."""
     try:
         tpl = core.template()
         size = disk_size(disk, tpl)
@@ -229,9 +231,9 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None):
             if m.get("iid"):
                 iid, t0, o = m["iid"], m["t0"], m["offer"]
             else:
-                iid, t0, o = _race(job, queue, tpl, size, sync)
+                iid, t0, o = _race(job, queue, tpl, size, sync, docker)
             try:
-                r = core.wait_ready(iid, t0, o, job)
+                r = core.wait_ready(iid, t0, o, job, docker=docker)
                 break
             except VastgameError as e:
                 if e.key != "core.try_another":              # отмена, ошибка после running и т.п.
@@ -262,7 +264,7 @@ def _where(o):
     return (o.get("geolocation") or "").strip(", ")
 
 
-def _race(job, queue, tpl, size, sync):
+def _race(job, queue, tpl, size, sync, docker=False):
     """Запустить наперегонки до RACE машин из очереди (id предложений); вернуть (iid, t0, offer)
     первой дошедшей до running, остальные удалить. Зависшую дольше VAST_START_MIN или сломанную —
     удалить, пометить хост и поставить вместо неё следующую. Состояние забега — в meta: окно
@@ -294,13 +296,13 @@ def _race(job, queue, tpl, size, sync):
         while len(racers) < RACE and rents < MAX_RENTS and queue:
             oid = queue.pop(0)
             try:
-                o = core.offer_by_id(int(oid), size)
+                o = core.offer_by_id(int(oid), size, docker)
             except (VastgameError, ValueError, TypeError):
                 continue                               # заняли или не подходит — дальше по списку
             if o.get("machine_id") in used or str(o.get("machine_id")) in bad:
                 continue
             try:
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync), o)
+                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker), o)
             except VastgameError as e:
                 if not racers and not added:
                     raise                              # не арендовали ни одной — сказать почему
@@ -334,7 +336,8 @@ def _race(job, queue, tpl, size, sync):
             if tried:
                 raise VastgameError(f"Не запустилась ни одна из {len(tried)} машин — похоже, у Vast сейчас "
                                     "проблемы с KVM. Попробуй позже или выбери машины в другой стране.",
-                                    key="core.tries_exhausted", n=len(tried))
+                                    key="core.tries_exhausted_docker" if docker else "core.tries_exhausted",
+                                    n=len(tried))
             raise VastgameError("Подходящих машин в твоём списке не осталось — выбери другую.", key="core.no_spare")
         try:
             now = {i["id"]: i for i in core.list_instances()}
