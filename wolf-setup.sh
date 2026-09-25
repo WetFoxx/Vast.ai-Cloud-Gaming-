@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v3.16 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.0 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+#                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
 # Харденинг (в коде помечен [HARDENING #N]):
@@ -78,6 +79,15 @@
 #
 # АВТООБНОВЛЕНИЯ UBUNTU отключены: на одноразовом инстансе они ставят новое ядро и
 # библиотеки прямо во время игры и требуют перезагрузки.
+#
+# DOCKER (v4.0, WOLF_MODE=docker). Обычный контейнер Vast без systemd, /dev/net/tun и user
+# namespaces — образ vastgame-desktop (папка docker/ репозитория): X, звук, Sunshine, рабочий стол и
+# Steam с заплатками он поднимает сам, а wolf здесь — тот же агент, те же архивы в облаке и та же
+# страница статуса, что на KVM (общие для обоих). Отличия режима: службы systemd заменяет
+# «wolf supervise» (страница статуса, наблюдение за играми, загрузка и таймеры), Tailscale — в
+# userspace-режиме без Tailscale SSH (команды приложения идут через страницу /cmd), firewall и
+# настройка экрана пропускаются (делает образ), Sunshine перезапускает скрипт образа со своими
+# настройками захвата — связка с Moonlight общая с KVM. На KVM ничего из этого не действует.
 # ==============================================================================
 
 # Переменные из Vast (/etc/environment) имеют приоритет над значениями ниже.
@@ -91,6 +101,7 @@ export SYNC_STEAM_GAMES="${SYNC_STEAM_GAMES:-1}"  # 1 = синхронизиро
 export SYNC_OTHER_GAMES="${SYNC_OTHER_GAMES:-1}"  # 1 = синхронизировать игры из GAMES_DIR (не из Steam)
 export SYNC_SAVES="${SYNC_SAVES:-1}"              # 1 = синхронизировать сохранения (префиксы Proton)
 export AUTO_RES="${AUTO_RES:-1}"                  # 1 = управлять разрешением (EDID/xorg + wolf-res)
+export WOLF_MODE="${WOLF_MODE:-kvm}"              # kvm | docker (v4.0; docker задаёт образ vastgame-desktop)
 
 set -uo pipefail
 umask 022
@@ -99,8 +110,10 @@ mkdir -p /etc/wolf /var/lib/wolf /run/wolf
 exec > >(tee -a /var/log/wolf-setup.log) 2>&1
 echo "=== wolf-setup $(date '+%F %T')"
 
-# Автообновления Ubuntu выключаются до того, как успеют сработать их таймеры
-systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service &>/dev/null || true
+WM="$WOLF_MODE"
+[ "$WM" = docker ] || WM=kvm
+# Автообновления Ubuntu выключаются до того, как успеют сработать их таймеры (в Docker их нет)
+[ "$WM" = docker ] || systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service &>/dev/null || true
 
 # ================================== НАСТРОЙКИ ==================================
 R="${R_REMOTE:-gdrive:vastai-cloud-games}"     # папка в Google Drive
@@ -128,14 +141,29 @@ UI=$(id -u "$DU")
 GD="${GAMES_DIR:-$DH/Downloads/Games}"         # игры вне Steam: подпапка = архив
 
 # ============================== ПРОВЕРКА ОКРУЖЕНИЯ =============================
-# Фатально только отсутствие systemd: без него службы и таймеры не заработают вовсе.
-# Остальное — предупреждения, чтобы причина была видна сразу, а не через час отладки.
-[ -d /run/systemd/system ] || {
-  echo "ОШИБКА: systemd не управляет системой — нужен KVM-инстанс, а не контейнер"; exit 1; }
+# На KVM фатально только отсутствие systemd: без него службы и таймеры не заработают вовсе.
+# В Docker (v4.0) их заменяет «wolf supervise». Остальное — предупреждения, чтобы причина была
+# видна сразу, а не через час отладки.
 EW=()
+if [ "$WM" = docker ]; then
+  # Контейнер без /dev/net/tun: ни ZeroTier, ни Tailscale SSH (команды — через страницу /cmd)
+  [ -z "$ZT" ] || EW+=("ZT_NETWORK_ID в Docker не поддерживается (нет /dev/net/tun) — ZeroTier пропущен")
+  ZT= TSS=0
+  [ -x /opt/vastgame/sunshine-start.sh ] \
+    || EW+=("WOLF_MODE=docker, но это не образ vastgame-desktop — Sunshine и экран работать не будут")
+else
+  [ -d /run/systemd/system ] || {
+    echo "ОШИБКА: systemd не управляет системой — нужен KVM-инстанс (для контейнера — образ vastgame-desktop)"
+    exit 1; }
+fi
 . /etc/os-release 2>/dev/null
-[ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = "22.04" ] \
-  || EW+=("система «${PRETTY_NAME:-неизвестна}» — скрипт проверялся только на Ubuntu 22.04")
+if [ "$WM" = docker ]; then
+  [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = "24.04" ] \
+    || EW+=("система «${PRETTY_NAME:-неизвестна}» — режим Docker проверялся только на Ubuntu 24.04")
+else
+  [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = "22.04" ] \
+    || EW+=("система «${PRETTY_NAME:-неизвестна}» — скрипт проверялся только на Ubuntu 22.04")
+fi
 { hash nvidia-smi 2>/dev/null && nvidia-smi -L &>/dev/null; } \
   || EW+=("NVIDIA не обнаружена — управление разрешением отключится, аппаратного кодировщика может не быть")
 [ -n "$RCLONE_REFRESH_TOKEN" ] || [ -s /root/.config/rclone/rclone.conf ] \
@@ -168,7 +196,7 @@ VI="${CONTAINER_ID:-}"                          # номер инстанса в
 umask 022
 
 # /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf, ключ Vast -> vastkey)
-declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD VI > /etc/wolf/env
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD VI WM > /etc/wolf/env
 chmod 600 /etc/wolf/env
 
 # Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
@@ -182,6 +210,9 @@ export DEBIAN_FRONTEND=noninteractive
 echo 'DPkg::Lock::Timeout "600";' > /etc/apt/apt.conf.d/90wolf
 for _ in {1..60}; do getent hosts github.com >/dev/null && break; sleep 2; done
 
+# В Docker всё нужное уже в образе (там своя, закреплённая Sunshine и Steam с заплатками) —
+# ничего не ставим: apt здесь только потерял бы время
+if [ "$WM" != docker ]; then
 # xrandr/xhost/xset — x11-xserver-utils, cvt — xserver-xorg-core
 hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables 2>/dev/null || {
   apt-get update -q
@@ -199,6 +230,7 @@ fi
 if [ ! -x /usr/games/steam ]; then
   curl -fsSLo /tmp/steam.deb https://cdn.akamai.steamstatic.com/client/installer/steam.deb \
     && dpkg --add-architecture i386 && apt-get update -q && apt-get install -yq /tmp/steam.deb
+fi
 fi
 
 # =================================== rclone ====================================
@@ -269,6 +301,18 @@ u()   { runuser -u "$DU" -- env -i \
           LANG=C.UTF-8 DISPLAY="$D" XAUTHORITY="$DH/.Xauthority" \
           XDG_RUNTIME_DIR="/run/user/$UI" \
           DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UI/bus" "$@"; }
+# [v4.0] Tailscale: на KVM — служба systemd; в Docker — tailscaled без /dev/net/tun
+# (userspace, запуск — скрипт образа, те же путь состояния и сокет)
+tsd() {
+  if [ "${WM:-kvm}" = docker ]; then
+    case $1 in
+      stop)  pkill -x tailscaled && sleep 2 ;;
+      start) /opt/vastgame/tailscaled-start.sh ;;
+    esac
+    return 0
+  fi
+  systemctl "$1" tailscaled 2>/dev/null
+}
 # Уведомление на рабочем столе: обычная срочность, скрывается через NS секунд,
 # transient — не остаётся в истории. Код возврата не влияет на сервисы.
 ntf() { u notify-send -a Wolf -i document-save -u normal -t "$(( ${NS:-8} * 1000 ))" \
@@ -733,6 +777,8 @@ EOF
 # базового режима и откат, если X не поднялся. Совпадает — X не трогаем.
 setup_display() {
   [ "$AR" = 1 ] || return 0
+  # [v4.0] В Docker экран (EDID, xorg.conf, X-сервер) настраивает образ при старте
+  [ "${WM:-kvm}" = docker ] && { log "дисплей: настроен образом Docker, режим $(xmode)"; return 0; }
   hash nvidia-smi 2>/dev/null || { log "дисплей: не NVIDIA — пропуск"; return 0; }
   local C=/etc/X11/xorg.conf.d/10-wolf.conf E=/etc/X11/wolf.edid ne="$T/wolf.edid.new" nc="$T/10-wolf.conf.new"
   gen_edid "$ne" && write_xorg "$nc" || { log "дисплей: не удалось сгенерировать конфиг"; return 0; }
@@ -764,6 +810,10 @@ setup_display() {
 # с tailscale0 и lo, остальное DROP. Политика INPUT не трогается => SSH и управление
 # Vast работают. Пока Tailscale не поднялся, правила не ставятся — об этом в логе.
 setup_sunshine_firewall() {
+  # [v4.0] В Docker прав на iptables нет, а наружу опубликован только порт Tailscale:
+  # Sunshine и страница статуса доступны через Tailscale (и соседям по сети хоста — у кабинета
+  # Sunshine пароль, команды страницы проверяют владельца через Tailscale)
+  [ "${WM:-kvm}" = docker ] && { log "firewall: в Docker не ставится — порты наружу не опубликованы"; return 0; }
   hash iptables 2>/dev/null || { log "firewall: iptables нет — пропуск"; return 0; }
   local IF=tailscale0 pr p="${WP:-8099}"
   if ! ip link show "$IF" &>/dev/null; then
@@ -801,12 +851,23 @@ sunshine_prep() {
   # нового ключевого (~RTT). Замер 2026-09-25 (~1% потерь на маршруте): 7–20% пропавших кадров → 3.6%.
   # Только если строки нет — свой выбор из кабинета Sunshine не трогаем.
   grep -q '^fec_percentage' "$cf" || printf 'fec_percentage = 50\n' >> "$cf"
+  # [v4.0] Имя для Moonlight одно на KVM и Docker (связка общая — плитка та же): без него KVM назывался
+  # «ubuntu», а контейнер — случайным номером. Своё имя из кабинета Sunshine не трогаем
+  grep -q '^sunshine_name' "$cf" || printf 'sunshine_name = vastai-gaming\n' >> "$cf"
   chown -R "$DU:" "$d"
 }
 
 # Sunshine перезапускается ПОСЛЕ восстановления identity, иначе Moonlight просит PIN
 sunshine_restart() {
   hash sunshine 2>/dev/null || { log "Sunshine не установлен"; return 0; }
+  # [v4.0] В Docker — скрипт образа: свой файл настроек (NvFBC, NVENC, геймпад), а связка с
+  # Moonlight и логин кабинета — общие с KVM (sunshine_state.json из identity). KVM-шный
+  # sunshine.conf здесь не трогаем
+  if [ "${WM:-kvm}" = docker ]; then
+    /opt/vastgame/sunshine-start.sh >> /var/log/wolf.log 2>&1
+    log "Sunshine перезапущен (образ Docker)"
+    return 0
+  fi
   rm -f "$DH/.config/autostart/sunshine.desktop"
   sunshine_prep                                  # [HARDENING #1] разрешение под клиента
   u systemctl --user stop sunshine.service &>/dev/null
@@ -846,19 +907,19 @@ boot() {
 
   # 1. identity — БЕЗОПАСНО (без распаковки в /), до сети и сервисов
   pkill -x steam
-  systemctl stop tailscaled 2>/dev/null
+  tsd stop
   [ -n "$ZT" ] && systemctl stop zerotier-one 2>/dev/null
   u mkdir -p "$DH/.config"
-  m0=$(cat /etc/machine-id)
+  m0=$(cat /etc/machine-id 2>/dev/null)
   ( restore_identity_safe ) || echo identity >> "$FL"
-  if [ "$m0" != "$(cat /etc/machine-id)" ]; then
+  if [ "$m0" != "$(cat /etc/machine-id 2>/dev/null)" ]; then
     [ -L /var/lib/dbus/machine-id ] || cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
-    systemctl restart systemd-journald
+    [ "${WM:-kvm}" = docker ] || systemctl restart systemd-journald
     log "machine-id восстановлен"
   fi
 
   # 2. Сеть. Auth-key Tailscale — через file: (не виден в ps). ZeroTier — только если задан.
-  systemctl start tailscaled 2>/dev/null
+  tsd start
   if [ -n "$ZT" ]; then
     systemctl start zerotier-one 2>/dev/null
     for _ in {1..15}; do zerotier-cli join "$ZT" &>/dev/null && break; sleep 2; done
@@ -1077,6 +1138,15 @@ sunshine_creds() {
 #      удалит себя (через 30 с, чтобы приложение успело прочитать итог); «ok app: …» — ключа нет
 #      или Vast не удалил: удалит приложение, когда связь вернётся.
 finish_start() {
+  # [v4.0] В Docker без systemd: отдельный процесс в своей сессии (обрыв запроса его не прервёт),
+  # «уже идёт» — по блокировке, которую держит сам finish-run
+  if [ "${WM:-kvm}" = docker ]; then
+    flock -n "$L/finish.lock" true || { echo "finish: уже идёт"; return 0; }
+    setsid flock -n "$L/finish.lock" /usr/local/bin/wolf finish-run \
+      </dev/null >>/var/log/wolf-finish.log 2>&1 &
+    echo "finish: запущено"
+    return 0
+  fi
   if systemctl is-active --quiet wolf-finish; then echo "finish: уже идёт"; return 0; fi
   systemctl reset-failed wolf-finish 2>/dev/null
   systemd-run --unit=wolf-finish --collect /usr/local/bin/wolf finish-run >/dev/null \
@@ -1116,6 +1186,27 @@ finish_run() {
   st finish ok "app: всё выгружено; Vast не удалил инстанс — удалит приложение"
 }
 
+# ---------------------------------------------------------------- supervise ---
+# [v4.0] Docker: вместо служб и таймеров systemd — один процесс. Страница статуса и наблюдение за
+# играми (перезапускаются, если упали), загрузка — один раз, синхронизация по расписанию как у
+# таймеров KVM (state через 5 мин, дальше каждые SMIN; games через 12 мин, дальше каждые GMIN) и,
+# как там, только после boot-done. Низкий приоритет — чтобы не мешать игре.
+low() { if ionice -c3 true 2>/dev/null; then ionice -c3 nice -n 19 "$@"; else nice -n 19 "$@"; fi; }
+supervise() {
+  local ns ng now
+  ( while :; do WOLF_PORT=$WP python3 /usr/local/bin/wolf-web.py; sleep 5; done ) &
+  ( while :; do low "$0" watch; sleep 10; done ) &
+  [ -e "$L/boot-started" ] || { : > "$L/boot-started"; "$0" boot & }
+  now=$(date +%s); ns=$(( now + 300 )); ng=$(( now + 720 ))
+  while :; do
+    sleep 20
+    [ -e "$L/boot-done" ] || continue
+    now=$(date +%s)
+    if [ "$now" -ge "$ns" ]; then ns=$(( now + SMIN * 60 )); ( low "$0" state >/dev/null 2>&1 & ); fi
+    if [ "$now" -ge "$ng" ]; then ng=$(( now + GMIN * 60 )); ( low "$0" games >/dev/null 2>&1 & ); fi
+  done
+}
+
 case ${1:-} in
   boot)                                      boot ;;
   finish)                                    finish_start ;;
@@ -1123,15 +1214,18 @@ case ${1:-} in
   finish-run)                                finish_run ;;
   state|games|shutdown|restore|push|forget)  bk "$@" ;;
   watch)                                     watch_games ;;
+  supervise)                                 supervise ;;
   firewall)                                  setup_sunshine_firewall ;;
   display)                                   xenv && setup_display ;;
-  *) echo "использование: wolf boot|state|games|shutdown|finish|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|watch|firewall|display"; exit 2 ;;
+  *) echo "использование: wolf boot|state|games|shutdown|finish|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|watch|supervise|firewall|display"; exit 2 ;;
 esac
 WOLF
 
 # ============================== /usr/local/bin/wolf-res =======================
 # [HARDENING #1] Разрешение под клиента Moonlight. Sunshine вызывает wolf-res при
 # подключении (с размерами клиента) и без аргументов при отключении.
+# В Docker (v4.0) у образа свой wolf-res (плюс экран прижимается к 0,0) — его не трогаем.
+if [ "$WM" != docker ]; then
 w /usr/local/bin/wolf-res <<'RES'
 #!/bin/bash
 # wolf-res [ШИРИНА ВЫСОТА [ГЦ]] — режим под клиента; без аргументов — базовый.
@@ -1196,6 +1290,7 @@ if [ $ok = 1 ]; then log "установлено $(cur) (запрос ${TARGET}@
 else log "не удалось установить $TARGET — остаётся $(cur)"; fi
 exit 0
 RES
+fi
 
 # ================================= wolf-web.py =================================
 w /usr/local/bin/wolf-web.py <<'WEB'
@@ -1261,11 +1356,18 @@ def tsjson(sub, *args):
     # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
     return json.loads(subprocess.run(['tailscale', sub, '--json', *args], capture_output=True, text=True,
                                      timeout=10).stdout)
-def same_owner(ip):
+def peer(ip, port):
+    """Адрес для whois. [v4.0] В Docker Tailscale работает без /dev/net/tun и передаёт входящие
+    соединения с 127.0.0.1: настоящего отправителя Tailscale знает по адресу вместе с портом
+    (proxymap). Местная программа, пришедшая напрямую, такой записи не имеет — ей отказ, как и раньше."""
+    if ip in ('127.0.0.1', '::1'):
+        return f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
+    return ip
+def same_owner(ip, port=0):
     """Прислал ли команду человек, которому принадлежит эта машина в Tailscale."""
     try:
         me = tsjson('status', '--peers=false')['Self']['UserID']
-        who = tsjson('whois', ip)
+        who = tsjson('whois', peer(ip, port))
         return bool(me) and who['UserProfile']['ID'] == me and not (who.get('Node') or {}).get('Tags')
     except Exception:
         return False
@@ -1288,7 +1390,7 @@ class H(BaseHTTPRequestHandler):
             return self.reply(400, {'error': 'не JSON'})
         if not spec:
             return self.reply(400, {'error': 'нет такой команды'})
-        if not same_owner(self.client_address[0]):
+        if not same_owner(*self.client_address[:2]):
             return self.reply(403, {'error': 'устройство другого владельца в Tailscale'})
         cmd, background = spec
         if background:
@@ -1313,6 +1415,24 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 ThreadingHTTPServer(('', int(os.environ.get('WOLF_PORT', '8099'))), H).serve_forever()
 WEB
+
+# ================================== Docker (v4.0) ==============================
+# Без systemd: всё — один процесс «wolf supervise» (страница статуса, наблюдение за играми,
+# загрузка и таймеры) в своей группе процессов. Повторный запуск скрипта снимает прежнюю группу
+# целиком и начинает заново (загрузка — снова: гейты boot-done/boot-started снимаются).
+# Steam и Sunshine живут в своих сессиях — их это не задевает.
+if [ "$WM" = docker ]; then
+  p=$(cat /run/wolf/supervise.pid 2>/dev/null)
+  # только если это и правда прежний «wolf supervise» (номер мог достаться другому процессу)
+  if [ -n "$p" ] && tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'wolf supervise'; then
+    kill -- "-$p" 2>/dev/null; sleep 1
+  fi
+  rm -f /run/wolf/boot-done /run/wolf/boot-started
+  setsid /usr/local/bin/wolf supervise </dev/null >>/var/log/wolf-supervise.log 2>&1 &
+  echo $! > /run/wolf/supervise.pid
+  echo "=== wolf v4.0 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+  exit 0
+fi
 
 # =================================== systemd ===================================
 cat > /etc/systemd/system/wolf-boot.service <<'EOF'
@@ -1432,4 +1552,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v3.16 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v4.0 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"

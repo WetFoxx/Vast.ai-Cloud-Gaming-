@@ -109,9 +109,19 @@ if [ -n "$AGENT" ]; then
   # ------------------------------------------------------------------- агент wolf
   stage wolf
   W=/run/vastgame/wolf-setup.sh
+  # Последняя строка ошибки скачивания — в журнал Vast: без неё причину не узнать (Tailscale до агента не поднят).
+  # Секреты аккаунта в ней заменяются на <секрет>
+  fetch_err() {
+    local l s
+    l=$(grep -v '^[[:space:]]*$' /var/log/wolf-fetch.log 2>/dev/null | tail -1 | cut -c1-300)
+    for s in "${RCLONE_REFRESH_TOKEN:-}" "${RCLONE_CLIENT_SECRET:-}" "${RCLONE_CLIENT_ID:-}"; do
+      [ -n "$s" ] && l=${l//"$s"/<секрет>}
+    done
+    printf '%s' "$l" | sed -E 's/ya29\.[A-Za-z0-9._-]+/<токен>/g; s#1//[A-Za-z0-9._-]+#<токен>#g'
+  }
   ok=
   for try in 1 2 3 4 5; do
-    rm -f "$W"
+    rm -f "$W"; : > /var/log/wolf-fetch.log
     case $WOLF_SCRIPT_URL in
       drive:*)   # с Google Drive этого аккаунта (тот же токен, что у wolf) — проверка до публикации
         ( export RCLONE_CONFIG_WGD_TYPE=drive RCLONE_CONFIG_WGD_SCOPE=drive \
@@ -122,7 +132,7 @@ if [ -n "$AGENT" ]; then
       *) curl -fsSL -o "$W" "$WOLF_SCRIPT_URL" 2>>/var/log/wolf-fetch.log ;;
     esac
     [ -s "$W" ] && head -1 "$W" | grep -q '^#!/bin/bash' && { ok=1; break; }
-    log "wolf-setup.sh не скачался (попытка $try)"
+    log "wolf-setup.sh не скачался (попытка $try): $(fetch_err)"
     sleep 10
   done
   if [ -n "$ok" ]; then

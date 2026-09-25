@@ -5,6 +5,11 @@
 # напрямую, без ретранслятора. setsid — своя сессия: перезапуск wolf supervise её не задевает.
 # Зовут: wolf (boot, режим Docker) и присмотр entrypoint.sh. Уже работает — ничего не делает.
 SOCK=/var/run/tailscale/tailscaled.sock
+# Vast публикует 41641/udp под другим внешним номером (VAST_UDP_PORT_41641 на PUBLIC_IPADDR); без подсказки
+# Tailscale объявляет :41641, и прямая связь не устанавливается — всё идёт через ретранслятор DERP (живой тест 2026-09-26)
+if [ -n "${PUBLIC_IPADDR:-}" ] && [ -n "${VAST_UDP_PORT_41641:-}" ]; then
+  export TS_DEBUG_PRETENDPOINT="$PUBLIC_IPADDR:$VAST_UDP_PORT_41641"
+fi
 mkdir -p /var/lib/tailscale /var/run/tailscale
 if ! pgrep -x tailscaled >/dev/null; then
   rm -f "$SOCK"           # сокет от прошлого запуска (упал или контейнер перезапущен) — иначе ждать нечего
