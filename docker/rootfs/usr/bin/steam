@@ -1,5 +1,6 @@
 #!/bin/bash
-# /usr/games/steam в vastgame-desktop (оригинал запускателя — steam.real): Steam в контейнере без user namespaces.
+# /usr/bin/steam в vastgame-desktop: Steam в контейнере без user namespaces. Настоящий запускатель Valve —
+# /opt/vastgame/real/steam (ссылка на bin_steam.sh: он узнаёт свой режим по имени файла, «steam.real» не годится).
 # Заплатки (steam-patch.sh) ставятся перед запуском и держатся, пока Steam работает; если обновление клиента
 # их откатило и Steam вышел с «Steam now requires user namespaces» (код 71) — заплатка и перезапуск.
 # Геймпад: библиотека vgpad в играх (LD_PRELOAD — Steam передаёт играм сам), SDL ищет джойстики без udev.
@@ -7,15 +8,15 @@
 ME=$(id -u)
 export LD_PRELOAD="libvgpad.so${LD_PRELOAD:+:$LD_PRELOAD}" SDL_JOYSTICK_DISABLE_UDEV=1
 # Steam уже работает — передать ему команду (steam://…) и выйти
-if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /usr/games/steam.real "$@"; fi
+if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
 exec 9>"/tmp/steam-run-$ME.lock"
-flock -n 9 || exec /usr/games/steam.real "$@"          # другой запуск уже присматривает
+flock -n 9 || exec /opt/vastgame/real/steam "$@"          # другой запуск уже присматривает
 /opt/vastgame/steam-patch.sh watch &
 W=$!
 trap 'kill $W 2>/dev/null' EXIT
 for try in 1 2 3 4 5 6 7 8; do
   /opt/vastgame/steam-patch.sh once
-  /usr/games/steam.real -cef-disable-gpu-compositing "$@"
+  /opt/vastgame/real/steam -cef-disable-gpu-compositing "$@"
   rc=$?
   [ "$rc" = 71 ] || break
   echo "[steam] проверка user namespaces вернулась (обновление клиента?) — заплатка и перезапуск $try" >&2
