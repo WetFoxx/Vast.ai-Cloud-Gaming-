@@ -262,6 +262,93 @@ class Api:
         except VastgameError as e:
             return {"error": error_data(e)}
 
+    # ---- Простая настройка: по одному шагу — программы → Vast → Google → Tailscale → остальное само
+    def wizard_state(self):
+        """Что уже готово (только проверки). Страница начинает с первого неготового шага."""
+        from concurrent.futures import ThreadPoolExecutor
+        mac = sys.platform == "darwin"
+        programs = {"tailscale": bool(paths.tailscale_app() if mac else paths.find("tailscale")),
+                    "moonlight": bool(moonlight.path())}
+        # Проверки ходят в сеть (Vast, Google) — одновременно, чтобы экран «Проверяю…» не висел
+        with ThreadPoolExecutor(3) as ex:
+            v = ex.submit(setupcheck.vast_key)
+            g = ex.submit(lambda: setupcheck.google(setupcheck._vast_secrets(), sizes=False))
+            ts = ex.submit(setupcheck.tailscale_phase)
+            v, g, ts = v.result(), g.result(), ts.result()
+        vast = {"ok": v["state"] != "missing", "balance": v["params"].get("balance")}
+        # Google — после Vast (токен уходит в аккаунт Vast). «Не отправлен в Vast» доделает последний шаг
+        # сам; вход через старый общий клиент rclone («old») — войти заново
+        google = {"ok": vast["ok"] and (g["state"] == "ok" or g["key"] == "setup.google.not_in_vast"),
+                  "email": g["params"].get("email") if vast["ok"] else None}
+        return {"platform": sys.platform, "programs": programs, "vast": vast, "google": google, "tailscale": ts}
+
+    def tailscale_phase(self):
+        """Этап подключения Tailscale — страница спрашивает раз в пару секунд, пока идёт этот шаг."""
+        return setupcheck.tailscale_phase()
+
+    def install_programs(self):
+        """Поставить недостающие Tailscale и Moonlight (официальные файлы с проверкой подписи).
+        Пароль Mac спросит сама macOS — один раз, для Tailscale; Moonlight ставится без пароля."""
+        if sys.platform != "darwin":
+            return {"error": {"key": "wizard.install.not_mac", "params": {}, "text": "not mac"}}
+
+        def run(job):
+            if not moonlight.path():
+                job.say("Устанавливаю Moonlight", key="wizard.install.moonlight")
+                installer.moonlight()
+            if not paths.tailscale_app():
+                job.say("Устанавливаю Tailscale — macOS спросит пароль", key="wizard.install.tailscale")
+                installer.tailscale()
+            return True
+        return self._background("install", run, with_job=True)
+
+    def open_extension_settings(self):
+        """Открыть раздел Системных настроек, где разрешают расширение Tailscale. macOS 15 и новее —
+        «Объекты входа и расширения», раньше — «Конфиденциальность и безопасность»."""
+        if sys.platform != "darwin":
+            return
+        import platform
+        major = int((platform.mac_ver()[0] or "0").split(".")[0])
+        url = ("x-apple.systempreferences:com.apple.LoginItems-Settings.extension" if major >= 15
+               else "x-apple.systempreferences:com.apple.preference.security?General")
+        subprocess.Popen(["open", url])
+
+    def tailscale_up(self):
+        """Включить Tailscale, если человек вошёл, но он выключен."""
+        exe = paths.find("tailscale")
+        try:
+            r = paths.run([exe, "up"], 30, env=paths.tailscale_env()) if exe else None
+        except (OSError, subprocess.SubprocessError):
+            r = None
+        if r is None or r.returncode != 0:
+            return {"error": {"key": "wizard.ts.up_failed", "params": {}, "text": "tailscale up failed"}}
+        return {"ok": True}
+
+    def wizard_finish(self):
+        """Последний шаг простой настройки — всё, что можно сделать без человека."""
+        return self._background("finish", self._finish_setup, with_job=True)
+
+    def _finish_setup(self, job):
+        job.say("Шаблон vastgame на Vast", key="wizard.finish.template")
+        tpl = my_template()
+        if not tpl:
+            ok, msg = setup.save_template(100, "", "1920x1200", "0")     # как в расширенной настройке по умолчанию
+        elif tpl.get("onstart") != setup.ONSTART:
+            ok, msg = setup.refresh_template()                            # устарел — на свежий скрипт
+        else:
+            ok, msg = True, ""
+        if not ok:
+            raise VastgameError(msg, key="setup.err.template")
+        job.say("SSH-ключ в Vast", key="wizard.finish.sshkey")
+        sshkey.ensure()
+        job.say("Доступ к Google Drive для машины", key="wizard.finish.google")
+        if not {"RCLONE_REFRESH_TOKEN", "RCLONE_CLIENT_ID", "RCLONE_CLIENT_SECRET"} <= setupcheck._vast_secrets():
+            setup.send_google_to_vast()
+        job.say("Продолжать после перезагрузки", key="wizard.finish.autostart")
+        if autostart.status("resume") not in ("on", "unsupported"):
+            autostart.install("resume")      # не вышло — не беда: играть можно, шаг останется в расширенной
+        return True
+
     def _simple(self, fn, *args):
         """Вызвать функцию мастера; ошибку — странице с ключом перевода."""
         try:

@@ -115,8 +115,9 @@ def ts_login_link(iid):
     return lines[1] if lines[1].startswith("https://login.tailscale.com/") else None
 
 
-def check(tok, old=None):
-    """Проверить токен: (почта владельца Drive, число файлов в папке или None, ГБ) или None, если не работает."""
+def check(tok, old=None, sizes=True):
+    """Проверить токен: (почта владельца Drive, число файлов в папке или None, ГБ) или None, если не работает.
+    sizes=False — не считать файлы в папке (это второй долгий запрос; простой настройке нужен только вход)."""
     # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её
     # из метаданных папок в корне Drive: чаще всего встречающийся владелец и есть хозяин диска
     root = rclone("lsjson", "-M", "--max-depth", "1", REMOTE, tok=tok, old=old, timeout=120)
@@ -129,6 +130,8 @@ def check(tok, old=None):
             owners[o] = owners.get(o, 0) + 1
     # С drive.file в корне видны только папки, созданные приложением, — может не найтись ни одной
     email = max(owners, key=owners.get) if owners else "не определить (приложение ещё ничего не создало)"
+    if not sizes:
+        return email, None, 0
     size = rclone("size", REMOTE + FOLDER, "--json", tok=tok, old=old, timeout=120)
     if size.returncode != 0:          # папки нет
         return email, None, 0

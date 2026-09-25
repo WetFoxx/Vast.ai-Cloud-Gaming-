@@ -269,3 +269,27 @@ td.ping.measured { font-weight: 600; }
 th.sortable { cursor: pointer; }
 th.sortable:hover, th.sorted { color: var(--text); }
 th .arrow { display: inline-block; width: 1em; text-align: center; }
+
+/* Простая настройка */
+.wiz-steps { list-style: none; display: flex; gap: 6px; padding: 0; margin: 0 0 14px; flex-wrap: wrap; }
+.wiz-steps li { flex: 1 1 90px; font-size: 12px; color: var(--muted); padding-top: 6px; border-top: 3px solid var(--border); }
+.wiz-steps li.current { color: var(--text); border-top-color: var(--accent); font-weight: 600; }
+.wiz-steps li.done { color: var(--text); border-top-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.wiz-steps li.done::before { content: "✓ "; }
+.wiz-card { display: flex; flex-direction: column; gap: 14px; padding: 22px; }
+.wiz-card h1 { margin: 0; font-size: 22px; }
+.wiz-text { white-space: pre-line; line-height: 1.5; font-size: 15px; }
+.wiz-text b { font-weight: 600; }
+.wiz-body { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.wiz-body .row { display: flex; gap: 8px; flex-wrap: wrap; width: 100%; align-items: center; }
+.wiz-body .field { flex: 1 1 260px; font-size: 14px; padding: 9px 12px; }
+.wiz-body button.big { font-size: 16px; padding: 12px 22px; }
+.wiz-check { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.wiz-check li::before { display: inline-block; width: 1.4em; content: "○"; color: var(--muted); }
+.wiz-check li.done::before { content: "✓"; color: var(--accent); }
+.wiz-check li.active::before { content: "…"; color: var(--text); }
+.wiz-status { font-size: 14px; line-height: 1.45; white-space: pre-line; }
+.wiz-status.err { color: var(--error); }
+.wiz-status.ok { font-weight: 600; }
+.wiz-foot { display: flex; justify-content: center; margin-top: 6px; }
+#screen-wizard > .actions { justify-content: flex-end; margin-top: 12px; }

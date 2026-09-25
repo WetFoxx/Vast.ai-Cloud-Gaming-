@@ -130,6 +130,19 @@
   </main>
 
   <!-- ===== Настройка ===== -->
+  <!-- ===== Простая настройка: один шаг — одно действие ===== -->
+  <main id="screen-wizard" hidden>
+    <ol class="wiz-steps" id="wiz-steps"></ol>
+    <section class="card wiz-card">
+      <h1 id="wiz-title"></h1>
+      <div class="wiz-text" id="wiz-text"></div>
+      <div class="wiz-body" id="wiz-body"></div>
+      <div class="wiz-status" id="wiz-status" hidden></div>
+    </section>
+    <div class="actions"><button class="primary" id="wiz-next" hidden></button></div>
+    <div class="wiz-foot"><button class="link" id="wiz-advanced" data-i18n="wizard.advanced"></button></div>
+  </main>
+
   <main id="screen-setup" hidden>
     <h1 data-i18n="setup.title"></h1>
     <div class="sub" id="setup-summary" data-i18n="setup.loading"></div>
@@ -143,6 +156,7 @@
       <button class="small danger" id="setup-reset" data-i18n="setup.reset.button"></button>
     </section>
     <div class="actions">
+      <button id="setup-wizard" data-i18n="wizard.open"></button>
       <button id="setup-recheck" data-i18n="setup.recheck"></button>
       <button class="primary" id="setup-back" data-i18n="btn.back"></button>
     </div>

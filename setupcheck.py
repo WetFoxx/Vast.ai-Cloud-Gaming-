@@ -52,6 +52,55 @@ def tools():
     return out
 
 
+TS_EXTENSION = "io.tailscale.ipn.macsys.network-extension"   # системное расширение Tailscale с сайта
+TS_VPN = "io.tailscale.ipn.macsys"                           # его конфигурация VPN в macOS
+
+
+def _out(cmd):
+    """Вывод служебной команды macOS (только чтение, без пароля) или "" — не удалось."""
+    try:
+        return paths.run(cmd, 10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def tailscale_phase():
+    """Где человек сейчас в подключении Tailscale — для простой настройки, чтобы показывать ровно
+    одно действие и самим переходить дальше. {"phase": ..., "tailnet": ...}:
+      missing   — не установлен;
+      start     — установлен, но не запущен (или ещё не отвечает) — открыть Tailscale;
+      extension — macOS ждёт, пока человек разрешит системное расширение в Системных настройках;
+      vpn       — ждёт «Разрешить» в окне про конфигурацию VPN;
+      login     — нужно войти в Tailscale (в браузере);
+      stopped   — вошёл, но Tailscale выключен;
+      magicdns  — в сети, но выключен MagicDNS (Moonlight не найдёт машину по имени);
+      ready     — всё готово.
+    Все проверки — чтение, без пароля: tailscale status, systemextensionsctl list, scutil --nc list."""
+    mac = sys.platform == "darwin"
+    if not paths.find("tailscale") or (mac and not paths.tailscale_app()):
+        return {"phase": "missing"}
+    st = paths.tailscale_status() or {}
+    state = st.get("BackendState")
+    if state == "Running":
+        if not (st.get("CurrentTailnet") or {}).get("MagicDNSEnabled", True):
+            return {"phase": "magicdns"}
+        return {"phase": "ready", "tailnet": (st.get("MagicDNSSuffix") or "").rstrip(".")}
+    if state in ("NeedsLogin", "NeedsMachineAuth"):
+        return {"phase": "login"}
+    if state == "Stopped":
+        return {"phase": "stopped"}
+    if mac:
+        # Tailscale не отвечает: чаще всего macOS ещё ждёт разрешений. Строка расширения:
+        # «… io.tailscale.ipn.macsys.network-extension (…) Tailscale Network Extension [activated enabled]»
+        # После переустановки строк бывает несколько (старая — «waiting to uninstall») — смотрим все
+        ext = [ln for ln in _out(["systemextensionsctl", "list"]).splitlines() if TS_EXTENSION in ln]
+        if any("waiting for user" in ln for ln in ext):
+            return {"phase": "extension"}
+        if any("activated enabled" in ln for ln in ext) and TS_VPN not in _out(["scutil", "--nc", "list"]):
+            return {"phase": "vpn"}
+    return {"phase": "start"}
+
+
 def vast_key():
     key = keyring.get_password(SERVICE, "VAST_API_KEY")
     if key:
@@ -81,7 +130,7 @@ def _vast_secrets():
         return set()
 
 
-def google(secrets):
+def google(secrets, sizes=True):
     if not all(drive.client()):
         return _step("google", "missing", "setup.google.no_client")
     tok = drive.token()
@@ -89,7 +138,7 @@ def google(secrets):
         return _step("google", "missing", "setup.google.missing")
     if drive.is_old_token():
         return _step("google", "warn", "setup.google.old")
-    info = drive.check(tok)
+    info = drive.check(tok, sizes=sizes)
     if info is None:
         return _step("google", "missing", "setup.google.bad")
     if not {"RCLONE_REFRESH_TOKEN", "RCLONE_CLIENT_ID", "RCLONE_CLIENT_SECRET"} <= secrets:

@@ -35,7 +35,7 @@ function duration(sec) {
 }
 
 function show(screen) {
-  for (const s of ["main", "offers", "progress", "games", "setup", "history"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard"]) $("screen-" + s).hidden = s !== screen;
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -417,7 +417,7 @@ let setupData = null;   // последний ответ setup_status: {steps, r
 const SETUP_ICON = { ok: "✓", warn: "!", missing: "✗" };
 
 $("open-setup").addEventListener("click", openSetup);
-$("setup-banner-open").addEventListener("click", openSetup);
+$("setup-banner-open").addEventListener("click", () => openWizard());
 $("setup-recheck").addEventListener("click", openSetup);
 $("setup-back").addEventListener("click", () => { show("main"); refresh(); });
 
@@ -641,6 +641,285 @@ function setupActions(st, li) {
     else box.appendChild(button(t("setup.act.edit"), form));
   }
 }
+
+// ---------------------------------------------------------------- простая настройка
+// Один экран — одно действие. Что уже готово (проверяет Python: wizard_state) — пропускаем, после
+// каждого действия сами идём дальше. Порядок: программы → Vast → Google → Tailscale (самый трудный —
+// последним: токен Google уходит в аккаунт Vast, значит Vast раньше) → остальное само → «Всё готово».
+const WIZ_STEPS = ["programs", "vast", "google", "tailscale", "finish"];
+const VAST_BILLING = "https://cloud.vast.ai/billing/";
+let wiz = null;          // {step, state, gen, auto: {что уже сделали сами один раз}, timer}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function wizAlive(g) { return wiz && wiz.gen === g && !$("screen-wizard").hidden; }
+function wizStop() { if (wiz && wiz.timer) clearTimeout(wiz.timer); }
+
+function wizIsDone(step, s) {
+  if (step === "programs") return s.programs.tailscale && s.programs.moonlight;
+  if (step === "vast") return s.vast.ok;
+  if (step === "google") return s.google.ok;
+  if (step === "tailscale") return s.tailscale.phase === "ready";
+  return false;
+}
+function wizNext(after) {
+  const rest = WIZ_STEPS.slice(WIZ_STEPS.indexOf(after) + 1);
+  return rest.find((k) => !wizIsDone(k, wiz.state)) || "finish";
+}
+async function wizRefreshState() {
+  const s = DEMO ? demoWizState() : await api().wizard_state();
+  if (s && !s.error) wiz.state = s;
+  return s;
+}
+
+async function openWizard() {
+  wizStop();
+  show("wizard");
+  wiz = { step: null, state: null, gen: (wiz ? wiz.gen : 0) + 1, auto: {} };
+  const g = wiz.gen;
+  wizScreen({ title: t("wizard.checking") });
+  const s = await wizRefreshState();
+  if (!wizAlive(g)) return;
+  if (s.error) { wizScreen({ title: t("wizard.error.title"), status: errText(s.error), err: true, retry: openWizard }); return; }
+  // Совсем с нуля — сначала приветствие; иначе сразу к первому неготовому шагу
+  const fresh = !s.programs.tailscale && !s.programs.moonlight && !s.vast.ok;
+  goWiz(fresh ? "welcome" : WIZ_STEPS.find((k) => !wizIsDone(k, s)));
+}
+
+function goWiz(step) {
+  wizStop();
+  wiz.step = step;
+  wiz.gen++;
+  ({ welcome: wizWelcome, programs: wizPrograms, vast: wizVast, google: wizGoogle,
+     tailscale: wizTailscale, finish: wizFinish, done: wizFinished })[step]();
+}
+
+// Экран шага: заголовок, текст, элементы, строка состояния, кнопка «Дальше» (или «Повторить»)
+function wizScreen({ title, text = "", body = [], status = "", err = false, ok = false, next = null, retry = null }) {
+  const steps = $("wiz-steps");
+  steps.innerHTML = "";
+  steps.hidden = !wiz || !wiz.step || wiz.step === "welcome";
+  for (const k of WIZ_STEPS) {
+    const done = wiz && wiz.state && (wiz.step === "done" || (k !== "finish" && wizIsDone(k, wiz.state)));
+    steps.appendChild(el("li", { className: k === (wiz && wiz.step) ? "current" : done ? "done" : "" }, t("wizard.step." + k)));
+  }
+  $("wiz-title").textContent = title;
+  $("wiz-text").textContent = text;
+  $("wiz-body").replaceChildren(...body);
+  wizStatus(status, err, ok);
+  const nb = $("wiz-next");
+  const action = next || (retry && { label: t("wizard.retry"), onclick: retry });
+  nb.hidden = !action;
+  if (action) { nb.textContent = action.label; nb.onclick = action.onclick; nb.disabled = false; }
+}
+function wizStatus(text, err = false, ok = false) {
+  const st = $("wiz-status");
+  st.hidden = !text;
+  st.textContent = text || "";
+  st.className = "wiz-status" + (err ? " err" : ok ? " ok" : "");
+}
+function wizRow(...items) { const r = el("div", { className: "row" }); r.append(...items); return r; }
+function bigButton(label, onclick, primary = true) { const b = button(label, onclick, primary); b.classList.add("big"); return b; }
+
+// Дождаться конца короткой операции окна (установка, вход) — события отдаём onEvent
+async function waitJob(onEvent) {
+  if (DEMO) { await sleep(1500); return { done: true }; }
+  let seen = 0;
+  for (;;) {
+    await sleep(1000);
+    const p = await api().progress(0);
+    if (!p) continue;
+    const evs = p.events || [];
+    if (onEvent) for (const e of evs.slice(seen)) onEvent(e);
+    seen = evs.length;
+    if (p.done) return p;
+  }
+}
+
+function wizWelcome() {
+  wizScreen({ title: t("wizard.welcome.title"), text: t("wizard.welcome.text"),
+              next: { label: t("wizard.start"), onclick: () => goWiz(WIZ_STEPS.find((k) => !wizIsDone(k, wiz.state))) } });
+}
+
+function wizPrograms() {
+  const g = wiz.gen, s = wiz.state;
+  const list = el("ul", { className: "wiz-check" });
+  for (const [name, ok] of [["Tailscale", s.programs.tailscale], ["Moonlight", s.programs.moonlight]])
+    list.appendChild(el("li", { className: ok ? "done" : "" }, t("wizard.programs.item." + name.toLowerCase())));
+  if (s.platform !== "darwin") {            // пока только Mac умеет ставить сам — остальным ссылки
+    wizScreen({ title: t("wizard.programs.title"), text: t("wizard.programs.text_other"), body: [list,
+      wizRow(button(t("setup.act.download") + " Tailscale", () => openUrl(DOWNLOAD.tailscale_app)),
+             button(t("setup.act.download") + " Moonlight", () => openUrl(DOWNLOAD.moonlight)))],
+      retry: async () => { await wizRefreshState(); goWiz(wizIsDone("programs", wiz.state) ? wizNext("programs") : "programs"); } });
+    return;
+  }
+  const install = bigButton(t("wizard.programs.install"), async () => {
+    install.disabled = true;
+    const r = DEMO ? { ok: true } : await api().install_programs();
+    if (r.error) { wizStatus(errText(r.error), true); install.disabled = false; return; }
+    wizStatus(t("wizard.programs.working"));
+    const p = await waitJob((e) => e.key && wizAlive(g) && wizStatus(eventText(e)));
+    if (!wizAlive(g)) return;
+    if (p.error) { wizStatus(errText(p.error), true); install.disabled = false; return; }
+    demoWizMark("programs");
+    await wizRefreshState();
+    if (wizAlive(g)) goWiz(wizIsDone("programs", wiz.state) ? wizNext("programs") : "programs");
+  });
+  wizScreen({ title: t("wizard.programs.title"), text: t("wizard.programs.text"), body: [list, install] });
+}
+
+function wizVast(replace = false) {
+  const g = wiz.gen, s = wiz.state.vast;
+  if (s.ok && !replace) {
+    const low = s.balance != null && s.balance < 1;
+    const body = [];
+    if (low) body.push(button(t("wizard.vast.topup"), () => openUrl(VAST_BILLING), true));
+    body.push(button(t("wizard.vast.replace"), () => wizVast(true)));
+    // Итог — текстом сверху, кнопки («пополнить», «другой ключ») — под ним
+    wizScreen({ title: t("wizard.vast.title"), body,
+                text: t("wizard.vast.ok", { balance: money(s.balance || 0) }) + (low ? "\n\n" + t("wizard.vast.low") : ""),
+                next: { label: t("wizard.next"), onclick: () => goWiz(wizNext("vast")) } });
+    return;
+  }
+  const f = field(t("setup.field.vast_key"), "password");
+  const check = button(t("wizard.vast.check"), async () => {
+    if (!f.value.trim()) { f.focus(); return; }
+    check.disabled = true;
+    wizStatus(t("setup.working"));
+    const r = DEMO ? { ok: true, result: 7.5 } : await api().save_vast_key(f.value);
+    if (!wizAlive(g)) return;
+    check.disabled = false;
+    if (r.error) { wizStatus(errText(r.error), true); return; }
+    wiz.state.vast = { ok: true, balance: r.result };
+    demoWizMark("vast");
+    wizVast();
+    if (r.result >= 1) { await sleep(1500); if (wizAlive(g)) goWiz(wizNext("vast")); }   // денег хватает — сразу дальше
+  }, true);
+  f.addEventListener("keydown", (e) => { if (e.key === "Enter") check.click(); });
+  wizScreen({ title: t("wizard.vast.title"), text: t("wizard.vast.text"),
+              body: [bigButton(t("wizard.vast.open"), () => openUrl(KEYS_URL.vast), false), wizRow(f, check)] });
+  f.focus();
+}
+
+function wizGoogle() {
+  const g = wiz.gen, s = wiz.state.google;
+  const login = bigButton(t(s.ok ? "wizard.google.relogin" : "wizard.google.login"), async () => {
+    login.disabled = true;
+    const r = DEMO ? { ok: true } : await api().google_login();
+    if (r.error) { wizStatus(errText(r.error), true); login.disabled = false; return; }
+    wizStatus(t("wizard.google.waiting"));
+    const p = await waitJob();
+    if (!wizAlive(g)) return;
+    if (p.error) { wizStatus(errText(p.error), true); login.disabled = false; return; }
+    demoWizMark("google");
+    await wizRefreshState();
+    if (wizAlive(g)) goWiz(wizIsDone("google", wiz.state) ? wizNext("google") : "google");
+  }, !s.ok);
+  if (s.ok) login.classList.remove("big");        // уже вошли — «другим аккаунтом» не главное действие
+  wizScreen({ title: t("wizard.google.title"), body: [login],
+              text: s.ok ? t("wizard.google.ok", { email: s.email || "" }) : t("wizard.google.text"),
+              next: s.ok ? { label: t("wizard.next"), onclick: () => goWiz(wizNext("google")) } : null });
+}
+
+// Tailscale: раз в 2 секунды спрашиваем, на каком он этапе, и показываем ровно одно действие.
+// Что можно сделать за человека — делаем сами один раз (открыть Tailscale, настройки, страницу входа)
+function wizTailscale() {
+  const g = wiz.gen;
+  let last = null;
+  wizScreen({ title: t("wizard.ts.title"), text: t("wizard.ts.intro") });
+  const tick = async () => {
+    if (!wizAlive(g)) return;
+    const p = DEMO ? demoTsPhase() : await api().tailscale_phase();
+    if (!wizAlive(g)) return;
+    if (p && !p.error && p.phase !== last) { last = p.phase; wizTsPhase(p, g); }
+    if (p && p.phase === "ready") {
+      wiz.state.tailscale = p;
+      await sleep(1200);
+      if (wizAlive(g)) goWiz(wizNext("tailscale"));
+      return;
+    }
+    wiz.timer = setTimeout(tick, 2000);
+  };
+  tick();
+}
+
+function wizTsPhase(p, g) {
+  const once = (what, fn) => { if (!wiz.auto[what]) { wiz.auto[what] = true; if (!DEMO) fn(); } };
+  const openTs = () => { if (!DEMO) api().open_tailscale(); };
+  let body = [], status = "";
+  switch (p.phase) {
+    case "missing":
+      body = [bigButton(t("wizard.programs.install"), async (e) => {
+        e.target.disabled = true;
+        const r = DEMO ? { ok: true } : await api().install_programs();
+        if (r.error) { wizStatus(errText(r.error), true); e.target.disabled = false; return; }
+        const j = await waitJob((ev) => ev.key && wizAlive(g) && wizStatus(eventText(ev)));
+        if (j.error && wizAlive(g)) { wizStatus(errText(j.error), true); e.target.disabled = false; }
+      })];
+      break;
+    case "start":
+      once("open", openTs);                        // установлен, но не запущен — открыть самим
+      body = [button(t("wizard.ts.open"), openTs)];
+      status = t("wizard.ts.waiting");
+      break;
+    case "extension":
+      once("settings", () => api().open_extension_settings());
+      body = [bigButton(t("wizard.ts.settings"), () => !DEMO && api().open_extension_settings())];
+      break;
+    case "vpn":
+      body = [button(t("wizard.ts.show_again"), openTs)];
+      break;
+    case "login":
+      once("login", () => api().tailscale_login());   // ссылку входа Python откроет в браузере сам
+      body = [button(t("wizard.ts.login_again"), async () => {
+        const r = DEMO ? { ok: true } : await api().tailscale_reopen_login();
+        if (r && r.error && !DEMO) api().tailscale_login();     // прошлый вход закончился — начать заново
+      })];
+      break;
+    case "stopped":
+      body = [bigButton(t("wizard.ts.turn_on"), async () => {
+        const r = DEMO ? { ok: true } : await api().tailscale_up();
+        if (r.error) wizStatus(errText(r.error), true);
+      })];
+      break;
+    case "magicdns":
+      body = [bigButton(t("wizard.ts.dns"), () => openUrl(DNS_URL))];
+      break;
+    case "ready":
+      status = t("wizard.ts.ready");
+      break;
+  }
+  wizScreen({ title: t("wizard.ts.title"), text: t("wizard.ts." + p.phase), body, status, ok: p.phase === "ready" });
+}
+
+async function wizFinish() {
+  const g = wiz.gen;
+  const items = ["template", "sshkey", "google", "autostart"];
+  const list = el("ul", { className: "wiz-check" });
+  for (const k of items) list.appendChild(el("li", {}, t("wizard.finish.item." + k)));
+  const mark = (upto) => [...list.children].forEach((li, i) => { li.className = i < upto ? "done" : i === upto ? "active" : ""; });
+  wizScreen({ title: t("wizard.finish.title"), text: t("wizard.finish.text"), body: [list] });
+  const r = DEMO ? { ok: true } : await api().wizard_finish();
+  if (!wizAlive(g)) return;
+  if (r.error) { wizScreen({ title: t("wizard.finish.title"), body: [list], status: errText(r.error), err: true, retry: () => goWiz("finish") }); return; }
+  mark(0);
+  const p = await waitJob((e) => { if (wizAlive(g) && e.key && e.key.startsWith("wizard.finish.")) mark(items.indexOf(e.key.slice(14))); });
+  if (!wizAlive(g)) return;
+  if (p.error) { wizStatus(errText(p.error), true); $("wiz-next").hidden = false; $("wiz-next").textContent = t("wizard.retry"); $("wiz-next").onclick = () => goWiz("finish"); return; }
+  mark(items.length);
+  await sleep(700);
+  if (wizAlive(g)) goWiz("done");
+}
+
+function wizFinished() {
+  wizScreen({ title: t("wizard.done.title"), text: t("wizard.done.text"),
+    next: { label: t("wizard.done.play"), onclick: async () => {
+      $("wiz-next").disabled = true;
+      if (!DEMO) { await loadSetup(); await refresh(); }
+      openOffers();
+    } } });
+}
+
+$("wiz-advanced").addEventListener("click", () => { wizStop(); openSetup(); });
+$("setup-wizard").addEventListener("click", openWizard);
 
 // ---------------------------------------------------------------- история и траты
 let historyData = null, historyDays = 30, historyAll = false;
@@ -1106,6 +1385,30 @@ function demoSetup() {
     st("autostart", "warn", "setup.autostart.off"), st("open_at_login", "ok", "setup.open_at_login.off")] };
 }
 
+// Простая настройка в демо: ?demo=wizard&wiz=new|ts|done — с нуля, до Tailscale, всё готово
+let demoWiz = null;      // в демо нажатое считается сделанным (demoWizMark)
+function demoWizState() {
+  if (!demoWiz) {
+    const w = new URLSearchParams(location.search).get("wiz") || "new";
+    const past = w !== "new";
+    demoWiz = { platform: "darwin", programs: { tailscale: past, moonlight: past }, vast: { ok: past, balance: 0.42 },
+                google: { ok: past, email: "player@gmail.com" }, tailscale: { phase: w === "done" ? "ready" : "start" } };
+  }
+  return JSON.parse(JSON.stringify(demoWiz));
+}
+function demoWizMark(step) {
+  if (!DEMO) return;
+  demoWizState();
+  if (step === "programs") demoWiz.programs = { tailscale: true, moonlight: true };
+  if (step === "google") demoWiz.google.ok = true;
+  if (step === "vast") demoWiz.vast = { ok: true, balance: 7.5 };
+}
+let demoTsTick = 0;
+function demoTsPhase() {        // этапы сменяются сами, как будто человек всё нажимает
+  const seq = ["start", "start", "extension", "extension", "extension", "vpn", "vpn", "login", "login", "login", "ready"];
+  return { phase: seq[Math.min(demoTsTick++, seq.length - 1)] };
+}
+
 function demoHistory(days, all) {
   const now = Date.now() / 1000;
   const sessions = Array.from({ length: 8 }, (_, i) => ({ iid: 52264565 - i, start: now - i * 86400 * 1.5,
@@ -1128,14 +1431,17 @@ async function start() {
   if (DEMO === "games") { openGames(); return; }
   if (DEMO === "setup") { openSetup(); return; }
   if (DEMO === "history") { openHistory(30); return; }
+  if (DEMO === "wizard") { openWizard(); return; }
   await refresh();
-  // Настройка: проверяем в фоне; нет ключа Vast (первый запуск) — сразу открыть экран настройки
-  if (current === null && !DEMO) openSetup();
-  else loadSetup();
   // Окно открыли заново: запуск/завершение ещё идёт в фоне — показать ход; закончилось, пока окно
   // было закрыто, — показать результат (особенно важно, если что-то не получилось)
   const task = !DEMO && current && current.task;
-  if (task && (task.active || task.unseen)) startProgress(task.kind);
+  if (task && (task.active || task.unseen)) { startProgress(task.kind); loadSetup(); }
+  else if (current === null && !DEMO) openWizard();          // первый запуск (нет ключа Vast) — простая настройка
+  else loadSetup().then((d) => {
+    // Что-то не настроено — простая настройка, если человек ещё на главном экране
+    if (d && !d.error && !d.ready && !$("screen-main").hidden) openWizard();
+  });
   if (!DEMO) setInterval(() => { if (!$("screen-main").hidden) refresh(); }, REFRESH_SEC * 1000);
 }
 
