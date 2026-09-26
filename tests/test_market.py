@@ -53,6 +53,14 @@ class TestLastMachine(unittest.TestCase):
         self.assertEqual(len(rows), 1)                                   # не спрятан
         self.assertEqual(rows[0]["_failed"], "exited")                   # а помечен
 
+    def test_slow_disk_hidden(self):
+        slow = dict(OFFER, id=1, disk_bw=69.2)                             # как у хоста в Португалии
+        fast = dict(OFFER, id=2, disk_bw=2743.0)
+        unknown = dict(OFFER, id=3)                                      # Vast не сообщил скорость — не прячем
+        with self.fake_call([slow, fast, unknown]):
+            ids = {o["id"] for o in market.search(100)}
+        self.assertEqual(ids, {2, 3})
+
     def test_busy(self):
         with self.fake_call([]):
             last = market.last_machine(100)
