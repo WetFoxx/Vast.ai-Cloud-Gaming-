@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.4 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.5 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -78,6 +78,8 @@
 # с оглавлением ИМЯ.tar.zst.parts, части идут по 4 сразу (wolf-parts.py), на диске — лишь несколько частей.
 # Новая версия появляется только целиком (сначала части, потом оглавление), оборвалось — цела прежняя.
 # Маленькие архивы (вход в Steam, личность, сохранения) — одним файлом, как раньше.
+# СКАЧИВАНИЕ КУСКАМИ (v4.5). Архивы качаются кусками по 64 МБ, до 8 сразу, прямо в распаковку, без временных
+# файлов — в том числе большие одиночные архивы, выгруженные до v4.4 (им не нужно заново выгружаться частями).
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -712,18 +714,20 @@ xt_user() { u tar -xpf - -C "$B" --no-overwrite-dir --delay-directory-restore \
               --warning=no-timestamp 2>>"$T/tar.err"; }
 
 get() {  # $1 объект в облаке  $2 имя  (B/K заданы spec)
-  local f="$T/$2.z" s a
-  # [v4.4] частями — параллельно, по порядку в распаковку; на диске лишь несколько частей
+  local s h
+  # [v4.4] частями; [v4.5] кусками по 64 МБ, до 8 сразу, в памяти и по порядку прямо в распаковку (без временных
+  # файлов — раньше части ложились на диск, и распаковка писала их ещё раз)
   if awk -F'\t' -v o="$1.parts" '$1==o {f=1} END {exit !f}' "$LS"; then
     parts get "$1" | zstd -dcq | xt_user
     set -- "${PIPESTATUS[@]}"
     [[ "$*" =~ ^[0\ ]+$ ]]; return
   fi
-  s=$(awk -F'\t' -v o="$1" '$1==o{print $3}' "$LS")
-  a=$(df -B1 --output=avail "$T" | tail -1)
-  if [ "${s:-0}" -gt 99999999 ] && [ $(( s * 3 )) -lt $(( a / PAR )) ]; then
-    rc copyto --multi-thread-streams=8 "$R/$1" "$f" && zstd -dcq "$f" | xt_user
-    set -- "${PIPESTATUS[@]}"; rm -f "$f"
+  s=$(awk -F'\t' -v o="$1" '$1==o{print $3}' "$LS"); h=$(awk -F'\t' -v o="$1" '$1==o{print $2}' "$LS")
+  if [ "${s:-0}" -gt "${WOLF_BIG_FILE:-134217728}" ] && [ -n "$h" ]; then
+    # [v4.5] большой одиночный архив (выгружен до v4.4) — тоже кусками в несколько потоков; раньше — одним
+    # потоком ~25 МБ/с (или целиком во временный файл, если на диске было втрое больше места)
+    parts cat "$1" "$s" "$h" | zstd -dcq | xt_user
+    set -- "${PIPESTATUS[@]}"
   else
     rc cat --buffer-size=128M "$R/$1" | zstd -dcq | xt_user
     set -- "${PIPESTATUS[@]}"
@@ -1816,6 +1820,7 @@ w /usr/local/bin/wolf-parts.py <<'PARTS'
 # хранится частями по WOLF_PART_MB (512) МБ и оглавлением; части качаются и выгружаются по WOLF_PART_PAR (4) сразу.
 #   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]        — поток со stdin в ОБЛАКО/ОБЪЕКТ
 #   wolf-parts.py get ОБЛАКО ОБЪЕКТ                     — архив из частей в stdout, по порядку
+#   wolf-parts.py cat ОБЛАКО ОБЪЕКТ РАЗМЕР MD5           — [v4.5] одиночный файл в stdout, так же кусками
 #   wolf-parts.py rm  ОБЛАКО ОБЪЕКТ [--no-trash] [--all] — удалить объект во всех видах (--all — и его дельты)
 # Как хранится ОБЪЕКТ (например, sgame--Игра.tar.zst или его дельта sgame--Игра.tar.zst.1a2b3c4d):
 #   * меньше одной части — одним файлом ОБЪЕКТ, как раньше (ОБЪЕКТ.part → переименование);
@@ -1825,11 +1830,18 @@ w /usr/local/bin/wolf-parts.py <<'PARTS'
 #     прежний одиночный файл. Оборвалось посередине — в облаке остаётся прежняя целая версия.
 #   * ставший однажды частями объект частями и остаётся (даже маленький): иначе одиночный файл и старое
 #     оглавление могли бы разойтись; при обоих видах верным считается оглавление.
-# Место на диске. Части ждут выгрузки (или распаковки) во временной папке; сколько их там у всех процессов
-# вместе — ограничено: WOLF_PART_SLOTS (6) мест, замки .slotN. Свободно меньше, чем нужно всем местам сразу
-# с запасом, — часть идёт прямо из потока в облако (из облака — в распаковку) одним потоком, как до v4.4:
-# медленнее, зато без временных файлов; архив, ещё не хранившийся частями, выгружается тогда одним файлом.
-# Каждая часть проверяется: rclone сверяет MD5 после передачи, get — ещё и с оглавлением.
+# Скачивание (v4.5) — кусками по WOLF_RANGE_MB (64) МБ, до WOLF_RANGE_PAR (8) сразу (rclone cat --offset --count),
+# в памяти и по порядку прямо в распаковку, без временных файлов: раньше части ложились на диск, а распаковка писала
+# их ещё раз — на медленном диске это 20 МБ/с (живой случай 2026-09-26). Так же, кусками, качаются и большие
+# одиночные архивы, выгруженные до v4.4, — им не нужно заново выгружаться частями. Кусок, который не скачался,
+# повторяется целиком: в распаковку он ещё не ушёл. В памяти у всех процессов вместе — не больше
+# WOLF_RANGE_SLOTS (12) кусков (замки .ramN).
+# Выгрузка: части ждут отправки во временной папке; сколько их там у всех процессов вместе — ограничено:
+# WOLF_PART_SLOTS (6) мест, замки .slotN. Свободно меньше, чем нужно всем местам сразу с запасом, — часть идёт
+# прямо из потока в облако одним потоком, как до v4.4: медленнее, зато без временных файлов; архив, ещё не
+# хранившийся частями, выгружается тогда одним файлом.
+# Каждая часть проверяется: rclone сверяет MD5 после передачи, скачивание — ещё и с оглавлением (одиночный файл —
+# с MD5 из списка облака).
 # Имена частей начинаются с «ОБЪЕКТ.» — прежние wolf forget и приложение на Mac удаляют и считают их вместе с архивом.
 # Код выхода: 0 — готово, 1 — не получилось (прежняя версия в облаке не тронута).
 import concurrent.futures as cf
@@ -1856,6 +1868,10 @@ RESERVE = 512 * MB                   # не занимать частями по
 MINFREE = int(os.environ.get("WOLF_PART_MINFREE") or SLOTS * PART + RESERVE)   # свободно меньше — без временных файлов
 TRIES = 3                            # попыток на часть (поверх повторов самого rclone)
 WAIT = float(os.environ.get("WOLF_PART_WAIT") or 5)   # пауза перед повтором, с (растёт с каждой попыткой)
+RANGE = int(os.environ.get("WOLF_RANGE_BYTES") or int(os.environ.get("WOLF_RANGE_MB") or 64) * MB)
+WINDOW = max(1, int(os.environ.get("WOLF_RANGE_PAR") or 8))      # кусков одного архива в пути одновременно
+RSLOTS = max(1, int(os.environ.get("WOLF_RANGE_SLOTS") or 12))   # кусков в памяти у всех процессов вместе
+RC_READ = ["--timeout=60s", "--contimeout=15s"]   # соединение зависло — ошибка через минуту и повтор куска
 RC = ["rclone", "--retries=5", "--low-level-retries=20", "--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200",
       "--drive-chunk-size=64M"]         # куски выгрузки: по умолчанию 8 МБ — медленно
 HEAD = "vastgame-parts 1"
@@ -1911,12 +1927,13 @@ def roomy():
     return shutil.disk_usage(TMP).free >= MINFREE
 
 
-def slot(wait=True):
-    """Место под одну часть во временной папке — общее на все процессы (замок .slotN): открытый файл-замок,
-    закрыть — освободить. None — все места заняты (при wait=False)."""
+def slot(wait=True, kind="slot"):
+    """Место под часть на диске (kind="slot", WOLF_PART_SLOTS мест) или под кусок в памяти (kind="ram",
+    WOLF_RANGE_SLOTS) — общее на все процессы (замок .<kind>N): открытый файл-замок, закрыть — освободить.
+    None — все места заняты (при wait=False)."""
     while True:
-        for k in range(SLOTS):
-            f = open(os.path.join(TMP, f".slot{k}"), "a")
+        for k in range(SLOTS if kind == "slot" else RSLOTS):
+            f = open(os.path.join(TMP, f".{kind}{k}"), "a")
             try:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return f
@@ -2140,40 +2157,91 @@ def parse_index(text, obj):
     return parts
 
 
-def download(remote, name, path):
+def fetch(remote, name, off, cnt):
+    """cnt байт файла name с позиции off — в память. Кусок ещё не ушёл в распаковку, поэтому при сбое его просто
+    повторяем целиком (одним потоком так было нельзя: оборвалось на 30-м гигабайте — всё сначала)."""
+    buf = bytearray(cnt)
     for i in range(TRIES):
-        r = rclone("copyto", "--multi-thread-streams=4", f"{remote}/{name}", path)
-        if r.returncode == 0:
-            return path
-        log(f"{name}: {why(r)}")
+        p = subprocess.Popen(argv("cat", *RC_READ, f"--offset={off}", f"--count={cnt}", f"{remote}/{name}"),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        view, n = memoryview(buf), 0
+        while n < cnt and (k := p.stdout.readinto(view[n:])):
+            n += k
+        view.release()
+        extra = p.stdout.read(1)
+        err = p.stderr.read().decode("utf-8", "replace").strip()
+        code = p.wait()
+        if code == 0 and n == cnt and not extra:
+            return buf
+        log(f"{name} [{off}+{cnt}]: " + (err.splitlines()[-1][-300:] if err else f"код {code}, байт {n}"))
         time.sleep(WAIT * (i + 1))
     return None
 
 
-def copy_out(path, md5, size, out):
-    """Часть с диска — в распаковку. True — сошлась с оглавлением."""
-    h, n = hashlib.md5(), 0
-    with open(path, "rb") as f:
-        while b := f.read(BLOCK):
-            h.update(b)
-            n += len(b)
-            out.write(b)
-    return h.hexdigest() == md5 and n == size
+def stream(remote, segs, out):
+    """Сегменты (имя, размер, md5) по порядку — кусками по RANGE, до WINDOW сразу — в out; каждый сегмент
+    сверяется с md5. В памяти — не больше WINDOW кусков у процесса и RSLOTS у всех вместе.
+    None — всё сошлось, иначе текст ошибки."""
+    ranges = [(si, off, min(RANGE, size - off)) for si, (_, size, _) in enumerate(segs) for off in range(0, size, RANGE)]
+    hashes = [hashlib.md5() for _ in segs]
+    futures, locks, nxt = {}, {}, 0
+    with cf.ThreadPoolExecutor(WINDOW) as ex:
+        def start(k, lock):
+            si, off, cnt = ranges[k]
+            locks[k] = lock
+            futures[k] = ex.submit(fetch, remote, segs[si][0], off, cnt)
+
+        def fill():                                        # вперёд, пока есть свободные места в памяти
+            nonlocal nxt
+            while nxt < len(ranges) and len(futures) < WINDOW:
+                lock = slot(wait=False, kind="ram")
+                if lock is None:
+                    return
+                start(nxt, lock)
+                nxt += 1
+
+        fill()
+        for k, (si, off, cnt) in enumerate(ranges):
+            if k not in futures:                           # места в памяти держат другие архивы — подождать
+                start(k, slot(kind="ram"))
+                nxt = k + 1
+            buf = futures.pop(k).result()
+            try:
+                if buf is None:
+                    return f"{segs[si][0]}: кусок {off}+{cnt} не скачался"
+                out.write(buf)
+                hashes[si].update(buf)
+            finally:
+                locks.pop(k).close()
+            if off + cnt == segs[si][1] and hashes[si].hexdigest() != segs[si][2]:
+                return f"{segs[si][0]}: не сходится MD5"
+            fill()
+    for si, (name, size, md5) in enumerate(segs):          # пустые сегменты: кусков у них нет
+        if size == 0 and hashes[si].hexdigest() != md5:
+            return f"{name}: не сходится MD5"
+    return None
 
 
-def stream_out(remote, name, md5, size, out):
-    """Часть прямо из облака в распаковку (на диске мало места), одним потоком. True — сошлась с оглавлением."""
-    p = subprocess.Popen(argv("cat", "--buffer-size=128M", f"{remote}/{name}"), stdout=subprocess.PIPE)
-    h, n = hashlib.md5(), 0
+def read(remote, obj, segs):
+    """Сегменты — в stdout (в распаковку). 0 — всё скачалось и сошлось."""
+    os.makedirs(TMP, exist_ok=True)                       # замки мест в памяти лежат во временной папке
+    t0 = time.time()
     try:
-        while b := p.stdout.read(BLOCK):
-            h.update(b)
-            n += len(b)
-            out.write(b)
-    finally:
-        p.stdout.close()
-        code = p.wait()
-    return code == 0 and h.hexdigest() == md5 and n == size
+        err = stream(remote, segs, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        err = "распаковка прервалась"
+    except OSError as e:
+        err = str(e)
+    if err:
+        if err == "распаковка прервалась":                # не ругаться ещё раз при выходе, дописывая stdout
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        log(f"{obj}: {err}")
+        return 1
+    total = sum(s for _, s, _ in segs)
+    dt = max(time.time() - t0, 0.001)
+    log(f"{obj}: {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с), частей {len(segs)}")
+    return 0
 
 
 def get(remote, obj):
@@ -2186,63 +2254,12 @@ def get(remote, obj):
     if not parts:
         log(f"{obj}: оглавление частей не прочиталось")
         return 1
-    os.makedirs(TMP, exist_ok=True)
-    tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
-    out, t0 = sys.stdout.buffer, time.time()
-    futures, locks, nxt, told = {}, {}, 0, False
-    try:
-        with cf.ThreadPoolExecutor(PAR) as ex:
-            def start(k, lock):
-                locks[k] = lock
-                futures[k] = ex.submit(download, remote, parts[k][0], os.path.join(tmp, str(k)))
+    return read(remote, obj, [(n, s, m) for n, m, s in parts])
 
-            def fill():                                    # качать вперёд, пока есть места и диск
-                nonlocal nxt
-                while nxt < len(parts) and len(futures) < PAR and roomy():
-                    lock = slot(wait=False)
-                    if lock is None:
-                        return
-                    start(nxt, lock)
-                    nxt += 1
 
-            fill()
-            for i, (name, md5, size) in enumerate(parts):
-                if i not in futures:                       # не начата: мало места на диске или места заняты
-                    nxt = i + 1
-                    if not roomy():                        # прямо из облака в распаковку, одним потоком
-                        if not told:
-                            log(f"{obj}: мало места на диске — дальше одним потоком, с части {name}")
-                            told = True
-                        if not stream_out(remote, name, md5, size, out):
-                            log(f"{obj}: часть {name} не скачалась или не сходится с оглавлением")
-                            return 1
-                        fill()
-                        continue
-                    start(i, slot())                       # места держат другие архивы — подождать
-                path, lock = futures.pop(i).result(), locks.pop(i)
-                try:
-                    good = bool(path) and copy_out(path, md5, size, out)
-                finally:
-                    if path:
-                        os.remove(path)
-                    lock.close()
-                if not good:
-                    log(f"{obj}: часть {name} не скачалась или не сходится с оглавлением")
-                    return 1
-                fill()
-            out.flush()
-        total = sum(s for _, _, s in parts)
-        dt = max(time.time() - t0, 0.001)
-        log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
-        return 0
-    except BrokenPipeError:
-        log(f"{obj}: распаковка прервалась")
-        return 1
-    except OSError as e:
-        log(f"{obj}: {e}")
-        return 1
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+def cat(remote, obj, size, md5):
+    """Одиночный файл (архив меньше части или выгруженный до v4.4) — тоже кусками, в несколько потоков."""
+    return read(remote, obj, [(obj, int(size), md5)])
 
 
 def rm(remote, obj, trash, everything):
@@ -2259,10 +2276,13 @@ def rm(remote, obj, trash, everything):
 
 
 def main(args):
-    if len(args) < 4 or args[1] not in ("put", "get", "rm"):
-        print("usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash] [--all]", file=sys.stderr)
+    if len(args) < 4 or args[1] not in ("put", "get", "cat", "rm") or (args[1] == "cat" and len(args) < 6):
+        print("usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash] [--all] | cat REMOTE OBJECT SIZE MD5",
+              file=sys.stderr)
         return 2
     cmd, remote, obj, flags = args[1], args[2].rstrip("/"), args[3], args[4:]
+    if cmd == "cat":
+        return cat(remote, obj, flags[0], flags[1])
     trash = "--no-trash" not in flags
     if cmd == "put":
         return put(remote, obj, trash)
