@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.2 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.3 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -77,6 +77,10 @@
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
 # прячутся в steamapps/.vastgame-hidden (иначе Steam сам начнёт качать всю библиотеку); включена —
 # возвращаются, и игры восстанавливаются из облака. Раньше выключенная синхронизация стирала паспорта.
+#
+# STEAM INPUT (v4.3) по умолчанию выключен для каждой игры, где ты сам не выбирал в её свойствах
+# («Контроллер» → Steam Input): игры получают геймпад напрямую как Xbox-контроллер. В Docker со
+# Steam Input игры геймпад не видели. Включить для игры — в её свойствах, выбор сохранится.
 #
 # ВЫГРУЗКА ПО ВЫХОДУ ИЗ ИГРЫ. wolf-watch.service раз в 5 с смотрит, какие игры запущены
 # (Steam — по процессу reaper с AppId, игры из GAMES_DIR — по пути к их папке у
@@ -1016,6 +1020,8 @@ boot() {
     fi
     pool unpack steam-client steam-cache "${p[@]}"
     if [ "$SG" = 1 ]; then acf_unhide; else acf_hide; fi     # [v4.2] до запуска Steam
+    # [v4.3] Steam Input по умолчанию выключен (до запуска Steam; папка игр ещё не восстановлена — только это)
+    log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --steam-input 2>&1)"
     if [ -e "$DH/$SR/steam.sh" ]; then
       if [ "$SF" = 1 ]; then
         printf 'BootStrapperInhibitAll=Enable\nBootStrapperForceSelfUpdate=Disable\n' > "$DH/$SR/steam.cfg"
@@ -1495,8 +1501,12 @@ w /usr/local/bin/wolf-shortcuts.py <<'SHORTCUTS'
 # (compatdata/<номер> → архив pfx--<номер>) остаются общими. Наши записи помечены тегом vastgame: их
 # убираем, когда папки больше нет; добавленные руками не трогаем (и папку с такой игрой пропускаем).
 # Proton — в config/config.vdf (CompatToolMapping): тот, что выбран «для всех игр», иначе Proton Experimental.
+# [v4.3] Steam Input по умолчанию выключен: в userdata/<id>/config/localconfig.vdf каждой игре без своего выбора —
+# UseSteamControllerConfig "0" (как «Отключить Steam Input» в её свойствах). В Docker с ним игры не видят геймпад
+# (живой случай 2026-09-26, The Blood of Dawnwalker); меню Steam и Big Picture геймпадом управляются и так.
+# Выбор человека в свойствах игры не трогаем. --steam-input — только это (до восстановления папки игр).
 # Код выхода: 0 — ничего не изменилось, 3 — изменилось (Steam нужно перезапустить), 1 — ошибка.
-import binascii, os, re, struct, sys
+import binascii, glob, os, re, struct, sys
 
 TAG = "vastgame"
 CHECK = "--check" in sys.argv
@@ -1693,7 +1703,58 @@ def sync_proton(config_vdf, ids):
     return change
 
 
+def steam_input_off(steam_root):
+    """Steam Input «выключен» всем играм, у которых нет своего выбора. True — что-то изменилось."""
+    sa = os.path.join(steam_root, "steamapps")
+    ids = set()
+    for f in glob.glob(os.path.join(sa, "appmanifest_*.acf")) + glob.glob(os.path.join(sa, ".vastgame-hidden", "appmanifest_*.acf")):
+        m = re.search(r"appmanifest_(\d+)\.acf$", f)
+        if m:
+            ids.add(int(m.group(1)))
+    changed = False
+    users = os.path.join(steam_root, "userdata")
+    for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
+        cfg = os.path.join(users, u, "config")
+        if not (u.isdigit() and u != "0" and os.path.isdir(cfg)):
+            continue
+        mine = set(ids)
+        try:                                                # сторонние игры этого пользователя (и наши, и добавленные руками)
+            with open(os.path.join(cfg, "shortcuts.vdf"), "rb") as f:
+                for e in bkv_read(f.read(), 0)[0].get("shortcuts", {}).values():
+                    if isinstance(e.get("appid"), tuple):
+                        mine.add(e["appid"][1] & 0xFFFFFFFF)
+        except (OSError, ValueError, IndexError, struct.error):
+            pass
+        path = os.path.join(cfg, "localconfig.vdf")
+        if not mine or not os.path.isfile(path):            # файла ещё нет (Steam не входил) — не создаём
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            items = tkv_parse(f.read())
+        store = tkv_get(items, "UserLocalConfigStore")
+        if store is None:
+            continue
+        apps = tkv_get(store, "apps", True)
+        change = False
+        for aid in sorted(mine):
+            block = tkv_get(apps, str(aid), True)
+            if not any(k.lower() == "usesteamcontrollerconfig" for k, v in block):
+                block.append(["UseSteamControllerConfig", "0"])
+                change = True
+        if change and not CHECK:
+            tmp = path + ".vastgame-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(tkv_dump(items))
+            os.replace(tmp, path)
+        changed |= change
+    return changed
+
+
 def main(games_dir, steam_root):
+    if "--steam-input" in sys.argv:
+        changed = steam_input_off(steam_root)
+        if not CHECK:
+            print(f"steam input: выключен по умолчанию, изменено: {'да' if changed else 'нет'}")
+        return 3 if changed else 0
     games = []
     for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
         folder = os.path.join(games_dir, d)
@@ -1711,6 +1772,7 @@ def main(games_dir, steam_root):
         if u.isdigit() and u != "0" and os.path.isdir(cfg):
             changed |= sync_user(cfg, games, ids)
     changed |= sync_proton(os.path.join(steam_root, "config", "config.vdf"), ids)
+    changed |= steam_input_off(steam_root)                 # и новым сторонним играм, и поставленным за сессию
     if not CHECK:
         print(f"shortcuts: игр в папке {len(games)}, изменено: {'да' if changed else 'нет'}")
     return 3 if changed else 0
@@ -1738,7 +1800,7 @@ if [ "$WM" = docker ]; then
   rm -f /run/wolf/boot-done /run/wolf/boot-started
   setsid /usr/local/bin/wolf supervise </dev/null >>/var/log/wolf-supervise.log 2>&1 &
   echo $! > /run/wolf/supervise.pid
-  echo "=== wolf v4.2 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+  echo "=== wolf v4.3 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
   exit 0
 fi
 
@@ -1860,4 +1922,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v4.2 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v4.3 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
