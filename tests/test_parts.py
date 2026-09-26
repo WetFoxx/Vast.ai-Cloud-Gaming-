@@ -303,6 +303,51 @@ class TestWolfFunctions(unittest.TestCase):
         self.assertEqual(self.sh(chunked + [("a.tar.zst.33334444.parts", "ee", "1")], "rver a"), "33334444bbbb+ee")
         self.assertEqual(self.sh([], "rver a"), "")
 
+    def version_check(self, stale, fresh, known):
+        """Кусок pack от «rv=$(rver…» до ошибки «другая версия»: stale — список в начале прохода ($LS),
+        fresh — что вернёт перечитанный список (rl), known — версия, которую знает машина ($S/v)."""
+        body = re.search(r'^pack\(\) \{\n.*?\n\}$', WOLF, re.S | re.M).group(0)
+        part = re.search(r'^(  rv=\$\(rver "\$n"\); lv=.*?другая версия.*?\n  fi\n)', body, re.S | re.M).group(1)
+        d = Path(tempfile.mkdtemp())
+        (d / "v").mkdir()
+        (d / "v" / "game--X").write_text(known + "\n")
+        (d / "w").mkdir()
+        rows = lambda r: "".join("\t".join(x) + "\n" for x in r)
+        (d / "ls").write_text(rows(stale))
+        (d / "fresh").write_text(rows(fresh))
+        script = (f'LS="{d}/ls"; S="{d}"; w="{d}/w"; R=облако\n'
+                  'rd() { cat "$1" 2>/dev/null; }\n'
+                  'st() { echo "ST $1 $2"; }\n'
+                  'gamearch() { return 0; }\n'
+                  'drop() { echo DROP; }\n'
+                  'rclone() { return 1; }\n'
+                  f'rl() {{ : > "{d}/rl-called"; cat "{d}/fresh"; }}\n'   # stderr pack глушит — метка файлом
+                  f'{self.fn("rver")}\n'
+                  f'check() {{ local n=game--X rv lv\n{part}  echo "ДАЛЬШЕ $rv"; }}\ncheck\n')
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        return r.stdout.strip(), (d / "rl-called").exists()
+
+    BASE = ("game--X.tar.zst.parts", "11112222aaaa", "1")
+
+    def test_parallel_push_is_not_another_instance(self):
+        # список снят до того, как параллельный проход выгрузил новую дельту; машина уже знает новую версию
+        out, reread = self.version_check(stale=[self.BASE, ("game--X.tar.zst.11112222", "old", "1")],
+                                         fresh=[self.BASE, ("game--X.tar.zst.11112222", "new", "1")],
+                                         known="11112222aaaa+new")
+        self.assertEqual(out, "ДАЛЬШЕ 11112222aaaa+new")                  # без ошибки, дальше — с верной версией
+        self.assertTrue(reread)
+
+    def test_really_other_version_is_still_an_error(self):
+        out, _ = self.version_check(stale=[self.BASE, ("game--X.tar.zst.11112222", "other", "1")],
+                                    fresh=[self.BASE, ("game--X.tar.zst.11112222", "other", "1")],
+                                    known="11112222aaaa+mine")
+        self.assertEqual(out, "ST game--X err")
+
+    def test_same_version_does_not_reread_cloud(self):
+        out, reread = self.version_check(stale=[self.BASE], fresh=[], known="11112222aaaa")
+        self.assertEqual(out, "ДАЛЬШЕ 11112222aaaa")
+        self.assertFalse(reread)
+
     def test_names(self):
         rows = [("sgame--X.tar.zst.parts", "h", "1"), ("sgame--X.tar.zst.g0123abcd-0000", "h", "1"),
                 ("sgame--Y.tar.zst", "h", "1"), ("sgame--Y.tar.zst.11112222", "h", "1"),
