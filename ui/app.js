@@ -244,6 +244,7 @@ function showTabs() {
   $("tab-kvm").classList.toggle("active", !offersDocker);
   $("tab-docker").classList.toggle("active", !!offersDocker);
   $("offers-docker-note").hidden = !offersDocker;
+  $("f-traffic-box").hidden = !offersDocker;
 }
 // Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
 $("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offersData ? offersData.disk : null, false); });
@@ -260,12 +261,17 @@ function syncChoice() { return Object.fromEntries(SYNC_KEYS.map((k) => [k, $("sy
 let filters = null, page = 0;
 const SPEEDS = [0, 100, 300, 500, 1000];          // Мбит/с — не ниже (меньшая из скоростей ↓/↑)
 const PINGS = [0, 50, 80, 100, 150, 200];         // мс — не выше
+const TRAFFICS = [0, 0.1, 0.5, 1, 2, 5];          // $ за ТБ — не дороже; 0.1 — «бесплатный»; только Docker (у KVM не списывается)
+function trafficOk(o, lim) { return !lim || (lim === 0.1 ? o.traffic_tb < 0.1 : o.traffic_tb <= lim); }
 function netSpeed(o) { return Math.min(o.net_down, o.net_up); }
 function countryName(cc) {
   try { return new Intl.DisplayNames([LANG], { type: "region" }).of(cc) || cc; } catch (e) { return cc; }
 }
 function saveFilters() { if (!DEMO) api().save_offer_filters(filters); }
-function filtersActive() { return filters.countries.length || filters.gpus.length || filters.speed || filters.ping; }
+function filtersActive() {
+  return filters.countries.length || filters.gpus.length || filters.speed || filters.ping
+    || (offersDocker && filters.traffic);
+}
 
 // Сортировка — нажатием на заголовок колонки; повторное нажатие переворачивает. Первое нажатие —
 // самый полезный порядок: цена и пинг от меньшего, интернет и надёжность от большего.
@@ -284,6 +290,7 @@ function applyFilters(list) {
   const f = filters;
   const r = list.filter((o) => (!f.countries.length || f.countries.includes(o.cc))
     && (!f.gpus.length || f.gpus.includes(o.gpu))
+    && (!offersDocker || trafficOk(o, f.traffic))
     && (!f.speed || netSpeed(o) >= f.speed)
     && (!f.ping || (o.ping.ms != null && o.ping.ms <= f.ping)));
   // Цена — только аренда: трафик по реальным списаниям почти не берётся. Неизвестное (пинг «—») — всегда в конце
@@ -321,6 +328,8 @@ function fillSelect(sel, values, label, value) {
 function renderFilters(d) {
   fillSelect($("f-speed"), SPEEDS, (v) => v ? t("filter.speed.from", { n: v }) : t("filter.any"), filters.speed);
   fillSelect($("f-ping"), PINGS, (v) => v ? t("filter.ping.to", { n: v }) : t("filter.any"), filters.ping);
+  fillSelect($("f-traffic"), TRAFFICS, (v) => !v ? t("filter.any") : v === 0.1 ? t("filter.traffic.free")
+    : t("filter.traffic.to", { n: v }), filters.traffic ?? 1);
   for (const th of document.querySelectorAll("#offers-table th.sortable")) {
     const on = th.dataset.sort === (filters.sort || "price");
     th.classList.toggle("sorted", on);
@@ -365,7 +374,7 @@ function renderFilters(d) {
   }
 }
 
-for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"]]) {
+for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"], ["f-traffic", "traffic"]]) {
   $(id).addEventListener("change", () => {
     filters[key] = Number($(id).value);
     page = 0; saveFilters(); renderOffers();
@@ -437,7 +446,8 @@ function renderOffers() {
     c[2].textContent = o.country;
     pingCell(c[3], o.ping);
     c[4].textContent = t("unit.mbps", { n: netSpeed(o) });
-    c[4].title = t("net.both", { down: o.net_down, up: o.net_up });
+    c[4].title = t("net.both", { down: o.net_down, up: o.net_up })
+      + (offersDocker ? "\n" + t("net.traffic", { price: o.traffic_tb < 0.1 ? "$0" : "$" + num(o.traffic_tb) }) : "");
     c[5].textContent = money(o.price);
     c[6].textContent = num(o.reliability * 100) + "%";
     tr.addEventListener("click", () => { selected = o.id; renderOffers(); });
@@ -1444,7 +1454,7 @@ function demoOffers(disk) {
     const kind = i === 3 ? "measured" : i % 10 === 1 ? "region" : "estimate";
     offers.push({ id: 100 + i, gpu: gpus[i * 7 % gpus.length], country, cc: country.split(",").pop().trim(),
                   price, traffic: 0.01, total: price + 0.01, reliability: 0.97 + (i % 3) / 100,
-                  net_down: 90 + (i * 131 % 1800), net_up: 80 + (i * 97 % 1500),
+                  net_down: 90 + (i * 131 % 1800), net_up: 80 + (i * 97 % 1500), traffic_tb: [0, 0.4, 1, 3, 5][i % 5],
                   ping: { ms: kind === "estimate" ? est : est + 40, kind },
                   failed: i === 2 ? "Машина перешла в состояние «exited» и не запустится." : null });
   }

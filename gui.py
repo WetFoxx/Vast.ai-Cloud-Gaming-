@@ -49,7 +49,8 @@ HERE = Path(__file__).resolve().parent
 LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_PAGE = 15    # машин на странице выбора (показываются все подходящие, по страницам)
 # Фильтры списка машин по умолчанию: все страны, любая скорость и пинг, сначала дешёвые
-OFFER_FILTERS = {"countries": [], "gpus": [], "speed": 0, "ping": 0, "sort": "price", "dir": "asc"}
+OFFER_FILTERS = {"countries": [], "gpus": [], "speed": 0, "ping": 0, "traffic": 1, "sort": "price", "dir": "asc"}
+TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 — любой, 0.1 — бесплатный); только вкладка Docker
 OFFER_SORTS = ("price", "ping", "net", "rel", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
@@ -157,6 +158,8 @@ class Api:
                     "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
                     "reliability": o["reliability"], "failed": o.get("_failed"), "start_min": o.get("_start_min"),
                     "net_down": round(o.get("inet_down") or 0), "net_up": round(o.get("inet_up") or 0),
+                    # цена трафика, $ за ТБ (дороже из двух сторон) — фильтр «Трафик» во вкладке Docker
+                    "traffic_tb": round(max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0) * 1000, 2),
                     "ping": latency.for_offer(o, remembered, me)}
         return {"docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
@@ -187,6 +190,7 @@ class Api:
         clean = {"countries": [c for c in f.get("countries") or [] if isinstance(c, str)][:100],
                  "gpus": [g for g in f.get("gpus") or [] if isinstance(g, str)][:100],
                  "speed": max(0, int(f.get("speed") or 0)), "ping": max(0, int(f.get("ping") or 0)),
+                 "traffic": f.get("traffic") if f.get("traffic") in TRAFFIC_LIMITS else OFFER_FILTERS["traffic"],
                  "sort": f.get("sort") if f.get("sort") in OFFER_SORTS else "price",
                  "dir": "desc" if f.get("dir") == "desc" else "asc"}
         settings.set("offer_filters", clean)

@@ -70,15 +70,12 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(sent["vms_enabled"], {"eq": True})
         self.assertEqual(sorted(ids), [1, 2, 3, 6])     # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь
 
-    def test_docker_only_free_traffic(self):
-        # В Docker трафик реально списывается ($4/ТБ за час игры дороже самой машины) — платный не показываем
-        paid = dict(offer(7), inet_up_cost=0.004, inet_down_cost=0.004)
-        half = dict(offer(8), inet_up_cost=0, inet_down_cost=0.004)          # только скачивание — тоже платно
-        rows = [paid, half, dict(offer(9), inet_up_cost=0.000003, inet_down_cost=0.000003)]
-        with mock.patch.object(market, "call", lambda *a, **k: {"offers": [dict(o, vms_enabled=True) for o in rows]}), \
+    def test_traffic_price_left_to_the_filter(self):
+        # Цену трафика выбирает человек фильтром «Трафик» на странице — поиск ничего не отсекает
+        rows = [dict(offer(7), inet_up_cost=0.004, inet_down_cost=0.004), dict(offer(9), inet_up_cost=0, inet_down_cost=0)]
+        with mock.patch.object(market, "call", lambda *a, **k: {"offers": [dict(o) for o in rows]}), \
              mock.patch.object(market, "bad_hosts", lambda: {}):
-            self.assertEqual([o["id"] for o in market.search(60, docker=True)], [9])
-            self.assertEqual(sorted(o["id"] for o in market.search(60)), [7, 8, 9])   # KVM — как раньше
+            self.assertEqual(sorted(o["id"] for o in market.search(60, docker=True)), [7, 9])
 
     def test_china_never_listed(self):
         # Google Drive и GitHub там заблокированы — машина висит на скачивании скрипта

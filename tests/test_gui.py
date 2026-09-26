@@ -78,6 +78,7 @@ class TestOffers(unittest.TestCase):
         self.assertEqual(d["page_size"], gui.OFFERS_PAGE)
         o = d["offers"][0]
         self.assertEqual((o["cc"], o["net_down"], o["net_up"]), ("JP", 500, 300))
+        self.assertEqual(o["traffic_tb"], 0)                          # трафик для фильтра Docker, $ за ТБ
         self.assertIn(o["ping"]["kind"], ("estimate", "measured", "region"))
         self.assertEqual(d["filters"], gui.OFFER_FILTERS)             # ничего не выбрано — всё по умолчанию
 
@@ -86,7 +87,11 @@ class TestOffers(unittest.TestCase):
         self.assertEqual(api.save_offer_filters({"countries": ["JP", 5], "gpus": ["RTX 3060", None], "speed": "300",
                                                  "ping": -1, "sort": "evil", "dir": "sideways"}), {"ok": True})
         self.assertEqual(api._offer_filters(), {"countries": ["JP"], "gpus": ["RTX 3060"], "speed": 300, "ping": 0,
-                                                "sort": "price", "dir": "asc"})
+                                                "traffic": 1, "sort": "price", "dir": "asc"})
+        api.save_offer_filters({"traffic": 0.1})
+        self.assertEqual(api._offer_filters()["traffic"], 0.1)
+        api.save_offer_filters({"traffic": 7})                       # не из списка — по умолчанию
+        self.assertEqual(api._offer_filters()["traffic"], 1)
         api.save_offer_filters({"sort": "net", "dir": "desc"})
         self.assertEqual((api._offer_filters()["sort"], api._offer_filters()["dir"]), ("net", "desc"))
         self.assertIn("error", api.save_offer_filters("nope"))
