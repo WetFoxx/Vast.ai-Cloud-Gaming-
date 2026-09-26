@@ -3,6 +3,7 @@
 # Главное: новая версия появляется только целиком; сбой посередине оставляет прежнюю целой; порча части ловится;
 # мало места на диске — прямо из потока, как до v4.4; части на диске у всех процессов вместе — не больше мест.
 
+import hashlib
 import os
 import re
 import shutil
@@ -21,6 +22,9 @@ WOLF = re.search(r"^w /usr/local/bin/wolf <<'WOLF'\n(.*?)^WOLF$", SRC, re.S | re
 RCLONE = shutil.which("rclone") or next((p for p in ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone")
                                          if os.path.exists(p)), None)
 PART = 100_000
+RANGE = 30_000          # кусок скачивания — нарочно не делит часть ровно: у каждой части короткий последний кусок
+ZSTD = shutil.which("zstd") or next((p for p in ("/opt/homebrew/bin/zstd", "/usr/local/bin/zstd")
+                                     if os.path.exists(p)), None)
 
 
 class PartsBase(unittest.TestCase):
@@ -50,6 +54,7 @@ class PartsBase(unittest.TestCase):
             path = f"{self.bin}:{path}"
         return {"PATH": f"{path}:/usr/bin:/bin", "RCLONE_CONFIG": "/nonexistent", "WOLF_TMP": str(self.tmp),
                 "WOLF_PART_BYTES": str(PART), "WOLF_PART_PAR": "3", "WOLF_PART_WAIT": "0", "HOME": str(self.d),
+                "WOLF_RANGE_BYTES": str(RANGE), "WOLF_RANGE_PAR": "3",
                 **self.extra}
 
     def run_p(self, *args, data=b""):
@@ -57,8 +62,8 @@ class PartsBase(unittest.TestCase):
                               env=self.env())
 
     def leftovers(self):
-        """Временные файлы, кроме замков мест (.slotN — постоянные)."""
-        return [p.name for p in self.tmp.iterdir() if not p.name.startswith(".slot")]
+        """Временные файлы, кроме замков мест (.slotN, .ramN — постоянные)."""
+        return [p.name for p in self.tmp.iterdir() if not p.name.startswith((".slot", ".ram"))]
 
     def chunked(self, obj="g.tar.zst"):
         return [n for n in self.files() if re.fullmatch(re.escape(obj) + r"\.g[0-9a-f]{8}-\d{4}", n)]
@@ -194,6 +199,105 @@ class TestParts(PartsBase):
 
 
 @unittest.skipUnless(RCLONE, "нужен rclone")
+class TestRangedRead(PartsBase):
+    """v4.5: одиночный файл (архив до v4.4) — кусками в несколько потоков, прямо в stdout, MD5 сверяется."""
+
+    def single(self, data, name="s.tar.zst"):
+        (self.cloud / name).write_bytes(data)
+        return name, str(len(data)), hashlib.md5(data).hexdigest()
+
+    def cat(self, name, size, md5):
+        r = self.run_p("cat", str(self.cloud), name, size, md5)
+        return r.returncode, r.stdout
+
+    def test_single_file_in_ranges(self):
+        for n in (RANGE * 3 + 7, RANGE * 3, 1, 0):                   # с хвостом, ровно, один байт, пустой
+            data = os.urandom(n)
+            self.assertEqual(self.cat(*self.single(data)), (0, data), n)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_wrong_md5_is_an_error(self):
+        name, size, _ = self.single(os.urandom(RANGE * 2 + 1))
+        self.assertEqual(self.cat(name, size, "0" * 32)[0], 1)
+        name, size, _ = self.single(b"", "e.tar.zst")                # пустой — кусков нет, но сверка есть
+        self.assertEqual(self.cat(name, size, "0" * 32)[0], 1)
+
+    def test_failed_range_is_retried(self):
+        data = os.urandom(RANGE * 3 + 5)
+        mark = self.d / "failed-once"
+        # первый запрос куска со смещением RANGE падает, повтор — удачный
+        self.fake_sh = (f'[[ " $* " == *" cat "* && " $* " == *"--offset={RANGE} "* && ! -e "{mark}" ]] '
+                        f'&& {{ : > "{mark}"; exit 1; }}')
+        self.assertEqual(self.cat(*self.single(data)), (0, data))
+        self.assertTrue(mark.exists())
+
+    def test_range_that_keeps_failing_is_an_error(self):
+        self.fake_sh = f'[[ " $* " == *" cat "* && " $* " == *"--offset={RANGE * 2} "* ]] && exit 1'
+        self.assertEqual(self.cat(*self.single(os.urandom(RANGE * 3)))[0], 1)
+
+    def test_short_file_is_an_error(self):
+        name, size, md5 = self.single(os.urandom(RANGE * 2))
+        (self.cloud / name).write_bytes(os.urandom(RANGE))           # в облаке короче, чем в списке
+        self.assertEqual(self.cat(name, size, md5)[0], 1)
+
+
+@unittest.skipUnless(RCLONE and ZSTD, "нужны rclone и zstd")
+class TestWolfGet(PartsBase):
+    """get из wolf (как есть, из heredoc): частями → parts get; большой одиночный → parts cat (кусками);
+    маленький одиночный → rclone cat одним потоком, как раньше. Распаковка подменена записью в файл."""
+
+    BIG = 50_000                                                      # WOLF_BIG_FILE для теста
+
+    def z(self, data):
+        return subprocess.run([ZSTD, "-q", "-c"], input=data, capture_output=True, check=True).stdout
+
+    def get_wolf(self, obj):
+        fn = re.search(r"^get\(\) \{.*?^\}$", WOLF, re.S | re.M).group(0)
+        ls, out, log = self.d / "ls", self.d / "out", self.d / "parts.log"
+        ls.write_bytes(subprocess.run([RCLONE, "lsf", "--files-only", "-F", "phs", "--hash", "MD5", "-s", "\t",
+                                       str(self.cloud)], capture_output=True, check=True,
+                                      env={**self.env(), "PATH": os.environ["PATH"]}).stdout)
+        script = (f'LS="{ls}"; R="{self.cloud}"; T="{self.tmp}"\n'
+                  'rc() { rclone "$@" --retries=1; }\n'
+                  f'parts() {{ local c=$1; shift; python3 "{self.script}" "$c" "$R" "$@" 2>>"{log}"; }}\n'
+                  f'xt_user() {{ cat > "{out}"; }}\n'
+                  f'{fn}\nget "{obj}" name && echo ГОТОВО || echo СБОЙ\n')
+        env = {**self.env(), "WOLF_BIG_FILE": str(self.BIG), "PATH": f"{Path(ZSTD).parent}:{self.env()['PATH']}"}
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        used_parts = log.exists() and obj in log.read_text()
+        return r.stdout.strip(), out.read_bytes() if out.exists() else b"", used_parts
+
+    def test_chunked(self):
+        data = os.urandom(PART * 2 + 99)
+        self.assertEqual(self.put("g.tar.zst", self.z(data)), 0)
+        self.assertEqual(self.get_wolf("g.tar.zst"), ("ГОТОВО", data, True))
+
+    def test_big_single_goes_in_ranges(self):
+        data = os.urandom(self.BIG * 2)
+        (self.cloud / "b.tar.zst").write_bytes(self.z(data))           # как архив, выгруженный до v4.4
+        self.assertEqual(self.get_wolf("b.tar.zst"), ("ГОТОВО", data, True))
+
+    def test_small_single_as_before(self):
+        data = os.urandom(1000)
+        (self.cloud / "s.tar.zst").write_bytes(self.z(data))
+        self.assertEqual(self.get_wolf("s.tar.zst"), ("ГОТОВО", data, False))
+
+    def test_big_single_damaged_fails(self):
+        data = os.urandom(self.BIG * 2)
+        (self.cloud / "b.tar.zst").write_bytes(self.z(data))
+        fn = self.get_wolf                                            # список снят, потом файл в облаке подменили
+        real = subprocess.run
+        def swap(*a, **k):
+            r = real(*a, **k)
+            if a and a[0][:2] == [RCLONE, "lsf"]:
+                (self.cloud / "b.tar.zst").write_bytes(self.z(os.urandom(self.BIG * 2)))
+            return r
+        from unittest import mock
+        with mock.patch.object(subprocess, "run", swap):
+            self.assertEqual(fn("b.tar.zst")[0], "СБОЙ")
+
+
+@unittest.skipUnless(RCLONE, "нужен rclone")
 class TestPartsLowDisk(PartsBase):
     """Мало места на диске (свободно меньше WOLF_PART_MINFREE): без временных файлов, прямо из потока, как до v4.4."""
 
@@ -266,10 +370,10 @@ class TestSlots(PartsBase):
         import fcntl
         data = os.urandom(PART * 3)
         self.put("g.tar.zst", data)
-        self.extra = {"WOLF_PART_SLOTS": "1"}
+        self.extra = {"WOLF_RANGE_SLOTS": "1"}
         # вывод — в файл, не в канал: переполненный канал сам остановил бы процесс, и тест ничего бы не проверял
-        with open(self.tmp / ".slot0", "a") as held, open(self.d / "out", "wb") as out:
-            fcntl.flock(held, fcntl.LOCK_EX)                          # единственное место занято «другим архивом»
+        with open(self.tmp / ".ram0", "a") as held, open(self.d / "out", "wb") as out:
+            fcntl.flock(held, fcntl.LOCK_EX)                          # единственное место в памяти занято «другим»
             p = subprocess.Popen([sys.executable, str(self.script), "get", str(self.cloud), "g.tar.zst"],
                                  stdout=out, stderr=subprocess.DEVNULL, env=self.env())
             for _ in range(30):                                       # без ожидания управился бы за доли секунды
