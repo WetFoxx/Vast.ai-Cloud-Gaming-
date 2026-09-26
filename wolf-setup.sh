@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.3 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.4 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -72,6 +72,12 @@
 # сторонней игрой с Proton (wolf-shortcuts.py): при загрузке и при выключении, когда Steam закрыт.
 # Номер игры считается как у самого Steam, поэтому её сохранения (pfx--<номер>) общие на всех машинах.
 # Игры, добавленные в Steam руками, не трогаются; папку удалили — игра пропадает из библиотеки.
+#
+# БОЛЬШИЕ АРХИВЫ — ЧАСТЯМИ (v4.4). Google Drive отдаёт и принимает один файл одним потоком (~25 МБ/с):
+# игра на 50 ГБ восстанавливалась 35+ минут. Архив больше 512 МБ теперь хранится частями ИМЯ.tar.zst.g…-0000…
+# с оглавлением ИМЯ.tar.zst.parts, части идут по 4 сразу (wolf-parts.py), на диске — лишь несколько частей.
+# Новая версия появляется только целиком (сначала части, потом оглавление), оборвалось — цела прежняя.
+# Маленькие архивы (вход в Steam, личность, сохранения) — одним файлом, как раньше.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -342,11 +348,16 @@ sr() {
 }
 
 rl() { rc lsf --files-only -F phs --hash MD5 -s $'\t' "$R"; }
+# [v4.4] Объект (архив или его дельта) — одним файлом ИМЯ или частями с оглавлением ИМЯ.parts
+# (wolf-parts.py); при обоих видах верно оглавление, версия частей — MD5 оглавления
 rver() {
   awk -F'\t' -v b="$1.tar.zst" '{H[$1]=$2}
-    END{h=H[b]; if(h!=""){d=b"."substr(h,1,8); print h ((d in H)?"+"H[d]:"")}}' "${2:-$LS}"
+    END{h=H[b".parts"]; if(h=="") h=H[b]
+        if(h!=""){d=b"."substr(h,1,8); dh=H[d".parts"]; if(dh=="") dh=H[d]; print h (dh!=""?"+"dh:"")}}' "${2:-$LS}"
 }
-names() { sed -n 's/\.tar\.zst\t.*//p' "$LS" | grep -E "$1"; }
+names() { sed -n -E 's/\.tar\.zst(\.parts)?\t.*//p' "$LS" | awk '!s[$0]++' | grep -E "$1"; }
+# [v4.4] Большие архивы — частями, параллельно: parts put|get|rm ОБЪЕКТ [--no-trash] (ход — в wolf.log)
+parts() { local c=$1; shift; WOLF_TMP="$T" python3 /usr/local/bin/wolf-parts.py "$c" "$R" "$@" 2>>/var/log/wolf.log; }
 ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null; }
 # Папка для игр не из Steam (v3.10): если её нет — создать пустой. Зовётся при загрузке и каждые
 # GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
@@ -470,7 +481,7 @@ pack() {
   # вручную. Это решение пользователя: не воюем с ним и заново не выгружаем.
   # Отсутствие перепроверяем прямым запросом, чтобы сбой списка не выдал себя за удаление.
   if [ -z "$rv" ] && [ -n "$lv" ] && [ "$lv" != "?" ] && gamearch "$n" \
-     && ! rclone lsf "$R/$n.tar.zst" --retries 1 2>/dev/null | grep -q .; then
+     && ! { rclone lsf "$R/$n.tar.zst" --retries 1; rclone lsf "$R/$n.tar.zst.parts" --retries 1; } 2>/dev/null | grep -q .; then
     drop "$n"
     st "$n" ok "удалён из облака вручную — больше не выгружается (вернуть: sudo FORCE=1 wolf push '$n')"
     rm -rf "$w"; return 0
@@ -498,12 +509,12 @@ pack() {
   tar -cf - -C "$B" --no-recursion --null -T "$w/l" "${x[@]}" --ignore-failed-read \
       --warning=no-file-changed --warning=no-file-removed 2>> "$T/tar.err" \
     | zstd -q -T0 -"$Z" \
-    | rc rcat --drive-chunk-size=128M "$R/$o.part"
+    | parts put "$o"            # [v4.4] маленький — одним файлом (.part → переименование), большой — частями
   s=("${PIPESTATUS[@]}")
-  if [ "${s[0]}" -le 1 ] && [ "${s[1]}${s[2]}" = 00 ] && rc moveto "$R/$o.part" "$R/$o"; then
+  if [ "${s[0]}" -le 1 ] && [ "${s[1]}${s[2]}" = 00 ]; then
     if [ $f = 1 ]; then
       mv "$w/c" "$S/m/$n"
-      [[ $rv = *+* ]] && rcp deletefile "$R/$n.tar.zst.${rv:0:8}" &>/dev/null
+      [[ $rv = *+* ]] && parts rm "$n.tar.zst.${rv:0:8}" --no-trash &>/dev/null   # дельта к прежней базе
     fi
     echo "$fp" > "$S/h/$n"; rm -f "$S/p/$n"
     { rl > "$w/r" && rver "$n" "$w/r"; } > "$S/v/$n" || echo "?" > "$S/v/$n"
@@ -697,6 +708,12 @@ xt_user() { u tar -xpf - -C "$B" --no-overwrite-dir --delay-directory-restore \
 
 get() {  # $1 объект в облаке  $2 имя  (B/K заданы spec)
   local f="$T/$2.z" s a
+  # [v4.4] частями — параллельно, по порядку в распаковку; на диске лишь несколько частей
+  if awk -F'\t' -v o="$1.parts" '$1==o {f=1} END {exit !f}' "$LS"; then
+    parts get "$1" | zstd -dcq | xt_user
+    set -- "${PIPESTATUS[@]}"
+    [[ "$*" =~ ^[0\ ]+$ ]]; return
+  fi
   s=$(awk -F'\t' -v o="$1" '$1==o{print $3}' "$LS")
   a=$(df -B1 --output=avail "$T" | tail -1)
   if [ "${s:-0}" -gt 99999999 ] && [ $(( s * 3 )) -lt $(( a / PAR )) ]; then
@@ -1077,7 +1094,7 @@ boot() {
       [ -e "$f" ] || continue
       d=$(idirs "$f" | head -1)
       [ -n "$d" ] && [ ! -d "$DH/$SR/steamapps/common/$d" ] || continue
-      awk -F'\t' -v o="sgame--$d.tar.zst" '$1==o {f=1} END {exit !f}' "$LS" && continue
+      awk -F'\t' -v o="sgame--$d.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$LS" && continue
       rm -f "$f"
       log "sgame--$d: игры нет ни на диске, ни в облаке — манифест убран, Steam покажет её неустановленной"
     done
@@ -1786,6 +1803,305 @@ if __name__ == "__main__":
         sys.exit(1)
 SHORTCUTS
 
+# =============================== wolf-parts.py =================================
+w /usr/local/bin/wolf-parts.py <<'PARTS'
+#!/usr/bin/env python3
+# [v4.4] Большие архивы в облаке — частями, параллельно. Google Drive отдаёт и принимает один файл одним потоком
+# (~25 МБ/с): игра на 50 ГБ восстанавливалась 35+ минут (живой случай 2026-09-26). Теперь архив больше одной части
+# хранится частями по WOLF_PART_MB (512) МБ и оглавлением; части качаются и выгружаются по WOLF_PART_PAR (4) сразу,
+# на диске одновременно лежит лишь несколько частей — хватает обычного диска.
+#   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]  — поток со stdin в ОБЛАКО/ОБЪЕКТ
+#   wolf-parts.py get ОБЛАКО ОБЪЕКТ               — архив из частей в stdout, по порядку
+#   wolf-parts.py rm  ОБЛАКО ОБЪЕКТ [--no-trash]  — удалить объект во всех видах
+# Как хранится ОБЪЕКТ (например, sgame--Игра.tar.zst или его дельта sgame--Игра.tar.zst.1a2b3c4d):
+#   * меньше одной части — одним файлом ОБЪЕКТ, как раньше (ОБЪЕКТ.part → переименование);
+#   * больше — части ОБЪЕКТ.g<поколение>-0000, -0001, … и оглавление ОБЪЕКТ.parts (имена, MD5, размеры).
+#     Версия объекта — MD5 оглавления. Новая версия появляется только целиком: сначала все части нового
+#     поколения, затем оглавление (ОБЪЕКТ.parts.new → ОБЪЕКТ.parts), и только потом удаляются старые части и
+#     прежний одиночный файл. Оборвалось посередине — в облаке остаётся прежняя целая версия.
+#   * ставший однажды частями объект частями и остаётся (даже маленький): иначе одиночный файл и старое
+#     оглавление могли бы разойтись; при обоих видах верным считается оглавление.
+# Каждая часть проверяется: rclone сверяет MD5 после передачи, get — ещё и с оглавлением.
+# Имена частей начинаются с «ОБЪЕКТ.» — прежние wolf forget и приложение на Mac удаляют и считают их вместе с архивом.
+# Код выхода: 0 — готово, 1 — не получилось (прежняя версия в облаке не тронута).
+import concurrent.futures as cf
+import hashlib
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+PART = int(os.environ.get("WOLF_PART_BYTES") or int(os.environ.get("WOLF_PART_MB") or 512) * 1024 * 1024)
+PAR = max(1, int(os.environ.get("WOLF_PART_PAR") or 4))
+TMP = os.environ.get("WOLF_TMP") or "/var/tmp/wolf"
+BLOCK = 8 * 1024 * 1024
+RESERVE = 512 * 1024 * 1024          # не занимать частями последние полгигабайта диска
+TRIES = 3                            # попыток на часть (поверх повторов самого rclone)
+WAIT = float(os.environ.get("WOLF_PART_WAIT") or 5)   # пауза перед повтором, с (растёт с каждой попыткой)
+RC = ["rclone", "--retries=5", "--low-level-retries=20", "--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200",
+      "--drive-chunk-size=64M"]         # куски выгрузки: по умолчанию 8 МБ — медленно
+HEAD = "vastgame-parts 1"
+
+
+def log(msg):
+    print(f"parts: {msg}", file=sys.stderr, flush=True)
+
+
+def rclone(*args, trash=False, **kw):
+    return subprocess.run([*RC, f"--drive-use-trash={'true' if trash else 'false'}", *args],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+
+
+def names(remote):
+    """Имена файлов в папке облака или None (облако не ответило)."""
+    r = rclone("lsf", "--files-only", remote)
+    return r.stdout.decode("utf-8", "replace").splitlines() if r.returncode == 0 else None
+
+
+def part_re(obj):
+    return re.compile(re.escape(obj) + r"\.g([0-9a-f]{8})-\d{4}")
+
+
+def free(path):
+    return shutil.disk_usage(path).free
+
+
+def delete(remote, files, trash):
+    """Удалить файлы (параллельно). True — все удалены."""
+    if not files:
+        return True
+    with cf.ThreadPoolExecutor(8) as ex:
+        return all(ex.map(lambda f: rclone("deletefile", f"{remote}/{f}", trash=trash).returncode == 0, files))
+
+
+def read_part(src, path):
+    """Прочитать из src до PART байт в файл path. (md5, размер, поток кончился)."""
+    h, n = hashlib.md5(), 0
+    with open(path, "wb") as f:
+        while n < PART:
+            b = src.read(min(BLOCK, PART - n))
+            if not b:
+                return h.hexdigest(), n, True
+            f.write(b)
+            h.update(b)
+            n += len(b)
+    return h.hexdigest(), n, False
+
+
+def upload(path, remote, name):
+    try:
+        for i in range(TRIES):
+            if rclone("copyto", path, f"{remote}/{name}").returncode == 0:
+                return True
+            time.sleep(WAIT * (i + 1))
+        return False
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def put(remote, obj, trash):
+    have = names(remote)
+    if have is None:
+        log(f"{obj}: облако не ответило")
+        return 1
+    chunked = f"{obj}.parts" in have
+    os.makedirs(TMP, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
+    src = sys.stdin.buffer
+    t0 = time.time()
+    try:
+        first = os.path.join(tmp, "0")
+        md5, size, eof = read_part(src, first)
+        if eof and not chunked:
+            # Меньше одной части и частей раньше не было — одним файлом, как всегда: .part → переименование
+            rclone("deletefile", f"{remote}/{obj}.part")
+            ok = (rclone("copyto", first, f"{remote}/{obj}.part").returncode == 0
+                  and rclone("moveto", f"{remote}/{obj}.part", f"{remote}/{obj}", trash=True).returncode == 0)
+            if not ok:
+                rclone("deletefile", f"{remote}/{obj}.part")
+                log(f"{obj}: выгрузка одним файлом не удалась")
+                return 1
+            return 0
+
+        gen = secrets.token_hex(4)
+        parts, futures, failed = [], [], False
+        slots = threading.Semaphore(PAR)                  # частей одновременно в работе (у каждой — свой файл)
+
+        def send(path, name):
+            try:
+                return upload(path, remote, name)
+            finally:
+                slots.release()
+
+        with cf.ThreadPoolExecutor(PAR) as ex:
+            i, path, last = 0, first, eof
+            slots.acquire()                               # первая часть уже прочитана
+            while True:
+                name = f"{obj}.g{gen}-{i:04d}"
+                parts.append((name, md5, size))
+                futures.append(ex.submit(send, path, name))
+                if last:
+                    break
+                slots.acquire()                           # место для следующей части
+                if any(f.done() and not f.result() for f in futures):
+                    failed = True
+                while not failed and free(tmp) < PART + RESERVE:
+                    if all(f.done() for f in futures):    # всё выгружено, а места всё равно нет
+                        log(f"{obj}: нет места на диске даже для одной части ({PART >> 20} МБ)")
+                        failed = True
+                        break
+                    time.sleep(1)
+                if failed:
+                    slots.release()
+                    break
+                i += 1
+                path = os.path.join(tmp, str(i))
+                md5, size, last = read_part(src, path)
+                if size == 0:                             # поток кончился ровно на границе части
+                    os.remove(path)
+                    slots.release()
+                    break
+            failed = not all(f.result() for f in futures) or failed
+        if failed:
+            delete(remote, [n for n, _, _ in parts], trash=False)
+            log(f"{obj}: выгрузка частей не удалась — прежняя версия в облаке не тронута")
+            return 1
+
+        index = os.path.join(tmp, "index")
+        total = sum(s for _, _, s in parts)
+        with open(index, "w") as f:
+            f.write(f"{HEAD}\n{total}\n" + "".join(f"{n}\t{m}\t{s}\n" for n, m, s in parts))
+        ok = (rclone("copyto", index, f"{remote}/{obj}.parts.new").returncode == 0
+              and rclone("moveto", f"{remote}/{obj}.parts.new", f"{remote}/{obj}.parts", trash=True).returncode == 0)
+        if not ok:
+            delete(remote, [n for n, _, _ in parts] + [f"{obj}.parts.new"], trash=False)
+            log(f"{obj}: оглавление не записалось — прежняя версия в облаке не тронута")
+            return 1
+        # новая версия записана — старые части и прежний одиночный файл больше не нужны
+        pr = part_re(obj)
+        old = [n for n in have if (m := pr.fullmatch(n)) and m.group(1) != gen]
+        if obj in have:
+            old.append(obj)
+        if not delete(remote, old, trash):
+            log(f"{obj}: не все старые части удалились (уберутся при следующей выгрузке)")
+        dt = max(time.time() - t0, 0.001)
+        log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def parse_index(text, obj):
+    lines = text.splitlines()
+    if len(lines) < 3 or lines[0] != HEAD:
+        raise ValueError("не оглавление частей")
+    parts = []
+    for ln in lines[2:]:
+        n, m, s = ln.split("\t")
+        if not n.startswith(obj + "."):
+            raise ValueError(f"чужая часть в оглавлении: {n}")
+        parts.append((n, m, int(s)))
+    if sum(s for _, _, s in parts) != int(lines[1]):
+        raise ValueError("размеры частей не сходятся с оглавлением")
+    return parts
+
+
+def download(remote, name, path):
+    for i in range(TRIES):
+        if rclone("copyto", "--multi-thread-streams=4", f"{remote}/{name}", path).returncode == 0:
+            return path
+        time.sleep(WAIT * (i + 1))
+    return None
+
+
+def get(remote, obj):
+    r = rclone("cat", f"{remote}/{obj}.parts")
+    try:
+        parts = parse_index(r.stdout.decode("utf-8", "replace"), obj) if r.returncode == 0 else None
+    except ValueError as e:
+        log(f"{obj}: {e}")
+        return 1
+    if not parts:
+        log(f"{obj}: оглавление частей не прочиталось")
+        return 1
+    os.makedirs(TMP, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
+    out, t0 = sys.stdout.buffer, time.time()
+    try:
+        with cf.ThreadPoolExecutor(PAR) as ex:
+            futures = {}
+
+            def start(i):
+                futures[i] = ex.submit(download, remote, parts[i][0], os.path.join(tmp, str(i)))
+
+            for i in range(min(PAR, len(parts))):
+                start(i)
+            for i, (name, md5, size) in enumerate(parts):
+                path = futures.pop(i).result()
+                if not path:
+                    log(f"{obj}: часть {name} не скачалась")
+                    return 1
+                h, n = hashlib.md5(), 0
+                with open(path, "rb") as f:
+                    while b := f.read(BLOCK):
+                        h.update(b)
+                        n += len(b)
+                        out.write(b)
+                os.remove(path)
+                if h.hexdigest() != md5 or n != size:
+                    log(f"{obj}: часть {name} не сходится с оглавлением")
+                    return 1
+                nxt = i + PAR
+                if nxt < len(parts):
+                    while free(tmp) < PART + RESERVE and any(not f.done() for f in futures.values()):
+                        time.sleep(1)                    # подождать, пока освободится место
+                    start(nxt)
+            out.flush()
+        total = sum(s for _, _, s in parts)
+        dt = max(time.time() - t0, 0.001)
+        log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
+        return 0
+    except BrokenPipeError:
+        log(f"{obj}: распаковка прервалась")
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def rm(remote, obj, trash):
+    have = names(remote)
+    if have is None:
+        return 1
+    pr = part_re(obj)
+    victims = [n for n in have if n in (obj, f"{obj}.part", f"{obj}.parts", f"{obj}.parts.new") or pr.fullmatch(n)]
+    return 0 if delete(remote, victims, trash) else 1
+
+
+def main(argv):
+    if len(argv) < 4 or argv[1] not in ("put", "get", "rm"):
+        print(__doc__ or "usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash]", file=sys.stderr)
+        return 2
+    cmd, remote, obj = argv[1], argv[2].rstrip("/"), argv[3]
+    trash = "--no-trash" not in argv[4:]
+    if cmd == "put":
+        return put(remote, obj, trash)
+    if cmd == "get":
+        return get(remote, obj)
+    return rm(remote, obj, trash)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+PARTS
+
 # ================================== Docker (v4.0) ==============================
 # Без systemd: всё — один процесс «wolf supervise» (страница статуса, наблюдение за играми,
 # загрузка и таймеры) в своей группе процессов. Повторный запуск скрипта снимает прежнюю группу
@@ -1800,7 +2116,7 @@ if [ "$WM" = docker ]; then
   rm -f /run/wolf/boot-done /run/wolf/boot-started
   setsid /usr/local/bin/wolf supervise </dev/null >>/var/log/wolf-supervise.log 2>&1 &
   echo $! > /run/wolf/supervise.pid
-  echo "=== wolf v4.3 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+  echo "=== wolf v4.4 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
   exit 0
 fi
 
@@ -1922,4 +2238,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v4.3 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v4.4 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
