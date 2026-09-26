@@ -69,8 +69,10 @@
   `sunshine_name = vastai-gaming` (Docker и KVM) — плитка Moonlight не меняет имя (без него KVM «ubuntu», Docker — номер
   контейнера). Прямая связь Tailscale: Vast публикует 41641/udp под другим внешним портом (`VAST_UDP_PORT_41641` на
   `PUBLIC_IPADDR`) → `TS_DEBUG_PRETENDPOINT` в tailscaled-start.sh (с Mac Алексея с VPN всё равно DERP Токио ~170 мс — VPN).
-  В Docker есть `CONTAINER_API_KEY` (64 симв.) — самоудаление работает. Проверка: `docker-poc/poc/run_agent.py` (только
+  В Docker есть `CONTAINER_API_KEY` (64 симв.) — самоудаление работает. Проверка: `poc/run_agent.py` в ветке `docker-poc` (только
   тестовая папка `vastai-cloud-games-test`, `R_REMOTE`), `run_diag.py` — разведчик (форма переменных, ошибка rclone без секретов).
+  **Уборка 2026-09-26:** папка разведки убрана (`git worktree add ~/vastgame-docker-poc docker-poc` — вернуть), тестовая папка
+  и `backup-2026-09-24` на Drive — в корзине (30 дней); для новой проверки тестовую папку создать заново копией.
   **Проверено вживую 2026-09-26 (52633411, Корея RTX 3060, образ 5dc9921):** готово через ~2 мин после аренды, узел
   vastai-gaming-6 без одобрения, Moonlight без PIN, Steam вошёл сам, сохранения и игра из Games на месте, `/cmd` работает,
   «Закончить» → выгрузка в тестовую папку и самоудаление, настоящая папка не тронута. Алексей: «всё работало».
