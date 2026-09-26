@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.1 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.2 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -72,6 +72,11 @@
 # сторонней игрой с Proton (wolf-shortcuts.py): при загрузке и при выключении, когда Steam закрыт.
 # Номер игры считается как у самого Steam, поэтому её сохранения (pfx--<номер>) общие на всех машинах.
 # Игры, добавленные в Steam руками, не трогаются; папку удалили — игра пропадает из библиотеки.
+#
+# ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
+# уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
+# прячутся в steamapps/.vastgame-hidden (иначе Steam сам начнёт качать всю библиотеку); включена —
+# возвращаются, и игры восстанавливаются из облака. Раньше выключенная синхронизация стирала паспорта.
 #
 # ВЫГРУЗКА ПО ВЫХОДУ ИЗ ИГРЫ. wolf-watch.service раз в 5 с смотрит, какие игры запущены
 # (Steam — по процессу reaper с AppId, игры из GAMES_DIR — по пути к их папке у
@@ -351,6 +356,31 @@ gamearch() { case $1 in game--*|sgame--*|pfx--*) return 0 ;; esac; return 1; }
 drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1"; : > "$S/x/$1"; }
 # Каталоги установки из манифестов Steam: installdir из appmanifest_*.acf
 idirs() { sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$@" 2>/dev/null; }
+# [v4.2] Паспорта игр Steam хранятся в облаке всегда. Без синхронизации игр Steam паспорта игр, файлов которых
+# на диске нет, прячутся в steamapps/$HID — иначе Steam сам начнёт качать всю библиотеку; с синхронизацией
+# возвращаются на место, и игры восстанавливаются из облака. Steam в эту папку не заглядывает
+HID=.vastgame-hidden
+acf_hide() {
+  local s="$DH/$SR/steamapps" f d n=0
+  for f in "$s"/appmanifest_*.acf; do
+    [ -e "$f" ] || continue
+    d=$(idirs "$f" | head -1)
+    [ -n "$d" ] && [ -d "$s/common/$d" ] && continue
+    u mkdir -p "$s/$HID" && u mv -f "$f" "$s/$HID/" && n=$((n + 1))
+  done
+  [ $n = 0 ] || log "игры Steam: паспортов без файлов — $n, спрятаны от Steam (синхронизация игр Steam выключена); в облаке сохранены"
+  return 0
+}
+acf_unhide() {
+  local s="$DH/$SR/steamapps" f n=0
+  for f in "$s/$HID"/appmanifest_*.acf; do
+    [ -e "$f" ] || continue
+    if [ -e "$s/${f##*/}" ]; then u rm -f "$f"          # в библиотеке уже есть — он новее
+    else u mv -f "$f" "$s/" && n=$((n + 1)); fi
+  done
+  [ $n = 0 ] || log "игры Steam: возвращено паспортов — $n (синхронизация игр Steam включена)"
+  return 0
+}
 
 # ----------------------------------------------------------------- манифест ---
 F() { find "$@" \( -type d -printf '%p\td\0' -o -printf '%p\t%y\t%s\t%T@\t%l\0' \) 2>/dev/null; }
@@ -387,7 +417,11 @@ ls_() {
       F .steam -maxdepth 1 \( -type l -o -name registry.vdf \)
       F "$SR/config" "$SR/userdata" -path "$SR/config/htmlcache" -prune -o
       F "$SR" -maxdepth 1 \( -name local.vdf -o -name 'ssfn*' \)
-      [ "$SG" = 1 ] && F "$s" -maxdepth 1 \( -name '*.acf' -o -name libraryfolders.vdf \) ;;
+      # [v4.2] паспорта игр (appmanifest_*.acf) — всегда, в том числе спрятанные (acf_hide): раньше без
+      # синхронизации игр Steam их здесь не было, и выгрузка удаляла их из облака — включённая потом
+      # синхронизация уже не могла вернуть игры (Steam их «не знал»)
+      F "$s" -maxdepth 1 \( -name '*.acf' -o -name libraryfolders.vdf \)
+      F "$s/$HID" -maxdepth 1 -name '*.acf'; : ;;
     compatdata) F "$s/compatdata" ;;
     pfx--*)     F "$s/compatdata/$A" ;;
     game--*)    F "$A" ;;
@@ -981,6 +1015,7 @@ boot() {
       log "сохранения: синхронизация выключена (SYNC_SAVES=0) — из облака не восстанавливаю"
     fi
     pool unpack steam-client steam-cache "${p[@]}"
+    if [ "$SG" = 1 ]; then acf_unhide; else acf_hide; fi     # [v4.2] до запуска Steam
     if [ -e "$DH/$SR/steam.sh" ]; then
       if [ "$SF" = 1 ]; then
         printf 'BootStrapperInhibitAll=Enable\nBootStrapperForceSelfUpdate=Disable\n' > "$DH/$SR/steam.cfg"
@@ -1703,7 +1738,7 @@ if [ "$WM" = docker ]; then
   rm -f /run/wolf/boot-done /run/wolf/boot-started
   setsid /usr/local/bin/wolf supervise </dev/null >>/var/log/wolf-supervise.log 2>&1 &
   echo $! > /run/wolf/supervise.pid
-  echo "=== wolf v4.1 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+  echo "=== wolf v4.2 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
   exit 0
 fi
 
@@ -1825,4 +1860,4 @@ systemctl restart wolf-web.service
 systemctl start --no-block wolf-firewall.service
 systemctl start --no-block wolf-boot.service
 systemctl restart --no-block wolf-watch.service
-echo "=== wolf v4.1 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+echo "=== wolf v4.2 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
