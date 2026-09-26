@@ -286,6 +286,22 @@ function gpuRank(o) {
 const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, rel: (o) => o.reliability, gpu: gpuRank };
 const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", rel: "desc", gpu: "desc" };
 
+// Замены выбранной машины (решение 2026-09-27): одновременно арендуется только она; если Vast её не запустит (10 минут
+// или ошибка хоста), фоновый процесс возьмёт следующую из этого списка — в порядке и с фильтрами человека, но только
+// «не хуже»: видеокарта не слабее, цена в час не выше (в Docker — и трафик), пинг не больше (пинг выбранной неизвестен —
+// только из той же страны). Цену фоновый процесс перепроверяет ещё раз по свежим данным.
+function notWorse(x, o) {
+  const gx = gpuRank(x), go = gpuRank(o);
+  if (gx == null || go == null || gx < go || x.price > o.price) return false;
+  if (offersDocker && x.traffic_tb > o.traffic_tb) return false;
+  if (o.ping.ms == null) return x.cc === o.cc;
+  return x.ping.ms != null && x.ping.ms <= o.ping.ms;
+}
+function spareFor(id) {
+  const list = offerList(offersData), o = list.find((x) => x.id === id);
+  return o ? list.filter((x) => x.id !== id && notWorse(x, o)).map((x) => x.id).slice(0, 10) : [];
+}
+
 function applyFilters(list) {
   const f = filters;
   const r = list.filter((o) => (!f.countries.length || f.countries.includes(o.cc))
@@ -481,16 +497,13 @@ $("rent").addEventListener("click", async () => {
   text += "\n\n" + t("confirm.rent.sync", { list: on.join(", ") || t("sync.none") });
   if (!sync.saves) text += " " + t("confirm.rent.saves_off");
   if (o.bad_reason) text += "\n\n" + t("confirm.badhost", { reason: o.bad_reason });
-  // Забег: вместе с выбранной запускаются ещё машины из списка, остаётся первая запустившаяся
-  const extra = Math.min(2, offerList(offersData).filter((x) => x.id !== o.id).length);
-  if (extra) text += "\n\n" + t("confirm.rent.race", { n: extra });
+  // Замена, если выбранная не запустится: только «не хуже» (сколько таких — в тексте подтверждения)
+  const spare = spareFor(selected);
+  text += "\n\n" + (spare.length ? t("confirm.rent.spare", { n: spare.length }) : t("confirm.rent.nospare"));
   if (docker) text += "\n\n" + t("confirm.rent.docker");
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
-  // Запасные — следующие машины из списка, как он сейчас отфильтрован и отсортирован: если Vast
-  // не запустит выбранную за 10 минут, фоновый процесс сам возьмёт следующую
-  const spare = offerList(offersData).map((x) => x.id).filter((id) => id !== o.id).slice(0, 10);
   const r = await api().play(o.id, sync, disk, LANG, spare, docker);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
@@ -1262,6 +1275,7 @@ function renderArchives(archives) {
   }
 }
 
+const TO_LIST = ["core.offer_gone", "core.no_spare", "core.tries_exhausted", "core.tries_exhausted_docker"];
 const RACE_KEYS = ["core.race_start", "core.race_added", "core.race_slow", "core.race_broken", "core.race_won",
                    "core.race_rent_failed", "core.fail_timeout", "core.fail_host", "core.fail_state"];
 function eventText(ev) { return ev.key ? t(ev.key, ev.params || {}) : ev.text; }
@@ -1326,7 +1340,8 @@ async function pollOnce() {
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
-    $("progress-offers").hidden = !(p.error && p.error.key === "core.offer_gone");
+    // К списку машин: выбранную заняли, или она не запустилась, а замены «не хуже» нет — выбирает человек
+    $("progress-offers").hidden = !(p.error && TO_LIST.includes(p.error.key));
     $("tailscale-box").hidden = true;
     if (p.result) (prog.kind === "stop" ? renderStopResult : renderResult)(p.result);
   }

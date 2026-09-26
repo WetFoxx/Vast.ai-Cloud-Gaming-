@@ -196,8 +196,13 @@ def disk_size(disk, tpl):
     return max(DISK_MIN, min(DISK_MAX, int(disk)))
 
 
-RACE = 3             # машин сразу: остаётся первая, дошедшая у Vast до running, остальные удаляются тут же
-MAX_RENTS = 6        # всего аренд за один запуск (вместе с заменами зависших и сломанных)
+# Забег (сразу 3 машины, остаётся первая запустившаяся) убран (решение 2026-09-27): машину по факту выбирал не человек,
+# а «кто первым запустится» — у друга вместо выбранной RTX 4090 осталась RTX 5090 за $0.69/ч. Теперь арендуется только
+# выбранная; не запустилась — замена следующей из списка человека, но только «не хуже» (видеокарта не слабее, пинг не
+# больше — это отбирает страница, цена в час и трафик не выше — перепроверяется здесь по свежим ценам); таких нет —
+# ошибка core.no_spare, человек выбирает сам.
+RACE = 1             # машин сразу
+MAX_RENTS = 3        # всего аренд за один запуск: выбранная и до двух замен
 RACE_POLL = 10       # с: как часто спрашивать Vast о состоянии машин
 GONE_WAIT = 60       # с: ждать, пока удалённая машина исчезнет у Vast, прежде чем брать другую
 
@@ -205,12 +210,9 @@ GONE_WAIT = 60       # с: ждать, пока удалённая машина 
 def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False):
     """Аренда (человек уже ответил «да» в окне) и ожидание готовности.
 
-    На Vast часть KVM-хостов подолгу (или навсегда) висит в Create/Loading, поэтому машины
-    запускаются наперегонки (_race): сразу RACE штук — выбранная и следующие из списка человека
-    (spare — с его фильтрами и порядком). Первая, дошедшая до running, остаётся, остальные
-    удаляются в ту же минуту: до установки Tailscale и восстановления из облака (это минуты после
-    running) они не доходят. До running Vast берёт только за диск — ~$0.001 за машину (выписка
-    2026-09-25), так что лишние почти ничего не стоят.
+    На Vast часть KVM-хостов подолгу (или навсегда) висит в Create/Loading: машину, которую Vast не запустил
+    за VAST_START_MIN или хост сломал, удаляем (до running Vast берёт только за диск — ~$0.001) и берём
+    следующую из spare — списка «не хуже выбранной», который отобрала страница (_race, RACE машин сразу).
     docker — вкладка «Docker (экспериментально)»: контейнер из образа vastgame-desktop вместо KVM; машину
     без работающего NVENC wait_ready заменяет так же, как не запустившуюся (core.try_another)."""
     try:
@@ -264,6 +266,11 @@ def _where(o):
     return (o.get("geolocation") or "").strip(", ")
 
 
+def _traffic(o):
+    """Цена трафика, $ за ГБ (дороже из двух сторон)."""
+    return max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0)
+
+
 def _race(job, queue, tpl, size, sync, docker=False):
     """Запустить наперегонки до RACE машин из очереди (id предложений); вернуть (iid, t0, offer)
     первой дошедшей до running, остальные удалить. Зависшую дольше VAST_START_MIN или сломанную —
@@ -273,12 +280,14 @@ def _race(job, queue, tpl, size, sync, docker=False):
     racers = list(m.get("race") or [])                 # [{"iid", "t0", "offer", "errors"}]
     tried = list(m.get("tried") or [])                 # хосты, которые не запустились
     rents = m.get("rents", len(racers))
+    limit = m.get("limit")                             # цена выбранной машины: замены не дороже
     used = set(tried) | {r["offer"].get("machine_id") for r in racers} | set(m.get("used") or [])
-    first = not racers
-    job.stage("vast", "Vast запускает машины")
+    first = limit is None                             # ещё ни одной аренды — эта будет выбранной
+    job.stage("vast", "Vast запускает машину")
 
     def save():
-        _set_meta(job, race=racers, tried=tried, rents=rents, used=sorted(x for x in used if x is not None))
+        _set_meta(job, race=racers, tried=tried, rents=rents, used=sorted(x for x in used if x is not None),
+                  limit=limit)
 
     def drop(r, key, **params):
         """Убрать машину из забега: удалить у Vast (за неё списан только диск)."""
@@ -289,21 +298,30 @@ def _race(job, queue, tpl, size, sync, docker=False):
             job.say(key, "warn", key=key, gpu=r["offer"].get("gpu_name"), country=_where(r["offer"]), **params)
 
     def top_up():
-        """Добрать машин до RACE из очереди: свежие цена и наличие, другие хосты, не помеченные."""
-        nonlocal rents
+        """Добрать машин до RACE из очереди. Первая — выбранная человеком: её и арендуем (даже если хост помечен —
+        он видел пометку и подтвердил; заняли — сказать ему, а не подсовывать другую). Дальше — замены: свежие цена
+        и наличие, другие хосты, не помеченные и не дороже выбранной (цена в час, в Docker — и трафик)."""
+        nonlocal rents, limit
         bad = set(market.bad_hosts())
         added = []
         while len(racers) < RACE and rents < MAX_RENTS and queue:
             oid = queue.pop(0)
+            chosen = limit is None
             try:
                 o = core.offer_by_id(int(oid), size, docker)
             except (VastgameError, ValueError, TypeError):
-                continue                               # заняли или не подходит — дальше по списку
-            if o.get("machine_id") in used or str(o.get("machine_id")) in bad:
+                if chosen:
+                    raise                              # выбранную заняли, пока подтверждали
+                continue                               # замену заняли или не подходит — дальше по списку
+            if not chosen and (o.get("machine_id") in used or str(o.get("machine_id")) in bad
+                               or o.get("dph_total", 0) > limit["price"] + 1e-6
+                               or docker and _traffic(o) > limit["traffic"] + 1e-9):
                 continue
             try:
                 iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker), o)
             except VastgameError as e:
+                if not chosen and e.key == "core.offer_gone":
+                    continue                           # замену только что заняли — следующая
                 if not racers and not added:
                     raise                              # не арендовали ни одной — сказать почему
                 # Например, не хватает баланса на ещё одну — ждём уже запущенные
@@ -311,6 +329,8 @@ def _race(job, queue, tpl, size, sync, docker=False):
                 queue.clear()
                 break
             rents += 1
+            if chosen:
+                limit = {"price": o.get("dph_total", 0), "traffic": _traffic(o)}
             used.add(o.get("machine_id"))
             r = {"iid": iid, "t0": t0, "offer": o, "errors": 0}
             racers.append(r)
@@ -319,12 +339,9 @@ def _race(job, queue, tpl, size, sync, docker=False):
         return added
 
     added = top_up()
-    if first and racers:
-        job.say("Запускаю сразу несколько машин", "info", key="core.race_start", n=len(racers),
-                list=", ".join(f"{r['offer'].get('gpu_name')} ({_where(r['offer'])})" for r in racers))
-    else:
+    if not first:
         for r in added:
-            job.say("Добавил машину", "info", key="core.race_added", gpu=r["offer"].get("gpu_name"),
+            job.say("Беру вместо неё", "info", key="core.race_added", gpu=r["offer"].get("gpu_name"),
                     country=_where(r["offer"]))
     while True:
         if getattr(job, "cancelled", lambda: False)():
@@ -333,12 +350,13 @@ def _race(job, queue, tpl, size, sync, docker=False):
                 drop(r, None)
             raise VastgameError(f"Запуск отменён, машины {gone} удалены.", key="core.start_cancelled", id=gone)
         if not racers:
-            if tried:
+            if tried and rents >= MAX_RENTS:            # все попытки кончились — похоже, беда у Vast
                 raise VastgameError(f"Не запустилась ни одна из {len(tried)} машин — похоже, у Vast сейчас "
                                     "проблемы с KVM. Попробуй позже или выбери машины в другой стране.",
                                     key="core.tries_exhausted_docker" if docker else "core.tries_exhausted",
                                     n=len(tried))
-            raise VastgameError("Подходящих машин в твоём списке не осталось — выбери другую.", key="core.no_spare")
+            raise VastgameError("Машина не запустилась, а машин не хуже неё в списке нет — выбери другую.",
+                                key="core.no_spare")
         try:
             now = {i["id"]: i for i in core.list_instances()}
         except VastgameError:
@@ -365,15 +383,16 @@ def _race(job, queue, tpl, size, sync, docker=False):
                 else:
                     drop(r, "core.race_broken")
                 for a in top_up():
-                    job.say("Добавил машину", "info", key="core.race_added", gpu=a["offer"].get("gpu_name"),
+                    job.say("Беру вместо неё", "info", key="core.race_added", gpu=a["offer"].get("gpu_name"),
                             country=_where(a["offer"]))
         if winner:
             losers = [r for r in racers if r is not winner]
             for r in losers:
                 drop(r, None)                          # медленнее — не значит плохой: хост не помечаем
             o = winner["offer"]
-            job.say("Первой запустилась машина", "ok", key="core.race_won", gpu=o.get("gpu_name"), country=_where(o),
-                    min=max(1, round((time.time() - winner["t0"]) / 60)), n=len(losers))
+            if losers:
+                job.say("Первой запустилась машина", "ok", key="core.race_won", gpu=o.get("gpu_name"),
+                        country=_where(o), min=max(1, round((time.time() - winner["t0"]) / 60)), n=len(losers))
             _set_meta(job, iid=winner["iid"], t0=winner["t0"], offer=o, race=[])
             return winner["iid"], winner["t0"], o
         time.sleep(RACE_POLL)
