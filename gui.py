@@ -606,9 +606,12 @@ class Api:
             # Moonlight ещё не связан с этой машиной — связать самим, без ручного PIN
             node = wolfnode.ts_node()
             if not node:
+                settings.applog(f"moonlight: {host} — машины нет в Tailscale")
                 return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
             pairing.pair(host, node[1], on_notice=self._ssh_notice)
-        moonlight.stream(host, app, *self._stream_args())
+        args = self._stream_args()
+        settings.applog(f"moonlight: трансляция {host} «{app}», разрешение/частота/битрейт: {args}")
+        moonlight.stream(host, app, *args)
         return {"ok": True}
 
     def _ssh_notice(self, text):

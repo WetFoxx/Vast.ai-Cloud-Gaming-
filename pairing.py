@@ -27,6 +27,7 @@ import urllib3
 
 import moonlight
 import paths
+from settings import applog
 from vastapi import SERVICE, VastgameError
 import wolfnode
 from wolfnode import ssh_run
@@ -59,13 +60,23 @@ def set_creds_on_machine(ip, on_notice=None):
                             key="pair.creds_failed", out=out.strip()[-200:])
 
 
+# Все запросы к кабинету — БЕЗ перехода по переадресации (allow_redirects=False). Sunshine, у которой логин ещё не задан
+# (новый человек: пустое облако — нет identity), на любой запрос отвечает 307 → /welcome («придумайте логин»).
+# requests переходил туда, получал обычную страницу (200) — и логин «подходил»: его не задавали, PIN Sunshine не
+# принимала, связка висела полторы минуты и обрывалась (у двух друзей, 2026-09-26/27). Переадресация = логина нет.
+def _no_login(r):
+    return r.status_code == 401 or 300 <= r.status_code < 400
+
+
 def _login_ok(ip):
-    """Принимает ли кабинет Sunshine наш логин: True / False (401) / None (не отвечает — перезапускается)."""
+    """Принимает ли кабинет Sunshine наш логин: True / False (401 или логина нет совсем) / None (не отвечает —
+    перезапускается)."""
     try:
-        r = requests.get(f"https://{ip}:{PORT}/api/config", auth=creds(), verify=False, timeout=10)
+        r = requests.get(f"https://{ip}:{PORT}/api/config", auth=creds(), verify=False, timeout=10,
+                         allow_redirects=False)
     except requests.RequestException:
         return None
-    return None if r.status_code >= 500 else r.status_code != 401
+    return None if r.status_code >= 500 else not _no_login(r)
 
 
 def ensure_login(ip, on_notice=None, wait=90):
@@ -74,14 +85,17 @@ def ensure_login(ip, on_notice=None, wait=90):
     начатую связку, и Moonlight ждёт вечно (так было в первом живом тесте 2026-09-25)."""
     ok = _login_ok(ip)
     if ok:
+        applog("moonlight: логин кабинета Sunshine подходит")
         return
     if ok is None:
         raise VastgameError("Кабинет Sunshine на машине не отвечает.", key="pair.no_sunshine")
+    applog("moonlight: логина кабинета нет или он другой — задаю на машине")
     set_creds_on_machine(ip, on_notice)
     end = time.time() + wait
     while time.time() < end:
         time.sleep(3)
         if _login_ok(ip):
+            applog("moonlight: логин кабинета задан, Sunshine перезапустилась")
             return
     raise VastgameError("Sunshine не принял новый логин после перезапуска.", key="pair.creds_failed",
                         out="timeout")
@@ -96,10 +110,11 @@ def _pending(ip):
     номера — 400 (разведка Docker 2026-09-25). OLD_API — Sunshine старая (такого запроса нет);
     "401" — неверный логин; None — нет связи."""
     try:
-        r = requests.get(f"https://{ip}:{PORT}/api/pin", auth=creds(), verify=False, timeout=10)
+        r = requests.get(f"https://{ip}:{PORT}/api/pin", auth=creds(), verify=False, timeout=10,
+                         allow_redirects=False)
     except requests.RequestException:
         return None
-    if r.status_code == 401:
+    if _no_login(r):
         return "401"
     try:
         items = r.json().get("pairings")
@@ -124,7 +139,7 @@ def _cancel_stale(ip):
     for pid in pend:
         try:
             requests.delete(f"https://{ip}:{PORT}/api/pin", json={"pairing_id": pid}, auth=creds(),
-                            verify=False, timeout=10)
+                            verify=False, timeout=10, allow_redirects=False)
         except requests.RequestException:
             pass
 
@@ -141,10 +156,11 @@ def _send_pin(ip, pin):
             return False                      # Moonlight ещё не постучался
         body["pairing_id"] = pend[-1]         # самая свежая — наш Moonlight (старые отменены перед связкой)
     try:
-        r = requests.post(f"https://{ip}:{PORT}/api/pin", json=body, auth=creds(), verify=False, timeout=10)
+        r = requests.post(f"https://{ip}:{PORT}/api/pin", json=body, auth=creds(), verify=False, timeout=10,
+                          allow_redirects=False)
     except requests.RequestException:
         return None
-    if r.status_code == 401:
+    if _no_login(r):
         return "401"
     try:
         return bool(r.json().get("status"))
@@ -158,6 +174,21 @@ def pair(host, ip, on_notice=None):
     exe = moonlight.path()
     if not exe:
         raise VastgameError("Moonlight не установлен", key="moonlight.missing")
+    applog(f"moonlight: связка с {host} ({ip})")
+    t0 = time.time()
+    try:
+        _pair(exe, host, ip, on_notice)
+    except VastgameError as e:
+        applog(f"moonlight: связка не удалась за {time.time() - t0:.0f} с: {e}")
+        raise
+    applog(f"moonlight: связано за {time.time() - t0:.0f} с")
+    # Связка хранится в identity — выгрузить сразу, чтобы следующие машины были связаны без PIN.
+    # </dev/null и скобки: команда уходит в фон на машине, и ssh не ждёт конца выгрузки
+    _later(lambda: wolfnode.run(ip, "push-identity", timeout=180, on_notice=on_notice, ssh=ssh_run))
+    return True
+
+
+def _pair(exe, host, ip, on_notice):
     ensure_login(ip, on_notice)          # сначала логин кабинета (с перезапуском Sunshine), потом связка
     _cancel_stale(ip)
     pin = f"{secrets.randbelow(10000):04d}"
@@ -178,10 +209,6 @@ def pair(host, ip, on_notice=None):
         finally:
             if p.poll() is None:
                 p.terminate()
-    # Связка хранится в identity — выгрузить сразу, чтобы следующие машины были связаны без PIN.
-    # </dev/null и скобки: команда уходит в фон на машине, и ssh не ждёт конца выгрузки
-    _later(lambda: wolfnode.run(ip, "push-identity", timeout=180, on_notice=on_notice, ssh=ssh_run))
-    return True
 
 
 def _later(fn):

@@ -15,6 +15,9 @@ import gui  # noqa: E402
 from vastapi import VastgameError  # noqa: E402
 
 
+APPLOG = []
+
+
 def setUpModule():
     """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
     import tempfile
@@ -26,6 +29,10 @@ def setUpModule():
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.{name}")
         p.start()
         unittest.addModuleCleanup(p.stop)
+    # app.log — в память (открытие Moonlight пишет туда ход), а не в настоящую папку настроек
+    p = mock.patch.object(settings, "applog", APPLOG.append)
+    p.start()
+    unittest.addModuleCleanup(p.stop)
     # Фоновый процесс в тестах — поток с той же работой (jobs.work: блокировка, job.json, уведомление)
     for obj, name, value in [(gui.jobs, "_launch", lambda kind, args: threading.Thread(
                                   target=gui.jobs.work, args=(kind, args), daemon=True).start()),

@@ -5,6 +5,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 LANGUAGES = ("ru", "en", "es")
@@ -43,3 +44,16 @@ def set(name, value):   # noqa: A001 — «set» здесь понятнее в�
     else:
         data[name] = value
     FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def applog(text):
+    """Строка в app.log (папка настроек): ход связки Moonlight и запуска трансляции — чтобы разобрать сбой у другого
+    человека по одному присланному файлу. Без секретов: ни паролей, ни PIN."""
+    try:
+        log = config_dir() / "app.log"
+        if log.exists() and log.stat().st_size > 1_000_000:
+            log.unlink()
+        with open(log, "a") as f:
+            f.write(f"{time.strftime('%F %T')} {text}\n")
+    except OSError:
+        pass

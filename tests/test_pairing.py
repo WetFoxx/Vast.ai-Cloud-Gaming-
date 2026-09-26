@@ -23,6 +23,12 @@ def _no_page():
 
 def setUpModule():
     unittest.addModuleCleanup(_no_page().stop)
+    p = mock.patch.object(pairing, "applog", LOG.append)      # app.log — в память, не в папку настроек
+    p.start()
+    unittest.addModuleCleanup(p.stop)
+
+
+LOG = []
 
 class FakeResponse:
     def __init__(self, code, status=None):
@@ -60,11 +66,11 @@ class TestPair(unittest.TestCase):
             return 0, "sunshine-creds: ok\n"
         return 0, ""
 
-    def fake_get(self, url, auth, verify, timeout):
+    def fake_get(self, url, auth, verify, timeout, **kw):
         self.order.append("check-login")
         return FakeResponse(200 if getattr(self, "creds_ok", False) else 401)
 
-    def fake_post(self, url, json, auth, verify, timeout):
+    def fake_post(self, url, json, auth, verify, timeout, **kw):
         self.posts.append(json["pin"])
         self.order.append("pin")
         if not getattr(self, "creds_ok", False):
@@ -126,7 +132,7 @@ class TestPairNewSunshine(TestPair):
     def moonlight_started(self):
         return (self.d / "args").exists()
 
-    def fake_get(self, url, auth, verify, timeout):
+    def fake_get(self, url, auth, verify, timeout, **kw):
         if url.endswith("/api/pin"):
             if self.moonlight_started() and self.NEW not in self.pending and not (self.d / "ok").exists():
                 if self.STALE in self.pending:                           # как настоящая: 409, Moonlight ждёт зря
@@ -136,12 +142,12 @@ class TestPairNewSunshine(TestPair):
                                                for i in self.pending]})
         return FakeJSON(200, {"status": True})                           # /api/config — логин подходит
 
-    def fake_delete(self, url, json, auth, verify, timeout):
+    def fake_delete(self, url, json, auth, verify, timeout, **kw):
         self.deleted.append((json["pairing_id"], self.moonlight_started()))
         self.pending.remove(json["pairing_id"])
         return FakeJSON(200, {"status": True})
 
-    def fake_post(self, url, json, auth, verify, timeout):
+    def fake_post(self, url, json, auth, verify, timeout, **kw):
         self.bodies.append(dict(json))
         if "pairing_id" not in json:
             return FakeJSON(400, {"status": False, "error": "pairing_id must contain exactly 32 hexadecimal characters"})
@@ -163,6 +169,52 @@ class TestPairNewSunshine(TestPair):
 
     # Прежние тесты — про старую Sunshine; здесь они не нужны
     test_pairs_and_sets_own_login_when_needed = test_our_login_already_works = test_moonlight_fails = None
+
+
+class TestPairFreshSunshine(TestPairNewSunshine):
+    """Новый человек: облако пустое (нет identity) → у Sunshine логин кабинета ещё не задан. Такая Sunshine на ЛЮБОЙ
+    запрос отвечает 307 → /welcome. Если идти по переадресации, там обычная страница (200) — логин будто подходит,
+    его не задают, PIN не принимается, связка висит полторы минуты (у двух друзей, 2026-09-26/27)."""
+
+    def setUp(self):
+        super().setUp()
+        self.creds_ok = False
+        self.pending = []
+
+    def welcome(self, kw, method="GET"):
+        """Ответ Sunshine без логина. requests по умолчанию сам переходит по 307 — и получает страницу /welcome
+        (GET → 200) или «плохой запрос» (POST на /welcome → 400)."""
+        if kw.get("allow_redirects", True):
+            return FakeJSON(200, None) if method == "GET" else FakeJSON(400, {"status": False})
+        return FakeJSON(307, None)
+
+    def fake_get(self, url, auth, verify, timeout, **kw):
+        if not self.creds_ok:
+            return self.welcome(kw)
+        return super().fake_get(url, auth, verify, timeout)
+
+    def fake_post(self, url, json, auth, verify, timeout, **kw):
+        if not self.creds_ok:
+            self.bodies.append(dict(json))
+            return self.welcome(kw, "POST")
+        return super().fake_post(url, json, auth, verify, timeout)
+
+    def fake_delete(self, url, json, auth, verify, timeout, **kw):
+        if not self.creds_ok:
+            return self.welcome(kw, "DELETE")
+        return super().fake_delete(url, json, auth, verify, timeout)
+
+    def test_pairs_with_pairing_id(self):
+        LOG.clear()
+        with mock.patch.object(pairing.requests, "post", self.fake_post), \
+             mock.patch.object(pairing.requests, "delete", self.fake_delete), \
+             mock.patch.object(pairing, "PAIR_WAIT", 5):
+            self.assertTrue(pairing.pair("h", "100.1.1.1"))
+        creds_calls = [c for c in self.ssh if c[0].startswith("wolf sunshine-creds")]
+        self.assertEqual(creds_calls, [("wolf sunshine-creds vastgame", "secret\n")])   # логин задан
+        self.assertTrue(any("логина кабинета нет" in x for x in LOG), LOG)             # и это видно в app.log
+        self.assertTrue(any(x.startswith("moonlight: связано за") for x in LOG), LOG)
+        self.assertFalse(any("secret" in x for x in LOG))                               # пароля в журнале нет
 
 
 if __name__ == "__main__":
