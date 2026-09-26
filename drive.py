@@ -4,6 +4,7 @@
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import tempfile
 from pathlib import Path
@@ -76,21 +77,27 @@ def rclone_both(*args, capture=True, timeout=None):
     return subprocess.run([paths.need("rclone"), *args], capture_output=capture, text=True, env=env, timeout=timeout)
 
 
-def rclone(*args, tok=None, old=None, timeout=300):
+def rclone(*args, tok=None, old=None, timeout=300, env=None):
     """Запустить rclone с доступом к Drive. Возвращает CompletedProcess (stdout/stderr — текстом).
 
     old=True — старый доступ: общий клиент rclone, scope drive (для чтения старой папки).
     Иначе — клиент приложения и scope drive.file. По умолчанию — как у сохранённого токена.
+    env — готовое окружение из _env() (чтобы не читать Keychain на каждый вызов).
     """
+    env = env or _env(tok, old)
+    return subprocess.run([paths.need("rclone"), *args], capture_output=True, text=True, env=env, timeout=timeout)
+
+
+def _env(tok=None, old=None):
+    """Окружение для rclone: «диск» vgdrive: с токеном (см. rclone)."""
     saved = token()
     if old is None:
         # Сохранённый токен — с тем клиентом, через который получен; любой другой переданный — новый
         old = is_old_token() if tok in (None, saved) else False
     if tok is None:
         tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if old and not is_old_token() else saved
-    env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
-               **_remote("vgdrive", tok, old))
-    return subprocess.run([paths.need("rclone"), *args], capture_output=True, text=True, env=env, timeout=timeout)
+    return dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
+                **_remote("vgdrive", tok, old))
 
 
 def ensure_folder():
@@ -142,7 +149,8 @@ def check(tok, old=None, sizes=True):
 def archives():
     """Архивы в папке: {имя: {"size": байты, "mtime": "2026-09-23", "files": [файлы]}} или None при ошибке.
 
-    Один архив — это ИМЯ.tar.zst, рядом бывает дельта ИМЯ.tar.zst.<8 символов> и недогруженный ИМЯ...part.
+    Один архив — это ИМЯ.tar.zst, рядом бывает дельта ИМЯ.tar.zst.<8 символов> и недогруженный ИМЯ...part;
+    большой (v4.4) — части ИМЯ.tar.zst.g<поколение>-NNNN и оглавление ИМЯ.tar.zst.parts.
     """
     r = rclone("lsjson", "--files-only", REMOTE + FOLDER, timeout=120)
     if r.returncode != 0:
@@ -161,12 +169,20 @@ def archives():
 
 
 def trash(files):
-    """Удалить файлы из папки в корзину Drive (30 дней их можно вернуть). True — если все удалены."""
-    ok = True
-    for name in files:
-        r = rclone("deletefile", "--drive-use-trash=true", f"{REMOTE}{FOLDER}/{name}", timeout=120)
-        ok = ok and r.returncode == 0
-    return ok
+    """Удалить файлы из папки в корзину Drive (30 дней их можно вернуть). True — если все удалены.
+
+    Большая игра — это сотня частей (wolf-setup.sh v4.4), поэтому по 8 сразу. Оглавления частей (.parts) —
+    первыми: не удалились — части не трогаем, архив остаётся целым."""
+    env = _env()                                       # Keychain — один раз, а не из восьми потоков
+
+    def one(name):
+        return rclone("deletefile", "--drive-use-trash=true", f"{REMOTE}{FOLDER}/{name}", timeout=120,
+                      env=env).returncode == 0
+    with ThreadPoolExecutor(8) as ex:
+        for group in ([f for f in files if f.endswith(".parts")], [f for f in files if not f.endswith(".parts")]):
+            if not all(list(ex.map(one, group))):
+                return False
+    return True
 
 
 def _access_token():

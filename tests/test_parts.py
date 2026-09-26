@@ -1,6 +1,7 @@
 # wolf-setup.sh v4.4: большие архивы — частями (wolf-parts.py из heredoc). Настоящий код с настоящим rclone, «облако» —
 # временная папка (rclone работает с ней так же, как с Drive). Размер части в тестах — 100 КБ.
-# Главное: новая версия появляется только целиком; сбой посередине оставляет прежнюю целой; порча части ловится.
+# Главное: новая версия появляется только целиком; сбой посередине оставляет прежнюю целой; порча части ловится;
+# мало места на диске — прямо из потока, как до v4.4; части на диске у всех процессов вместе — не больше мест.
 
 import os
 import re
@@ -8,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -20,8 +23,9 @@ RCLONE = shutil.which("rclone") or next((p for p in ("/opt/homebrew/bin/rclone",
 PART = 100_000
 
 
-@unittest.skipUnless(RCLONE, "нужен rclone")
-class TestParts(unittest.TestCase):
+class PartsBase(unittest.TestCase):
+    """Настоящий wolf-parts.py с настоящим rclone; «облако» — папка cloud, временные файлы — tmp."""
+
     def setUp(self):
         self.d = Path(tempfile.mkdtemp())
         self.cloud, self.tmp, self.bin = self.d / "cloud", self.d / "tmp", self.d / "bin"
@@ -29,23 +33,35 @@ class TestParts(unittest.TestCase):
             x.mkdir()
         self.script = self.d / "wolf-parts.py"
         self.script.write_text(CODE)
-        self.fail_on = None                              # подстрока имени, на выгрузке которого rclone «падает»
+        self.fake_sh = None                              # поддельный rclone (см. fake)
+        self.extra = {}                                  # добавочные переменные окружения
+
+    def fake(self, sub, cmd, done=False):
+        """rclone «падает» на команде cmd, если в аргументах есть sub; done — сначала всё же делает (ответ потерялся)."""
+        act = f'"{RCLONE}" "$@"; exit 1' if done else "exit 1"
+        self.fake_sh = f'for a in "$@"; do case "$a" in *{sub}*) [[ " $* " == *" {cmd} "* ]] && {{ {act}; }} ;; esac; done'
 
     def env(self):
         path = str(Path(RCLONE).parent)
-        if self.fail_on:
-            # поддельный rclone: copyto в файл с этой подстрокой — ошибка, остальное — настоящему rclone
+        if self.fake_sh:
             fake = self.bin / "rclone"
-            fake.write_text(f'#!/bin/bash\nfor a in "$@"; do case "$a" in *{self.fail_on}*) '
-                            f'[[ " $* " == *" copyto "* ]] && exit 1 ;; esac; done\nexec "{RCLONE}" "$@"\n')
+            fake.write_text(f'#!/bin/bash\n{self.fake_sh}\nexec "{RCLONE}" "$@"\n')
             fake.chmod(0o755)
             path = f"{self.bin}:{path}"
         return {"PATH": f"{path}:/usr/bin:/bin", "RCLONE_CONFIG": "/nonexistent", "WOLF_TMP": str(self.tmp),
-                "WOLF_PART_BYTES": str(PART), "WOLF_PART_PAR": "3", "WOLF_PART_WAIT": "0", "HOME": str(self.d)}
+                "WOLF_PART_BYTES": str(PART), "WOLF_PART_PAR": "3", "WOLF_PART_WAIT": "0", "HOME": str(self.d),
+                **self.extra}
 
     def run_p(self, *args, data=b""):
         return subprocess.run([sys.executable, str(self.script), *args], input=data, capture_output=True,
                               env=self.env())
+
+    def leftovers(self):
+        """Временные файлы, кроме замков мест (.slotN — постоянные)."""
+        return [p.name for p in self.tmp.iterdir() if not p.name.startswith(".slot")]
+
+    def chunked(self, obj="g.tar.zst"):
+        return [n for n in self.files() if re.fullmatch(re.escape(obj) + r"\.g[0-9a-f]{8}-\d{4}", n)]
 
     def put(self, obj, data):
         return self.run_p("put", str(self.cloud), obj, data=data).returncode
@@ -57,6 +73,9 @@ class TestParts(unittest.TestCase):
     def files(self):
         return sorted(p.name for p in self.cloud.iterdir())
 
+
+@unittest.skipUnless(RCLONE, "нужен rclone")
+class TestParts(PartsBase):
     def test_big_goes_in_parts_and_comes_back_exactly(self):
         data = os.urandom(PART * 3 + 1234)
         self.assertEqual(self.put("g.tar.zst", data), 0)
@@ -65,7 +84,7 @@ class TestParts(unittest.TestCase):
         self.assertEqual(len([n for n in names if re.fullmatch(r"g\.tar\.zst\.g[0-9a-f]{8}-\d{4}", n)]), 4)
         self.assertNotIn("g.tar.zst", names)
         self.assertEqual(self.get("g.tar.zst"), (0, data))
-        self.assertEqual(list(self.tmp.iterdir()), [])                # временные файлы убраны
+        self.assertEqual(self.leftovers(), [])                        # временные файлы убраны
 
     def test_small_stays_one_file_as_before(self):
         data = os.urandom(1000)
@@ -99,9 +118,9 @@ class TestParts(unittest.TestCase):
         prev = os.urandom(PART * 2 + 3)
         self.put("g.tar.zst", prev)
         before = self.files()
-        self.fail_on = "-0002"                                        # третья часть нового поколения не выгрузится
+        self.fake("-0002", "copyto")                                  # третья часть нового поколения не выгрузится
         self.assertEqual(self.put("g.tar.zst", os.urandom(PART * 4)), 1)
-        self.fail_on = None
+        self.fake_sh = None
         self.assertEqual(self.files(), before)                        # ни новых частей, ни нового оглавления
         self.assertEqual(self.get("g.tar.zst"), (0, prev))
 
@@ -122,7 +141,142 @@ class TestParts(unittest.TestCase):
         self.assertFalse([n for n in left if not n.startswith("g.tar.zst.1a2b3c4d")], left)
         self.assertIn("g.tar.zst.1a2b3c4d.parts", left)
 
+    def test_rm_all_takes_deltas_too_but_not_neighbours(self):
+        self.put("g.tar.zst", os.urandom(PART * 2))
+        self.put("g.tar.zst.1a2b3c4d", os.urandom(PART * 2))          # дельта частями
+        self.put("g.tar.zst.1a2b3c4d.x", os.urandom(10))
+        self.put("g2.tar.zst", os.urandom(PART * 2))                  # соседняя игра с похожим именем
+        self.assertEqual(self.run_p("rm", str(self.cloud), "g.tar.zst", "--all").returncode, 0)
+        self.assertFalse([n for n in self.files() if not n.startswith("g2.tar.zst")], self.files())
+        self.assertEqual(self.get("g2.tar.zst")[0], 0)
 
+    def test_rm_keeps_parts_when_index_cannot_be_removed(self):
+        self.put("g.tar.zst", os.urandom(PART * 2))
+        before = self.files()
+        self.fake(".parts", "deletefile")                             # оглавление не удаляется
+        self.assertEqual(self.run_p("rm", str(self.cloud), "g.tar.zst").returncode, 1)
+        self.assertEqual(self.files(), before)                        # части целы — архив по-прежнему читается
+        self.fake_sh = None
+        self.assertEqual(self.get("g.tar.zst")[0], 0)
+
+    def test_index_not_written_keeps_previous_version(self):
+        prev = os.urandom(PART * 2 + 3)
+        self.put("g.tar.zst", prev)
+        before = self.files()
+        self.fake(".parts.new", "copyto")
+        self.assertEqual(self.put("g.tar.zst", os.urandom(PART * 3)), 1)
+        self.fake_sh = None
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
+
+    def test_commit_done_but_reported_failed_is_kept(self):
+        # оглавление переименовалось, а rclone ответил ошибкой (потерялся ответ сервера): новые части не удалять
+        self.put("g.tar.zst", os.urandom(PART * 2))
+        data = os.urandom(PART * 3 + 11)
+        self.fake(".parts.new", "moveto", done=True)
+        self.assertEqual(self.put("g.tar.zst", data), 0)
+        self.fake_sh = None
+        self.assertEqual(self.get("g.tar.zst"), (0, data))
+        self.assertEqual(len(self.chunked()), 4)                      # старое поколение убрано, новое целое
+
+    def test_single_rename_done_but_reported_failed_is_kept(self):
+        data = os.urandom(500)
+        self.fake(".part", "moveto", done=True)
+        self.assertEqual(self.put("s.tar.zst", data), 0)
+        self.fake_sh = None
+        self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), data)
+
+    def test_missing_folder_is_created(self):
+        self.cloud = self.cloud / "новая папка"
+        data = os.urandom(PART * 2 + 1)
+        self.assertEqual(self.put("g.tar.zst", data), 0)
+        self.assertEqual(self.get("g.tar.zst"), (0, data))
+
+
+@unittest.skipUnless(RCLONE, "нужен rclone")
+class TestPartsLowDisk(PartsBase):
+    """Мало места на диске (свободно меньше WOLF_PART_MINFREE): без временных файлов, прямо из потока, как до v4.4."""
+
+    LOW = {"WOLF_PART_MINFREE": str(10 ** 18)}
+
+    def test_new_archive_goes_as_one_file_like_before(self):
+        self.extra = self.LOW
+        data = os.urandom(PART * 3 + 17)
+        self.assertEqual(self.put("g.tar.zst", data), 0)
+        self.assertEqual(self.files(), ["g.tar.zst"])                 # одним файлом, частей нет
+        self.assertEqual((self.cloud / "g.tar.zst").read_bytes(), data)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_chunked_archive_stays_chunked_and_reads_back(self):
+        self.put("g.tar.zst", os.urandom(PART * 2))                   # места было много — частями
+        self.extra = self.LOW
+        data = os.urandom(PART * 3 + 5)
+        self.assertEqual(self.put("g.tar.zst", data), 0)              # части — прямо из потока
+        self.assertEqual(len(self.chunked()), 4)
+        self.assertNotIn("g.tar.zst", self.files())
+        self.assertEqual(self.get("g.tar.zst"), (0, data))            # и скачивание — прямо в распаковку
+        self.extra = {}
+        self.assertEqual(self.get("g.tar.zst"), (0, data))            # и обычным путём — то же самое
+
+    def test_exact_multiple_of_part_size(self):
+        self.put("g.tar.zst", os.urandom(PART * 2))
+        self.extra = self.LOW
+        data = os.urandom(PART * 2)                                   # поток кончается ровно на границе части
+        self.assertEqual(self.put("g.tar.zst", data), 0)
+        self.assertEqual(len(self.chunked()), 2)                      # без пустой третьей части
+        self.assertEqual(self.get("g.tar.zst"), (0, data))
+
+    def test_damaged_part_is_caught_when_streaming(self):
+        self.put("g.tar.zst", os.urandom(PART * 2 + 9))
+        part = next(p for p in self.cloud.iterdir() if p.name.endswith("-0000"))
+        part.write_bytes(os.urandom(part.stat().st_size))
+        self.extra = self.LOW
+        self.assertEqual(self.get("g.tar.zst")[0], 1)
+
+    def test_stream_failure_keeps_previous_version(self):
+        prev = os.urandom(PART * 2 + 1)
+        self.put("g.tar.zst", prev)
+        before = self.files()
+        self.extra = self.LOW
+        self.fake("-0001", "rcat")
+        self.assertEqual(self.put("g.tar.zst", os.urandom(PART * 3)), 1)
+        self.fake_sh = None
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
+
+
+@unittest.skipUnless(RCLONE, "нужен rclone")
+class TestSlots(PartsBase):
+    """Места под части на диске общие для всех процессов: заняты — ждём, а не переполняем диск."""
+
+    def test_two_archives_share_one_slot(self):
+        self.extra = {"WOLF_PART_SLOTS": "1"}
+        data = {o: os.urandom(PART * 4 + 3) for o in ("a.tar.zst", "b.tar.zst")}
+        res = {}
+        th = [threading.Thread(target=lambda o=o: res.__setitem__(o, self.put(o, data[o]))) for o in data]
+        for t in th:
+            t.start()
+        for t in th:
+            t.join(120)
+        self.assertEqual(res, {"a.tar.zst": 0, "b.tar.zst": 0})
+        for o in data:
+            self.assertEqual(self.get(o), (0, data[o]))
+
+    def test_get_waits_for_a_free_slot(self):
+        import fcntl
+        data = os.urandom(PART * 3)
+        self.put("g.tar.zst", data)
+        self.extra = {"WOLF_PART_SLOTS": "1"}
+        # вывод — в файл, не в канал: переполненный канал сам остановил бы процесс, и тест ничего бы не проверял
+        with open(self.tmp / ".slot0", "a") as held, open(self.d / "out", "wb") as out:
+            fcntl.flock(held, fcntl.LOCK_EX)                          # единственное место занято «другим архивом»
+            p = subprocess.Popen([sys.executable, str(self.script), "get", str(self.cloud), "g.tar.zst"],
+                                 stdout=out, stderr=subprocess.DEVNULL, env=self.env())
+            for _ in range(30):                                       # без ожидания управился бы за доли секунды
+                time.sleep(0.1)
+                self.assertIsNone(p.poll(), "скачал, не дождавшись места")
+        self.assertEqual(p.wait(timeout=60), 0)                       # место освободилось — докачал
+        self.assertEqual((self.d / "out").read_bytes(), data)
 class TestWolfFunctions(unittest.TestCase):
     """rver и names из wolf: версия объекта при одиночном файле, частях и дельтах обоих видов."""
 
@@ -156,9 +310,6 @@ class TestWolfFunctions(unittest.TestCase):
         self.assertEqual(self.sh(rows, "names '^sgame--'").split("\n"), ["sgame--X", "sgame--Y", "sgame--Z"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestMacListing(unittest.TestCase):
     """Приложение на Mac: игра из частей — одна строка «Игры в облаке» с полным размером, «Убрать» — все её файлы."""
@@ -178,3 +329,39 @@ class TestMacListing(unittest.TestCase):
         self.assertEqual(a["sgame--X"]["size"], 1800)
         self.assertEqual(len(a["sgame--X"]["files"]), 3)
         self.assertEqual(set(a), {"sgame--X", "identity"})
+
+
+class TestMacTrash(unittest.TestCase):
+    """«Убрать» игру без машины (drive.trash): большая игра — сотня частей, поэтому параллельно; оглавление — первым,
+    не удалилось — части не трогаем (архив остаётся целым и читается)."""
+
+    def trash(self, files, fail=()):
+        from unittest import mock
+        sys.path.insert(0, str(ROOT))
+        import drive
+        calls, lock = [], threading.Lock()
+
+        def fake(*a, **k):
+            name = a[-1].rsplit("/", 1)[-1]
+            with lock:
+                calls.append(name)
+            return subprocess.CompletedProcess([], 1 if name in fail else 0, stdout="", stderr="")
+        with mock.patch.object(drive, "_env", lambda *a, **k: {}), mock.patch.object(drive, "rclone", fake):
+            return drive.trash(files), calls
+
+    FILES = ["X.tar.zst.g0123abcd-0000", "X.tar.zst.g0123abcd-0001", "X.tar.zst.parts", "X.tar.zst.1a2b3c4d"]
+
+    def test_index_first_then_everything(self):
+        ok, calls = self.trash(self.FILES)
+        self.assertTrue(ok)
+        self.assertEqual(calls[0], "X.tar.zst.parts")
+        self.assertEqual(sorted(calls), sorted(self.FILES))
+
+    def test_index_not_removed_parts_kept(self):
+        ok, calls = self.trash(self.FILES, fail={"X.tar.zst.parts"})
+        self.assertFalse(ok)
+        self.assertEqual(calls, ["X.tar.zst.parts"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -531,13 +531,12 @@ pack() {
 # Drive (30 дней их можно вернуть оттуда). Сама игра на этом инстансе остаётся, но
 # больше не выгружается; на следующих инстансах её архива уже не будет.
 forget() {
-  local n=$1 a o=()
+  local n=$1 o=()
   gamearch "$n" || { log "forget: '$n' — не архив игры (нужен game--, sgame-- или pfx--)"; return 1; }
   exec 8> "$L/$n.lock"; flock -w 900 8 || return 1
   mapfile -t o < <(awk -F'\t' -v b="$n.tar.zst" '$1==b || index($1, b".")==1 {print $1}' "$LS")
-  for a in "${o[@]}"; do
-    rc deletefile "$R/$a" || { st "$n" err "не удалось удалить $a из облака"; return 1; }
-  done
+  # [v4.4] все файлы архива (части, дельты) — параллельно, оглавления первыми; список берётся свежий
+  parts rm "$n.tar.zst" --all || { st "$n" err "не удалось удалить $n из облака"; return 1; }
   drop "$n"
   st "$n" ok "удалён из облака${o[*]:+ (лежит в корзине Drive 30 дней)} — больше не выгружается"
 }
@@ -1808,11 +1807,10 @@ w /usr/local/bin/wolf-parts.py <<'PARTS'
 #!/usr/bin/env python3
 # [v4.4] Большие архивы в облаке — частями, параллельно. Google Drive отдаёт и принимает один файл одним потоком
 # (~25 МБ/с): игра на 50 ГБ восстанавливалась 35+ минут (живой случай 2026-09-26). Теперь архив больше одной части
-# хранится частями по WOLF_PART_MB (512) МБ и оглавлением; части качаются и выгружаются по WOLF_PART_PAR (4) сразу,
-# на диске одновременно лежит лишь несколько частей — хватает обычного диска.
-#   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]  — поток со stdin в ОБЛАКО/ОБЪЕКТ
-#   wolf-parts.py get ОБЛАКО ОБЪЕКТ               — архив из частей в stdout, по порядку
-#   wolf-parts.py rm  ОБЛАКО ОБЪЕКТ [--no-trash]  — удалить объект во всех видах
+# хранится частями по WOLF_PART_MB (512) МБ и оглавлением; части качаются и выгружаются по WOLF_PART_PAR (4) сразу.
+#   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]        — поток со stdin в ОБЛАКО/ОБЪЕКТ
+#   wolf-parts.py get ОБЛАКО ОБЪЕКТ                     — архив из частей в stdout, по порядку
+#   wolf-parts.py rm  ОБЛАКО ОБЪЕКТ [--no-trash] [--all] — удалить объект во всех видах (--all — и его дельты)
 # Как хранится ОБЪЕКТ (например, sgame--Игра.tar.zst или его дельта sgame--Игра.tar.zst.1a2b3c4d):
 #   * меньше одной части — одним файлом ОБЪЕКТ, как раньше (ОБЪЕКТ.part → переименование);
 #   * больше — части ОБЪЕКТ.g<поколение>-0000, -0001, … и оглавление ОБЪЕКТ.parts (имена, MD5, размеры).
@@ -1821,11 +1819,17 @@ w /usr/local/bin/wolf-parts.py <<'PARTS'
 #     прежний одиночный файл. Оборвалось посередине — в облаке остаётся прежняя целая версия.
 #   * ставший однажды частями объект частями и остаётся (даже маленький): иначе одиночный файл и старое
 #     оглавление могли бы разойтись; при обоих видах верным считается оглавление.
+# Место на диске. Части ждут выгрузки (или распаковки) во временной папке; сколько их там у всех процессов
+# вместе — ограничено: WOLF_PART_SLOTS (6) мест, замки .slotN. Свободно меньше, чем нужно всем местам сразу
+# с запасом, — часть идёт прямо из потока в облако (из облака — в распаковку) одним потоком, как до v4.4:
+# медленнее, зато без временных файлов; архив, ещё не хранившийся частями, выгружается тогда одним файлом.
 # Каждая часть проверяется: rclone сверяет MD5 после передачи, get — ещё и с оглавлением.
 # Имена частей начинаются с «ОБЪЕКТ.» — прежние wolf forget и приложение на Mac удаляют и считают их вместе с архивом.
 # Код выхода: 0 — готово, 1 — не получилось (прежняя версия в облаке не тронута).
 import concurrent.futures as cf
+import fcntl
 import hashlib
+import itertools
 import os
 import re
 import secrets
@@ -1836,11 +1840,14 @@ import tempfile
 import threading
 import time
 
-PART = int(os.environ.get("WOLF_PART_BYTES") or int(os.environ.get("WOLF_PART_MB") or 512) * 1024 * 1024)
-PAR = max(1, int(os.environ.get("WOLF_PART_PAR") or 4))
+MB = 1024 * 1024
+PART = int(os.environ.get("WOLF_PART_BYTES") or int(os.environ.get("WOLF_PART_MB") or 512) * MB)
+PAR = max(1, int(os.environ.get("WOLF_PART_PAR") or 4))        # частей одного архива одновременно
+SLOTS = max(1, int(os.environ.get("WOLF_PART_SLOTS") or 6))    # частей на диске у всех процессов вместе
 TMP = os.environ.get("WOLF_TMP") or "/var/tmp/wolf"
-BLOCK = 8 * 1024 * 1024
-RESERVE = 512 * 1024 * 1024          # не занимать частями последние полгигабайта диска
+BLOCK = 8 * MB
+RESERVE = 512 * MB                   # не занимать частями последние полгигабайта диска
+MINFREE = int(os.environ.get("WOLF_PART_MINFREE") or SLOTS * PART + RESERVE)   # свободно меньше — без временных файлов
 TRIES = 3                            # попыток на часть (поверх повторов самого rclone)
 WAIT = float(os.environ.get("WOLF_PART_WAIT") or 5)   # пауза перед повтором, с (растёт с каждой попыткой)
 RC = ["rclone", "--retries=5", "--low-level-retries=20", "--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200",
@@ -1852,31 +1859,78 @@ def log(msg):
     print(f"parts: {msg}", file=sys.stderr, flush=True)
 
 
-def rclone(*args, trash=False, **kw):
-    return subprocess.run([*RC, f"--drive-use-trash={'true' if trash else 'false'}", *args],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+def argv(*args, trash=False):
+    return [*RC, f"--drive-use-trash={'true' if trash else 'false'}", *args]
+
+
+def rclone(*args, trash=False):
+    return subprocess.run(argv(*args, trash=trash), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def why(r):
+    """Последняя строка ошибки rclone — для журнала."""
+    lines = r.stderr.decode("utf-8", "replace").strip().splitlines()
+    return lines[-1][-300:] if lines else f"код {r.returncode}"
 
 
 def names(remote):
-    """Имена файлов в папке облака или None (облако не ответило)."""
+    """Имена файлов в папке облака или None (облако не ответило). Папки нет (код 3) — пусто: выгрузка её создаст."""
     r = rclone("lsf", "--files-only", remote)
+    if r.returncode == 3:
+        return []
     return r.stdout.decode("utf-8", "replace").splitlines() if r.returncode == 0 else None
+
+
+def same(remote, name, md5):
+    """Файл в облаке — с этим MD5. Нужно, когда rclone сообщил об ошибке, а дело на самом деле сделано
+    (ответ сервера потерялся): не принять удачу за сбой и не удалить только что записанное."""
+    r = rclone("md5sum", f"{remote}/{name}")
+    return r.returncode == 0 and r.stdout.decode("utf-8", "replace").split()[:1] == [md5]
+
+
+def md5_of(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while b := f.read(BLOCK):
+            h.update(b)
+    return h.hexdigest()
 
 
 def part_re(obj):
     return re.compile(re.escape(obj) + r"\.g([0-9a-f]{8})-\d{4}")
 
 
-def free(path):
-    return shutil.disk_usage(path).free
+def roomy():
+    """Места на диске хватит всем частям всех процессов сразу, с запасом."""
+    return shutil.disk_usage(TMP).free >= MINFREE
+
+
+def slot(wait=True):
+    """Место под одну часть во временной папке — общее на все процессы (замок .slotN): открытый файл-замок,
+    закрыть — освободить. None — все места заняты (при wait=False)."""
+    while True:
+        for k in range(SLOTS):
+            f = open(os.path.join(TMP, f".slot{k}"), "a")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return f
+            except OSError:
+                f.close()
+        if not wait:
+            return None
+        time.sleep(0.5)
 
 
 def delete(remote, files, trash):
-    """Удалить файлы (параллельно). True — все удалены."""
-    if not files:
-        return True
+    """Удалить файлы, параллельно. Оглавления — первыми: не удалились — части не трогаем, объект остаётся целым.
+    True — всё удалено."""
+    def one(f):
+        return rclone("deletefile", f"{remote}/{f}", trash=trash).returncode == 0
     with cf.ThreadPoolExecutor(8) as ex:
-        return all(ex.map(lambda f: rclone("deletefile", f"{remote}/{f}", trash=trash).returncode == 0, files))
+        for group in ([f for f in files if f.endswith(".parts")], [f for f in files if not f.endswith(".parts")]):
+            if not all(list(ex.map(one, group))):
+                return False
+    return True
 
 
 def read_part(src, path):
@@ -1893,11 +1947,42 @@ def read_part(src, path):
     return h.hexdigest(), n, False
 
 
+def rcat(src, dest, limit=None, first=b""):
+    """Поток прямо в облако, без временного файла (на диске мало места): first, затем src — до limit байт
+    (None — до конца). Одна попытка: поток не перечитать. (успех, md5, размер, поток кончился)."""
+    p = subprocess.Popen(argv("rcat", "--drive-chunk-size=128M", dest), stdin=subprocess.PIPE,
+                         stdout=subprocess.DEVNULL)
+    h, n, eof, b = hashlib.md5(), 0, False, first
+    try:
+        while True:
+            if b:
+                p.stdin.write(b)
+                h.update(b)
+                n += len(b)
+            want = BLOCK if limit is None else min(BLOCK, limit - n)
+            if want <= 0:
+                break
+            b = src.read(want)
+            if not b:
+                eof = True
+                break
+    except BrokenPipeError:
+        pass                                               # rclone упал — скажет код выхода
+    finally:
+        try:
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+    return p.wait() == 0, h.hexdigest(), n, eof
+
+
 def upload(path, remote, name):
     try:
         for i in range(TRIES):
-            if rclone("copyto", path, f"{remote}/{name}").returncode == 0:
+            r = rclone("copyto", path, f"{remote}/{name}")
+            if r.returncode == 0:
                 return True
+            log(f"{name}: {why(r)}")
             time.sleep(WAIT * (i + 1))
         return False
     finally:
@@ -1907,94 +1992,129 @@ def upload(path, remote, name):
             pass
 
 
+def put_single(remote, obj, path=None, md5=None, src=None):
+    """Одним файлом, как до v4.4: ОБЪЕКТ.part → переименование в ОБЪЕКТ (прежний — в корзину).
+    path (и его md5) — файл на диске; src — прямо из потока (на диске мало места)."""
+    part = f"{remote}/{obj}.part"
+    rclone("deletefile", part)                            # хвост прерванной выгрузки
+    if path:
+        ok = rclone("copyto", path, part).returncode == 0
+    else:
+        ok, md5, _, _ = rcat(src, part)
+    ok = ok and (rclone("moveto", part, f"{remote}/{obj}", trash=True).returncode == 0 or same(remote, obj, md5))
+    if not ok:
+        rclone("deletefile", part)
+        log(f"{obj}: выгрузка одним файлом не удалась — прежняя версия в облаке не тронута")
+    return 0 if ok else 1
+
+
+def put_parts(remote, obj, have, trash, tmp, src, ahead):
+    """Части нового поколения, по PAR сразу; потом оглавление; потом уборка прежней версии.
+    ahead — первая часть, уже прочитанная на диск: (путь, md5, размер, замок места)."""
+    t0, gen = time.time(), secrets.token_hex(4)
+    parts, futures, ok = [], [], True
+    mine = threading.Semaphore(PAR)
+
+    def send(path, name, lock):
+        try:
+            return upload(path, remote, name)
+        finally:
+            lock.close()
+            mine.release()
+
+    try:
+        with cf.ThreadPoolExecutor(PAR) as ex:
+            for i in itertools.count():
+                name = f"{obj}.g{gen}-{i:04d}"
+                mine.acquire()
+                if any(f.done() and not f.result() for f in futures):
+                    mine.release()
+                    ok = False
+                    break
+                if ahead or roomy():
+                    if ahead:
+                        (path, md5, size, lock), ahead, last = ahead, None, False
+                    else:
+                        lock, path = slot(), os.path.join(tmp, str(i))
+                        md5, size, last = read_part(src, path)
+                        if size == 0 and parts:           # поток кончился ровно на границе части
+                            os.remove(path)
+                            lock.close()
+                            mine.release()
+                            break
+                    parts.append((name, md5, size))
+                    futures.append(ex.submit(send, path, name, lock))
+                else:
+                    # на диске мало места — эта часть прямо из потока, одним потоком
+                    mine.release()
+                    first = src.read(min(BLOCK, PART))
+                    if not first and parts:
+                        break
+                    good, md5, size, last = rcat(src, f"{remote}/{name}", PART, first)
+                    parts.append((name, md5, size))
+                    if not good:
+                        log(f"{name}: выгрузка из потока не удалась")
+                        ok = False
+                        break
+                if last:
+                    break
+            ok = all([f.result() for f in futures]) and ok
+    except OSError as e:
+        log(f"{obj}: {e}")
+        ok = False
+    if not ok:
+        delete(remote, [n for n, _, _ in parts], trash=False)
+        log(f"{obj}: выгрузка частей не удалась — прежняя версия в облаке не тронута")
+        return 1
+
+    index = os.path.join(tmp, "index")
+    total = sum(s for _, _, s in parts)
+    with open(index, "w") as f:
+        f.write(f"{HEAD}\n{total}\n" + "".join(f"{n}\t{m}\t{s}\n" for n, m, s in parts))
+    committed = (rclone("copyto", index, f"{remote}/{obj}.parts.new").returncode == 0
+                 and rclone("moveto", f"{remote}/{obj}.parts.new", f"{remote}/{obj}.parts", trash=True).returncode == 0)
+    if not committed and not same(remote, f"{obj}.parts", md5_of(index)):
+        delete(remote, [n for n, _, _ in parts] + [f"{obj}.parts.new"], trash=False)
+        log(f"{obj}: оглавление не записалось — прежняя версия в облаке не тронута")
+        return 1
+    # новая версия записана — старые части и прежний одиночный файл больше не нужны
+    pr = part_re(obj)
+    old = [n for n in have if (m := pr.fullmatch(n)) and m.group(1) != gen]
+    if obj in have:
+        old.append(obj)
+    if not delete(remote, old, trash):
+        log(f"{obj}: не все старые части удалились (уберутся при следующей выгрузке)")
+    dt = max(time.time() - t0, 0.001)
+    log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
+    return 0
+
+
 def put(remote, obj, trash):
     have = names(remote)
     if have is None:
         log(f"{obj}: облако не ответило")
         return 1
-    chunked = f"{obj}.parts" in have
     os.makedirs(TMP, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
     src = sys.stdin.buffer
-    t0 = time.time()
     try:
-        first = os.path.join(tmp, "0")
-        md5, size, eof = read_part(src, first)
-        if eof and not chunked:
-            # Меньше одной части и частей раньше не было — одним файлом, как всегда: .part → переименование
-            rclone("deletefile", f"{remote}/{obj}.part")
-            ok = (rclone("copyto", first, f"{remote}/{obj}.part").returncode == 0
-                  and rclone("moveto", f"{remote}/{obj}.part", f"{remote}/{obj}", trash=True).returncode == 0)
-            if not ok:
-                rclone("deletefile", f"{remote}/{obj}.part")
-                log(f"{obj}: выгрузка одним файлом не удалась")
-                return 1
-            return 0
-
-        gen = secrets.token_hex(4)
-        parts, futures, failed = [], [], False
-        slots = threading.Semaphore(PAR)                  # частей одновременно в работе (у каждой — свой файл)
-
-        def send(path, name):
-            try:
-                return upload(path, remote, name)
-            finally:
-                slots.release()
-
-        with cf.ThreadPoolExecutor(PAR) as ex:
-            i, path, last = 0, first, eof
-            slots.acquire()                               # первая часть уже прочитана
-            while True:
-                name = f"{obj}.g{gen}-{i:04d}"
-                parts.append((name, md5, size))
-                futures.append(ex.submit(send, path, name))
-                if last:
-                    break
-                slots.acquire()                           # место для следующей части
-                if any(f.done() and not f.result() for f in futures):
-                    failed = True
-                while not failed and free(tmp) < PART + RESERVE:
-                    if all(f.done() for f in futures):    # всё выгружено, а места всё равно нет
-                        log(f"{obj}: нет места на диске даже для одной части ({PART >> 20} МБ)")
-                        failed = True
-                        break
-                    time.sleep(1)
-                if failed:
-                    slots.release()
-                    break
-                i += 1
-                path = os.path.join(tmp, str(i))
-                md5, size, last = read_part(src, path)
-                if size == 0:                             # поток кончился ровно на границе части
-                    os.remove(path)
-                    slots.release()
-                    break
-            failed = not all(f.result() for f in futures) or failed
-        if failed:
-            delete(remote, [n for n, _, _ in parts], trash=False)
-            log(f"{obj}: выгрузка частей не удалась — прежняя версия в облаке не тронута")
-            return 1
-
-        index = os.path.join(tmp, "index")
-        total = sum(s for _, _, s in parts)
-        with open(index, "w") as f:
-            f.write(f"{HEAD}\n{total}\n" + "".join(f"{n}\t{m}\t{s}\n" for n, m, s in parts))
-        ok = (rclone("copyto", index, f"{remote}/{obj}.parts.new").returncode == 0
-              and rclone("moveto", f"{remote}/{obj}.parts.new", f"{remote}/{obj}.parts", trash=True).returncode == 0)
-        if not ok:
-            delete(remote, [n for n, _, _ in parts] + [f"{obj}.parts.new"], trash=False)
-            log(f"{obj}: оглавление не записалось — прежняя версия в облаке не тронута")
-            return 1
-        # новая версия записана — старые части и прежний одиночный файл больше не нужны
-        pr = part_re(obj)
-        old = [n for n in have if (m := pr.fullmatch(n)) and m.group(1) != gen]
-        if obj in have:
-            old.append(obj)
-        if not delete(remote, old, trash):
-            log(f"{obj}: не все старые части удалились (уберутся при следующей выгрузке)")
-        dt = max(time.time() - t0, 0.001)
-        log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
-        return 0
+        ahead = None
+        if f"{obj}.parts" not in have:
+            if not roomy():
+                log(f"{obj}: мало места на диске — одним файлом, одним потоком")
+                return put_single(remote, obj, src=src)
+            lock, first = slot(), os.path.join(tmp, "first")
+            md5, size, eof = read_part(src, first)
+            if eof:                                        # меньше одной части — одним файлом, как всегда
+                try:
+                    return put_single(remote, obj, path=first, md5=md5)
+                finally:
+                    lock.close()
+            ahead = (first, md5, size, lock)
+        return put_parts(remote, obj, have, trash, tmp, src, ahead)
+    except OSError as e:
+        log(f"{obj}: {e} — прежняя версия в облаке не тронута")
+        return 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2016,10 +2136,38 @@ def parse_index(text, obj):
 
 def download(remote, name, path):
     for i in range(TRIES):
-        if rclone("copyto", "--multi-thread-streams=4", f"{remote}/{name}", path).returncode == 0:
+        r = rclone("copyto", "--multi-thread-streams=4", f"{remote}/{name}", path)
+        if r.returncode == 0:
             return path
+        log(f"{name}: {why(r)}")
         time.sleep(WAIT * (i + 1))
     return None
+
+
+def copy_out(path, md5, size, out):
+    """Часть с диска — в распаковку. True — сошлась с оглавлением."""
+    h, n = hashlib.md5(), 0
+    with open(path, "rb") as f:
+        while b := f.read(BLOCK):
+            h.update(b)
+            n += len(b)
+            out.write(b)
+    return h.hexdigest() == md5 and n == size
+
+
+def stream_out(remote, name, md5, size, out):
+    """Часть прямо из облака в распаковку (на диске мало места), одним потоком. True — сошлась с оглавлением."""
+    p = subprocess.Popen(argv("cat", "--buffer-size=128M", f"{remote}/{name}"), stdout=subprocess.PIPE)
+    h, n = hashlib.md5(), 0
+    try:
+        while b := p.stdout.read(BLOCK):
+            h.update(b)
+            n += len(b)
+            out.write(b)
+    finally:
+        p.stdout.close()
+        code = p.wait()
+    return code == 0 and h.hexdigest() == md5 and n == size
 
 
 def get(remote, obj):
@@ -2035,35 +2183,47 @@ def get(remote, obj):
     os.makedirs(TMP, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
     out, t0 = sys.stdout.buffer, time.time()
+    futures, locks, nxt, told = {}, {}, 0, False
     try:
         with cf.ThreadPoolExecutor(PAR) as ex:
-            futures = {}
+            def start(k, lock):
+                locks[k] = lock
+                futures[k] = ex.submit(download, remote, parts[k][0], os.path.join(tmp, str(k)))
 
-            def start(i):
-                futures[i] = ex.submit(download, remote, parts[i][0], os.path.join(tmp, str(i)))
+            def fill():                                    # качать вперёд, пока есть места и диск
+                nonlocal nxt
+                while nxt < len(parts) and len(futures) < PAR and roomy():
+                    lock = slot(wait=False)
+                    if lock is None:
+                        return
+                    start(nxt, lock)
+                    nxt += 1
 
-            for i in range(min(PAR, len(parts))):
-                start(i)
+            fill()
             for i, (name, md5, size) in enumerate(parts):
-                path = futures.pop(i).result()
-                if not path:
-                    log(f"{obj}: часть {name} не скачалась")
+                if i not in futures:                       # не начата: мало места на диске или места заняты
+                    nxt = i + 1
+                    if not roomy():                        # прямо из облака в распаковку, одним потоком
+                        if not told:
+                            log(f"{obj}: мало места на диске — дальше одним потоком, с части {name}")
+                            told = True
+                        if not stream_out(remote, name, md5, size, out):
+                            log(f"{obj}: часть {name} не скачалась или не сходится с оглавлением")
+                            return 1
+                        fill()
+                        continue
+                    start(i, slot())                       # места держат другие архивы — подождать
+                path, lock = futures.pop(i).result(), locks.pop(i)
+                try:
+                    good = bool(path) and copy_out(path, md5, size, out)
+                finally:
+                    if path:
+                        os.remove(path)
+                    lock.close()
+                if not good:
+                    log(f"{obj}: часть {name} не скачалась или не сходится с оглавлением")
                     return 1
-                h, n = hashlib.md5(), 0
-                with open(path, "rb") as f:
-                    while b := f.read(BLOCK):
-                        h.update(b)
-                        n += len(b)
-                        out.write(b)
-                os.remove(path)
-                if h.hexdigest() != md5 or n != size:
-                    log(f"{obj}: часть {name} не сходится с оглавлением")
-                    return 1
-                nxt = i + PAR
-                if nxt < len(parts):
-                    while free(tmp) < PART + RESERVE and any(not f.done() for f in futures.values()):
-                        time.sleep(1)                    # подождать, пока освободится место
-                    start(nxt)
+                fill()
             out.flush()
         total = sum(s for _, _, s in parts)
         dt = max(time.time() - t0, 0.001)
@@ -2072,30 +2232,37 @@ def get(remote, obj):
     except BrokenPipeError:
         log(f"{obj}: распаковка прервалась")
         return 1
+    except OSError as e:
+        log(f"{obj}: {e}")
+        return 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def rm(remote, obj, trash):
+def rm(remote, obj, trash, everything):
     have = names(remote)
     if have is None:
         return 1
-    pr = part_re(obj)
-    victims = [n for n in have if n in (obj, f"{obj}.part", f"{obj}.parts", f"{obj}.parts.new") or pr.fullmatch(n)]
+    if everything:                                         # и все дельты с их частями: всё, что начинается с «ОБЪЕКТ.»
+        victims = [n for n in have if n == obj or n.startswith(obj + ".")]
+    else:
+        pr = part_re(obj)
+        victims = [n for n in have if n in (obj, f"{obj}.part", f"{obj}.parts", f"{obj}.parts.new")
+                   or pr.fullmatch(n)]
     return 0 if delete(remote, victims, trash) else 1
 
 
-def main(argv):
-    if len(argv) < 4 or argv[1] not in ("put", "get", "rm"):
-        print(__doc__ or "usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash]", file=sys.stderr)
+def main(args):
+    if len(args) < 4 or args[1] not in ("put", "get", "rm"):
+        print("usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash] [--all]", file=sys.stderr)
         return 2
-    cmd, remote, obj = argv[1], argv[2].rstrip("/"), argv[3]
-    trash = "--no-trash" not in argv[4:]
+    cmd, remote, obj, flags = args[1], args[2].rstrip("/"), args[3], args[4:]
+    trash = "--no-trash" not in flags
     if cmd == "put":
         return put(remote, obj, trash)
     if cmd == "get":
         return get(remote, obj)
-    return rm(remote, obj, trash)
+    return rm(remote, obj, trash, "--all" in flags)
 
 
 if __name__ == "__main__":
