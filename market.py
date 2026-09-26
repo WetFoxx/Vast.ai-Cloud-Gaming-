@@ -23,6 +23,10 @@ DOCKER_DRIVER = 580
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
 # машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
 BLOCKED = {"CN"}
+# Docker: трафик контейнера Vast считает и берёт деньги (живой случай 2026-09-26, Таиланд: за час GPU $0.105,
+# трафик $0.386 — стрим и скачивание игр). У KVM по реальным списаниям трафик не берётся ($0.000) — там не фильтруем.
+# Во вкладке Docker — только машины с бесплатным трафиком (дешевле $0.10 за ТБ в обе стороны)
+DOCKER_MAX_TRAFFIC = 0.0001   # $ за ГБ
 
 
 # Хосты, которые не смогли запустить машину: {machine_id: {"reason": ..., "date": ...}}. Их НЕ прячем —
@@ -137,6 +141,8 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         down = o.get("inet_down_cost") or 0   # $ за ГБ входящего (скачивание игр с Google Drive)
         # «Бесплатный» — дешевле $0.10 за ТБ: у таких хостов в API стоят копейки вроде 0.000003 $/ГБ
         if free and max(up, down) >= 0.0001:
+            continue
+        if docker and max(up, down) >= DOCKER_MAX_TRAFFIC:
             continue
         if max_traffic is not None and max(up, down) > max_traffic:
             continue

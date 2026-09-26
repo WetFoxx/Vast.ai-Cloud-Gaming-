@@ -40,7 +40,8 @@ CONFIG = '''"InstallConfigStore"
 '''
 
 
-class TestShortcuts(unittest.TestCase):
+class Base(unittest.TestCase):
+    """Поддельные папки игр и Steam, запуск настоящего помощника."""
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.script = self.tmp / "wolf-shortcuts.py"
@@ -73,6 +74,8 @@ class TestShortcuts(unittest.TestCase):
         self.assertEqual(end, len(data))
         return list(root["shortcuts"].values())
 
+
+class TestShortcuts(Base):
     def test_added_with_steam_appid_and_proton(self):
         self.assertEqual(self.run_it(), 3)
         [e] = self.shortcuts()
@@ -117,6 +120,57 @@ class TestShortcuts(unittest.TestCase):
         f.write_bytes(b"\x05garbage")
         self.assertIn(self.run_it(), (0, 3))
         self.assertEqual(f.read_bytes(), b"\x05garbage")
+
+
+LOCALCONFIG = '''"UserLocalConfigStore"
+{
+	"apps"
+	{
+		"3751260"
+		{
+			"UseSteamControllerConfig"		"2"
+		}
+	}
+	"friends"
+	{
+		"PersonaName"		"Имя \\"в кавычках\\""
+	}
+}
+'''
+
+
+class TestSteamInput(Base):
+    """v4.3: Steam Input выключен по умолчанию — UseSteamControllerConfig "0" там, где человек сам не выбирал."""
+
+    def setUp(self):
+        super().setUp()
+        self.lc = self.steam / "userdata/123/config/localconfig.vdf"
+        self.lc.write_text(LOCALCONFIG)
+        (self.steam / "steamapps").mkdir()
+        for aid in (10, 3751260):
+            (self.steam / f"steamapps/appmanifest_{aid}.acf").write_text('"AppState"\n{\n}\n')
+
+    def setting(self, aid):
+        items = self.ws.tkv_parse(self.lc.read_text())
+        block = self.ws.tkv_get(self.ws.tkv_get(self.ws.tkv_get(items, "UserLocalConfigStore"), "apps"), str(aid))
+        return dict(block or []).get("UseSteamControllerConfig")
+
+    def test_off_by_default_own_choice_kept(self):
+        self.assertEqual(self.run_it("--steam-input"), 3)
+        self.assertEqual(self.setting(10), "0")                 # игра без выбора — выключен
+        self.assertEqual(self.setting(3751260), "2")            # человек включил сам — не трогаем
+        self.assertIn('"PersonaName"\t\t"Имя \\"в кавычках\\""', self.lc.read_text())   # остальное на месте
+        self.assertEqual(self.run_it("--steam-input"), 0)       # второй раз — ничего
+
+    def test_games_folder_shortcut_gets_it_too(self):
+        self.run_it()
+        [e] = self.shortcuts()
+        self.assertEqual(self.setting(e["appid"][1] & 0xFFFFFFFF), "0")
+
+    def test_no_localconfig_nothing_created(self):
+        self.lc.unlink()
+        self.assertEqual(self.run_it("--steam-input"), 0)
+        self.assertFalse(self.lc.exists())
 
 
 if __name__ == "__main__":

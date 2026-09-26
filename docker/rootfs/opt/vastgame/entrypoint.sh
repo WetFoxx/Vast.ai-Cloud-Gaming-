@@ -40,8 +40,9 @@ u() { runuser -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" LANG=C.UTF-
         DBUS_SESSION_BUS_ADDRESS="$BUS" "$@"; }
 desktop() { u setsid startxfce4 >/var/log/xfce.log 2>&1 & }
 # Суть ошибки Xorg — строки (EE) без общих «смотри лог» и «сервер завершён»
-xerr() { grep -E "\(EE\)|Fatal" /var/log/Xorg.0.log 2>/dev/null \
-           | grep -vE "Please also check|Server terminated|\(EE\) *$|^\(EE\) *$" | tail -${1:-4}; }
+# («Fatal server error:» — только заголовок: причина в следующей строке, её и берём)
+xerr() { grep -A1 -E "\(EE\)|Fatal" /var/log/Xorg.0.log 2>/dev/null \
+           | grep -vE "^--$|Please also check|Server terminated|Fatal server error: *$|^(\[[^]]*\] *)?\(EE\) *$" | tail -${1:-4}; }
 
 trap 'log "остановка"; pkill -TERM -u "$DU"; pkill -TERM sunshine; pkill -TERM Xorg; tailscale down 2>/dev/null; exit 0' TERM INT
 

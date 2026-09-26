@@ -23,7 +23,7 @@ TPL = {"hash_id": "abc", "recommended_disk_space": 100,
 def offer(oid, driver="580.173.02", vms=False, gpu="RTX 3060", deverified=False):
     return {"id": oid, "machine_id": oid * 10, "gpu_name": gpu, "driver_version": driver, "vms_enabled": vms,
             "is_vm_deverified": deverified, "dph_total": 0.07, "reliability": 0.99, "disk_space": 500,
-            "geolocation": "Seoul, KR"}
+            "geolocation": "Seoul, KR", "inet_up_cost": 0, "inet_down_cost": 0}
 
 
 class TestRentalBody(unittest.TestCase):
@@ -69,6 +69,16 @@ class TestSearch(unittest.TestCase):
         ids, sent = self.run_search(False)
         self.assertEqual(sent["vms_enabled"], {"eq": True})
         self.assertEqual(sorted(ids), [1, 2, 3, 6])     # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь
+
+    def test_docker_only_free_traffic(self):
+        # В Docker трафик реально списывается ($4/ТБ за час игры дороже самой машины) — платный не показываем
+        paid = dict(offer(7), inet_up_cost=0.004, inet_down_cost=0.004)
+        half = dict(offer(8), inet_up_cost=0, inet_down_cost=0.004)          # только скачивание — тоже платно
+        rows = [paid, half, dict(offer(9), inet_up_cost=0.000003, inet_down_cost=0.000003)]
+        with mock.patch.object(market, "call", lambda *a, **k: {"offers": [dict(o, vms_enabled=True) for o in rows]}), \
+             mock.patch.object(market, "bad_hosts", lambda: {}):
+            self.assertEqual([o["id"] for o in market.search(60, docker=True)], [9])
+            self.assertEqual(sorted(o["id"] for o in market.search(60)), [7, 8, 9])   # KVM — как раньше
 
     def test_china_never_listed(self):
         # Google Drive и GitHub там заблокированы — машина висит на скачивании скрипта

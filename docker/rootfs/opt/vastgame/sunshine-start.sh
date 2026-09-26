@@ -54,7 +54,9 @@ start() {  # $1 захват  $2 кодировщик
   else
     u setsid env LD_PRELOAD=libvgpad.so sunshine "$CONF" </dev/null >/dev/null 2>&1 9>&- &
   fi
-  for i in $(seq 1 40); do grep -qE "Found H.264 encoder|Couldn.t find any working encoder" "$LOGF" 2>/dev/null && break; sleep 0.5; done
+  # Проверка кодировщиков у Sunshine на медленных хостах идёт дольше 20 с (было 20 — у друга 2026-09-26 так
+  # забраковали три исправные машины): ждём до 90 с
+  for i in $(seq 1 180); do grep -qE "Found H.264 encoder|Couldn.t find any working encoder" "$LOGF" 2>/dev/null && break; sleep 0.5; done
 }
 
 # Логин кабинета из переменной — только без агента: у агента логин общий с KVM и приезжает из облака
@@ -69,9 +71,14 @@ if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
   echo ok > /run/vastgame/nvenc
   echo "sunshine: NVENC, захват $(sed -n 's/^capture = //p' "$CONF")"
   report ok "NVENC, захват $(sed -n 's/^capture = //p' "$CONF")"
+elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
+  # Ни «нашла», ни «не нашла» за 90 с — не браковать машину: без явной ошибки это просто медленная проверка
+  echo ok > /run/vastgame/nvenc
+  echo "sunshine: проверка NVENC не закончилась за 90 с — оставляю как есть"
+  report ok "NVENC: проверка не закончилась за 90 с"
 else
   echo no > /run/vastgame/nvenc
   echo "sunshine: NVENC на этой машине не работает — захват X11, кодирование процессором (медленно)"
-  report err "NVENC не работает: $(grep -m1 -iE 'nvenc|cuda' "$LOGF" 2>/dev/null | cut -c1-120)"
+  report err "NVENC не работает: $(grep -iE 'error|fatal' "$LOGF" 2>/dev/null | grep -iE 'nvenc|cuda|encoder' | tail -1 | sed 's/^\[[^]]*\]: *//' | cut -c1-120)"
   start x11 software
 fi
