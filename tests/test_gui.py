@@ -670,15 +670,31 @@ class TestMoonlight(unittest.TestCase):
         self.assertEqual(started, [("m", "Steam Big Picture")])
 
     def test_not_paired_pairs_first_then_streams(self):
-        steps = []
+        steps, seen = [], iter([None])                              # до связки не видит, после — видит
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
-             mock.patch.object(gui.moonlight, "apps", lambda host: None), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append(("pair", host, ip)) or True), \
              mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: steps.append(("stream", h, a)) or True), \
              mock.patch.object(gui.settings, "set", lambda k, v: None):
             self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
         self.assertEqual(steps, [("pair", "h", "100.1.1.1"), ("stream", "h", "Desktop")])
+
+    def test_pairing_not_seen_is_repeated(self):
+        # Живой случай 2026-09-27: связка прошла, а Moonlight машину «не видел» — повторить связку за человека
+        steps, seen = [], iter([None, None, None, None])            # до связки и три проверки после неё
+        del APPLOG[:]
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
+             mock.patch.object(gui.moonlight, "log_tail", lambda n=12: "Warning: x"), \
+             mock.patch.object(gui.time, "sleep", lambda s: None), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append("pair") or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: steps.append("stream") or True), \
+             mock.patch.object(gui.settings, "set", lambda k, v: None):
+            self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
+        self.assertEqual(steps, ["pair", "pair", "stream"])
+        self.assertTrue(any("связываю ещё раз" in x and "Warning: x" in x for x in APPLOG), APPLOG)
 
     def test_second_click_while_pairing_does_not_stream_twice(self):
         # Живой тест 2026-09-25: два нажатия во время связки → две трансляции, обе оборвались
@@ -690,6 +706,8 @@ class TestMoonlight(unittest.TestCase):
              mock.patch.object(gui.moonlight, "apps", lambda host: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.pairing, "pair", slow_pair), \
+             mock.patch.object(gui.moonlight, "log_tail", lambda n=12: ""), \
+             mock.patch.object(gui.time, "sleep", lambda s: None), \
              mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: streams.append(a) or True), \
              mock.patch.object(gui.settings, "set", lambda k, v: None):
             first = threading.Thread(target=api.open_moonlight, args=("h", "Desktop"))

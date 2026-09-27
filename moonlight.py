@@ -107,3 +107,19 @@ def resolutions(native):
         rest = [r for r in rest if r != (native["w"], native["h"])]
         return [(native["w"], native["h"])] + rest
     return rest
+
+
+def log_tail(n=12):
+    """Последние предупреждения и ошибки из свежего журнала Moonlight (/tmp/Moonlight-<время>.log) — для app.log,
+    когда связка «не видна». Строки со словом PIN не берём: одноразовый, но всё же код."""
+    import glob
+    logs = sorted(glob.glob("/tmp/Moonlight-*.log"), key=os.path.getmtime)
+    if not logs:
+        return ""
+    try:
+        with open(logs[-1], errors="replace") as f:
+            lines = [ln.rstrip() for ln in f if re.search(r"Warning|Error|Critical|fail", ln, re.I)
+                     and not re.search(r"\bpin\b", ln, re.I)]
+    except OSError:
+        return ""
+    return " | ".join(ln[-160:] for ln in lines[-n:])

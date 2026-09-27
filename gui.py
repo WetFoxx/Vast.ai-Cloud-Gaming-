@@ -609,10 +609,28 @@ class Api:
                 settings.applog(f"moonlight: {host} — машины нет в Tailscale")
                 return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
             pairing.pair(host, node[1], on_notice=self._ssh_notice)
+            # Живой случай 2026-09-27 (друг): связка прошла, а трансляция сразу после неё не пошла, и Moonlight связку
+            # «не видел» — со второго нажатия (ещё одна связка) заработало. Теперь проверяем сами и повторяем за человека
+            if not self._sees_pairing(host):
+                settings.applog("moonlight: после связки Moonlight не видит машину — связываю ещё раз; журнал Moonlight: "
+                                + moonlight.log_tail())
+                pairing.pair(host, node[1], on_notice=self._ssh_notice)
+                if not self._sees_pairing(host):
+                    settings.applog("moonlight: и после второй связки не видит; журнал Moonlight: " + moonlight.log_tail())
         args = self._stream_args()
         settings.applog(f"moonlight: трансляция {host} «{app}», разрешение/частота/битрейт: {args}")
         moonlight.stream(host, app, *args)
         return {"ok": True}
+
+    @staticmethod
+    def _sees_pairing(host, tries=3, pause=3):
+        """Moonlight отвечает списком приложений машины — связка у него есть (после связки бывает не сразу)."""
+        for i in range(tries):
+            if moonlight.apps(host) is not None:
+                return True
+            if i < tries - 1:
+                time.sleep(pause)
+        return False
 
     def _ssh_notice(self, text):
         """Tailscale SSH просит подтвердить вход (режим «check») — открыть его страницу в браузере
