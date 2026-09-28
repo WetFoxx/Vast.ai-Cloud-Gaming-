@@ -692,6 +692,34 @@ class Api:
         Сама проверка — в фоне (updater.Checker), окно сети не ждёт."""
         return self._updates.status()
 
+    def update_prepare(self):
+        """«Обновить»: скачать новую версию и проверить её (подпись описания, размер и SHA-256 архива, подпись
+        кода, самопроверка) — в окне, ход через progress(). Можно и во время игры: машину это не трогает."""
+        if self._local_busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        job = self._job = Job("update")
+
+        def run():
+            shown = [-1]
+
+            def on_progress(got, total):
+                percent = got * 100 // total
+                if percent != shown[0]:            # событие — только когда меняется процент (не больше 100)
+                    shown[0] = percent
+                    job.say(f"скачано {percent}%", key="update.downloading", percent=percent)
+            try:
+                job.result = updater.prepare(on_progress=on_progress, say=job.say)
+            except VastgameError as e:
+                job.error = error_data(e)
+            except Exception as e:                 # noqa: BLE001 — показать любую причину
+                _log_error("update_prepare")
+                job.error = jobs.unexpected(e)
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
+
     # ---- прочее
     def open_url(self, url):
         """Открыть адрес в браузере — только http(s): кабинет Sunshine, страница статуса, вход Tailscale."""

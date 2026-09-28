@@ -38,7 +38,8 @@ def selftest():
     import subprocess
     problems = []
     for m in ("gui", "jobs", "core", "drive", "setup", "setupcheck", "autostart", "notify", "webview",
-              "webview.platforms.cocoa", "keystore", "keyring", "requests"):
+              "webview.platforms.cocoa", "keystore", "keyring", "requests", "updater",
+              "cryptography.hazmat.primitives.asymmetric.ed25519"):
         try:
             importlib.import_module(m)
         except Exception as e:                   # noqa: BLE001 — показать любую причину
@@ -65,6 +66,14 @@ def selftest():
             plist_version = None
         if plist_version != VERSION:
             problems.append(f"версия в Info.plist ({plist_version}) ≠ version.py ({VERSION})")
+    # Открытый ключ выпусков вшит: без него приложение не примет ни одного обновления
+    import base64
+    import updater
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(updater.PUBLIC_KEY or ""))
+    except Exception:                            # noqa: BLE001 — нет ключа, не base64, не 32 байта
+        problems.append("нет открытого ключа выпусков (updater.PUBLIC_KEY) — обновления не будут приниматься")
     here = paths.HERE
     for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css"):
         if not (here / f).is_file():

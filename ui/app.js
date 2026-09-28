@@ -1583,9 +1583,26 @@ function renderUpdate(u) {
 async function refreshUpdate() {
   try { renderUpdate(DEMO ? demoUpdate() : await api().update_status()); } catch (e) { renderUpdate(null); }
 }
-// Пока «Обновить» открывает страницу выпуска (скачать руками); следующим шагом — поставит само
-$("update-go").addEventListener("click", () => updateInfo && updateInfo.page && openUrl(updateInfo.page));
 $("update-notes").addEventListener("click", () => updateInfo && updateInfo.page && openUrl(updateInfo.page));
+
+// «Обновить»: Python скачивает новую версию и проверяет её; здесь — ход и итог под надписью
+function updateState(s) {
+  const st = $("update-state");
+  st.hidden = !s;
+  st.classList.toggle("err", !!(s && s.error));
+  st.textContent = !s ? "" : s.error ? errText(s.error) : s.ready ? t("update.ready", { version: s.ready.version }) : s.text;
+  $("update-go").disabled = !!(s && s.text);
+  $("update-go").hidden = !!(s && s.ready);
+}
+$("update-go").addEventListener("click", async () => {
+  if (!updateInfo || $("update-go").disabled) return;
+  updateState({ text: t("update.checking") });
+  if (DEMO) { await sleep(800); updateState({ ready: { version: updateInfo.latest } }); return; }
+  const r = await api().update_prepare();
+  if (r && r.error) { updateState({ error: r.error }); return; }
+  const p = await waitJob((e) => e.key && updateState({ text: t(e.key, e.params || {}) }));
+  updateState(p.error ? { error: p.error } : { ready: p.result });
+});
 function demoUpdate() {
   const v = new URLSearchParams(location.search).get("update");   // ?demo=ready&update=0.3.0
   return v ? { current: "0.2.0", available: true, latest: v, page: "https://github.com/" } : { current: "0.2.0", available: false };

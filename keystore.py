@@ -181,13 +181,13 @@ def _check_name(name):
         raise ValueError(f"недопустимое имя ключа: {name!r}")
 
 
-def _security(*args, stdin=None):
+def _security(*args, stdin=None, timeout=TIMEOUT):
     """Запустить security → (код выхода, stdout). Вывод ошибок security не показывается и не хранится."""
     if _in_tests():
         raise RealKeychainInTest(f"автотест обратился к настоящей Связке ключей: security {args[0]}")
     feed ={"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
     try:
-        p = subprocess.run([SECURITY, *args], capture_output=True, text=True, timeout=TIMEOUT, **feed)
+        p = subprocess.run([SECURITY, *args], capture_output=True, text=True, timeout=timeout, **feed)
     except (OSError, subprocess.SubprocessError) as e:
         raise KeystoreError(f"Связка ключей не ответила (security {args[0]}: {type(e).__name__})") from None
     return p.returncode, p.stdout

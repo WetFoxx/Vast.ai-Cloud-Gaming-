@@ -32,9 +32,9 @@ class TestI18n(unittest.TestCase):
                 self.assertTrue(texts[lang][key].strip(), f"пусто {lang}/{key}")
 
     def test_python_keys_translated(self):
-        """Каждый key="..." в core.py и vastapi.py есть в словаре, и подстановки совпадают по именам."""
+        """Каждый key="..." в core.py, vastapi.py и updater.py есть в словаре, и подстановки совпадают по именам."""
         texts = ui_texts()["en"]
-        for f in ("core.py", "vastapi.py"):
+        for f in ("core.py", "vastapi.py", "updater.py"):
             src = (ROOT / f).read_text()
             for key in set(re.findall(r'key="([a-z_.]+)"', src)) | set(re.findall(r'"(core\.[a-z_]+)"', src)):
                 self.assertIn(key, texts, f"{f}: нет перевода для {key}")

@@ -182,6 +182,7 @@ button.danger { color: var(--error); }
 .update-text { display: flex; flex-direction: column; align-items: flex-start; }
 .update-text button.link { padding: 2px 0 0; color: var(--accent); }
 .card.update > button { flex: none; }
+#update-state.err { color: var(--error); }
 
 /* ---- Запуск Moonlight */
 .ml-row { display: flex; gap: 10px; align-items: stretch; }

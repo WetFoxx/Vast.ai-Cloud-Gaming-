@@ -39,7 +39,9 @@ def setUpModule():
                              (gui.jobs.notify, "send", lambda title, text: SENT.append((title, text))),
                              (gui.moonlight, "native_display", lambda: None),      # не звать system_profiler
                              # названия игр — не спрашивать сайт Steam и не писать кэш в настоящую папку
-                             (gui.steamnames, "for_archives", lambda archives: {})]:
+                             (gui.steamnames, "for_archives", lambda archives: {}),
+                             # ошибка в функции окна — в память, а не в app.log настоящей папки настроек
+                             (gui, "_log_error", lambda where: APPLOG.append("error in " + where))]:
         p = mock.patch.object(obj, name, value)
         p.start()
         unittest.addModuleCleanup(p.stop)
@@ -437,10 +439,42 @@ class TestUpdate(unittest.TestCase):
     def test_version_and_update_status(self):
         # Окно узнаёт номер своей версии и есть ли новее (проверка — updater.Checker, сети здесь нет)
         api = gui.Api()
-        api._updates = gui.updater.Checker(fetch=lambda: "9.9.9", spawn=lambda f: f())
+        api._updates = gui.updater.Checker(fetch=lambda: {"version": "9.9.9"}, spawn=lambda f: f())
         self.assertEqual(api.settings()["version"], gui.updater.VERSION)
         s = api.update_status()
         self.assertEqual((s["available"], s["latest"], s["page"]), (True, "9.9.9", gui.updater.page("9.9.9")))
+
+
+class TestUpdatePrepare(unittest.TestCase):
+    def run_prepare(self, prepare):
+        api = gui.Api()
+        with mock.patch.object(gui.updater, "prepare", prepare):
+            self.assertEqual(api.update_prepare(), {"ok": True})
+            return wait_done(api)
+
+    def test_ready_with_progress(self):
+        def prepare(on_progress, say):
+            say("проверяю", key="update.checking")
+            for got in (0, 50, 50, 100):                       # один и тот же процент — одно событие
+                on_progress(got, 100)
+            return {"version": "9.9.9", "app": "/tmp/x"}
+        p = self.run_prepare(prepare)
+        self.assertEqual((p["kind"], p["result"]), ("update", {"version": "9.9.9", "app": "/tmp/x"}))
+        self.assertEqual([e["params"].get("percent") for e in p["events"]], [None, 0, 50, 100])
+
+    def test_refused_update_is_explained(self):
+        def prepare(on_progress, say):
+            raise VastgameError("отклонено", key="update.err.checksum")
+        self.assertEqual(self.run_prepare(prepare)["error"]["key"], "update.err.checksum")
+
+    def test_one_local_operation_at_a_time(self):
+        api = gui.Api()
+        gate = threading.Event()
+        with mock.patch.object(gui.updater, "prepare", lambda on_progress, say: gate.wait(5) and {}):
+            api.update_prepare()
+            self.assertEqual(api.update_prepare()["error"]["key"], "busy")
+            gate.set()
+            wait_done(api)
 
 
 class TestReset(unittest.TestCase):
