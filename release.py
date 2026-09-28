@@ -37,6 +37,7 @@ import updater
 SERVICE, ACCOUNT = "vastgame-release", "ed25519"   # запись в Связке ключей
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
+POST_TRIES = 20                                      # × 15 с: сколько ждать, пока GitHub покажет новый выпуск
 GH_USER = "WetFoxx"                                  # выпускает только этот аккаунт GitHub
 DMG = "vastgame-mac.dmg"                             # образ для ручной установки: постоянное имя, ссылка на последний
 LATEST = f"https://github.com/{updater.REPO}/releases/latest/download/{updater.MANIFEST}"   # всегда настоящий GitHub
@@ -201,9 +202,10 @@ def _check_zip(zip_path, version):
 
 def _post_check(version, zip_path):
     """После публикации — глазами приложения: «последний выпуск» на GitHub — эта версия с верной подписью,
-    архив по ссылке выпуска отдаётся нужного размера. GitHub показывает новый выпуск не мгновенно — несколько попыток."""
+    архив по ссылке выпуска отдаётся нужного размера. Ссылку «последний выпуск» GitHub несколько минут отдаёт из кэша
+    по-разному (живой случай 2026-09-28: 30 секунд не хватило) — ждём до ~5 минут."""
     url = f"https://github.com/{updater.REPO}/releases/download/vastgame-v{version}/{zip_path.name}"
-    for attempt in range(6):
+    for attempt in range(POST_TRIES):
         try:
             m = updater.fetch(LATEST)
             # GET без чтения тела: подписанные ссылки GitHub на файлы выпуска не обязаны отвечать на HEAD
@@ -213,7 +215,7 @@ def _post_check(version, zip_path):
                 return True
         except (updater.VastgameError, requests.RequestException, ValueError):
             pass
-        time.sleep(5)
+        time.sleep(15)
     return False
 
 
@@ -275,12 +277,15 @@ def publish(notes):
     if r.returncode != 0:
         sys.exit(f"gh не опубликовал выпуск: {r.stderr.strip()[:300]}")
 
-    _step("Проверяю глазами приложения")
-    if not _post_check(version, zip_path):
-        sys.exit("Выпуск на GitHub есть, но приложение его пока не видит — проверь страницу выпуска.")
-    _run(["git", "tag", tag])
-    print(f"""  приложения увидят {version} в течение 6 часов (или при следующем открытии окна).
-  Готово: https://github.com/{updater.REPO}/releases/tag/{tag}""")
+    _run(["git", "tag", tag])                  # выпуск уже есть — метка в git проекта в любом случае
+
+    _step("Проверяю глазами приложения (GitHub показывает новый выпуск не сразу — до 5 минут)")
+    if _post_check(version, zip_path):
+        print(f"  приложения увидят {version} в течение 6 часов (или при следующем открытии окна).")
+    else:
+        print(f"  ! GitHub пока отдаёт прежний выпуск по ссылке «последний» — приложения увидят {version} позже.\n"
+              f"    Если и через час не видят — проверь страницу выпуска.")
+    print(f"  Готово: https://github.com/{updater.REPO}/releases/tag/{tag}")
 
 
 def main(argv=None):

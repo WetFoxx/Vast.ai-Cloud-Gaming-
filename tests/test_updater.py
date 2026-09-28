@@ -660,6 +660,18 @@ class TestPublish(unittest.TestCase):
         self.assertEqual((m["version"], m["size"]), (v, 300))
         self.assertEqual((self.dist / "release-notes.md").read_text().strip(), "Исправлена связка Moonlight")
 
+    def test_tag_even_if_github_is_slow(self):
+        # Выпуск опубликован, а «последний» у GitHub ещё прежний (кэш): метка ставится, команда не падает
+        with mock.patch.object(release, "_post_check", lambda v, z: False):
+            dist = Path(tempfile.mkdtemp(dir=TMP))
+            tools = FakeTools(dist)
+            with mock.patch.object(release, "_run", tools.run), mock.patch.object(release, "DIST", dist), \
+                 mock.patch.object(release, "_published", lambda: "0.1.9"), mock.patch.object(release, "_check_zip", lambda z, v: None), \
+                 mock.patch.object(release, "load_key", lambda: KEY), mock.patch.object(release, "_ask", lambda q: "да"), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                release.publish("что нового")
+        self.assertEqual(tools.names()[-2:], ["gh release create", f"git tag vastgame-v{updater.VERSION}"])
+
     def test_first_release_ever(self):
         self.publish(published=None)
         self.assertIn("gh release create", self.tools.names())
