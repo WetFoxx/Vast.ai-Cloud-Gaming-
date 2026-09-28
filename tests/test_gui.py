@@ -477,6 +477,54 @@ class TestUpdatePrepare(unittest.TestCase):
             wait_done(api)
 
 
+class TestUpdateInstall(unittest.TestCase):
+    def api(self):
+        api = gui.Api()
+        api._update_ready = {"version": "9.9.9", "app": "/x/update/vastgame-9.9.9/vastgame.app"}
+        self.calls, self.exited = [], threading.Event()
+        for obj, name, value in ((gui.updater, "install", lambda app, v: self.calls.append((app, v))),
+                                 (gui.Api, "_exit", lambda s: self.exited.set())):   # настоящий выход убил бы тесты
+            p = mock.patch.object(obj, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return api
+
+    def test_needs_download_first(self):
+        self.assertEqual(gui.Api().update_install()["error"]["key"], "update.err.not_ready")
+
+    def test_installs_and_exits(self):
+        self.assertEqual(self.api().update_install(), {"ok": True})
+        self.assertTrue(self.exited.wait(5))
+        self.assertEqual(self.calls, [("/x/update/vastgame-9.9.9/vastgame.app", "9.9.9")])
+
+    def test_waits_for_play_or_stop(self):
+        api, state, real_sleep = self.api(), {"active": True, "kind": "play"}, time.sleep
+        with mock.patch.object(gui.jobs, "state", lambda: state), \
+             mock.patch.object(gui.time, "sleep", lambda s: real_sleep(0.01)):
+            api.update_install()
+            real_sleep(0.3)
+            p = api.progress()
+            self.assertEqual(([e["key"] for e in p["events"]], self.calls), (["update.waiting"], []))   # ждёт
+            state["active"] = False                                   # «Играть» закончилось
+            self.assertTrue(self.exited.wait(5))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_refused_install_keeps_window(self):
+        api = self.api()
+
+        def refuse(app, v):
+            raise VastgameError("нельзя", key="update.err.no_rights", error="Operation not permitted")
+        with mock.patch.object(gui.updater, "install", refuse):
+            api.update_install()
+            p = wait_done(api)
+        self.assertEqual((p["error"]["key"], self.exited.is_set()), ("update.err.no_rights", False))
+
+    def test_start_tells_about_update(self):
+        told = {"updated": {"from": "0.2.0", "to": "0.2.1"}}
+        with mock.patch.object(gui.updater, "after_start", lambda: told):
+            self.assertEqual(gui.Api().settings()["update"], told)
+
+
 class TestReset(unittest.TestCase):
     def test_reset_removes_keys_services_and_settings(self):
         # Как стираются ключи — tests/test_keystore.py (TestWipe); здесь — что сброс делает всё остальное

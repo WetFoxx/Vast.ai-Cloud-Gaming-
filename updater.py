@@ -1,5 +1,5 @@
-# updater.py — обновление vastgame по воздуху: есть ли версия новее; скачать её и проверить
-# (замена себя и перезапуск — следующим шагом).
+# updater.py — обновление vastgame по воздуху: есть ли версия новее; скачать её и проверить; поставить
+# на место себя и перезапуститься (с возвратом прежней, если новая не открылась).
 #
 # Выпуски лежат в GitHub Releases публичного репозитория проекта (метка vastgame-v<версия>). К каждому
 # прикладываются архив приложения vastgame-<версия>-mac-arm64.zip и файл-описание vastgame-update.json:
@@ -14,6 +14,7 @@
 # «последний выпуск» укажет не туда.
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -30,6 +32,7 @@ import requests
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+import settings
 from settings import config_dir
 from vastapi import VastgameError
 from version import VERSION
@@ -244,6 +247,129 @@ def prepare(on_progress=None, say=None, folder=None):
         shutil.rmtree(folder, ignore_errors=True)
         raise
     return {"version": m["version"], "app": str(app)}
+
+
+# ---------------------------------------------------------------- поставить и перезапуститься
+#
+# Прежнее окно меняет местами себя и проверенную новую версию одним действием (renamex_np RENAME_SWAP —
+# момента, когда приложения нет, не бывает; прежняя оказывается в папке обновления), запускает «сторожа»
+# (WATCH — скрипт оболочки, отдельный от обеих версий) и сразу выходит. Закрытым сторож считает и процесс-«зомби»
+# (завершился, но ещё не прибран родителем): kill -0 считает его живым. Сторож ждёт, пока прежнее окно
+# закроется, открывает новую версию и ждёт от неё знак STARTED (она ставит его при первом вопросе страницы —
+# after_start). Знак есть — прежняя версия удаляется; нет за WAIT секунд — возвращается на место и
+# открывается, а она сама скажет «обновление не встало». После обмена прежнее окно ничего не загружает
+# (файлы его папки уже новой версии) — только запускает сторожа и выходит.
+
+RENAME_SWAP = 0x2            # renamex_np: поменять местами (APFS)
+WAIT = 90                    # с: сколько сторож ждёт знак от новой версии
+STARTED = "started"          # знак новой версии (в папке обновления)
+FAILED = "failed"            # новая версия не встала, вернули прежнюю (в папке обновления: номер той версии)
+
+WATCH = r'''
+target=$1 backup=$2 folder=$3 pid=$4 version=$5 wait=$6 opener=$7
+say() { echo "$(date '+%F %T') $*" >> "$folder/update.log"; }
+i=0
+while ps -o stat= -p "$pid" 2>/dev/null | grep -qv Z && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+rm -f "$folder/started"
+"$opener" "$target" || say "не открылась $target"
+i=0
+while [ ! -f "$folder/started" ] && [ $i -lt "$wait" ]; do sleep 1; i=$((i+1)); done
+if [ -f "$folder/started" ]; then
+  rm -rf "$backup" "$folder/started"
+  say "поставлена $version"
+  exit 0
+fi
+say "$version не открылась за $wait с — возвращаю прежнюю"
+pkill -f "$target/Contents/MacOS/" 2>/dev/null
+sleep 1
+mv "$target" "$target.failed" && mv "$backup" "$target" && rm -rf "$target.failed" && echo "$version" > "$folder/failed"
+"$opener" "$target"
+'''
+
+
+def bundle_path():
+    """Папка самого приложения (…/vastgame.app) — у собранного; запущено из папки проекта — None."""
+    if not getattr(sys, "frozen", False):
+        return None
+    app = Path(sys.executable).resolve().parents[2]      # vastgame.app/Contents/MacOS/vastgame
+    return app if app.suffix == ".app" else None
+
+
+def check_place(target):
+    """Можно ли заменить приложение на месте; нельзя — VastgameError с объяснением, что сделать."""
+    if not target:
+        raise VastgameError("Обновление ставится только в собранное приложение.", key="update.err.not_app")
+    target = Path(target)
+    if "/AppTranslocation/" in str(target) or (str(target).startswith("/Volumes/")
+                                               and not os.access(target.parent, os.W_OK)):
+        raise VastgameError("Перенеси vastgame в «Программы» и открой оттуда.", key="update.err.move_to_apps")
+    try:
+        info = plistlib.loads((target / "Contents" / "Info.plist").read_bytes())
+    except (OSError, ValueError):
+        info = {}
+    if info.get("CFBundleIdentifier") != BUNDLE_ID:
+        raise VastgameError("Обновление ставится только в собранное приложение.", key="update.err.not_app")
+    if not (os.access(target.parent, os.W_OK) and os.access(target, os.W_OK)):
+        raise VastgameError("Нет прав заменить приложение.", key="update.err.no_rights", error="нет прав на запись")
+
+
+def swap(a, b):
+    """Поменять местами две папки одним действием (macOS renamex_np, RENAME_SWAP)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    if libc.renamex_np(os.fsencode(a), os.fsencode(b), RENAME_SWAP) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e), str(b))
+
+
+def install(staged_app, version, target=None, pid=None, folder=None, opener="/usr/bin/open", spawn=None):
+    """Поставить проверенную новую версию staged_app на место приложения target и запустить сторожа.
+    Вернулась без ошибки — вызывающий сразу выходит (os._exit): новую версию откроет сторож.
+    Не вышло — VastgameError, приложение не тронуто."""
+    target = Path(target) if target else bundle_path()
+    check_place(target)
+    folder = Path(folder or UPDATE_DIR)
+    staged = Path(staged_app)
+    if os.stat(staged).st_dev != os.stat(target.parent).st_dev:
+        # Другой диск (не бывает у «Программ» и папки настроек, но вдруг): сначала копия рядом
+        near = target.parent / ".vastgame-update.app"
+        shutil.rmtree(near, ignore_errors=True)
+        if _run(["/usr/bin/ditto", str(staged), str(near)], 600) != 0:
+            raise VastgameError("Не удалось скопировать обновление.", key="update.err.unpack")
+        staged = near
+    (folder / STARTED).unlink(missing_ok=True)
+    (folder / FAILED).unlink(missing_ok=True)
+    settings.set("updated", {"from": VERSION, "to": version})
+    try:
+        swap(staged, target)
+    except OSError as e:
+        settings.set("updated", None)
+        raise VastgameError(f"macOS не дала заменить приложение: {e.strerror}", key="update.err.no_rights",
+                            error=e.strerror) from None
+    # Теперь в target — новая версия, в staged — прежняя. Сторож — отдельно от окна (своя сессия)
+    (spawn or subprocess.Popen)(["/bin/sh", "-c", WATCH, "vastgame-update", str(target), str(staged), str(folder),
+                                 str(pid or os.getpid()), version, str(WAIT), opener],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+
+
+def after_start():
+    """Окно открылось: если это конец обновления — знак сторожу и что сказать человеку.
+    {"updated": {"from", "to"}} — обновились; {"failed": версия} — не встала, вернули прежнюю; иначе None."""
+    u = settings.get("updated")
+    if not u:
+        return None
+    settings.set("updated", None)
+    folder = Path(UPDATE_DIR)
+    if u.get("to") == VERSION:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / STARTED).touch()          # сторож увидит и уберёт прежнюю версию
+        return {"updated": u}
+    failed = folder / FAILED
+    if failed.exists():
+        failed.unlink(missing_ok=True)
+        return {"failed": u.get("to")}
+    return None
 
 
 # ---------------------------------------------------------------- проверка для окна

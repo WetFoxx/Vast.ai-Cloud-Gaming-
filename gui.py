@@ -74,11 +74,14 @@ class Api:
         self._opened = set()      # ссылки подтверждения Tailscale SSH, уже открытые в браузере
         self._display = (0, None) # (когда узнали, родной экран) — system_profiler небыстрый
         self._updates = updater.Checker()   # есть ли версия новее на GitHub — проверяет в фоне
+        self._update_ready = None           # {version, app} — новая версия скачана и проверена, можно ставить
 
     # ---- настройки
     def settings(self):
-        """Сохранённые настройки окна (язык — только если его выбрали сами) и номер версии приложения."""
-        return {"language": settings.get("language"), "version": updater.VERSION}
+        """Сохранённые настройки окна (язык — только если его выбрали сами), номер версии приложения и, если окно
+        открылось в конце обновления, что сказать («обновлено» / «не встало»). Страница спрашивает это первым —
+        тут же новая версия ставит сторожу знак «я открылась» (updater.after_start)."""
+        return {"language": settings.get("language"), "version": updater.VERSION, "update": updater.after_start()}
 
     def set_language(self, lang, remember=False):
         """Запомнить язык, выбранный человеком (иначе окно следует за языком системы)."""
@@ -708,7 +711,7 @@ class Api:
                     shown[0] = percent
                     job.say(f"скачано {percent}%", key="update.downloading", percent=percent)
             try:
-                job.result = updater.prepare(on_progress=on_progress, say=job.say)
+                job.result = self._update_ready = updater.prepare(on_progress=on_progress, say=job.say)
             except VastgameError as e:
                 job.error = error_data(e)
             except Exception as e:                 # noqa: BLE001 — показать любую причину
@@ -719,6 +722,46 @@ class Api:
 
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
+
+    def update_install(self):
+        """Поставить скачанную и проверенную версию (страница спросила): дождаться конца «Играть»/«Закончить»,
+        поменять местами с прежней, запустить сторожа и закрыть окно — новую версию откроет сторож
+        (updater.install). Не вышло — ошибка в progress(), приложение не тронуто."""
+        ready = self._update_ready
+        if not ready:
+            return {"error": {"key": "update.err.not_ready", "params": {}, "text": "not ready"}}
+        if self._local_busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        job = self._job = Job("update")
+
+        def run():
+            try:
+                said = False
+                while (jobs.state() or {}).get("active"):    # «Играть»/«Закончить» идёт в фоне — ждём конца
+                    if not said:
+                        job.say("жду окончания операции", key="update.waiting")
+                        said = True
+                    time.sleep(2)
+                job.say("ставлю новую версию", key="update.installing", version=ready["version"])
+                updater.install(ready["app"], ready["version"])
+            except VastgameError as e:
+                job.error = error_data(e)
+                job.done = True
+                return
+            except Exception as e:                 # noqa: BLE001 — показать любую причину
+                _log_error("update_install")
+                job.error = jobs.unexpected(e)
+                job.done = True
+                return
+            self._exit()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
+
+    def _exit(self):
+        """Выйти сразу после замены, без уборки: файлы в папке приложения уже новой версии, прежнему окну
+        ничего нельзя из неё загружать (страница уже пишет «окно перезапустится»). Новую версию откроет сторож."""
+        os._exit(0)
 
     # ---- прочее
     def open_url(self, url):

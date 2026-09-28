@@ -60,6 +60,7 @@ def setUpModule():
                              (updater, "URL", BASE + "/latest/vastgame-update.json"),
                              (updater, "OVERRIDE", BASE + "/latest/vastgame-update.json"),
                              (updater, "UPDATE_DIR", TMP / "update"),
+                             (updater.settings, "FILE", TMP / "settings.json"),      # не настоящие настройки
                              (updater.time, "sleep", lambda s: None)):
         p = mock.patch.object(obj, name, value)
         p.start()
@@ -290,6 +291,163 @@ class TestPrepare(unittest.TestCase):
         publish(make_zip())
         with mock.patch.object(updater.shutil, "disk_usage", lambda p: mock.Mock(free=1000)):
             self.assertEqual(self.prepare_err(), "update.err.space")
+
+
+def fake_bundle(where, mark, bundle_id="com.vastgame.app"):
+    """Папка «приложения» с Info.plist и файлом-меткой (какая это версия)."""
+    app = Path(where)
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_id}))
+    (app / mark).write_text(mark)
+    return app
+
+
+class TestInstall(unittest.TestCase):
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(dir=TMP))
+        self.folder = self.d / "update"
+        self.folder.mkdir()
+        self.target = fake_bundle(self.d / "Applications" / "vastgame.app", "OLD")
+        self.staged = fake_bundle(self.folder / "vastgame-9.9.9" / "vastgame.app", "NEW")
+        updater.settings.set("updated", None)
+        self.spawned = []
+
+    def install(self, **kw):
+        updater.install(self.staged, "9.9.9", target=self.target, pid=4242, folder=self.folder,
+                        spawn=lambda cmd, **opts: self.spawned.append((cmd, opts)), **kw)
+
+    def test_swap_and_watch(self):
+        self.install()
+        self.assertTrue((self.target / "NEW").exists())            # на месте приложения — новая версия
+        self.assertTrue((self.staged / "OLD").exists())            # прежняя — в папке обновления
+        self.assertEqual(updater.settings.get("updated"), {"from": updater.VERSION, "to": "9.9.9"})
+        cmd, opts = self.spawned[0]
+        self.assertEqual(cmd, ["/bin/sh", "-c", updater.WATCH, "vastgame-update", str(self.target), str(self.staged),
+                               str(self.folder), "4242", "9.9.9", str(updater.WAIT), "/usr/bin/open"])
+        self.assertTrue(opts["start_new_session"])                  # сторож переживёт выход окна
+
+    def test_macos_refuses(self):
+        # «Управление приложениями» или нет прав: ничего не тронуто, сторожа нет, отметки обновления нет
+        with mock.patch.object(updater, "swap", mock.Mock(side_effect=PermissionError(1, "Operation not permitted"))):
+            with self.assertRaises(VastgameError) as c:
+                self.install()
+        self.assertEqual(c.exception.key, "update.err.no_rights")
+        self.assertTrue((self.target / "OLD").exists())
+        self.assertEqual((self.spawned, updater.settings.get("updated")), ([], None))
+
+    def test_wrong_place_touches_nothing(self):
+        other = fake_bundle(self.d / "Other" / "vastgame.app", "OTHER", bundle_id="com.other.app")
+        with self.assertRaises(VastgameError) as c:
+            updater.install(self.staged, "9.9.9", target=other, pid=1, folder=self.folder,
+                            spawn=lambda cmd, **opts: self.spawned.append(cmd))
+        self.assertEqual(c.exception.key, "update.err.not_app")
+        self.assertTrue((other / "OTHER").exists() and (self.staged / "NEW").exists())
+        self.assertEqual((self.spawned, updater.settings.get("updated")), ([], None))
+
+    def test_other_disk_copies_first(self):
+        real_stat = os.stat
+
+        def stat(p, *a, **k):                    # папка обновления — будто на другом диске
+            st = real_stat(p, *a, **k)
+            return mock.Mock(st_dev=st.st_dev + 1) if Path(p) == self.staged else st
+        with mock.patch.object(updater.os, "stat", stat):
+            self.install()
+        near = self.target.parent / ".vastgame-update.app"
+        self.assertTrue((self.target / "NEW").exists())
+        self.assertTrue((near / "OLD").exists())                    # прежняя — рядом, её уберёт сторож
+        self.assertEqual(self.spawned[0][0][5], str(near))
+
+    def test_place_checks(self):
+        cases = [(None, "update.err.not_app"),
+                 (Path("/private/var/folders/x/AppTranslocation/y/d/vastgame.app"), "update.err.move_to_apps"),
+                 (fake_bundle(self.d / "other.app", "X", bundle_id="com.other.app"), "update.err.not_app")]
+        for target, key in cases:
+            with self.assertRaises(VastgameError) as c:
+                updater.check_place(target)
+            self.assertEqual(c.exception.key, key, target)
+        os.chmod(self.target.parent, 0o555)                          # «Программы» только для чтения
+        try:
+            with self.assertRaises(VastgameError) as c:
+                updater.check_place(self.target)
+            self.assertEqual(c.exception.key, "update.err.no_rights")
+        finally:
+            os.chmod(self.target.parent, 0o755)
+        updater.check_place(self.target)                              # всё в порядке — без ошибки
+
+    def test_swap_is_one_step(self):
+        a, b = fake_bundle(self.d / "a.app", "A"), fake_bundle(self.d / "b.app", "B")
+        updater.swap(a, b)
+        self.assertEqual(((a / "B").exists(), (b / "A").exists()), (True, True))
+        with self.assertRaises(OSError):
+            updater.swap(a, self.d / "нет-такой")
+
+
+class TestAfterStart(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(updater.UPDATE_DIR, ignore_errors=True)
+
+    def test_new_version_signals_the_watcher(self):
+        updater.settings.set("updated", {"from": "0.1.0", "to": updater.VERSION})
+        self.assertEqual(updater.after_start(), {"updated": {"from": "0.1.0", "to": updater.VERSION}})
+        self.assertTrue((updater.UPDATE_DIR / updater.STARTED).exists())
+        self.assertIsNone(updater.after_start())                  # сказано один раз
+
+    def test_rolled_back(self):
+        updater.settings.set("updated", {"from": updater.VERSION, "to": "9.9.9"})
+        updater.UPDATE_DIR.mkdir(parents=True)
+        (updater.UPDATE_DIR / updater.FAILED).write_text("9.9.9")
+        self.assertEqual(updater.after_start(), {"failed": "9.9.9"})
+        self.assertFalse((updater.UPDATE_DIR / updater.FAILED).exists())
+        self.assertFalse((updater.UPDATE_DIR / updater.STARTED).exists())    # прежней нечего подтверждать
+
+    def test_ordinary_start(self):
+        updater.settings.set("updated", None)
+        self.assertIsNone(updater.after_start())
+
+
+class TestWatch(unittest.TestCase):
+    """Сторож — настоящий /bin/sh на подставных папках; «открыть приложение» — подставной скрипт."""
+
+    def run_watch(self, starts, wait=3, old_pid=None):
+        d = Path(tempfile.mkdtemp(dir=TMP))
+        folder, target = d / "update", fake_bundle(d / "Applications" / "vastgame.app", "NEW")
+        backup = fake_bundle(folder / "vastgame-9.9.9" / "vastgame.app", "OLD")
+        opener = d / "open.sh"
+        opener.write_text(f'#!/bin/sh\necho "$1 $(ls "$1" | grep -E \'^(NEW|OLD)$\')" >> "{d}/opened"\n'
+                          + (f'touch "{folder}/started"\n' if starts else ""))
+        opener.chmod(0o755)
+        pid = old_pid or subprocess.run(["/usr/bin/true"]).returncode or 999999   # прежнее окно уже закрыто
+        r = subprocess.run(["/bin/sh", "-c", updater.WATCH, "vastgame-update", str(target), str(backup), str(folder),
+                            str(pid), "9.9.9", str(wait), str(opener)], timeout=wait + 20)
+        opened = (d / "opened").read_text().split("\n")[:-1] if (d / "opened").exists() else []
+        return r, target, backup, folder, [line.split()[-1] for line in opened]
+
+    def test_new_version_started(self):
+        r, target, backup, folder, opened = self.run_watch(starts=True)
+        self.assertEqual(opened, ["NEW"])
+        self.assertTrue((target / "NEW").exists())
+        self.assertFalse(backup.exists())                            # прежняя убрана
+        self.assertFalse((folder / "started").exists())
+        self.assertIn("поставлена 9.9.9", (folder / "update.log").read_text())
+
+    def test_new_version_did_not_start(self):
+        r, target, backup, folder, opened = self.run_watch(starts=False, wait=1)
+        self.assertEqual(opened, ["NEW", "OLD"])                     # открыли новую, не встала — открыли прежнюю
+        self.assertTrue((target / "OLD").exists())
+        self.assertFalse(backup.exists())
+        self.assertFalse(Path(str(target) + ".failed").exists())
+        self.assertEqual((folder / "failed").read_text().strip(), "9.9.9")
+
+    def test_waits_for_the_old_window(self):
+        import time
+        old = subprocess.Popen(["/bin/sleep", "1"])                  # прежнее окно ещё закрывается
+        t0 = time.time()
+        r, target, backup, folder, opened = self.run_watch(starts=True, old_pid=old.pid)
+        waited = time.time() - t0                                    # старый процесс мы не прибираем: он «зомби»
+        old.wait()
+        self.assertGreaterEqual(waited, 0.9)
+        self.assertLess(waited, 10)                                  # «зомби» — уже закрыт, не ждём до упора
+        self.assertEqual(opened, ["NEW"])
 
 
 class Clock:

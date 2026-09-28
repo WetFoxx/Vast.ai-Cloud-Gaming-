@@ -1573,35 +1573,63 @@ function demoHistory(days, all) {
 
 // ---------------------------------------------------------------- обновление
 // Python проверяет GitHub в фоне (updater.Checker); страница лишь спрашивает, что он уже узнал
-let updateInfo = null;   // {current, available, latest, page}
+let updateInfo = null;    // {current, available, latest, page}
+let updateReady = null;   // {version, app} — новая версия скачана и проверена, можно ставить
+let updateNotice = null;  // окно открылось в конце обновления: {updated: {from, to}} или {failed: версия}
 function renderUpdate(u) {
   updateInfo = u && !u.error ? u : null;
   const on = !!(updateInfo && updateInfo.available);
-  $("update-banner").hidden = !on;
+  $("update-banner").hidden = !on && !updateNotice;
+  $("update-go").hidden = !on;
+  $("update-notes").hidden = !on && !(updateNotice && updateNotice.updated);
+  $("update-go").textContent = t(updateReady ? "update.install" : "update.button");
   if (on) $("update-title").textContent = t("update.available", { version: updateInfo.latest });
+  else if (updateNotice) $("update-title").textContent = updateNotice.updated
+    ? t("update.done", { version: updateNotice.updated.to }) : t("update.failed", { version: updateNotice.failed });
+  $("update-title").classList.toggle("err", !on && !!(updateNotice && updateNotice.failed));
 }
 async function refreshUpdate() {
   try { renderUpdate(DEMO ? demoUpdate() : await api().update_status()); } catch (e) { renderUpdate(null); }
 }
-$("update-notes").addEventListener("click", () => updateInfo && updateInfo.page && openUrl(updateInfo.page));
+$("update-notes").addEventListener("click", () => {
+  const v = updateInfo && updateInfo.available ? updateInfo.latest : updateNotice && updateNotice.updated && updateNotice.updated.to;
+  if (v) openUrl("https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/releases/tag/vastgame-v" + v);
+});
 
-// «Обновить»: Python скачивает новую версию и проверяет её; здесь — ход и итог под надписью
+// «Обновить»: Python скачивает новую версию и проверяет её (ход — под надписью), потом — спросить и поставить:
+// окно закроется, новую версию откроет сторож (updater.install)
 function updateState(s) {
   const st = $("update-state");
   st.hidden = !s;
   st.classList.toggle("err", !!(s && s.error));
   st.textContent = !s ? "" : s.error ? errText(s.error) : s.ready ? t("update.ready", { version: s.ready.version }) : s.text;
   $("update-go").disabled = !!(s && s.text);
-  $("update-go").hidden = !!(s && s.ready);
+  $("update-go").textContent = t(updateReady ? "update.install" : "update.button");
 }
 $("update-go").addEventListener("click", async () => {
   if (!updateInfo || $("update-go").disabled) return;
-  updateState({ text: t("update.checking") });
-  if (DEMO) { await sleep(800); updateState({ ready: { version: updateInfo.latest } }); return; }
-  const r = await api().update_prepare();
+  if (!updateReady) {
+    updateState({ text: t("update.checking") });
+    if (DEMO) { await sleep(800); updateReady = { version: updateInfo.latest }; }
+    else {
+      const r = await api().update_prepare();
+      if (r && r.error) { updateState({ error: r.error }); return; }
+      const p = await waitJob((e) => e.key && updateState({ text: t(e.key, e.params || {}) }));
+      if (p.error) { updateState({ error: p.error }); return; }
+      updateReady = p.result;
+    }
+    updateState({ ready: updateReady });
+  }
+  const v = updateReady.version;
+  const yes = await ask({ title: t("update.confirm.title", { version: v }), text: t("update.confirm.text"),
+                          yes: t("update.button"), no: t("update.later") });
+  if (!yes) return;
+  updateState({ text: t("update.installing", { version: v }) });
+  if (DEMO) return;
+  const r = await api().update_install();
   if (r && r.error) { updateState({ error: r.error }); return; }
   const p = await waitJob((e) => e.key && updateState({ text: t(e.key, e.params || {}) }));
-  updateState(p.error ? { error: p.error } : { ready: p.result });
+  if (p.error) updateState({ error: p.error });            // иначе окно уже закрывается
 });
 function demoUpdate() {
   const v = new URLSearchParams(location.search).get("update");   // ?demo=ready&update=0.3.0
@@ -1610,13 +1638,19 @@ function demoUpdate() {
 
 // ---------------------------------------------------------------- старт
 async function start() {
-  let saved = null, version = "0.2.0";
-  if (DEMO) saved = new URLSearchParams(location.search).get("lang");
-  else ({ language: saved, version } = await api().settings());
+  let saved = null, version = "0.2.0", notice = null;
+  if (DEMO) {
+    const q = new URLSearchParams(location.search);
+    saved = q.get("lang");
+    if (q.get("updated")) notice = q.get("updated") === "failed" ? { failed: "0.2.1" } : { updated: { from: "0.2.0", to: q.get("updated") } };
+  } else ({ language: saved, version, update: notice } = await api().settings());
+  // Окно открылось в конце обновления — сказать итог (минуту, потом надпись живёт как обычно)
+  if (notice) { updateNotice = notice; setTimeout(() => { updateNotice = null; renderUpdate(updateInfo); }, 60 * 1000); }
   LANG = I18N[saved] ? saved : detectLanguage();
   fillLanguages();
   applyStatic();
   $("app-version").textContent = version || "";
+  renderUpdate(null);
   $("app-version").title = t("app.version", { version });
   // Есть ли версия новее: первый вопрос запускает проверку в фоне, ответ — через несколько секунд
   refreshUpdate();
