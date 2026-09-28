@@ -36,7 +36,7 @@ import updater
 
 SERVICE, ACCOUNT = "vastgame-release", "ed25519"   # запись в Связке ключей
 ROOT = Path(__file__).resolve().parent
-DIST = ROOT / "dist"
+DIST = ROOT / "dist.noindex"      # вывод build.sh (поиск macOS эту папку не видит)
 POST_TRIES = 20                                      # × 15 с: сколько ждать, пока GitHub покажет новый выпуск
 GH_USER = "WetFoxx"                                  # выпускает только этот аккаунт GitHub
 DMG = "vastgame-mac.dmg"                             # образ для ручной установки: постоянное имя, ссылка на последний
@@ -267,7 +267,7 @@ def publish(notes):
   описание: {updater.MANIFEST}, подписано
   что нового: {notes}""")
     if _ask("Опубликовать?") != "да":
-        sys.exit("Не опубликовано. Собранное лежит в dist/.")
+        sys.exit("Не опубликовано. Собранное лежит в dist.noindex/.")
 
     _step("Публикую на GitHub")
     notes_file = DIST / "release-notes.md"

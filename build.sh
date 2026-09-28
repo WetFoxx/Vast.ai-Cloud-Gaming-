@@ -1,7 +1,9 @@
 #!/bin/bash
 # build.sh — собрать vastgame.app и установочный образ vastgame.dmg (Mac, Apple Silicon).
 #
-#   ./build.sh            → dist/vastgame.app и dist/vastgame.dmg
+#   ./build.sh            → dist.noindex/vastgame.app и dist.noindex/vastgame.dmg
+#   (папка «.noindex» — поиск macOS и список приложений её не видят: на Mac разработчика
+#    иначе рядом с установленным vastgame показывается ещё и собранный)
 #
 # Что внутри приложения: свой Python со всеми библиотеками (PyInstaller), страница окна (ui/),
 # OAuth-клиент Google (oauth_client.json — вне git, должен лежать в папке проекта) и rclone.
@@ -40,16 +42,17 @@ done
 iconutil -c icns "$I" -o build/vastgame.icns
 
 # ---- приложение
-rm -rf build/vastgame dist/vastgame.app dist/vastgame.dmg
-.venv/bin/pyinstaller --noconfirm --clean vastgame.spec
+rm -rf build/vastgame dist.noindex/vastgame.app dist.noindex/vastgame.dmg
+.venv/bin/pyinstaller --noconfirm --clean --distpath dist.noindex vastgame.spec
 
 # ---- самопроверка собранного приложения (без окна, сети и ключей): модули, страница, rclone
-dist/vastgame.app/Contents/MacOS/vastgame selftest
+dist.noindex/vastgame.app/Contents/MacOS/vastgame selftest
 
 # ---- установочный образ: перетащить vastgame в «Программы»
 D=build/dmg
 rm -rf "$D"; mkdir -p "$D"
-cp -R dist/vastgame.app "$D/"
+cp -R dist.noindex/vastgame.app "$D/"
 ln -s /Applications "$D/Applications"
-hdiutil create -quiet -volname vastgame -srcfolder "$D" -ov -format UDZO dist/vastgame.dmg
-echo "Готово: dist/vastgame.app и dist/vastgame.dmg ($(du -h dist/vastgame.dmg | cut -f1))"
+hdiutil create -quiet -volname vastgame -srcfolder "$D" -ov -format UDZO dist.noindex/vastgame.dmg
+rm -rf "$D"      # копия приложения для образа больше не нужна (иначе в поиске macOS — лишний vastgame)
+echo "Готово: dist.noindex/vastgame.app и dist.noindex/vastgame.dmg ($(du -h dist.noindex/vastgame.dmg | cut -f1))"
