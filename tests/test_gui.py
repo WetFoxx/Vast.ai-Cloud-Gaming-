@@ -433,6 +433,16 @@ class TestSafe(unittest.TestCase):
             self.assertEqual(gui.Api().setup_status()["error"]["key"], "keychain.denied")
 
 
+class TestUpdate(unittest.TestCase):
+    def test_version_and_update_status(self):
+        # Окно узнаёт номер своей версии и есть ли новее (проверка — updater.Checker, сети здесь нет)
+        api = gui.Api()
+        api._updates = gui.updater.Checker(fetch=lambda: "9.9.9", spawn=lambda f: f())
+        self.assertEqual(api.settings()["version"], gui.updater.VERSION)
+        s = api.update_status()
+        self.assertEqual((s["available"], s["latest"], s["page"]), (True, "9.9.9", gui.updater.page("9.9.9")))
+
+
 class TestReset(unittest.TestCase):
     def test_reset_removes_keys_services_and_settings(self):
         # Как стираются ключи — tests/test_keystore.py (TestWipe); здесь — что сброс делает всё остальное

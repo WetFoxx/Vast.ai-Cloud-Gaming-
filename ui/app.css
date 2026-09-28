@@ -44,6 +44,7 @@ header {
   padding: 18px 22px 6px;
 }
 .brand { font-weight: 700; font-size: 20px; letter-spacing: .2px; }
+.version { color: var(--muted); font-weight: 400; font-size: 12px; letter-spacing: 0; margin-left: 4px; }
 .header-right { display: flex; align-items: center; gap: 10px; }
 .updated { color: var(--muted); font-size: 12px; }
 select {
@@ -175,6 +176,12 @@ button.link { flex: none; background: none; border: none; padding: 4px 8px; font
 button.danger { color: var(--error); }
 .card.attention { background: var(--warn-bg); display: flex; flex-direction: column; gap: 8px; }
 .card.attention button { align-self: flex-start; }
+
+/* ---- Доступна новая версия */
+.card.update { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-color: var(--accent); }
+.update-text { display: flex; flex-direction: column; align-items: flex-start; }
+.update-text button.link { padding: 2px 0 0; color: var(--accent); }
+.card.update > button { flex: none; }
 
 /* ---- Запуск Moonlight */
 .ml-row { display: flex; gap: 10px; align-items: stretch; }

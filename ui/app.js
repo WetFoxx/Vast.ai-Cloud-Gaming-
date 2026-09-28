@@ -1430,6 +1430,8 @@ $("lang").addEventListener("change", (e) => {
   LANG = e.target.value;
   applyStatic();
   if (current) render(current);
+  renderUpdate(updateInfo);
+  $("app-version").title = t("app.version", { version: $("app-version").textContent });
   if (!$("screen-offers").hidden) renderOffers();
   if (!$("screen-games").hidden) renderGames();
   if (!$("screen-setup").hidden) renderSetup();
@@ -1569,14 +1571,40 @@ function demoHistory(days, all) {
   return { days, all, other: all ? { count: 0, amount: 0 } : { count: 3, amount: 1.27 }, sessions, first: sessions[sessions.length - 1].start, now, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
 }
 
+// ---------------------------------------------------------------- обновление
+// Python проверяет GitHub в фоне (updater.Checker); страница лишь спрашивает, что он уже узнал
+let updateInfo = null;   // {current, available, latest, page}
+function renderUpdate(u) {
+  updateInfo = u && !u.error ? u : null;
+  const on = !!(updateInfo && updateInfo.available);
+  $("update-banner").hidden = !on;
+  if (on) $("update-title").textContent = t("update.available", { version: updateInfo.latest });
+}
+async function refreshUpdate() {
+  try { renderUpdate(DEMO ? demoUpdate() : await api().update_status()); } catch (e) { renderUpdate(null); }
+}
+// Пока «Обновить» открывает страницу выпуска (скачать руками); следующим шагом — поставит само
+$("update-go").addEventListener("click", () => updateInfo && updateInfo.page && openUrl(updateInfo.page));
+$("update-notes").addEventListener("click", () => updateInfo && updateInfo.page && openUrl(updateInfo.page));
+function demoUpdate() {
+  const v = new URLSearchParams(location.search).get("update");   // ?demo=ready&update=0.3.0
+  return v ? { current: "0.2.0", available: true, latest: v, page: "https://github.com/" } : { current: "0.2.0", available: false };
+}
+
 // ---------------------------------------------------------------- старт
 async function start() {
-  let saved = null;
+  let saved = null, version = "0.2.0";
   if (DEMO) saved = new URLSearchParams(location.search).get("lang");
-  else saved = (await api().settings()).language;
+  else ({ language: saved, version } = await api().settings());
   LANG = I18N[saved] ? saved : detectLanguage();
   fillLanguages();
   applyStatic();
+  $("app-version").textContent = version || "";
+  $("app-version").title = t("app.version", { version });
+  // Есть ли версия новее: первый вопрос запускает проверку в фоне, ответ — через несколько секунд
+  refreshUpdate();
+  setTimeout(refreshUpdate, 5000);
+  if (!DEMO) setInterval(refreshUpdate, 60 * 1000);
   if (DEMO === "offers") { openOffers(); return; }
   if (DEMO === "progress") { startProgress(); return; }
   if (DEMO === "stop") { startProgress("stop"); return; }

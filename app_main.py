@@ -53,6 +53,18 @@ def selftest():
     store = f"security, прежние записи — {backend}" if keystore.MAC else backend
     if keystore.MAC and not os.access(keystore.SECURITY, os.X_OK):
         problems.append(f"нет {keystore.SECURITY}")
+    # Номер версии в Info.plist сборки — тот же, что в version.py (его сравнивает проверка обновлений)
+    from version import VERSION
+    if paths.FROZEN and sys.platform == "darwin":
+        import plistlib
+        from pathlib import Path
+        info = Path(sys.executable).resolve().parents[1] / "Info.plist"
+        try:
+            plist_version = plistlib.loads(info.read_bytes()).get("CFBundleShortVersionString")
+        except (OSError, ValueError):
+            plist_version = None
+        if plist_version != VERSION:
+            problems.append(f"версия в Info.plist ({plist_version}) ≠ version.py ({VERSION})")
     here = paths.HERE
     for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css"):
         if not (here / f).is_file():
@@ -65,7 +77,7 @@ def selftest():
         cid = secret = None
     rclone = paths.find("rclone")
     ver = subprocess.run([rclone, "version"], capture_output=True, text=True).stdout.split("\n")[0] if rclone else ""
-    print(f"собрано: {paths.FROZEN} | хранилище ключей: {store}")
+    print(f"версия: {VERSION} | собрано: {paths.FROZEN} | хранилище ключей: {store}")
     print(f"OAuth-клиент Google: {'есть' if cid and secret else 'НЕТ'}")
     print(f"rclone: {rclone} ({ver})")
     print(f"запуск самого себя: {paths.self_cmd('resume')}")

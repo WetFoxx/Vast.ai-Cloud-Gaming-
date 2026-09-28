@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <div class="brand">vastgame</div>
+    <div class="brand">vastgame <span class="version" id="app-version"></span></div>
     <div class="header-right">
       <span class="updated" id="updated" data-i18n="app.loading"></span>
       <select id="lang" aria-label="Language"></select>
@@ -17,6 +17,13 @@
 
   <!-- ===== Главный экран ===== -->
   <main id="screen-main">
+    <section class="card update" id="update-banner" hidden>
+      <div class="update-text">
+        <div class="title" id="update-title"></div>
+        <button class="link" id="update-notes" data-i18n="update.notes"></button>
+      </div>
+      <button class="primary" id="update-go" data-i18n="update.button"></button>
+    </section>
     <section class="card attention" id="setup-banner" hidden>
       <div data-i18n="setup.banner"></div>
       <button class="primary" id="setup-banner-open" data-i18n="setup.open"></button>

@@ -43,6 +43,7 @@ import setupcheck
 import sshkey
 from vastapi import KEY_FILE
 import steamnames
+import updater
 from jobs import Job, error_data
 from vastapi import VastgameError, my_template
 
@@ -72,11 +73,12 @@ class Api:
         self._moonlight_lock = threading.Lock()   # «Запустить Moonlight» — не больше одного сразу
         self._opened = set()      # ссылки подтверждения Tailscale SSH, уже открытые в браузере
         self._display = (0, None) # (когда узнали, родной экран) — system_profiler небыстрый
+        self._updates = updater.Checker()   # есть ли версия новее на GitHub — проверяет в фоне
 
     # ---- настройки
     def settings(self):
-        """Сохранённые настройки окна (язык — только если его выбрали сами)."""
-        return {"language": settings.get("language")}
+        """Сохранённые настройки окна (язык — только если его выбрали сами) и номер версии приложения."""
+        return {"language": settings.get("language"), "version": updater.VERSION}
 
     def set_language(self, lang, remember=False):
         """Запомнить язык, выбранный человеком (иначе окно следует за языком системы)."""
@@ -683,6 +685,12 @@ class Api:
         """Логин кабинета Sunshine, который задало приложение, — показать человеку по его просьбе."""
         pw = keystore.get("SUNSHINE_PASSWORD")
         return {"user": pairing.USER, "password": pw} if pw else {"user": None}
+
+    # ---- обновление
+    def update_status(self):
+        """Есть ли версия новее: {"current", "available", "latest", "page"} — по последней проверке, сразу.
+        Сама проверка — в фоне (updater.Checker), окно сети не ждёт."""
+        return self._updates.status()
 
     # ---- прочее
     def open_url(self, url):

@@ -1,6 +1,6 @@
 # vastgame — Privacy Policy
 
-*Last updated: September 23, 2026*
+*Last updated: September 28, 2026*
 
 vastgame is an open-source desktop application that rents a cloud gaming PC on Vast.ai for you and keeps your game saves, Steam session and network settings in your own Google Drive, so they survive between rentals.
 
@@ -34,7 +34,7 @@ vastgame sends requests directly from your computer to:
 - **Vast.ai** — to search, rent and delete cloud machines and manage your templates and environment variables, using your Vast.ai API key;
 - **Tailscale** (the Tailscale app on your computer) — to find your cloud PC in your private network;
 - **Steam Store** (`store.steampowered.com`) — to look up game titles by their Steam app ID; only the app ID is sent;
-- **GitHub** — the cloud PC downloads the open-source setup script from the project repository.
+- **GitHub** — the cloud PC downloads the open-source setup script from the project repository; vastgame checks the project's Releases for a newer version of itself (a plain download of a small file — GitHub sees your IP address, nothing else is sent) and, when you choose to update, downloads the new version from there.
 
 Each of these services has its own privacy policy.
 

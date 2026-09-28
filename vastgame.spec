@@ -2,6 +2,11 @@
 # PyInstaller сам находит нужные модули по import, начиная с app_main.py; здесь — то, что он
 # не найдёт сам: файлы страницы, OAuth-клиент Google, rclone и описание приложения для macOS.
 
+import re
+
+# Номер версии — из version.py (одно место на всё); build.sh запускает сборку из папки проекта
+VERSION = re.search(r'^VERSION = "(\d+\.\d+\.\d+)"', open("version.py").read(), re.M).group(1)
+
 a = Analysis(
     ["app_main.py"],
     pathex=["."],
@@ -42,8 +47,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "vastgame",
         "CFBundleDisplayName": "vastgame",
-        "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "1",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
     },
