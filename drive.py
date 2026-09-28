@@ -9,11 +9,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import keyring
+import keystore
 import requests
 
 import paths
-from vastapi import SERVICE
 
 FOLDER = "vastai-cloud-games"   # папка на Drive, с которой работает wolf-setup.sh
 REMOTE = "vgdrive:"             # имя «диска» для rclone — только внутри утилиты
@@ -33,8 +32,8 @@ BUNDLED_CLIENT = Path(__file__).resolve().parent / "oauth_client.json"
 def client():
     """(client_id, client_secret) OAuth-клиента или (None, None).
     Сначала свой клиент человека (Keychain, для продвинутых), иначе — клиент приложения (oauth_client.json)."""
-    cid = keyring.get_password(SERVICE, "GOOGLE_CLIENT_ID")
-    secret = keyring.get_password(SERVICE, "GOOGLE_CLIENT_SECRET")
+    cid = keystore.get("GOOGLE_CLIENT_ID")
+    secret = keystore.get("GOOGLE_CLIENT_SECRET")
     if cid and secret:
         return cid, secret
     try:
@@ -46,12 +45,12 @@ def client():
 
 def token():
     """Токен Drive из Keychain (его сохраняет мастер: vastgame setup) или None."""
-    return keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN")
+    return keystore.get("RCLONE_REFRESH_TOKEN")
 
 
 def is_old_token():
     """True — если RCLONE_REFRESH_TOKEN ещё старый (общий клиент rclone), а не через клиент приложения."""
-    return keyring.get_password(SERVICE, "RCLONE_TOKEN_SCOPE") != SCOPE
+    return keystore.get("RCLONE_TOKEN_SCOPE") != SCOPE
 
 
 def _remote(name, tok, old):
@@ -71,7 +70,7 @@ def _remote(name, tok, old):
 def rclone_both(*args, capture=True, timeout=None):
     """rclone сразу с двумя «дисками»: vgold: — старый доступ (весь Drive), vgdrive: — клиент приложения.
     Для переноса архивов из старой папки в новую. capture=False — вывод rclone (прогресс) идёт на экран."""
-    old_tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if not is_old_token() else token()
+    old_tok = keystore.get("RCLONE_REFRESH_TOKEN_OLD") if not is_old_token() else token()
     env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),
                **_remote("vgold", old_tok, True), **_remote("vgdrive", token(), False))
     return subprocess.run([paths.need("rclone"), *args], capture_output=capture, text=True, env=env, timeout=timeout)
@@ -95,7 +94,7 @@ def _env(tok=None, old=None):
         # Сохранённый токен — с тем клиентом, через который получен; любой другой переданный — новый
         old = is_old_token() if tok in (None, saved) else False
     if tok is None:
-        tok = keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD") if old and not is_old_token() else saved
+        tok = keystore.get("RCLONE_REFRESH_TOKEN_OLD") if old and not is_old_token() else saved
     return dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),  # несуществующий
                 **_remote("vgdrive", tok, old))
 

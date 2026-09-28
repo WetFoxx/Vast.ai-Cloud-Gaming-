@@ -21,14 +21,14 @@ import threading
 import time
 from pathlib import Path
 
-import keyring
+import keystore
 import requests
 import urllib3
 
 import moonlight
 import paths
 from settings import applog
-from vastapi import SERVICE, VastgameError
+from vastapi import VastgameError
 import wolfnode
 from wolfnode import ssh_run
 
@@ -43,10 +43,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def creds():
     """(логин, пароль) кабинета Sunshine из Связки ключей; нет — придумать и сохранить."""
-    pw = keyring.get_password(SERVICE, "SUNSHINE_PASSWORD")
+    pw = keystore.get("SUNSHINE_PASSWORD")
     if not pw:
         pw = secrets.token_urlsafe(18)
-        keyring.set_password(SERVICE, "SUNSHINE_PASSWORD", pw)
+        keystore.put("SUNSHINE_PASSWORD", pw)
     return USER, pw
 
 

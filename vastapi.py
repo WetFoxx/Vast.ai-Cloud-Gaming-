@@ -6,13 +6,12 @@ import json
 import time
 from pathlib import Path
 
-import keyring
+import keystore
 import requests
 
 HOST = "https://console.vast.ai/"
 API = HOST + "api/v0/"
 KEY_FILE = Path.home() / ".vast_api_key"   # старое место ключа — до переноса в Keychain
-SERVICE = "vastgame"                        # имя записей в Keychain («Связка ключей»)
 
 
 class VastgameError(SystemExit):
@@ -38,7 +37,7 @@ TEMPLATE_NAME = "vastgame"
 
 def read_key():
     """API-ключ Vast: из Keychain, а если его там ещё нет — из старого файла. Ключ никуда не выводится."""
-    key = keyring.get_password(SERVICE, "VAST_API_KEY")
+    key = keystore.get("VAST_API_KEY")
     if not key and KEY_FILE.exists():
         key = KEY_FILE.read_text().strip()
     if not key:

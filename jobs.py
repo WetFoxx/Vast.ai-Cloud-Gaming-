@@ -52,8 +52,8 @@ def error_data(e):
 
 def unexpected(e):
     """Неожиданная ошибка — странице. Отказ в доступе к Связке ключей — понятным текстом: так бывает,
-    когда новая версия приложения (без подписи Apple) читает ключи, сохранённые прежней, а человек
-    нажал «Отказать»."""
+    когда ключи прежней версии переносятся в новое место (keystore.move_old, macOS спрашивает про каждый),
+    а человек нажал «Запретить»; или когда Связка ключей не ответила (keystore.KeystoreError)."""
     if isinstance(e, keyring.errors.KeyringError):
         return {"key": "keychain.denied", "params": {}, "text": f"{type(e).__name__}: {e}"}
     return {"key": None, "params": {}, "text": f"{type(e).__name__}: {e}"}

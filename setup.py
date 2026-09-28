@@ -16,12 +16,12 @@ import sys
 import webbrowser   # открыть ссылку в браузере (Mac и Windows)
 from pathlib import Path
 
-import keyring   # доступ к Keychain («Связка ключей») macOS
+import keystore   # ключи и токены — в Связке ключей macOS (keystore.py)
 
 import drive
 import paths
 import settings
-from vastapi import KEY_FILE, SERVICE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
+from vastapi import KEY_FILE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 
@@ -82,7 +82,7 @@ def step_mac():
 def step_vast_key():
     """Шаг 1: ключ API Vast — в Keychain, проверенный."""
     title(1, "Ключ Vast")
-    saved = keyring.get_password(SERVICE, "VAST_API_KEY")
+    saved = keystore.get("VAST_API_KEY")
     if saved:
         credit = check_key(saved)
         if credit is not None:
@@ -99,7 +99,7 @@ def step_vast_key():
         if credit is not None:
             print(f"  Найден ключ в старом файле {KEY_FILE} — он работает (баланс ${credit:.2f}).")
             if ask("  Перенести его в Keychain? («нет» — ввести другой ключ)"):
-                keyring.set_password(SERVICE, "VAST_API_KEY", old)
+                keystore.put("VAST_API_KEY", old)
                 print("  ✓ Ключ перенесён в Keychain.")
                 if ask(f"  Удалить файл {KEY_FILE}? Ключ в открытом файле больше не нужен"):
                     KEY_FILE.unlink()
@@ -122,7 +122,7 @@ def step_vast_key():
         if credit is None:
             print("  ✗ Vast не принял этот ключ. Проверь, что скопирован целиком.")
             continue
-        keyring.set_password(SERVICE, "VAST_API_KEY", key)
+        keystore.put("VAST_API_KEY", key)
         print(f"  ✓ Ключ работает (баланс ${credit:.2f}) и сохранён в Keychain.")
         if KEY_FILE.exists() and ask(f"  Удалить старый файл {KEY_FILE}? Теперь ключ в Keychain"):
             KEY_FILE.unlink()
@@ -157,8 +157,8 @@ def ensure_client():
             continue
         if not secret.startswith("GOCSPX-"):
             print("  ! Client secret обычно начинается с «GOCSPX-» — этот выглядит иначе, но сохраняю.")
-        keyring.set_password(SERVICE, "GOOGLE_CLIENT_ID", cid)
-        keyring.set_password(SERVICE, "GOOGLE_CLIENT_SECRET", secret)
+        keystore.put("GOOGLE_CLIENT_ID", cid)
+        keystore.put("GOOGLE_CLIENT_SECRET", secret)
         print("  ✓ OAuth-клиент сохранён в Keychain.")
         return True
     print("  ✗ Клиент так и не введён. Запусти vastgame setup ещё раз.")
@@ -231,9 +231,9 @@ def step_tailscale():
     """Шаг 3: ключ Tailscale (auth key) — в Keychain и в переменных аккаунта Vast."""
     import datetime
     title(3, "Tailscale")
-    key = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY")
+    key = keystore.get("TAILSCALE_AUTHKEY")
     if key:
-        saved = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY_DATE") or ""
+        saved = keystore.get("TAILSCALE_AUTHKEY_DATE") or ""
         age = ""
         if saved:
             days = (datetime.date.today() - datetime.date.fromisoformat(saved)).days
@@ -262,8 +262,8 @@ def step_tailscale():
         if not key.startswith("tskey-auth-"):
             print("  ✗ Это не ключ входа Tailscale: он начинается с «tskey-auth-». Попробуй ещё раз.")
             continue
-        keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY", key)
-        keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY_DATE", datetime.date.today().isoformat())
+        keystore.put("TAILSCALE_AUTHKEY", key)
+        keystore.put("TAILSCALE_AUTHKEY_DATE", datetime.date.today().isoformat())
         print("  ✓ Ключ сохранён в Keychain.")
         print("  Отправляю ключ в переменные аккаунта Vast (TAILSCALE_AUTHKEY)...")
         push_secret("TAILSCALE_AUTHKEY")
@@ -442,64 +442,30 @@ def tailscale_login(open_url, wait=600):
                 p.terminate()
 
 
-# Все записи vastgame в Связке ключей (тест сверяет список с кодом — новая запись не забудется)
-KEYCHAIN_NAMES = ("VAST_API_KEY", "RCLONE_REFRESH_TOKEN", "RCLONE_TOKEN_SCOPE", "RCLONE_REFRESH_TOKEN_OLD",
-                  "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "TAILSCALE_AUTHKEY", "TAILSCALE_AUTHKEY_DATE",
-                  "SUNSHINE_PASSWORD")
-
-
-def _in_keychain(name=None):
-    """Есть ли запись vastgame (с этим именем). Без -w/-g: значение не читается, macOS не спрашивает."""
-    cmd = ["security", "find-generic-password", "-s", SERVICE] + (["-a", name] if name else [])
-    return paths.run(cmd, 30).returncode == 0
-
-
 def reset_local():
-    """Удалить всё, что vastgame хранит на ЭТОМ Mac: записи «vastgame» в Связке ключей, службы
-    автозапуска, папку настроек (настройки, история сессий, журналы). После этого приложение ведёт
+    """Удалить всё, что vastgame хранит на ЭТОМ Mac: ключи в Связке ключей (и записи прежних версий),
+    службы автозапуска, папку настроек (настройки, история сессий, журналы). После этого приложение ведёт
     себя как после первой установки. Аккаунты Vast/Google/Tailscale, шаблон и переменные в Vast,
-    игры и сохранения на Drive — не трогает. Возвращает {"deleted": стёрто записей, "left": осталось}.
-
-    Каждую запись стираем по имени двумя способами и не останавливаемся на неудаче. Раньше был один
-    способ — системная программа security «до первой ошибки», и из приложения 2026-09-25 она стёрла
-    не всё: остались ключ Vast, вход в Google и пароль Sunshine, а мастер решил, что они настроены.
-    Записи создавали разные сборки приложения, и доступ к ним разрешён только им (не security):
-      1. само приложение (keyring) — нынешняя сборка ими пользуется, значит, доступ у неё есть;
-      2. если запись осталась — security."""
+    игры и сохранения на Drive — не трогает. Возвращает {"deleted": стёрто записей, "left": осталось}
+    (как стираются ключи и почему не «до первой ошибки» — keystore.wipe)."""
     import autostart
-    deleted = 0
-    for name in KEYCHAIN_NAMES:
-        if not _in_keychain(name):
-            continue
-        try:
-            keyring.delete_password(SERVICE, name)
-        except Exception:                    # noqa: BLE001 — нет доступа или записи: пробуем вторым способом
-            pass
-        if _in_keychain(name):
-            paths.run(["security", "delete-generic-password", "-s", SERVICE, "-a", name], 30)
-        deleted += not _in_keychain(name)
-    # Записи с другими именами (от прежних версий) — по одной, пока удаляются
-    for _ in range(50):
-        if paths.run(["security", "delete-generic-password", "-s", SERVICE], 30).returncode != 0:
-            break
-        deleted += 1
-    left = sum(_in_keychain(n) for n in KEYCHAIN_NAMES) or int(_in_keychain())
+    r = keystore.wipe()
     for name in autostart.NAMES:
         autostart.uninstall(name)
     shutil.rmtree(settings.config_dir(), ignore_errors=True)
-    return {"deleted": deleted, "left": left}
+    return r
 
 
 def summary():
     """Итог: что настроено, и предупреждения."""
     title(5, "Итог")
     have = call("GET", "secrets/").get("secrets") or {}
-    vast_ok = keyring.get_password(SERVICE, "VAST_API_KEY") is not None
+    vast_ok = keystore.get("VAST_API_KEY") is not None
     print(f"  {'✓' if vast_ok else '!'} Ключ Vast: {'в Keychain' if vast_ok else f'пока в файле {KEY_FILE} — перенеси (шаг 1)'}")
     for name, kc, what in (("RCLONE_CLIENT_ID", "GOOGLE_CLIENT_ID", "OAuth-клиент Google"),
                            ("RCLONE_REFRESH_TOKEN", "RCLONE_REFRESH_TOKEN", "Токен Google Drive"),
                            ("TAILSCALE_AUTHKEY", "TAILSCALE_AUTHKEY", "Ключ Tailscale")):
-        in_kc = keyring.get_password(SERVICE, kc) is not None
+        in_kc = keystore.get(kc) is not None
         in_vast = name in have
         mark = "✓" if in_kc and in_vast else "✗"
         print(f"  {mark} {what}: Keychain — {'да' if in_kc else 'нет'}, аккаунт Vast — {'да' if in_vast else 'нет'}")
@@ -592,10 +558,10 @@ def google_login():
     # архивы из старой папки — новому клиенту она не видна
     prev = drive.token()
     if prev and drive.is_old_token():
-        keyring.set_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD", prev)
-    keyring.set_password(SERVICE, "RCLONE_REFRESH_TOKEN", token)
-    keyring.set_password(SERVICE, "RCLONE_TOKEN_SCOPE", drive.SCOPE)   # токен — через клиент приложения
-    if keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN") != token:
+        keystore.put("RCLONE_REFRESH_TOKEN_OLD", prev)
+    keystore.put("RCLONE_REFRESH_TOKEN", token)
+    keystore.put("RCLONE_TOKEN_SCOPE", drive.SCOPE)   # токен — через клиент приложения
+    if keystore.get("RCLONE_REFRESH_TOKEN") != token:
         raise VastgameError("Не удалось сохранить токен в Keychain.", key="setup.err.keychain")
     drive.ensure_folder()    # папка архивов — сразу; не вышло (нет интернета) — создаст экран игр или машина
     return len(token)
@@ -625,7 +591,7 @@ def send_secret(name, keychain_name=None, value=None):
     """Записать секрет из Keychain (запись keychain_name, по умолчанию — name) в Environment Variables
     аккаунта Vast под именем name. Vast подставляет их в каждый инстанс — и через утилиту, и через сайт.
     Ничего не печатает. Возвращает (добавлен или обновлён, имена переменных аккаунта)."""
-    token = value or keyring.get_password(SERVICE, keychain_name or name)
+    token = value or keystore.get(keychain_name or name)
     if not token:
         raise VastgameError(f"В Keychain нет {name} — пройди мастер: vastgame setup", key="setup.err.no_secret", name=name)
     # Переменные аккаунта: POST secrets/ — создать, PUT — заменить (как в официальном CLI Vast)
@@ -657,7 +623,7 @@ def save_vast_key(key):
     credit = check_key(key) if key else None
     if credit is None:
         raise VastgameError("Vast не принял этот ключ.", key="setup.err.vast_key")
-    keyring.set_password(SERVICE, "VAST_API_KEY", key)
+    keystore.put("VAST_API_KEY", key)
     return credit
 
 
@@ -667,8 +633,8 @@ def save_tailscale_key(key):
     key = (key or "").strip()
     if not key.startswith("tskey-auth-"):
         raise VastgameError("Это не ключ входа Tailscale: он начинается с «tskey-auth-».", key="setup.err.ts_key")
-    keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY", key)
-    keyring.set_password(SERVICE, "TAILSCALE_AUTHKEY_DATE", datetime.date.today().isoformat())
+    keystore.put("TAILSCALE_AUTHKEY", key)
+    keystore.put("TAILSCALE_AUTHKEY_DATE", datetime.date.today().isoformat())
     return send_secret("TAILSCALE_AUTHKEY")
 
 
@@ -677,8 +643,8 @@ def save_google_client(cid, secret):
     cid, secret = "".join((cid or "").split()), (secret or "").strip()
     if not cid.endswith(".apps.googleusercontent.com") or not secret:
         raise VastgameError("Нужны Client ID (…apps.googleusercontent.com) и Client secret.", key="setup.err.client")
-    keyring.set_password(SERVICE, "GOOGLE_CLIENT_ID", cid)
-    keyring.set_password(SERVICE, "GOOGLE_CLIENT_SECRET", secret)
+    keystore.put("GOOGLE_CLIENT_ID", cid)
+    keystore.put("GOOGLE_CLIENT_SECRET", secret)
 
 
 # Запуск как команды (vastgame setup). При import setup — ничего не запускается: функции мастера

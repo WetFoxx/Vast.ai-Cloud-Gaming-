@@ -1,4 +1,4 @@
-# drive.client: свой клиент из Keychain важнее; без него — клиент приложения из oauth_client.json.
+# drive.client: свой клиент из Связки ключей важнее; без него — клиент приложения из oauth_client.json.
 
 import json
 import sys
@@ -21,17 +21,17 @@ class TestClient(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_bundled_when_keychain_empty(self):
-        with mock.patch.object(drive.keyring, "get_password", lambda s, k: None):
+        with mock.patch.object(drive.keystore, "get", lambda k: None):
             self.assertEqual(drive.client(), ("app.apps.googleusercontent.com", "S"))
 
     def test_own_client_wins(self):
         own = {"GOOGLE_CLIENT_ID": "mine.apps.googleusercontent.com", "GOOGLE_CLIENT_SECRET": "M"}
-        with mock.patch.object(drive.keyring, "get_password", lambda s, k: own.get(k)):
+        with mock.patch.object(drive.keystore, "get", lambda k: own.get(k)):
             self.assertEqual(drive.client(), ("mine.apps.googleusercontent.com", "M"))
 
     def test_nothing(self):
         self.tmp.unlink()
-        with mock.patch.object(drive.keyring, "get_password", lambda s, k: None):
+        with mock.patch.object(drive.keystore, "get", lambda k: None):
             self.assertEqual(drive.client(), (None, None))
 
 

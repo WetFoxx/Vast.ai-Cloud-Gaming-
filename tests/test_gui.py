@@ -37,7 +37,9 @@ def setUpModule():
     for obj, name, value in [(gui.jobs, "_launch", lambda kind, args: threading.Thread(
                                   target=gui.jobs.work, args=(kind, args), daemon=True).start()),
                              (gui.jobs.notify, "send", lambda title, text: SENT.append((title, text))),
-                             (gui.moonlight, "native_display", lambda: None)]:     # не звать system_profiler
+                             (gui.moonlight, "native_display", lambda: None),      # не звать system_profiler
+                             # названия игр — не спрашивать сайт Steam и не писать кэш в настоящую папку
+                             (gui.steamnames, "for_archives", lambda archives: {})]:
         p = mock.patch.object(obj, name, value)
         p.start()
         unittest.addModuleCleanup(p.stop)
@@ -431,71 +433,19 @@ class TestSafe(unittest.TestCase):
             self.assertEqual(gui.Api().setup_status()["error"]["key"], "keychain.denied")
 
 
-class FakeKeychain:
-    """Связка ключей: записи vastgame по именам. app_only — их может стереть только приложение (keyring),
-    а не системная программа security (так было у Алексея 2026-09-25); stuck — не стирает никто."""
-
-    def __init__(self, names, app_only=(), stuck=()):
-        self.items, self.app_only, self.stuck, self.cmds = set(names), set(app_only), set(stuck), []
-
-    def run(self, cmd, timeout, env=None):
-        self.cmds.append(cmd)
-        name = cmd[cmd.index("-a") + 1] if "-a" in cmd else None
-        found = [n for n in sorted(self.items) if name in (None, n)]
-        code = lambda ok: subprocess.CompletedProcess(cmd, 0 if ok else 44, "", "")   # noqa: E731
-        if cmd[1] == "find-generic-password":
-            return code(found)
-        # delete-generic-password: первую подходящую, если security её может стереть
-        if found and found[0] not in self.app_only | self.stuck:
-            self.items.discard(found[0])
-            return code(True)
-        return code(False)
-
-    def delete_password(self, service, name):
-        if name in self.stuck or name not in self.items:
-            raise Exception("denied")
-        self.items.discard(name)
-
-
 class TestReset(unittest.TestCase):
-    def reset(self, kc):
+    def test_reset_removes_keys_services_and_settings(self):
+        # Как стираются ключи — tests/test_keystore.py (TestWipe); здесь — что сброс делает всё остальное
         tmp = Path(tempfile.mkdtemp()) / "cfg"
         tmp.mkdir()
         (tmp / "settings.json").write_text("{}")
         removed = []
-        with mock.patch.object(gui.setup.paths, "run", kc.run), \
-             mock.patch.object(gui.setup.keyring, "delete_password", kc.delete_password), \
+        with mock.patch.object(gui.setup.keystore, "wipe", lambda: {"deleted": 3, "left": 1}), \
              mock.patch.object(gui.setup.settings, "config_dir", lambda: tmp), \
              mock.patch("autostart.uninstall", lambda name: removed.append(name)):
             r = gui.Api().reset_local()
-        self.assertEqual(removed, ["resume", "app"])
+        self.assertEqual((r, removed), ({"ok": True, "deleted": 3, "left": 1}, ["resume", "app"]))
         self.assertFalse(tmp.exists())
-        self.assertTrue(all(c[0] == "security" and "-w" not in c and "-g" not in c for c in kc.cmds))  # значения не читаем
-        return r
-
-    def test_reset_removes_everything(self):
-        kc = FakeKeychain(["VAST_API_KEY", "RCLONE_REFRESH_TOKEN", "OLD_UNKNOWN"])
-        self.assertEqual(self.reset(kc), {"ok": True, "deleted": 3, "left": 0})
-        self.assertEqual(kc.items, set())
-
-    def test_entries_security_cannot_delete(self):
-        # Живой случай 2026-09-25: сброс из приложения оставил ключ Vast, вход в Google и пароль Sunshine
-        names = ["VAST_API_KEY", "RCLONE_REFRESH_TOKEN", "RCLONE_TOKEN_SCOPE", "SUNSHINE_PASSWORD", "GOOGLE_CLIENT_ID"]
-        kc = FakeKeychain(names, app_only=names[:4])
-        self.assertEqual(self.reset(kc), {"ok": True, "deleted": 5, "left": 0})
-
-    def test_what_stays_is_reported(self):
-        kc = FakeKeychain(["VAST_API_KEY", "SUNSHINE_PASSWORD"], stuck=["VAST_API_KEY"])
-        self.assertEqual(self.reset(kc), {"ok": True, "deleted": 1, "left": 1})
-
-    def test_names_list_matches_code(self):
-        # Каждая запись, которую код кладёт в Связку ключей, есть в списке сброса
-        import re
-        used = set()
-        for f in Path(gui.__file__).parent.glob("*.py"):
-            used |= set(re.findall(r'set_password\([\w.]*SERVICE,\s*"([A-Z_]+)"', f.read_text()))
-        self.assertTrue(used)
-        self.assertEqual(used - set(gui.setup.KEYCHAIN_NAMES), set())
 
 
 class TestGames(unittest.TestCase):

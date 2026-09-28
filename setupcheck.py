@@ -11,7 +11,7 @@ import json
 import subprocess
 import sys
 
-import keyring
+import keystore
 
 import autostart
 import drive
@@ -19,7 +19,7 @@ import moonlight
 import paths
 import setup   # функции мастера: при import он НЕ запускается (защищён __main__)
 import sshkey
-from vastapi import KEY_FILE, SERVICE, VastgameError, call, check_key, my_template
+from vastapi import KEY_FILE, VastgameError, call, check_key, my_template
 
 
 def _step(id_, level, key, **params):
@@ -102,7 +102,7 @@ def tailscale_phase():
 
 
 def vast_key():
-    key = keyring.get_password(SERVICE, "VAST_API_KEY")
+    key = keystore.get("VAST_API_KEY")
     if key:
         credit = check_key(key)
         if credit is None:
@@ -148,12 +148,12 @@ def google(secrets, sizes=True):
 
 
 def tailscale_key(secrets):
-    in_kc = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY") is not None
+    in_kc = keystore.get("TAILSCALE_AUTHKEY") is not None
     in_vast = "TAILSCALE_AUTHKEY" in secrets
     if not in_vast:
         # Не обязателен (v3.12): первая машина войдёт в сеть по одобрению — ссылку откроет приложение
         return _step("tailscale_key", "ok", "setup.tailscale_key.optional")
-    saved = keyring.get_password(SERVICE, "TAILSCALE_AUTHKEY_DATE")
+    saved = keystore.get("TAILSCALE_AUTHKEY_DATE")
     if in_kc and saved:
         left = setup.TS_KEY_DAYS - (datetime.date.today() - datetime.date.fromisoformat(saved)).days
         if left <= 10:

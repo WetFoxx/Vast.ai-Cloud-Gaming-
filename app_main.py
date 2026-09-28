@@ -38,15 +38,21 @@ def selftest():
     import subprocess
     problems = []
     for m in ("gui", "jobs", "core", "drive", "setup", "setupcheck", "autostart", "notify", "webview",
-              "webview.platforms.cocoa", "keyring", "requests"):
+              "webview.platforms.cocoa", "keystore", "keyring", "requests"):
         try:
             importlib.import_module(m)
         except Exception as e:                   # noqa: BLE001 — показать любую причину
             problems.append(f"модуль {m}: {e}")
+    import os
     import keyring
+    import keystore
     import drive
     import paths
+    # Ключи: на Mac — системная программа security; keyring нужен для записей прежних версий
     backend = type(keyring.get_keyring()).__module__
+    store = f"security, прежние записи — {backend}" if keystore.MAC else backend
+    if keystore.MAC and not os.access(keystore.SECURITY, os.X_OK):
+        problems.append(f"нет {keystore.SECURITY}")
     here = paths.HERE
     for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css"):
         if not (here / f).is_file():
@@ -59,7 +65,7 @@ def selftest():
         cid = secret = None
     rclone = paths.find("rclone")
     ver = subprocess.run([rclone, "version"], capture_output=True, text=True).stdout.split("\n")[0] if rclone else ""
-    print(f"собрано: {paths.FROZEN} | хранилище ключей: {backend}")
+    print(f"собрано: {paths.FROZEN} | хранилище ключей: {store}")
     print(f"OAuth-клиент Google: {'есть' if cid and secret else 'НЕТ'}")
     print(f"rclone: {rclone} ({ver})")
     print(f"запуск самого себя: {paths.self_cmd('resume')}")

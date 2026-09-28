@@ -30,6 +30,7 @@ import history
 import installer
 import latency
 import jobs
+import keystore
 import market
 import moonlight
 import pairing
@@ -680,7 +681,7 @@ class Api:
 
     def sunshine_login(self):
         """Логин кабинета Sunshine, который задало приложение, — показать человеку по его просьбе."""
-        pw = pairing.keyring.get_password(pairing.SERVICE, "SUNSHINE_PASSWORD")
+        pw = keystore.get("SUNSHINE_PASSWORD")
         return {"user": pairing.USER, "password": pw} if pw else {"user": None}
 
     # ---- прочее

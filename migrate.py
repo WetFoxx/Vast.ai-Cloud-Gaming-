@@ -10,10 +10,10 @@
 import json
 import sys
 
-import keyring
+import keystore
 
 import drive
-from vastapi import SERVICE, list_instances
+from vastapi import list_instances
 
 FOLDER = drive.FOLDER
 
@@ -34,7 +34,7 @@ def lsjson(remote_path, *flags):
 # ---- 0. Условия
 if drive.is_old_token():
     sys.exit("Сначала войди в Google через клиент приложения: vastgame setup (шаг 2).")
-if not keyring.get_password(SERVICE, "RCLONE_REFRESH_TOKEN_OLD"):
+if not keystore.get("RCLONE_REFRESH_TOKEN_OLD"):
     sys.exit("Нет прежнего входа в Google (общий клиент rclone) — читать старые архивы нечем.")
 if list_instances():
     sys.exit("Сейчас арендована машина — сначала vastgame stop: иначе она может писать в папку во время переноса.")
