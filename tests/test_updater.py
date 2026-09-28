@@ -596,5 +596,98 @@ class TestRelease(unittest.TestCase):
         self.assertEqual([release.public_b64(k) for k in stored], [release.public_b64(KEY)])
 
 
+class FakeTools:
+    """git, gh, build.sh и ditto для publish: что спросили — запоминаем, отвечаем как настоящие."""
+
+    def __init__(self, dist, dirty=False, login="WetFoxx", tag_exists=False, build_ok=True):
+        self.dist, self.dirty, self.login, self.tag_exists, self.build_ok = dist, dirty, login, tag_exists, build_ok
+        self.cmds = []
+
+    def run(self, cmd, **kw):
+        self.cmds.append(cmd)
+        out, rc = "", 0
+        if cmd[:2] == ["git", "status"]:
+            out = " M core.py\n" if self.dirty else ""
+        elif cmd[:3] == ["gh", "api", "user"]:
+            out = self.login + "\n"
+        elif cmd[:3] == ["gh", "release", "view"]:
+            rc = 0 if self.tag_exists else 1
+        elif cmd == ["./build.sh"]:
+            rc = 0 if self.build_ok else 1
+            (self.dist / "vastgame.app").mkdir(parents=True, exist_ok=True)
+            (self.dist / "vastgame.dmg").write_bytes(b"dmg" * 10)
+        elif cmd[0] == "/usr/bin/ditto":
+            Path(cmd[-1]).write_bytes(b"zip" * 100)
+        return subprocess.CompletedProcess(cmd, rc, out, "")
+
+    def names(self):
+        return [" ".join(c[:3]) if c[0] != "/usr/bin/ditto" else "ditto" for c in self.cmds]
+
+
+class TestPublish(unittest.TestCase):
+    def publish(self, notes="Исправлена связка Moonlight", published="0.1.9", answer="да", **tools):
+        dist = Path(tempfile.mkdtemp(dir=TMP))
+        self.tools, self.checked, self.dist = FakeTools(dist, **tools), [], dist
+        with mock.patch.object(release, "_run", self.tools.run), mock.patch.object(release, "DIST", dist), \
+             mock.patch.object(release, "_published", lambda: published), \
+             mock.patch.object(release, "_check_zip", lambda z, v: self.checked.append((z.name, v))), \
+             mock.patch.object(release, "load_key", lambda: KEY), mock.patch.object(release, "_ask", lambda q: answer), \
+             mock.patch.object(release, "_post_check", lambda v, z: True), \
+             contextlib.redirect_stdout(io.StringIO()):
+            release.publish(notes)
+
+    def refused(self, **kw):
+        with self.assertRaises(SystemExit):
+            self.publish(**kw)
+        names = self.tools.names() if hasattr(self, "tools") else []
+        self.assertNotIn("gh release create", names)                 # ничего не опубликовано
+        self.assertNotIn("git tag " + f"vastgame-v{updater.VERSION}", names)
+        return names
+
+    def test_release(self):
+        self.publish()
+        v = updater.VERSION
+        self.assertEqual(self.tools.names(), ["git status --porcelain", "gh api user", f"gh release view",
+                                              "./build.sh", "ditto", "gh release create", f"git tag vastgame-v{v}"])
+        zip_name = f"vastgame-{v}-mac-arm64.zip"
+        self.assertEqual(self.checked, [(zip_name, v)])              # архив проверен до подписи и публикации
+        create = next(c for c in self.tools.cmds if c[:3] == ["gh", "release", "create"])
+        self.assertEqual(create[3:7], [f"vastgame-v{v}", str(self.dist / zip_name), str(self.dist / "vastgame-update.json"),
+                                       str(self.dist / "vastgame-mac.dmg")])
+        self.assertIn("--latest", create)
+        self.assertEqual(create[create.index("--repo") + 1], "WetFoxx/Vast.ai-Cloud-Gaming-")
+        m = updater.verify(json.loads((self.dist / "vastgame-update.json").read_text()))
+        self.assertEqual((m["version"], m["size"]), (v, 300))
+        self.assertEqual((self.dist / "release-notes.md").read_text().strip(), "Исправлена связка Moonlight")
+
+    def test_first_release_ever(self):
+        self.publish(published=None)
+        self.assertIn("gh release create", self.tools.names())
+
+    def test_refusals(self):
+        self.assertEqual(self.refused(dirty=True), ["git status --porcelain"])        # несохранённые изменения
+        self.assertEqual(self.refused(login="someone"), ["git status --porcelain", "gh api user"])
+        self.assertNotIn("./build.sh", self.refused(published=updater.VERSION))        # номер не новее
+        self.assertNotIn("./build.sh", self.refused(published="9.9.9"))
+        self.assertNotIn("./build.sh", self.refused(tag_exists=True))                  # выпуск уже есть
+        self.assertNotIn("ditto", self.refused(build_ok=False))
+        self.refused(answer="нет")                                                     # не сказал «да»
+        self.refused(answer="")
+        with self.assertRaises(SystemExit):
+            self.publish(notes="  ")                                                   # нет «что нового»
+
+    def test_published_version(self):
+        with mock.patch.object(updater, "fetch", lambda url: {"version": "0.2.3"}):
+            self.assertEqual(release._published(), "0.2.3")
+        def fail(code):
+            def f(url):
+                raise VastgameError("x", key="update.err.fetch", code=code)
+            return f
+        with mock.patch.object(updater, "fetch", fail(404)):
+            self.assertIsNone(release._published())                   # выпусков ещё нет
+        with mock.patch.object(updater, "fetch", fail("ConnectionError")), self.assertRaises(SystemExit):
+            release._published()                                      # не знаем — не выпускаем
+
+
 if __name__ == "__main__":
     unittest.main()

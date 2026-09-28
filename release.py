@@ -3,6 +3,7 @@
 #   .venv/bin/python release.py keygen            создать ключ подписи выпусков (один раз и навсегда)
 #   .venv/bin/python release.py restore ФАЙЛ      вернуть ключ из резервной копии (например, на новом Mac)
 #   .venv/bin/python release.py manifest ZIP      подписать файл-описание vastgame-update.json для архива
+#   .venv/bin/python release.py publish --notes "Что нового"   выпустить версию из version.py (см. publish)
 #
 # Ключ подписи — пара Ed25519. Открытый вшит в приложение (updater.PUBLIC_KEY): обновление с другой подписью
 # приложение не поставит. Закрытый — только в Связке ключей этого Mac, запись «vastgame-release», которую без
@@ -18,8 +19,14 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
+
+import requests
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -28,6 +35,11 @@ import keystore
 import updater
 
 SERVICE, ACCOUNT = "vastgame-release", "ed25519"   # запись в Связке ключей
+ROOT = Path(__file__).resolve().parent
+DIST = ROOT / "dist"
+GH_USER = "WetFoxx"                                  # выпускает только этот аккаунт GitHub
+DMG = "vastgame-mac.dmg"                             # образ для ручной установки: постоянное имя, ссылка на последний
+LATEST = f"https://github.com/{updater.REPO}/releases/latest/download/{updater.MANIFEST}"   # всегда настоящий GitHub
 BACKUP = Path.home() / "Desktop" / "vastgame-release-key.pem"
 PUBLIC_FILE = Path(__file__).resolve().parent / "release-public-key.txt"   # открытый ключ показывать можно
 MIN_PASSPHRASE = 12
@@ -153,12 +165,131 @@ def manifest(zip_path):
     print(f"Подписано: {out} (версия {data['version']}, {data['size']} байт)")
 
 
+# ---------------------------------------------------------------- выпуск
+
+def _run(cmd, **kw):
+    """Запустить программу, вывод — в CompletedProcess (текстом)."""
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, **kw)
+
+
+def _step(text):
+    print(f"\n━━ {text}")
+
+
+def _ask(question):
+    return input(f"{question} [да/нет]: ").strip().lower()
+
+
+def _published():
+    """Номер последнего выпуска на GitHub (описание проверено вшитым ключом) или None — выпусков ещё нет."""
+    try:
+        return updater.fetch(LATEST)["version"]
+    except updater.VastgameError as e:
+        if e.key == "update.err.fetch" and e.params.get("code") == 404:
+            return None
+        sys.exit(f"Не удалось проверить последний выпуск на GitHub: {e}")
+
+
+def _check_zip(zip_path, version):
+    """Архив — как у людей: распаковать и проверить тем же кодом, что приложение перед установкой."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        updater.check_app(updater.unpack(zip_path, {"version": version}, tmp), {"version": version})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _post_check(version, zip_path):
+    """После публикации — глазами приложения: «последний выпуск» на GitHub — эта версия с верной подписью,
+    архив по ссылке выпуска отдаётся нужного размера. GitHub показывает новый выпуск не мгновенно — несколько попыток."""
+    url = f"https://github.com/{updater.REPO}/releases/download/vastgame-v{version}/{zip_path.name}"
+    for attempt in range(6):
+        try:
+            m = updater.fetch(LATEST)
+            # GET без чтения тела: подписанные ссылки GitHub на файлы выпуска не обязаны отвечать на HEAD
+            with requests.get(url, stream=True, allow_redirects=True, timeout=30) as r:
+                size = int(r.headers.get("Content-Length", -1))
+            if m["version"] == version and r.status_code == 200 and size == zip_path.stat().st_size:
+                return True
+        except (updater.VastgameError, requests.RequestException, ValueError):
+            pass
+        time.sleep(5)
+    return False
+
+
+def publish(notes):
+    """Выпустить версию из version.py: проверки → сборка → архив и образ → проверка архива → подпись →
+    сводка и «да» → GitHub Releases → проверка глазами приложения → метка в git проекта."""
+    version = re.search(r'^VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "version.py").read_text(), re.M).group(1)
+    tag = f"vastgame-v{version}"
+    notes = (notes or "").strip()
+
+    _step(f"Проверяю, можно ли выпускать {version}")
+    if not notes:
+        sys.exit("Нужен текст «что нового»: --notes \"…\"")
+    if _run(["git", "status", "--porcelain"]).stdout.strip():
+        sys.exit("В git есть несохранённые изменения — выпуск должен быть ровно тем, что сохранено. Сначала коммит.")
+    if _run(["gh", "api", "user", "--jq", ".login"]).stdout.strip() != GH_USER:
+        sys.exit(f"gh не вошёл в аккаунт {GH_USER}: gh auth login")
+    last = _published()
+    if last and not updater.newer(version, last):
+        sys.exit(f"В version.py {version}, а на GitHub уже {last} — номер нужен больше.")
+    if _run(["gh", "release", "view", tag, "--repo", updater.REPO]).returncode == 0:
+        sys.exit(f"Выпуск {tag} на GitHub уже есть — поверх не выкладываю.")
+    print(f"  можно: на GitHub {last or 'выпусков ещё нет'}, выпускаю {version}")
+
+    _step("Собираю приложение (build.sh)")
+    if _run(["./build.sh"]).returncode != 0:
+        sys.exit("Сборка не удалась — подробности: ./build.sh")
+    zip_path = DIST / updater.FILE.format(version=version)
+    zip_path.unlink(missing_ok=True)
+    if _run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(DIST / "vastgame.app"),
+             str(zip_path)]).returncode != 0:
+        sys.exit("Не удалось упаковать архив.")
+    shutil.copyfile(DIST / "vastgame.dmg", DIST / DMG)
+
+    _step("Проверяю архив так же, как приложение перед установкой")
+    _check_zip(zip_path, version)
+    print("  приложение то, версия та, подпись кода цела, самопроверка прошла")
+
+    _step("Подписываю описание")
+    data = sign_manifest(load_key(), zip_path, version)
+    updater.verify(data)
+    manifest_path = DIST / updater.MANIFEST
+    manifest_path.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+
+    _step("Сводка")
+    print(f"""  выпуск:   {tag} → github.com/{updater.REPO}/releases (станет «последним»)
+  архив:    {zip_path.name}, {zip_path.stat().st_size / 1e6:.1f} МБ, SHA-256 {data['sha256'][:16]}…
+  образ:    {DMG}, {(DIST / DMG).stat().st_size / 1e6:.1f} МБ — для ручной установки
+  описание: {updater.MANIFEST}, подписано
+  что нового: {notes}""")
+    if _ask("Опубликовать?") != "да":
+        sys.exit("Не опубликовано. Собранное лежит в dist/.")
+
+    _step("Публикую на GitHub")
+    notes_file = DIST / "release-notes.md"
+    notes_file.write_text(notes + "\n")
+    r = _run(["gh", "release", "create", tag, str(zip_path), str(manifest_path), str(DIST / DMG),
+              "--repo", updater.REPO, "--title", f"vastgame {version}", "--notes-file", str(notes_file), "--latest"])
+    if r.returncode != 0:
+        sys.exit(f"gh не опубликовал выпуск: {r.stderr.strip()[:300]}")
+
+    _step("Проверяю глазами приложения")
+    if not _post_check(version, zip_path):
+        sys.exit("Выпуск на GitHub есть, но приложение его пока не видит — проверь страницу выпуска.")
+    _run(["git", "tag", tag])
+    print(f"""  приложения увидят {version} в течение 6 часов (или при следующем открытии окна).
+  Готово: https://github.com/{updater.REPO}/releases/tag/{tag}""")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Выпуск новой версии vastgame")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("keygen", help="создать ключ подписи выпусков (один раз)")
     sub.add_parser("restore", help="вернуть ключ из резервной копии").add_argument("file")
     sub.add_parser("manifest", help="подписать описание для архива").add_argument("zip")
+    sub.add_parser("publish", help="выпустить версию из version.py").add_argument("--notes", required=True)
     a = p.parse_args(argv)
     if a.cmd == "keygen":
         keygen()
@@ -166,6 +297,8 @@ def main(argv=None):
         restore(a.file)
     elif a.cmd == "manifest":
         manifest(a.zip)
+    elif a.cmd == "publish":
+        publish(a.notes)
 
 
 if __name__ == "__main__":
