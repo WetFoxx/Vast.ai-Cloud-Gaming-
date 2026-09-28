@@ -40,8 +40,8 @@ MANIFEST = "vastgame-update.json"
 # (архив тогда берётся из той же папки)
 OVERRIDE = os.environ.get("VASTGAME_UPDATE_URL")
 URL = OVERRIDE or f"https://github.com/{REPO}/releases/latest/download/{MANIFEST}"
-# Открытый ключ выпусков (base64 32 байт, печатает release.py keygen). None — ни одно обновление не принимается
-PUBLIC_KEY = None
+# Открытый ключ выпусков (base64 32 байт; создан release.py keygen 2026-09-28, закрытый — в Связке ключей Алексея)
+PUBLIC_KEY = "d0QgFz3vzLarH0PQgbETopZvO5OZvZO+g79SXwifho0="
 FORMAT = 1                   # вид описания; другой вид старое приложение не понимает и не ставит
 FILE = "vastgame-{version}-mac-arm64.zip"
 BUNDLE_ID = "com.vastgame.app"
