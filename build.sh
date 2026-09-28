@@ -32,7 +32,7 @@ if [ ! -x "$V/bin/rclone" ] || ! "$V/bin/rclone" version 2>/dev/null | grep -q "
 fi
 "$V/bin/rclone" version | head -1
 
-# ---- значок: из assets/icon-1024.png (рисует assets/make_icon.swift) — набор размеров для macOS
+# ---- значок: из assets/icon-1024.png (делает assets/make_logo.swift из логотипа, тёмный вариант) — набор размеров для macOS
 I=build/vastgame.iconset
 rm -rf "$I"; mkdir -p "$I"
 for n in 16 32 128 256 512; do

@@ -67,6 +67,21 @@ function statusText(st) {
   return t("status.text." + st.kind, p);
 }
 
+// Баланс «докручивается» до нового числа (при открытии — от нуля); «Уменьшить движение» в macOS — сразу
+let shownBalance = null;
+function setBalance(value) {
+  const el = $("balance"), to = Number(value), from = shownBalance === null ? 0 : shownBalance;
+  shownBalance = to;
+  if (from === to || matchMedia("(prefers-reduced-motion: reduce)").matches) { el.textContent = money(to); return; }
+  const t0 = performance.now(), ms = 900;
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / ms), eased = 1 - Math.pow(1 - k, 3);
+    el.textContent = money(from + (to - from) * eased);
+    if (k < 1 && shownBalance === to) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
 function render(data) {
   $("updated").textContent = t("app.updated", {
     time: new Date().toLocaleTimeString(LANG, { hour: "2-digit", minute: "2-digit" }),
@@ -76,7 +91,7 @@ function render(data) {
   current = data;
   if (data.game_names) GAME_NAMES = data.game_names;
 
-  $("balance").textContent = money(data.balance);
+  setBalance(data.balance);
   const sub = [];
   if (data.hours_left != null) sub.push(t("balance.hours", { hours: num(data.hours_left) }));
   if (data.low_balance) sub.push(t("balance.low"));

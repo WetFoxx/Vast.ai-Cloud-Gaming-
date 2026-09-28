@@ -1,86 +1,119 @@
-/* Цвета — в переменных: светлая и тёмная тема (как в системе) */
+/* Оформление в духе Google Stadia: тёмный (или светлый — как в системе) фон с мягким свечением, градиент из
+   логотипа VastGame (оранжевый → красный → малиновый → фиолетовый) на главном: кнопки, выделения, ход.
+   Цвета — в переменных; анимации — в конце файла (и выключаются, если в macOS включено «Уменьшить движение»). */
 :root {
-  --bg: #f4f5f7;
+  --grad: linear-gradient(115deg, #ff6a00 0%, #f5162f 38%, #d60f63 68%, #7a0cb8 100%);
+  --round: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --bg: #f4f3f7;
+  --glow-1: rgba(255, 106, 0, .10);
+  --glow-2: rgba(214, 15, 99, .10);
   --card: #ffffff;
-  --text: #1c1d21;
-  --muted: #6b6f7a;
-  --border: #e3e5ea;
-  --accent: #2f6fed;
+  --card-2: #f7f6fa;
+  --text: #16151b;
+  --muted: #6c6b78;
+  --border: rgba(22, 16, 40, .09);
+  --shadow: 0 1px 2px rgba(22, 10, 40, .05), 0 10px 28px rgba(22, 10, 40, .06);
+  --accent: #e0164f;
   --accent-text: #ffffff;
-  --none: #9aa0ab;      /* машины нет */
-  --starting: #e0a106;  /* запускается */
-  --ready: #1faa59;     /* готова к игре */
-  --syncing: #2f6fed;   /* синхронизация */
-  --stopping: #ef7d1a;  /* выключается */
-  --error: #e5484d;     /* ошибка */
-  --warn-bg: #fff4e0;
-  --error-bg: #fdecec;
+  --none: #a3a1ad;      /* машины нет */
+  --starting: #ff8a00;  /* запускается */
+  --ready: #17b26a;     /* готова к игре */
+  --syncing: #7a5cff;   /* синхронизация */
+  --stopping: #ff6a00;  /* выключается */
+  --error: #e5344f;     /* ошибка */
+  --warn-bg: #fff1e3;
+  --error-bg: #fde8ec;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16171b;
-    --card: #1f2126;
-    --text: #eceef2;
-    --muted: #9aa0ab;
-    --border: #2d3037;
-    --warn-bg: #3a2e14;
-    --error-bg: #3d1f21;
+    --bg: #0c0b10;
+    --glow-1: rgba(255, 106, 0, .13);
+    --glow-2: rgba(214, 15, 99, .17);
+    --card: #17161d;
+    --card-2: #1f1e27;
+    --text: #f3f2f7;
+    --muted: #9c9aa9;
+    --border: rgba(255, 255, 255, .075);
+    --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 14px 34px rgba(0, 0, 0, .38);
+    --accent: #ff3d6e;
+    --warn-bg: #2b1e10;
+    --error-bg: #2e1419;
   }
 }
 
 * { box-sizing: border-box; }
 /* hidden всегда прячет, даже если у блока свой display (например, flex) */
 [hidden] { display: none !important; }
+html { background: var(--bg); }
 body {
-  margin: 0;
-  background: var(--bg);
+  margin: 0; min-height: 100vh;
+  background:
+    radial-gradient(900px 420px at 108% -12%, var(--glow-2), transparent 62%),
+    radial-gradient(700px 360px at -12% -18%, var(--glow-1), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
   -webkit-user-select: none;
   user-select: none;
 }
 header {
-  display: flex; align-items: baseline; justify-content: space-between;
-  padding: 18px 22px 6px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 22px 8px;
 }
-.brand { font-weight: 700; font-size: 20px; letter-spacing: .2px; }
-.version { color: var(--muted); font-weight: 400; font-size: 12px; letter-spacing: 0; margin-left: 4px; }
+.brand { display: flex; align-items: center; gap: 9px; }
+.brand-mark { height: 30px; width: auto; filter: drop-shadow(0 3px 10px rgba(230, 20, 80, .35)); }
+.brand-word { height: 17px; width: auto; opacity: .92; }
+@media (prefers-color-scheme: dark) { .brand-word { filter: invert(1); } }
+.version { color: var(--muted); font-weight: 500; font-size: 12px; letter-spacing: 0; margin-left: 2px;
+  font-family: var(--round); }
 .header-right { display: flex; align-items: center; gap: 10px; }
 .updated { color: var(--muted); font-size: 12px; }
 select {
   font: inherit; font-size: 12px;
   color: var(--text); background: var(--card);
-  border: 1px solid var(--border); border-radius: 8px; padding: 3px 6px;
+  border: 1px solid var(--border); border-radius: 10px; padding: 4px 8px;
 }
-main { padding: 8px 22px 22px; display: flex; flex-direction: column; gap: 14px; }
+main { padding: 8px 22px 26px; display: flex; flex-direction: column; gap: 14px; }
 
 .card {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 16px 18px;
+  border-radius: 20px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
 }
-.label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
-.big { font-size: 32px; font-weight: 700; margin-top: 2px; }
+.label { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; font-weight: 600; }
+.big { font-family: var(--round); font-size: 34px; font-weight: 800; margin-top: 2px; letter-spacing: -.5px; }
+#balance { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+  width: max-content; }
 .sub { color: var(--muted); font-size: 13px; }
 .card.low { background: var(--warn-bg); }
 .card.low .sub { color: var(--text); }
 
 .status-row { display: flex; gap: 12px; align-items: flex-start; }
 .dot {
-  width: 14px; height: 14px; border-radius: 50%; margin-top: 5px; flex: none;
-  background: var(--none);
+  width: 12px; height: 12px; border-radius: 50%; margin-top: 7px; flex: none;
+  background: var(--none); position: relative;
 }
-.dot.starting { background: var(--starting); animation: pulse 1.4s ease-in-out infinite; }
-.dot.ready    { background: var(--ready); }
-.dot.syncing  { background: var(--syncing); animation: pulse 1.4s ease-in-out infinite; }
-.dot.stopping { background: var(--stopping); animation: pulse 1.4s ease-in-out infinite; }
-.dot.error    { background: var(--error); }
+.dot.starting { background: var(--starting); }
+.dot.ready    { background: var(--ready); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ready) 22%, transparent),
+                                            0 0 14px color-mix(in srgb, var(--ready) 70%, transparent); }
+.dot.syncing  { background: var(--syncing); }
+.dot.stopping { background: var(--stopping); }
+.dot.error    { background: var(--error); box-shadow: 0 0 0 4px color-mix(in srgb, var(--error) 22%, transparent); }
+/* Идёт работа — от точки расходятся круги */
+.dot.starting::after, .dot.syncing::after, .dot.stopping::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit;
+  animation: ripple 1.6s ease-out infinite;
+}
+@keyframes ripple { from { transform: scale(1); opacity: .6; } to { transform: scale(3.2); opacity: 0; } }
 @keyframes pulse { 50% { opacity: .35; } }
-.title { font-size: 18px; font-weight: 600; }
+.title { font-family: var(--round); font-size: 19px; font-weight: 700; }
 
-.machine { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 14px; }
-.links { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+.machine { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 14px; }
+.links { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
          display: flex; flex-direction: column; gap: 10px; }
 .link-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 code {
@@ -92,21 +125,41 @@ code {
 .actions { display: flex; gap: 12px; }
 button {
   flex: 1;
-  font: inherit; font-weight: 600;
-  padding: 12px 16px;
-  border-radius: 12px;
+  font: inherit; font-family: var(--round); font-weight: 650;
+  padding: 12px 18px;
+  border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--card);
   color: var(--text);
   cursor: pointer;
+  position: relative; overflow: hidden;
+  transition: transform .16s ease, box-shadow .22s ease, border-color .22s ease, background-position .5s ease,
+              opacity .2s ease;
 }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-button.small { flex: none; padding: 6px 12px; font-size: 13px; border-radius: 9px; }
-button:disabled { opacity: .45; cursor: default; }
+button:hover:not(:disabled) { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .12); }
+button:active:not(:disabled) { transform: translateY(0) scale(.975); }
+button.primary {
+  background: var(--grad); background-size: 170% 100%; background-position: 0 0;
+  border: 1px solid transparent; color: var(--accent-text);
+  box-shadow: 0 6px 20px rgba(230, 20, 80, .28);
+}
+button.primary:hover:not(:disabled) { background-position: 100% 0; border-color: transparent;
+  box-shadow: 0 10px 30px rgba(230, 20, 80, .42); }
+/* Блик, пробегающий по градиентной кнопке при наведении */
+button.primary::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, .38) 50%, transparent 70%);
+  transform: translateX(-130%);
+}
+button.primary:hover:not(:disabled)::after { transform: translateX(130%); transition: transform .75s ease; }
+#play { font-size: 17px; padding: 15px 18px; letter-spacing: .2px; }
+button.small { flex: none; padding: 6px 13px; font-size: 13px; border-radius: 999px; }
+button:disabled { opacity: .42; cursor: default; box-shadow: none; }
 
 .error {
   background: var(--error-bg);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 12px 14px;
   font-size: 14px;
   white-space: pre-wrap;
@@ -114,7 +167,7 @@ button:disabled { opacity: .45; cursor: default; }
 }
 
 /* ---- Экраны выбора машины и хода запуска */
-h1 { font-size: 20px; margin: 4px 0 0; }
+h1 { font-family: var(--round); font-size: 24px; font-weight: 800; letter-spacing: -.3px; margin: 4px 0 0; }
 .note { color: var(--muted); font-size: 13px; }
 .table-card { padding: 6px 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -122,10 +175,11 @@ th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; p
 td { padding: 8px; border-top: 1px solid var(--border); }
 th.num, td.num { text-align: right; white-space: nowrap; }
 tbody tr { cursor: pointer; }
+tbody tr { transition: background .15s ease; }
 tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 6px; font-size: 11px;
        background: color-mix(in srgb, var(--accent) 22%, transparent); }
-tbody tr.selected { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+tbody tr.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
 input[type=radio] { accent-color: var(--accent); margin: 0; }
 
 .stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -135,9 +189,9 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   border: 2px solid var(--border);
 }
 .stages li.active { color: var(--text); font-weight: 600; }
-.stages li.active .mark { border-color: var(--starting); border-top-color: transparent; animation: spin 1s linear infinite; }
+.stages li.active .mark { border-color: var(--accent); border-top-color: transparent; animation: spin .9s linear infinite; }
 .stages li.done { color: var(--text); }
-.stages li.done .mark { border-color: var(--ready); background: var(--ready); }
+.stages li.done .mark { border-color: transparent; background: var(--grad); box-shadow: 0 0 10px rgba(230, 20, 80, .35); }
 .stages li.failed .mark { border-color: var(--error); background: var(--error); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -159,12 +213,13 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 
 /* ---- Вопрос да/нет */
 .modal {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, .45);
+  position: fixed; inset: 0; background: rgba(8, 6, 14, .5);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }
 .dialog {
-  background: var(--card); border: 1px solid var(--border); border-radius: 16px;
-  padding: 20px; max-width: 460px; width: 100%;
+  background: var(--card); border: 1px solid var(--border); border-radius: 22px;
+  padding: 22px; max-width: 460px; width: 100%;
   display: flex; flex-direction: column; gap: 12px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
 }
@@ -173,12 +228,14 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 /* ---- «Закончить» и аварийное удаление */
 .danger-row { display: flex; justify-content: center; }
 button.link { flex: none; background: none; border: none; padding: 4px 8px; font-weight: 500; font-size: 13px; }
+button.link:hover:not(:disabled) { transform: none; box-shadow: none; text-decoration: underline; }
 button.danger { color: var(--error); }
 .card.attention { background: var(--warn-bg); display: flex; flex-direction: column; gap: 8px; }
 .card.attention button { align-self: flex-start; }
 
 /* ---- Доступна новая версия */
-.card.update { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-color: var(--accent); }
+.card.update { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1.5px solid transparent; background: linear-gradient(var(--card), var(--card)) padding-box, var(--grad) border-box; }
 .update-text { display: flex; flex-direction: column; align-items: flex-start; }
 .update-text button.link { padding: 2px 0 0; color: var(--accent); }
 .card.update > button { flex: none; }
@@ -214,9 +271,9 @@ input[type=checkbox] {
 }
 input[type=checkbox]::after {
   content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
-  background: #fff; transition: left .15s;
+  background: #fff; transition: left .2s cubic-bezier(.3, 1.4, .5, 1); box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
 }
-input[type=checkbox]:checked { background: var(--ready); }
+input[type=checkbox]:checked { background: var(--grad); }
 input[type=checkbox]:checked::after { left: 19px; }
 
 /* ---- Большие библиотеки игр */
@@ -254,7 +311,7 @@ tr.group td { font-weight: 600; font-size: 13px; color: var(--muted); background
 /* ---- История и траты */
 .tabs { display: flex; gap: 6px; }
 .tabs button { flex: none; padding: 5px 12px; font-size: 13px; border-radius: 9px; }
-.tabs button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.tabs button.active { background: var(--grad); border-color: transparent; color: var(--accent-text); }
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .stats .big { font-size: 22px; }
 #history-card { max-height: 360px; overflow: auto; }
@@ -281,11 +338,12 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 /* Простая настройка */
 .wiz-steps { list-style: none; display: flex; gap: 6px; padding: 0; margin: 0 0 14px; flex-wrap: wrap; }
 .wiz-steps li { flex: 1 1 90px; font-size: 12px; color: var(--muted); padding-top: 6px; border-top: 3px solid var(--border); }
+.wiz-steps li { border-image: none; }
 .wiz-steps li.current { color: var(--text); border-top-color: var(--accent); font-weight: 600; }
 .wiz-steps li.done { color: var(--text); border-top-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .wiz-steps li.done::before { content: "✓ "; }
 .wiz-card { display: flex; flex-direction: column; gap: 14px; padding: 22px; }
-.wiz-card h1 { margin: 0; font-size: 22px; }
+.wiz-card h1 { margin: 0; font-size: 24px; }
 .wiz-text { white-space: pre-line; line-height: 1.5; font-size: 15px; }
 .wiz-text b { font-weight: 600; }
 .wiz-body { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
@@ -312,5 +370,37 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 
 /* Вкладки списка машин: KVM / Docker (экспериментально) */
 .tabs { display: flex; gap: 6px; margin: 12px 0 6px; }
-.tabs button { border-radius: 8px; }
-.tabs button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.tabs button { border-radius: 999px; }
+.tabs button.active { background: var(--grad); border-color: transparent; color: var(--accent-text); }
+
+/* ---- Движение: экраны и карточки появляются мягко, одна за другой; вопрос — «всплывает».
+   Анимация срабатывает, когда блок становится видимым (hidden снят), — обновления данных её не повторяют. */
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop { from { opacity: 0; transform: translateY(10px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes slide-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+main > * { animation: rise .5s cubic-bezier(.2, .8, .2, 1) both; }
+main > :nth-child(2) { animation-delay: .04s; }
+main > :nth-child(3) { animation-delay: .08s; }
+main > :nth-child(4) { animation-delay: .12s; }
+main > :nth-child(5) { animation-delay: .16s; }
+main > :nth-child(6) { animation-delay: .2s; }
+main > :nth-child(n+7) { animation-delay: .24s; }
+#update-banner, #setup-banner { animation: slide-down .45s cubic-bezier(.2, .8, .2, 1) both; }
+.modal:not([hidden]) { animation: fade .2s ease both; }
+.modal:not([hidden]) .dialog { animation: pop .28s cubic-bezier(.2, .9, .3, 1.15) both; }
+.error:not([hidden]), .step-msg { animation: fade .25s ease both; }
+.card { transition: box-shadow .25s ease, transform .25s ease, background .3s ease; }
+/* Идёт запуск или скачивание обновления — по верху карточки бежит полоса цветов логотипа */
+@keyframes flow { to { background-position: -200% 0; } }
+.card:has(.stages li.active), .card.update:has(#update-go:disabled) { position: relative; overflow: hidden; }
+.card:has(.stages li.active)::before, .card.update:has(#update-go:disabled)::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  background: linear-gradient(90deg, #ff6a00, #f5162f, #d60f63, #7a0cb8, #ff6a00); background-size: 200% 100%;
+  animation: flow 1.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0s !important;
+    animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

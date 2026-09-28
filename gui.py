@@ -820,7 +820,7 @@ for _name, _fn in list(vars(Api).items()):
 def main():
     autostart.refresh()      # служба стоит, но проект переехал — поправить пути (выключенную не трогаем)
     api = Api()
-    window = webview.create_window("vastgame", str(HERE / "ui" / "index.html"), js_api=api,
+    window = webview.create_window("VastGame", str(HERE / "ui" / "index.html"), js_api=api,
                                    width=620, height=760, min_size=(520, 600))
     api._window = window
     window.events.closing += api._on_closing
