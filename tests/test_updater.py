@@ -427,6 +427,7 @@ class TestWatch(unittest.TestCase):
         self.assertEqual(opened, ["NEW"])
         self.assertTrue((target / "NEW").exists())
         self.assertFalse(backup.exists())                            # прежняя убрана
+        self.assertFalse(backup.parent.exists())                     # и опустевшая папка версии
         self.assertFalse((folder / "started").exists())
         self.assertIn("поставлена 9.9.9", (folder / "update.log").read_text())
 

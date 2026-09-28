@@ -276,6 +276,7 @@ i=0
 while [ ! -f "$folder/started" ] && [ $i -lt "$wait" ]; do sleep 1; i=$((i+1)); done
 if [ -f "$folder/started" ]; then
   rm -rf "$backup" "$folder/started"
+  rmdir "$(dirname "$backup")" 2>/dev/null
   say "поставлена $version"
   exit 0
 fi
