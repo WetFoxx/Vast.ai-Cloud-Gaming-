@@ -36,6 +36,7 @@ function duration(sec) {
 
 function show(screen) {
   for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen);
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -83,31 +84,39 @@ function setBalance(value) {
 }
 
 function render(data) {
-  $("updated").textContent = t("app.updated", {
-    time: new Date().toLocaleTimeString(LANG, { hour: "2-digit", minute: "2-digit" }),
-  });
   if (data.error) { showError("error", data.error); return; }
   showError("error", null);
   current = data;
   if (data.game_names) GAME_NAMES = data.game_names;
 
   setBalance(data.balance);
+  const st = data.status, m = st.machine;
+  // Машины нет — крупно баланс и «Играть»; есть — баланс справа, под состоянием — ярлыки машины и сессии
+  $("machine-card").classList.toggle("empty", !m);
   const sub = [];
-  if (data.hours_left != null) sub.push(t("balance.hours", { hours: num(data.hours_left) }));
+  if (data.hours_left != null) sub.push(t("balance.hours.short", { hours: num(data.hours_left) }));
+  if (!m) sub.push(t("balance.label"));
   if (data.low_balance) sub.push(t("balance.low"));
   $("balance-sub").textContent = sub.join(" · ");
   $("balance-card").classList.toggle("low", !!data.low_balance);
 
-  const st = data.status;
   $("dot").className = "dot " + st.state;
   $("status-title").textContent = t("status.title." + st.state);
+  // Подробности состояния — только когда их не видно ниже (ход архивов, строка запуска)
+  const task0 = data.task && data.task.active;
+  $("status-text").hidden = ["ready", "syncing"].includes(st.state) || !!task0 || !m;
   $("status-text").textContent = statusText(st);
-  const m = st.machine;
-  $("machine").hidden = !m;
-  if (m) $("machine").textContent = t("machine.line", { gpu: m.gpu, country: m.country, price: money(m.price), id: m.id });
-  // Сколько идёт сессия и сколько она уже стоит (по своей записи: начало и цена часа)
-  $("session-line").hidden = !data.session;
-  if (data.session) $("session-line").textContent = t("session.running", { time: hm(data.session.elapsed), cost: money(data.session.cost) });
+  const facts = $("facts");
+  facts.hidden = !m;
+  facts.innerHTML = "";
+  if (m) {
+    const chip = (text, cls = "") => facts.appendChild(el("span", { className: "chip " + cls }, text));
+    chip(`${m.gpu} · ${m.country}`, "strong");
+    chip(t("unit.per_hour", { price: money(m.price) }));
+    // Сколько идёт сессия и сколько она уже стоит (по своей записи: начало и цена часа)
+    if (data.session) chip(t("session.running", { time: hm(data.session.elapsed), cost: money(data.session.cost) }), "muted");
+    facts.title = t("machine.instance", { id: m.id });
+  }
   const li = st.links;
   $("links").hidden = !li || st.state === "starting";
   if (li) $("moonlight").textContent = li.moonlight;
@@ -122,8 +131,10 @@ function render(data) {
   renderAsks(st.asks || []);
   liveLoop(!!(task || ["starting", "syncing"].includes(st.state)));
 
+  $("play").hidden = !!m;
   $("play").disabled = st.state !== "none" || !!data.busy || (setupData && !setupData.ready);
   // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
+  $("foot").hidden = !m;
   $("stop").disabled = !m || !["ready", "syncing", "error"].includes(st.state) || !!data.busy;
   $("emergency").hidden = !m || !!data.busy;
 }
@@ -138,7 +149,7 @@ function liveFromStatus(st) {
 function renderLive(archives) {
   const names = sortedArchives(archives).filter((n) => ["down", "up", "err"].includes(archives[n][0]));
   const ul = $("live-archives");
-  ul.hidden = !names.length;
+  $("live").hidden = !names.length;
   ul.innerHTML = "";
   for (const n of names) ul.appendChild(archiveRow(n, archives[n][0], archives[n][2]));
 }
@@ -272,14 +283,25 @@ async function loadStreamSettings() {
   br.appendChild(el("option", { value: 0 }, t("stream.bitrate.auto")));
   for (const b of s.bitrates) br.appendChild(el("option", { value: b }, t("stream.bitrate.mbps", { n: b })));
   br.value = s.bitrate;
+  streamOptions = s.resolutions;
   $("stream-set").hidden = false;
   showStreamHint();
+}
+let streamOptions = [];
+// «Трансляция: 2560 × 1600 · авто» — выбор одной строкой; сами списки — в «Параметрах»
+function streamSummary() {
+  const o = streamOptions.find((x) => x.value === $("stream-res").value);
+  const res = !o ? "—" : o.value === "moonlight" ? t("stream.res.moonlight") : `${o.w} × ${o.h}`;
+  const br = Number($("stream-bitrate").value);
+  $("stream-summary").innerHTML = "";
+  $("stream-summary").append(t("stream.summary") + " ", el("b", {}, res + " · " + (br ? t("stream.bitrate.mbps", { n: br }) : t("stream.bitrate.auto.short"))));
 }
 function showStreamHint() {
   const native = $("stream-res").value === "native";
   $("stream-res").classList.toggle("native", native);
   $("stream-hint").hidden = false;
   $("stream-hint").textContent = t(native ? "stream.hint.native" : "stream.hint.other");
+  streamSummary();
 }
 for (const id of ["stream-res", "stream-bitrate"]) {
   $(id).addEventListener("change", () => {
@@ -294,6 +316,20 @@ $("ml-start").addEventListener("click", () => {
 
 $("open-sunshine").addEventListener("click", () => {
   if (current && current.status.links && !DEMO) api().open_url(current.status.links.sunshine);
+});
+
+// «Параметры ›»: разрешение и битрейт; ручное подключение (адрес, кабинет Sunshine, его логин)
+$("params-toggle").addEventListener("click", () => {
+  $("params").hidden = !$("params").hidden;
+  $("params-toggle").textContent = t($("params").hidden ? "params.open" : "params.close");
+});
+$("show-login").addEventListener("click", async () => {
+  const box = $("sunshine-login");
+  if (!box.hidden) { box.hidden = true; $("show-login").textContent = t("params.login.show"); return; }
+  const r = DEMO ? { user: "vastgame", password: "demo-password" } : await api().sunshine_login();
+  box.textContent = r && r.user ? t("setup.sunshine_login", { user: r.user, password: r.password }) : t("setup.sunshine_login.none");
+  box.hidden = false;
+  $("show-login").textContent = t("params.login.hide");
 });
 
 // ---------------------------------------------------------------- выбор машины
@@ -324,7 +360,7 @@ async function watchLaunch() {
 }
 function renderReplace() {
   const box = $("offers-current"), d = offersData;
-  $("rent").textContent = t(replaceMode ? "offers.replace" : "offers.rent");
+  rentLabel();
   box.hidden = !replaceMode && !replaceBlocked;
   if (box.hidden) return;
   if (replaceBlocked) { box.textContent = t("replace.ready"); return; }
@@ -379,7 +415,7 @@ function showTabs() {
   $("tab-kvm").classList.toggle("active", !offersDocker);
   $("tab-docker").classList.toggle("active", !!offersDocker);
   $("offers-docker-note").hidden = !offersDocker;
-  $("f-traffic-box").hidden = !offersDocker;
+  $("f-traffic").hidden = !offersDocker;
 }
 // Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
 $("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offersData ? offersData.disk : null, false); });
@@ -398,6 +434,7 @@ async function loadSyncList() {
   $("sync-summary").textContent = t("sync.loading");
   $("sync-list").innerHTML = "";
   $("sync-cols").hidden = true;
+  $("sync-toggle").hidden = true;
   $("sync-note").hidden = true;
   const d = DEMO ? demoSync() : await api().sync_list();
   if (my !== syncReq) return;
@@ -410,6 +447,10 @@ async function loadSyncList() {
   syncRows = d.rows;
   renderSync();
 }
+$("sync-toggle").addEventListener("click", () => {
+  $("sync-body").hidden = !$("sync-body").hidden;
+  $("sync-toggle").textContent = t($("sync-body").hidden ? "sync.edit" : "sync.hide");
+});
 
 function gameCover(r) {
   // Обложка из магазина Steam; игра не из Steam (или картинки нет) — первая буква на градиенте
@@ -436,6 +477,7 @@ function renderSync() {
   const ul = $("sync-list");
   ul.innerHTML = "";
   $("sync-cols").hidden = !syncRows.length;
+  $("sync-toggle").hidden = !syncRows.length;
   for (const r of syncRows) {
     const li = el("li");
     const name = el("span", { className: "name" });
@@ -554,10 +596,17 @@ function fillSelect(sel, values, label, value) {
 }
 
 function renderFilters(d) {
-  fillSelect($("f-speed"), SPEEDS, (v) => v ? t("filter.speed.from", { n: v }) : t("filter.any"), filters.speed);
-  fillSelect($("f-ping"), PINGS, (v) => v ? t("filter.ping.to", { n: v }) : t("filter.any"), filters.ping);
-  fillSelect($("f-traffic"), TRAFFICS, (v) => !v ? t("filter.any") : v === 0.1 ? t("filter.traffic.free")
-    : t("filter.traffic.to", { n: v }), filters.traffic ?? 1);
+  const chip = (key, v) => t(key) + ": " + v;
+  fillSelect($("f-speed"), SPEEDS, (v) => chip("filter.speed", v ? t("filter.speed.from", { n: v }) : t("filter.any")), filters.speed);
+  fillSelect($("f-ping"), PINGS, (v) => chip("filter.ping", v ? t("filter.ping.to", { n: v }) : t("filter.any")), filters.ping);
+  fillSelect($("f-traffic"), TRAFFICS, (v) => chip("filter.traffic", !v ? t("filter.any") : v === 0.1 ? t("filter.traffic.free")
+    : t("filter.traffic.to", { n: v })), filters.traffic ?? 1);
+  // включённый фильтр — цветом
+  $("f-speed").classList.toggle("on", !!filters.speed);
+  $("f-ping").classList.toggle("on", !!filters.ping);
+  $("f-traffic").classList.toggle("on", !!(filters.traffic ?? 1));
+  $("f-countries-btn").classList.toggle("on", filters.countries.length > 0);
+  $("f-gpus-btn").classList.toggle("on", filters.gpus.length > 0);
   for (const th of document.querySelectorAll("#offers-table th.sortable")) {
     const on = th.dataset.sort === (filters.sort || "price");
     th.classList.toggle("sorted", on);
@@ -565,8 +614,8 @@ function renderFilters(d) {
     th.querySelector(".arrow").textContent = on ? (filters.dir === "desc" ? "▼" : "▲") : "";
   }
   const names = filters.countries.map(countryName);
-  $("f-countries-btn").textContent = !names.length ? t("filter.countries.any")
-    : names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "");
+  $("f-countries-btn").textContent = (!names.length ? t("filter.countries.any")
+    : names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "")) + " ▾";
   // Страны — только те, что есть в списке, с числом машин
   const counts = {};
   for (const o of d.offers) counts[o.cc] = (counts[o.cc] || 0) + 1;
@@ -584,7 +633,7 @@ function renderFilters(d) {
   }
   // Видеокарты — так же: модели из списка с числом машин, от старших к младшим
   const g = filters.gpus;
-  $("f-gpus-btn").textContent = !g.length ? t("filter.gpus.any") : g.slice(0, 2).join(", ") + (g.length > 2 ? ` +${g.length - 2}` : "");
+  $("f-gpus-btn").textContent = (!g.length ? t("filter.gpus.any") : g.slice(0, 2).join(", ") + (g.length > 2 ? ` +${g.length - 2}` : "")) + " ▾";
   const gcounts = {};
   for (const o of d.offers) gcounts[o.gpu] = (gcounts[o.gpu] || 0) + 1;
   const glist = $("f-gpus-list");
@@ -608,9 +657,14 @@ for (const [id, key] of [["f-speed", "speed"], ["f-ping", "ping"], ["f-traffic",
     page = 0; saveFilters(); renderOffers();
   });
 }
-$("f-countries-btn").addEventListener("click", () => { $("f-countries").hidden = !$("f-countries").hidden; });
+// Панели под строкой фильтров: открыта одна
+function togglePop(id) {
+  for (const x of ["f-disk", "f-countries", "f-gpus"]) $(x).hidden = x !== id || !$(x).hidden;
+}
+$("f-disk-btn").addEventListener("click", () => togglePop("f-disk"));
+$("f-countries-btn").addEventListener("click", () => togglePop("f-countries"));
 $("f-countries-all").addEventListener("click", () => { filters.countries = []; page = 0; saveFilters(); renderOffers(); });
-$("f-gpus-btn").addEventListener("click", () => { $("f-gpus").hidden = !$("f-gpus").hidden; });
+$("f-gpus-btn").addEventListener("click", () => togglePop("f-gpus"));
 $("f-gpus-all").addEventListener("click", () => { filters.gpus = []; page = 0; saveFilters(); renderOffers(); });
 $("page-prev").addEventListener("click", () => { page--; renderOffers(); });
 $("page-next").addEventListener("click", () => { page++; renderOffers(); });
@@ -629,7 +683,8 @@ function renderOffers() {
   renderFilters(d);
   const list = offerList(d);
   $("offers-summary").textContent = t("offers.summary", { count: d.count, rel: num(d.min_rel * 100, 0), disk: d.disk })
-    + (filtersActive() ? " · " + t("offers.filtered", { shown: list.length }) : "");
+    + (filtersActive() ? " · " + t("offers.filtered", { shown: list.length }) : "") + " · " + t("offers.latency.short");
+  $("offers-summary").title = t("offers.latency");
   $("disk-value").textContent = t("disk.value", { gb: d.disk });
   const L = d.last;
   $("offers-last").hidden = !L;
@@ -683,6 +738,14 @@ function renderOffers() {
     body.appendChild(tr);
   }
   $("rent").disabled = replaceBlocked;
+  rentLabel();
+}
+
+// «Арендовать RTX 3070 · $0.10/ч» (в замене — «Заменить на …»)
+function rentLabel() {
+  const o = offersData && filters && offerList(offersData).find((x) => x.id === selected);   // фильтры — после renderOffers
+  const key = replaceMode ? "offers.replace" : "offers.rent";
+  $("rent").textContent = o ? t(key + ".to", { gpu: o.gpu, price: t("unit.per_hour", { price: money(o.price) }) }) : t(key);
 }
 
 $("offers-cancel").addEventListener("click", () => { show("main"); refresh(); });
@@ -837,12 +900,6 @@ function renderSetup() {
   li.innerHTML = '<span class="icon info">i</span><div class="body"><b></b><span class="sub pre"></span></div>';
   li.querySelector("b").textContent = t("setup.pair.title");
   li.querySelector(".sub").textContent = t("setup.pair.text");
-  const login = el("div", { className: "actions" });
-  login.appendChild(button(t("setup.act.sunshine_login"), async () => {
-    const r = DEMO ? { user: "vastgame", password: "demo" } : await api().sunshine_login();
-    stepMsg(li, r.user ? t("setup.sunshine_login", { user: r.user, password: r.password }) : t("setup.sunshine_login.none"));
-  }));
-  li.querySelector(".body").appendChild(login);
   ul.appendChild(li);
 }
 
@@ -1666,8 +1723,7 @@ function renderResult(r) {
   const links = $("links").cloneNode(true);
   const part = (id) => links.querySelector("#" + id);
   links.hidden = false;
-  part("moonlight").textContent = r.links.moonlight;
-  for (const id of ["ml-app", "stream-set", "stream-hint"]) part(id).remove();
+  for (const id of ["ml-app", "params-row", "params"]) part(id).remove();   // выбор и параметры — на главном
   const btn = part("ml-start"), note = part("ml-note");
   btn.onclick = async () => {
     btn.disabled = true;
@@ -1677,8 +1733,6 @@ function renderResult(r) {
     if (!m.installed) { btn.disabled = false; note.textContent = t("moonlight.missing"); return; }
     launchMoonlight(btn, note, r.links.moonlight, m.selected);
   };
-  part("copy-moonlight").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.links.moonlight);
-  part("open-sunshine").onclick = () => !DEMO && api().open_url(r.links.sunshine);
   links.removeAttribute("id");
   links.querySelectorAll("[id]").forEach((e) => e.removeAttribute("id"));
   box.appendChild(links);

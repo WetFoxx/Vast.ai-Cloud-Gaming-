@@ -9,10 +9,12 @@
 <body>
   <header>
     <div class="brand"><img class="brand-mark" src="logo-mark.png" alt=""><img class="brand-word" src="logo-word.png" alt="VastGame"><span class="version" id="app-version"></span></div>
-    <div class="header-right">
-      <span class="updated" id="updated" data-i18n="app.loading"></span>
-      <select id="lang" aria-label="Language"></select>
-    </div>
+    <!-- Разделы — значками справа (подписи — во всплывающих подсказках) -->
+    <nav class="header-right icons">
+      <button class="icon-btn" id="open-games" data-i18n-title="games.open"><svg viewBox="0 0 24 24"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg></button>
+      <button class="icon-btn" id="open-history" data-i18n-title="history.open"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></button>
+      <button class="icon-btn" id="open-setup" data-i18n-title="setup.open"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+    </nav>
   </header>
 
   <!-- ===== Главный экран ===== -->
@@ -35,22 +37,19 @@
       <ul class="asks" id="asks-list"></ul>
     </section>
 
-    <section class="card" id="balance-card">
-      <div class="label" data-i18n="balance.label"></div>
-      <div class="big" id="balance">—</div>
-      <div class="sub" id="balance-sub"></div>
-    </section>
-
-    <section class="card" id="machine-card">
-      <div class="status-row">
-        <span class="dot" id="dot"></span>
-        <div>
-          <div class="title" id="status-title">—</div>
+    <!-- Машина и баланс — одна карточка. Машины нет — крупно баланс и «Играть» (класс empty) -->
+    <section class="card hero" id="machine-card">
+      <div class="hero-top">
+        <div class="hero-main">
+          <div class="hero-status"><span class="dot" id="dot"></span><span class="title" id="status-title">—</span></div>
           <div class="sub" id="status-text"></div>
+          <div class="facts" id="facts" hidden></div>
+        </div>
+        <div class="money" id="balance-card">
+          <div class="big" id="balance">—</div>
+          <div class="sub" id="balance-sub"></div>
         </div>
       </div>
-      <div class="machine" id="machine" hidden></div>
-      <div class="sub" id="session-line" hidden></div>
       <div class="task-row" id="task-row" hidden>
         <span class="task-text" id="task-text"></span>
         <span class="task-buttons">
@@ -58,83 +57,91 @@
           <button class="small" id="task-show" data-i18n="task.show"></button>
         </span>
       </div>
-      <ul class="archives live" id="live-archives" hidden></ul>
       <div class="links" id="links" hidden>
         <div class="ml-row">
           <button class="primary" id="ml-start" data-i18n="moonlight.start"></button>
           <select id="ml-app" aria-label="Sunshine app" data-i18n-title="moonlight.app"></select>
         </div>
         <div class="sub" id="ml-note" hidden></div>
-        <div class="stream-set" id="stream-set" hidden>
-          <label><span class="label" data-i18n="stream.resolution"></span><select id="stream-res"></select></label>
-          <label><span class="label" data-i18n="stream.bitrate"></span><select id="stream-bitrate"></select></label>
+        <div class="row-link" id="params-row">
+          <span id="stream-summary"></span>
+          <button class="link" id="params-toggle" data-i18n="params.open"></button>
         </div>
-        <div class="sub" id="stream-hint" hidden></div>
-        <div class="link-row">
-          <div>
-            <div class="label" data-i18n="links.moonlight"></div>
-            <code id="moonlight"></code>
+        <!-- Параметры: разрешение и битрейт; ручное подключение (обычно не нужно — связывает VastGame сам) -->
+        <div class="params" id="params" hidden>
+          <div class="stream-set" id="stream-set" hidden>
+            <label><span class="label" data-i18n="stream.resolution"></span><select id="stream-res"></select></label>
+            <label><span class="label" data-i18n="stream.bitrate"></span><select id="stream-bitrate"></select></label>
           </div>
-          <button class="small" id="copy-moonlight" data-i18n="btn.copy"></button>
-        </div>
-        <div class="link-row">
-          <div class="label" data-i18n="links.sunshine"></div>
-          <button class="small" id="open-sunshine" data-i18n="btn.open"></button>
+          <div class="sub" id="stream-hint" hidden></div>
+          <div class="label params-cap" data-i18n="params.manual"></div>
+          <div class="link-row">
+            <div>
+              <div class="sub" data-i18n="links.moonlight"></div>
+              <code id="moonlight"></code>
+            </div>
+            <button class="small" id="copy-moonlight" data-i18n="btn.copy"></button>
+          </div>
+          <div class="link-row">
+            <div class="sub" data-i18n="links.sunshine"></div>
+            <button class="small" id="open-sunshine" data-i18n="btn.open"></button>
+          </div>
+          <div class="link-row">
+            <div>
+              <div class="sub" data-i18n="params.login"></div>
+              <code id="sunshine-login" hidden></code>
+            </div>
+            <button class="small" id="show-login" data-i18n="params.login.show"></button>
+          </div>
         </div>
       </div>
+      <div class="live" id="live" hidden>
+        <div class="label" data-i18n="live.title"></div>
+        <ul class="archives" id="live-archives"></ul>
+      </div>
+      <button class="primary" id="play" disabled hidden data-i18n="btn.play"></button>
     </section>
 
-    <div class="actions">
-      <button class="primary" id="play" disabled data-i18n="btn.play"></button>
+    <div class="foot" id="foot" hidden>
+      <button class="link danger" id="emergency" data-i18n="btn.emergency"></button>
       <button id="stop" disabled data-i18n="btn.stop"></button>
     </div>
-
     <div class="error" id="error" hidden></div>
-    <div class="actions">
-      <button id="open-games" data-i18n="games.open"></button>
-      <button id="open-history" data-i18n="history.open"></button>
-      <button id="open-setup" data-i18n="setup.open"></button>
-    </div>
-    <div class="danger-row"><button class="link danger" id="emergency" hidden data-i18n="btn.emergency"></button></div>
   </main>
 
   <!-- ===== Выбор машины ===== -->
   <main id="screen-offers" hidden>
     <h1 data-i18n="offers.title"></h1>
-    <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
-    <div class="note" data-i18n="offers.latency"></div>
-    <div class="note" id="offers-last" hidden></div>
-    <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->
-    <section class="card attention replace-card" id="offers-current" hidden></section>
     <div class="tabs" role="tablist">
       <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
       <button id="tab-docker" role="tab" data-i18n="offers.mode.docker"></button>
     </div>
     <div class="note" id="offers-docker-note" data-i18n="offers.mode.docker_note" hidden></div>
-    <section class="card disk-card">
-      <div class="disk-row"><span class="label" data-i18n="disk.title"></span><b id="disk-value"></b></div>
+    <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->
+    <section class="card attention replace-card" id="offers-current" hidden></section>
+    <!-- Фильтры — одной строкой; включённый подсвечен. Диск, страны, видеокарты — панелью под строкой -->
+    <div class="filter-chips">
+      <button class="chip" id="f-disk-btn"><span data-i18n="disk.chip"></span> <b id="disk-value"></b></button>
+      <button class="chip" id="f-countries-btn"></button>
+      <button class="chip" id="f-gpus-btn"></button>
+      <select class="chip" id="f-speed" data-i18n-title="filter.speed"></select>
+      <select class="chip" id="f-ping" data-i18n-title="filter.ping"></select>
+      <select class="chip" id="f-traffic" hidden data-i18n-title="filter.traffic"></select>
+    </div>
+    <section class="card pop disk-card" id="f-disk" hidden>
       <input type="range" id="disk" min="50" max="1000" step="10" value="100">
       <div class="sub" data-i18n="disk.hint"></div>
     </section>
-    <section class="card filters-card">
-      <div class="filters">
-        <label><span class="label" data-i18n="filter.countries"></span>
-          <button id="f-countries-btn" class="filter-btn"></button></label>
-        <label><span class="label" data-i18n="filter.gpus"></span>
-          <button id="f-gpus-btn" class="filter-btn"></button></label>
-        <label><span class="label" data-i18n="filter.speed"></span><select id="f-speed"></select></label>
-        <label><span class="label" data-i18n="filter.ping"></span><select id="f-ping"></select></label>
-        <label id="f-traffic-box" hidden><span class="label" data-i18n="filter.traffic"></span><select id="f-traffic"></select></label>
-      </div>
-      <div class="countries" id="f-countries" hidden>
-        <div class="countries-head"><button id="f-countries-all" data-i18n="filter.countries.all"></button></div>
-        <div class="countries-list" id="f-countries-list"></div>
-      </div>
-      <div class="countries" id="f-gpus" hidden>
-        <div class="countries-head"><button id="f-gpus-all" data-i18n="filter.gpus.all"></button></div>
-        <div class="countries-list" id="f-gpus-list"></div>
-      </div>
+    <section class="card pop countries" id="f-countries" hidden>
+      <div class="countries-head"><button id="f-countries-all" data-i18n="filter.countries.all"></button></div>
+      <div class="countries-list" id="f-countries-list"></div>
     </section>
+    <section class="card pop countries" id="f-gpus" hidden>
+      <div class="countries-head"><button id="f-gpus-all" data-i18n="filter.gpus.all"></button></div>
+      <div class="countries-list" id="f-gpus-list"></div>
+    </section>
+    <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
+    <div class="note" id="offers-last" hidden></div>
     <section class="card table-card">
       <table id="offers-table">
         <thead>
@@ -157,17 +164,19 @@
     <!-- Что синхронизировать: одна строка на игру (её файлы и сохранения вместе), выбор запоминается -->
     <section class="card sync-card" id="sync-card">
       <div class="sync-head">
-        <span class="label" data-i18n="sync.title"></span>
-        <span class="sub" id="sync-summary" data-i18n="sync.loading"></span>
+        <div><div class="label" data-i18n="sync.title"></div><span class="sub" id="sync-summary" data-i18n="sync.loading"></span></div>
+        <button class="link" id="sync-toggle" data-i18n="sync.edit" hidden></button>
       </div>
+      <div class="sync-body" id="sync-body" hidden>
       <div class="sync-cols" id="sync-cols" hidden><span></span><span></span><span data-i18n="sync.col.game"></span><span data-i18n="sync.col.saves"></span></div>
       <ul class="sync-list" id="sync-list"></ul>
+      </div>
       <div class="note" id="sync-note" hidden></div>
     </section>
     <div class="error" id="offers-error" hidden></div>
     <div class="actions">
       <button class="primary" id="rent" disabled data-i18n="offers.rent"></button>
-      <button id="offers-cancel" data-i18n="btn.cancel"></button>
+      <button class="cancel" id="offers-cancel" data-i18n="btn.cancel"></button>
     </div>
   </main>
 
@@ -192,6 +201,10 @@
       <ul class="setup-steps" id="setup-steps"></ul>
     </section>
     <div class="error" id="setup-error" hidden></div>
+    <section class="card lang-card">
+      <span class="label">Language · Язык · Idioma</span>
+      <select id="lang" aria-label="Language"></select>
+    </section>
     <section class="card reset-card">
       <div class="label" data-i18n="setup.reset.title"></div>
       <div class="sub" data-i18n="setup.reset.text"></div>

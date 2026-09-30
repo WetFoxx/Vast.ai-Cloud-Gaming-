@@ -2,6 +2,9 @@
    логотипа VastGame (оранжевый → красный → малиновый → фиолетовый) на главном: кнопки, выделения, ход.
    Цвета — в переменных; анимации — в конце файла (и выключаются, если в macOS включено «Уменьшить движение»). */
 :root {
+  /* стрелка выпадающего фильтра: обычная и на цветном (включённом) */
+  --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%23999' stroke-width='1.6'/%3E%3C/svg%3E");
+  --arrow-on: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%23fff' stroke-width='1.6'/%3E%3C/svg%3E");
   --grad: linear-gradient(115deg, #ff6a00 0%, #f5162f 38%, #d60f63 68%, #7a0cb8 100%);
   --round: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --bg: #f4f3f7;
@@ -420,6 +423,70 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .tabs { display: flex; gap: 6px; margin: 12px 0 6px; }
 .tabs button { border-radius: 999px; }
 .tabs button.active { background: var(--grad); border-color: transparent; color: var(--accent-text); }
+
+/* ==== Лаконичный вид (0.3.0): разделы — значками в шапке; машина и баланс — одна карточка; фильтры — ярлыками ==== */
+.icons { display: flex; gap: 6px; }
+.icon-btn { flex: none; width: 36px; height: 36px; padding: 0; display: flex; align-items: center; justify-content: center;
+  border-radius: 12px; }
+.icon-btn svg { width: 18px; height: 18px; stroke: var(--text); fill: none; stroke-width: 1.8; stroke-linecap: round;
+  stroke-linejoin: round; }
+.icon-btn.active { background: var(--grad); border-color: transparent; }
+.icon-btn.active svg { stroke: #fff; }
+
+.hero { display: flex; flex-direction: column; gap: 14px; padding: 20px; }
+.hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.hero-main { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.hero-status { display: flex; gap: 10px; align-items: center; }
+.hero-status .dot { margin-top: 0; }
+.hero-status .title { font-size: 21px; }
+.money { text-align: right; flex: none; }
+.money .big { font-size: 28px; margin: 0; background: var(--grad); -webkit-background-clip: text; background-clip: text;
+  color: transparent; width: auto; }
+.money.low .sub { color: var(--error); }
+.facts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+  background: var(--card-2); border: 1px solid var(--border); font-size: 12.5px; color: var(--text); white-space: nowrap; }
+.chip.strong { font-weight: 600; }
+.chip.muted { color: var(--muted); }
+/* Машины нет: крупно баланс и «Играть» по центру */
+.hero.empty { align-items: stretch; text-align: center; padding: 26px 20px 22px; }
+.hero.empty .hero-top { flex-direction: column; align-items: center; gap: 6px; }
+.hero.empty .hero-main { align-items: center; }
+.hero.empty .hero-status .title { font-size: 15px; font-weight: 500; color: var(--muted); font-family: inherit; }
+.hero.empty .money { text-align: center; }
+.hero.empty .money .big { font-size: 46px; }
+.hero #play { margin-top: 4px; }
+.row-link { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px;
+  color: var(--muted); }
+.row-link b { color: var(--text); font-weight: 600; }
+.row-link button.link { padding: 2px 0; color: var(--text); font-weight: 600; }
+.params { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 14px;
+  background: var(--card-2); }
+.params .stream-set { margin-top: 0; }
+.params-cap { margin-top: 4px; text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 12px; }
+.links { margin-top: 0; padding-top: 0; border-top: none; }
+.live { border-top: 1px solid var(--border); padding-top: 12px; display: flex; flex-direction: column; gap: 4px; }
+.foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.foot #stop { flex: none; padding: 12px 30px; }
+.foot #emergency[hidden] + #stop { margin-left: auto; }
+
+/* Выбор машины: фильтры одной строкой; включённый — цветом; диск, страны, видеокарты — панелью под строкой */
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.filter-chips .chip { flex: none; font: inherit; font-size: 13px; padding: 7px 12px; cursor: pointer; font-weight: 500; }
+.filter-chips select.chip { -webkit-appearance: none; appearance: none; padding-right: 26px;
+  background: var(--arrow) no-repeat right 10px center / 9px 6px, var(--card-2); }
+.filter-chips .chip.on { background: var(--grad); color: #fff; border-color: transparent; }
+.filter-chips select.chip.on { background: var(--arrow-on) no-repeat right 10px center / 9px 6px, var(--grad); }
+.filter-chips .chip:hover:not(:disabled) { transform: none; }
+.card.pop { padding: 12px 16px; }
+.card.pop.countries { margin-top: 0; border-top: 1px solid var(--border); }
+.card.pop.disk-card input[type=range] { margin: 6px 0; }
+button.cancel { flex: none; padding: 12px 22px; }
+.sync-head { align-items: center; }
+.sync-head button.link { color: var(--text); font-weight: 600; }
+.sync-body { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.lang-card { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.lang-card select { font-size: 14px; padding: 6px 10px; }
 
 /* ---- Движение: экраны и карточки появляются мягко, одна за другой; вопрос — «всплывает».
    Анимация срабатывает, когда блок становится видимым (hidden снят), — обновления данных её не повторяют. */
