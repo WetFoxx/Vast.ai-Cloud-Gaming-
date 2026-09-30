@@ -59,6 +59,8 @@ OFFER_SORTS = ("price", "ping", "net", "rel", "gpu")   # колонки, по к
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
 SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
+REPLACE_WAIT = 180   # с: «Сменить машину» — сколько ждать, пока прежний запуск закончится и Vast уберёт машину
+REPLACE_POLL = 2
 ASK_POLL = 10       # с: как часто окно спрашивает машину, нет ли новых вопросов (новая / удалённая игра)
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
@@ -147,11 +149,24 @@ class Api:
         settings.set("offers_docker", bool(docker))
         return bool(docker)
 
-    def offers(self, disk=None, docker=None):
+    def _launching(self):
+        """Идёт запуск («Играть» в фоне, машина ещё не готова) — предложение машины, которая запускается ({} — ещё не
+        арендована); иначе None."""
+        d = jobs.state()
+        if not d or d["kind"] != "play" or not d.get("active") or d.get("done"):
+            return None
+        m = d.get("meta") or {}
+        return m.get("offer") or next((r["offer"] for r in m.get("race") or [] if r.get("offer")), None) or {}
+
+    def offers(self, disk=None, docker=None, replace=False):
         """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс.
-        docker — вкладка «Docker (экспериментально)» (None — как в прошлый раз)."""
+        docker — вкладка «Docker (экспериментально)» (None — как в прошлый раз).
+        replace — каталог во время запуска («Сменить машину»): машина уже есть — это та, что запускается;
+        в ответе current — она (для сравнения цены и пинга), replace — идёт ли ещё запуск."""
+        launching = self._launching() if replace else None
         try:
-            core.require_no_machine()
+            if launching is None:
+                core.require_no_machine()
             tpl = core.template()
             disk = self._disk(disk, tpl)
             docker = self._docker(docker)
@@ -175,7 +190,13 @@ class Api:
                     # цена трафика, $ за ТБ (дороже из двух сторон) — фильтр «Трафик» во вкладке Docker
                     "traffic_tb": round(max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0) * 1000, 2),
                     "ping": latency.for_offer(o, remembered, me)}
-        return {"docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
+        current = None
+        if launching is not None:
+            o = launching
+            current = o and {"gpu": o.get("gpu_name") or "?", "country": market.country(o), "price": o.get("dph_total"),
+                             "ping": latency.for_offer(o, remembered, me), "machine_id": o.get("machine_id")}
+        return {"replace": launching is not None, "current": current,
+                "docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
                 "filters": self._offer_filters(),
                 "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
@@ -241,6 +262,10 @@ class Api:
         v4.6) качает и выгружает только выбранные игры; прежним скриптам — тумблеры по этому выбору."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        return self._start_play(offer_id, sync, disk, lang, spare, docker, select)
+
+    def _start_play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None):
+        """Сама аренда в фоне (play и replace). Идёт другая операция с машиной — busy."""
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
         if not isinstance(select, dict) and isinstance(settings.get("sync_sel"), dict):
             select = {}                      # список игр не загрузился — выбор, запомненный в прошлый раз
@@ -256,6 +281,51 @@ class Api:
         if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare,
                           docker=bool(docker)):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        return {"ok": True}
+
+    def replace(self, offer_id, disk=None, lang=None, spare=None, docker=False, select=None):
+        """«Заменить машину» из каталога во время запуска (человек подтвердил): отменить запуск, удалить машину, что
+        запускается, дождаться, что фоновый процесс закончил и у Vast машин нет, — и только тогда арендовать
+        выбранную. Двух машин не бывает ни на миг: аренда — тем же путём, что «Играть» (там ещё раз проверяется,
+        что машин нет). Запуск уже закончился: машина готова — отказ (менять — через «Закончить», на ней уже может
+        быть несохранённое); не удался и машины нет — обычная аренда."""
+        if self._local_busy():
+            return {"error": {"key": "busy", "params": {}, "text": "busy"}}
+        if self._launching() is None:
+            d = jobs.state() or {}
+            if d.get("kind") == "play" and d.get("done") and not d.get("error"):
+                return {"error": {"key": "replace.ready", "params": {}, "text": "machine is ready"}}
+            return self.play(offer_id, None, disk, lang, spare, docker, select)
+        job = self._job = Job("replace")
+
+        def run():
+            try:
+                job.say("Отменяю запуск и удаляю машину", "info", key="replace.cancelling")
+                for iid in jobs.cancel_play() or []:
+                    ok, msg = core.cancel_delete(iid)
+                    if not ok:
+                        raise VastgameError(f"Не удалось удалить машину {iid}: {msg}", key="core.delete_failed",
+                                            msg=msg or "")
+                job.say("Жду, пока Vast уберёт машину", "info", key="replace.waiting")
+                end = time.time() + REPLACE_WAIT
+                while (jobs.state() or {}).get("active") or core.list_instances():
+                    if time.time() > end:
+                        raise VastgameError("Прежняя машина всё ещё видна у Vast — новую не арендую",
+                                            key="replace.stuck")
+                    time.sleep(REPLACE_POLL)
+                jobs.mark_seen()                        # итог отменённого запуска показывать незачем
+                job.say("Арендую выбранную машину", "info", key="replace.renting")
+                r = self._start_play(offer_id, None, disk, lang, spare, docker, select)
+                job.error, job.result = r.get("error"), None if r.get("error") else {"ok": True}
+            except VastgameError as e:
+                job.error = error_data(e)
+            except Exception as e:                      # noqa: BLE001 — показать любую причину
+                _log_error("replace")
+                job.error = jobs.unexpected(e)
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
 
     def stop(self, lang=None):

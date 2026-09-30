@@ -116,6 +116,7 @@ function render(data) {
   // Идёт запуск или выключение (фоновый процесс) — строка с этапом и «Показать ход»
   const task = data.task && data.task.active ? data.task : null;
   $("task-row").hidden = !task;
+  $("task-replace").hidden = !task || task.kind !== "play";
   if (task) $("task-text").textContent = t("task." + task.kind) + (st.stage ? " · " + t("stage." + st.stage) : "");
   renderLive(liveFromStatus(st));
   renderAsks(st.asks || []);
@@ -296,7 +297,53 @@ $("open-sunshine").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- выбор машины
-$("play").addEventListener("click", () => openOffers());
+$("play").addEventListener("click", () => { replaceMode = false; replaceBlocked = false; openOffers(); });
+
+// ---- «Сменить машину»: каталог во время запуска. Две машины сразу — никогда: выбранную арендуем только после того,
+// как запуск текущей отменён, она удалена и Vast её больше не показывает (Api.replace). Готовую — только через «Закончить».
+let replaceMode = false;      // каталог во время запуска: «Заменить машину» вместо «Арендовать»
+let replaceBlocked = false;   // пока смотрели каталог, машина стала готовой — заменять уже нельзя
+let replaceTimer = null;
+function openReplace() {
+  replaceMode = true;
+  replaceBlocked = false;
+  clearInterval(progTimer);
+  openOffers();
+  clearInterval(replaceTimer);
+  replaceTimer = setInterval(watchLaunch, 5000);
+}
+async function watchLaunch() {
+  if ($("screen-offers").hidden || !replaceMode) { clearInterval(replaceTimer); replaceTimer = null; return; }
+  if (DEMO) return;
+  const p = await api().session_progress(1e9);
+  if (!p || !p.done) return;
+  if (!p.error) replaceBlocked = true;          // машина готова
+  else replaceMode = false;                     // запуск не удался или отменён — машины нет, обычная аренда
+  renderReplace();
+  renderOffers();
+}
+function renderReplace() {
+  const box = $("offers-current"), d = offersData;
+  $("rent").textContent = t(replaceMode ? "offers.replace" : "offers.rent");
+  box.hidden = !replaceMode && !replaceBlocked;
+  if (box.hidden) return;
+  if (replaceBlocked) { box.textContent = t("replace.ready"); return; }
+  const c = d && d.current;
+  box.textContent = c ? t("replace.current", { machine: `${c.gpu} · ${c.country} · ${money(c.price)}`,
+                                               ping: c.ping && c.ping.ms != null ? (c.ping.kind === "estimate" ? "≈ " : "") + t("unit.ms", { n: c.ping.ms }) : "—" })
+                      : t("replace.current_unknown");
+}
+function betterTags(o, addTag) {
+  // Чем машина лучше той, что запускается: дешевле и/или пинг меньше (одинаковое — без метки)
+  const c = offersData && offersData.current;
+  if (!replaceMode || !c) return;
+  const cheaper = (c.price || 0) - o.price;
+  if (cheaper >= 0.005) addTag("tag good", t("replace.cheaper", { d: money(cheaper) }), t("replace.better.hint"));
+  if (c.ping && c.ping.ms != null && o.ping && o.ping.ms != null && c.ping.ms - o.ping.ms >= 10)
+    addTag("tag good", t("replace.faster", { ms: Math.round(c.ping.ms - o.ping.ms) }), t("replace.better.hint"));
+}
+$("task-replace").addEventListener("click", openReplace);
+$("progress-replace").addEventListener("click", openReplace);
 
 let offersReq = 0;   // номер последнего запроса списка: ответ на устаревший (другой диск) не показывать
 let offersDocker = null;   // вкладка: false — KVM, true — Docker (экспериментально); null — как в прошлый раз
@@ -311,10 +358,15 @@ async function openOffers(disk, docker) {
   showError("offers-error", null);
   const my = ++offersReq;
   showTabs();
-  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await api().offers(disk ?? null, offersDocker);
+  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await api().offers(disk ?? null, offersDocker, replaceMode);
   if (my !== offersReq) return;
+  if (data.error && replaceMode && data.error.key === "core.running") {   // пока открывали, машина стала готовой
+    replaceBlocked = true; replaceMode = false; renderReplace();
+  }
   if (data.error) { showError("offers-error", data.error); return; }
   offersData = data;
+  if (replaceMode && !data.replace) replaceMode = false;       // запуск успел закончиться неудачно — обычная аренда
+  renderReplace();
   offersDocker = !!data.docker;
   showTabs();
   const slider = $("disk");
@@ -619,6 +671,7 @@ function renderOffers() {
     if (o.last) addTag("tag", t("offers.last.tag"));
     if (o.start_min && !o.failed) addTag("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
     if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке
+    betterTags(o, addTag);
     c[2].textContent = o.country;
     pingCell(c[3], o.ping);
     c[4].textContent = t("unit.mbps", { n: netSpeed(o) });
@@ -629,7 +682,7 @@ function renderOffers() {
     tr.addEventListener("click", () => { selected = o.id; renderOffers(); });
     body.appendChild(tr);
   }
-  $("rent").disabled = false;
+  $("rent").disabled = replaceBlocked;
 }
 
 $("offers-cancel").addEventListener("click", () => { show("main"); refresh(); });
@@ -666,9 +719,32 @@ $("rent").addEventListener("click", async () => {
   const spare = spareFor(selected);
   text += "\n\n" + (spare.length ? t("confirm.rent.spare", { n: spare.length }) : t("confirm.rent.nospare"));
   if (docker) text += "\n\n" + t("confirm.rent.docker");
-  const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
+  if (replaceMode) {
+    const c = offersData.current;
+    text = t("replace.confirm.text", { cur: c ? `${c.gpu} (${c.country})` : t("replace.cur_machine"), new: `${o.gpu} (${o.country})` })
+      + "\n\n" + text;
+  }
+  const yes = await ask({ title: t(replaceMode ? "replace.confirm.title" : "confirm.rent.title"), text,
+                          yes: t(replaceMode ? "replace.confirm.yes" : "confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
+  if (replaceMode) {
+    // Замена: отменить запуск, удалить машину, дождаться, что у Vast её нет, — и арендовать выбранную
+    const r = await api().replace(o.id, disk, LANG, spare, docker, select);
+    if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
+    $("offers-cancel").disabled = true;
+    const p = await waitJob((ev) => ($("offers-summary").textContent = eventText(ev)));
+    $("offers-cancel").disabled = false;
+    if (p.error) {
+      showError("offers-error", p.error);
+      if (p.error.key === "replace.ready") { replaceBlocked = true; replaceMode = false; renderReplace(); }
+      $("rent").disabled = replaceBlocked;
+      return;
+    }
+    replaceMode = false;
+    startProgress();
+    return;
+  }
   const r = await api().play(o.id, null, disk, LANG, spare, docker, select);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
@@ -1410,6 +1486,7 @@ function startProgress(kind = "play") {
   $("progress-cancel").hidden = kind !== "play";
   $("progress-cancel").disabled = false;
   $("progress-home").hidden = false;
+  $("progress-replace").hidden = kind !== "play";
   $("progress-note").hidden = false;
   showError("progress-error", null);
   renderStages(null, false);
@@ -1495,6 +1572,7 @@ async function pollOnce() {
     $("progress-title").textContent = t("progress.title." + p.kind);
     $("progress-note").textContent = t(p.kind === "stop" ? "progress.background_stop" : "progress.background");
     $("progress-cancel").hidden = p.kind !== "play";
+    $("progress-replace").hidden = p.kind !== "play";
   }
   for (const ev of p.events) {
     prog.log.push(ev);
@@ -1536,6 +1614,7 @@ async function pollOnce() {
     clearInterval(progTimer);
     $("progress-cancel").hidden = true;
     $("progress-home").hidden = true;
+    $("progress-replace").hidden = true;
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
@@ -1682,7 +1761,8 @@ function demoOffers(disk) {
   }
   offers.sort((a, b) => a.total - b.total);
   const busy = new URLSearchParams(location.search).get("last") === "busy";
-  return { disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: offers.length, balance: 3.18, page_size: 15,
+  const current = DEMO === "replace" ? { gpu: "RTX 3090", country: "Latvia, LV", price: 0.204, ping: { ms: 95, kind: "estimate" } } : null;
+  return { replace: !!current, current, disk, disk_min: 50, disk_max: 1000, min_rel: 0.97, count: offers.length, balance: 3.18, page_size: 15,
            filters: { countries: [], gpus: [], speed: 0, ping: 0, sort: "price", dir: "asc" },
            sync: { steam_games: false, other_games: true, saves: true }, offers,
            last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
@@ -1878,6 +1958,7 @@ async function start() {
   setTimeout(refreshUpdate, 5000);
   if (!DEMO) setInterval(refreshUpdate, 60 * 1000);
   if (DEMO === "offers") { openOffers(); return; }
+  if (DEMO === "replace") { openReplace(); return; }
   if (DEMO === "progress") { startProgress(); return; }
   if (DEMO === "stop") { startProgress("stop"); return; }
   if (DEMO === "games") { openGames(); return; }

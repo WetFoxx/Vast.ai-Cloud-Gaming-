@@ -53,7 +53,10 @@
       <div class="sub" id="session-line" hidden></div>
       <div class="task-row" id="task-row" hidden>
         <span class="task-text" id="task-text"></span>
-        <button class="small" id="task-show" data-i18n="task.show"></button>
+        <span class="task-buttons">
+          <button class="small" id="task-replace" data-i18n="task.replace"></button>
+          <button class="small" id="task-show" data-i18n="task.show"></button>
+        </span>
       </div>
       <ul class="archives live" id="live-archives" hidden></ul>
       <div class="links" id="links" hidden>
@@ -101,6 +104,8 @@
     <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
     <div class="note" data-i18n="offers.latency"></div>
     <div class="note" id="offers-last" hidden></div>
+    <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->
+    <section class="card attention replace-card" id="offers-current" hidden></section>
     <div class="tabs" role="tablist">
       <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
       <button id="tab-docker" role="tab" data-i18n="offers.mode.docker"></button>
@@ -285,6 +290,7 @@
       <button class="primary" id="progress-offers" hidden data-i18n="offers.back_to_list"></button>
       <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
       <button id="progress-home" hidden data-i18n="progress.home"></button>
+      <button id="progress-replace" hidden data-i18n="task.replace"></button>
       <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
     </div>
   </main>

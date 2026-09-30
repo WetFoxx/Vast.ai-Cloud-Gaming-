@@ -214,6 +214,8 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 .task-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px;
   border-radius: 12px; background: var(--card-2); }
 .task-text { font-weight: 600; font-size: 14px; }
+.task-buttons { display: flex; gap: 6px; flex: none; }
+.tag.good { background: rgba(23, 178, 106, .16); color: var(--ready); white-space: nowrap; }
 /* Вопросы машины на главном */
 .asks-card { display: flex; flex-direction: column; gap: 10px; position: relative; overflow: hidden;
   box-shadow: 0 0 0 1.5px rgba(230, 20, 80, .55), var(--shadow); }

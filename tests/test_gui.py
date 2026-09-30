@@ -122,6 +122,31 @@ class TestOffers(unittest.TestCase):
         self.assertEqual(len(d["offers"]), 1)
 
 
+class TestReplaceCatalog(unittest.TestCase):
+    def test_catalog_during_launch_shows_current_machine(self):
+        # «Сменить машину»: машина уже есть (запускается) — каталог всё равно открывается, с ней для сравнения
+        row = dict(OFFER, country="Latvia, LV", _traffic=0.01, _total=0.21, reliability=0.99)
+
+        def running():
+            raise VastgameError("есть машина", key="core.running", ids="42")
+        launching = dict(OFFER, id=5, gpu_name="RTX 3090", dph_total=0.2, geolocation="Latvia, LV")
+        for obj, name, value in [(gui.core, "require_no_machine", running),
+                                 (gui.core, "template", lambda: {"recommended_disk_space": 100}),
+                                 (gui.core, "balance", lambda: 3.0),
+                                 (gui.market, "search", lambda disk, docker=False: [row]),
+                                 (gui.market, "last_machine", lambda disk, docker=False: None),
+                                 (gui.Api, "_launching", lambda self: launching)]:
+            p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
+        d = gui.Api().offers(None, None, True)
+        self.assertTrue(d["replace"])
+        self.assertEqual((d["current"]["gpu"], d["current"]["price"]), ("RTX 3090", 0.2))
+        self.assertEqual(len(d["offers"]), 1)
+        # обычный «Играть» при той же машине — как раньше: «машина уже есть»
+        self.assertEqual(gui.Api().offers()["error"]["key"], "core.running")
+        with mock.patch.object(gui.Api, "_launching", lambda self: None):     # запуск кончился — машина готова
+            self.assertEqual(gui.Api().offers(None, None, True)["error"]["key"], "core.running")
+
+
 class TestPlay(unittest.TestCase):
     def setUp(self):
         self.rented = []
@@ -215,6 +240,85 @@ class TestPlay(unittest.TestCase):
         self.assertEqual(p["error"]["key"], "core.start_cancelled")
         self.assertEqual(SENT, [])                                    # отменил сам — уведомлять незачем
         self.assertFalse(gui.jobs.CANCEL.exists())                   # флаг убран — следующему запуску не мешает
+
+    def wait_stage(self, stage="vast"):
+        for _ in range(250):
+            if (self.api.session_progress() or {}).get("stage") == stage and (gui.jobs.state() or {}).get("meta", {}).get("iid"):
+                return
+            time.sleep(0.02)
+        raise AssertionError("запуск не дошёл до " + stage)
+
+    def test_replace_deletes_first_then_rents_chosen(self):
+        # «Сменить машину» во время запуска: прежняя удалена и пропала у Vast ДО аренды новой — двух машин нет ни на миг
+        log, alive, ids = [], set(), {5: 42, 7: 43}
+
+        def rent(oid, body, offer=None):
+            log.append(("rent", oid, sorted(alive)))                     # какие машины были у Vast в момент аренды
+            alive.add(ids[oid])
+            self.rented.append(oid)
+            return ids[oid], time.time()
+
+        def delete(iid):
+            log.append(("delete", iid))
+            alive.discard(iid)
+            return True, None
+
+        def no_machine():
+            if alive:
+                raise VastgameError("есть машина", key="core.running", ids="?")
+        waits = [self.cancellable_wait, self.fake_wait]
+        with mock.patch.object(gui.core, "wait_ready", lambda *a, **k: waits.pop(0)(*a, **k)), \
+             mock.patch.object(gui.core, "rent", rent), mock.patch.object(gui.core, "_delete_quietly", delete), \
+             mock.patch.object(gui.core, "_still_there", lambda iid: iid in alive), \
+             mock.patch.object(gui.core, "require_no_machine", no_machine), \
+             mock.patch.object(gui.core, "list_instances",
+                               lambda: [{"id": i, "actual_status": "running", "status_msg": ""} for i in sorted(alive)]), \
+             mock.patch.object(gui, "REPLACE_POLL", 0.02):
+            self.api.play(5, None, None, "ru")
+            self.wait_stage()
+            self.assertEqual(self.api.replace(7, None, "ru"), {"ok": True})
+            self.assertEqual(self.api.replace(7, None, "ru")["error"]["key"], "busy")   # второй клик — не вторая замена
+            p = wait_done(self.api)
+            self.assertIsNone(p["error"])
+            self.assertEqual([e["key"] for e in p["events"]], ["replace.cancelling", "replace.waiting", "replace.renting"])
+            self.gate.set()
+            s = wait_done(self.api, session=True)
+        self.assertIsNone(s["error"])
+        self.assertEqual(self.rented, [5, 7])
+        rent7 = log.index(("rent", 7, []))                               # в момент аренды у Vast машин не было
+        self.assertLess(log.index(("delete", 42)), rent7)
+
+    def test_replace_refused_when_machine_ready(self):
+        self.gate.set()
+        self.api.play(5)
+        wait_done(self.api, session=True)
+        deleted = []
+        with mock.patch.object(gui.core, "_delete_quietly", lambda iid: deleted.append(iid) or (True, None)):
+            r = self.api.replace(7)
+        self.assertEqual(r["error"]["key"], "replace.ready")
+        self.assertEqual((self.rented, deleted), ([5], []))
+
+    def test_replace_never_rents_while_old_machine_listed(self):
+        # Vast всё ещё показывает прежнюю машину — новую не арендуем (платили бы за две), честно говорим
+        with mock.patch.object(gui.core, "wait_ready", self.cancellable_wait), \
+             mock.patch.object(gui, "REPLACE_WAIT", 0.5), mock.patch.object(gui, "REPLACE_POLL", 0.02):
+            self.api.play(5)
+            self.wait_stage()
+            self.api.replace(7)
+            p = wait_done(self.api)
+        self.assertEqual(p["error"]["key"], "replace.stuck")
+        self.assertEqual(self.rented, [5])
+
+    def test_replace_after_failed_launch_is_plain_rent(self):
+        def fail(*a, **k):
+            raise VastgameError("хост", key="core.no_spare")
+        with mock.patch.object(gui.core, "wait_ready", fail):
+            self.api.play(5)
+            wait_done(self.api, session=True)
+        self.api.replace(7)                                              # машины нет — просто аренда
+        self.gate.set()
+        wait_done(self.api, session=True)
+        self.assertEqual(self.rented[-1], 7)
 
     def test_old_cancel_flag_does_not_cancel_new_start(self):
         gui.jobs.CANCEL.write_text("1")                              # осталось от прошлого раза
