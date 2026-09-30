@@ -1,4 +1,4 @@
-# Вкладка «Docker (экспериментально)» (шаг 3): поиск машин без KVM, но с драйвером от 580, аренда из образа
+# Вкладка «Docker» (шаг 3; основная с 0.3.1): поиск машин без KVM, но с драйвером от 535 (две Sunshine в образе), аренда из образа
 # vastgame-desktop тем же скриптом, замена машины без NVENC. Без денег и сети — Vast и машина поддельные.
 
 import sys
@@ -50,7 +50,7 @@ class TestRentalBody(unittest.TestCase):
 class TestSearch(unittest.TestCase):
     def run_search(self, docker):
         sent = {}
-        rows = [offer(1, vms=True), offer(2), offer(3, driver="570.124.06"), offer(4, gpu="A100 SXM4"),
+        rows = [offer(1, vms=True), offer(2), offer(3, driver="530.41.03"), offer(4, gpu="A100 SXM4"),
                 offer(5, vms=True, deverified=True), offer(6, driver=None)]
 
         def call(method, path, body=None, **k):
@@ -63,7 +63,7 @@ class TestSearch(unittest.TestCase):
     def test_docker_needs_driver_not_kvm(self):
         ids, sent = self.run_search(True)
         self.assertNotIn("vms_enabled", sent)
-        self.assertEqual(sorted(ids), [1, 2, 5])        # 3 — драйвер 570, 4 — без кодировщика видео, 6 — драйвер неизвестен
+        self.assertEqual(sorted(ids), [1, 2, 5])        # 3 — драйвер 530, 4 — без кодировщика видео, 6 — драйвер неизвестен
 
     def test_kvm_as_before(self):
         ids, sent = self.run_search(False)
@@ -113,7 +113,7 @@ class TestOfferCheck(unittest.TestCase):
 
     def test_docker_old_driver_refused(self):
         with self.assertRaises(VastgameError) as e:
-            self.check(offer(3, driver="570.1"), True)
+            self.check(offer(3, driver="530.1"), True)
         self.assertEqual(e.exception.key, "core.offer_old_driver")
 
     def test_docker_without_kvm_is_fine(self):

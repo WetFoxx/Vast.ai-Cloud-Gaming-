@@ -28,8 +28,9 @@ PRO = re.compile(r"^(RTX A(2000|4000|4500|5000|6000)|RTX PRO (4000|4500|5000|600
 def gpu_ok(name):
     """Видеокарта подходит для игр по трансляции: игровая или профессиональная с кодировщиком и выходами."""
     return bool(GAMING.match(name or "") or PRO.match(name or ""))
-# Docker (образ vastgame-desktop): Sunshine 2026 собрана с CUDA 13 — NVENC работает с драйвером хоста от 580
-DOCKER_DRIVER = 580
+# Docker (образ vastgame-desktop): две Sunshine — 2026 на CUDA 13 (драйвер хоста от 580) и 2025.924 на CUDA 12.9
+# для драйверов старше (с 0.3.1; sunshine-start.sh выбирает по версии). Самые старые драйверы на Vast — 535.
+DOCKER_DRIVER = 535
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
 # машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
 BLOCKED = {"CN"}

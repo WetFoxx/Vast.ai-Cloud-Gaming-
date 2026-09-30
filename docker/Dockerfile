@@ -44,6 +44,27 @@ RUN curl -fsSL -o /tmp/sunshine.deb \
     && apt-get update -qq && apt-get install -yq /tmp/sunshine.deb \
     && rm -rf /tmp/sunshine.deb /var/lib/apt/lists/*
 
+# [0.3.1] Вторая Sunshine — для хостов со старым драйвером (535–575): 2025.924 — последняя, собранная с CUDA 12.9
+# (с 2026.516 — CUDA 13.1: нужен драйвер от 580). Лежит отдельно (/opt/sunshine-cuda12/sunshine — имя процесса то же),
+# путь к своим веб-файлам и шейдерам в ней заменён на /usr/share/sunsh-12 (той же длины — байты заменяются один в
+# один), иначе она взяла бы файлы нынешней. Выбирает sunshine-start.sh по версии драйвера. Её лишние библиотеки
+# (значок в трее, GTK) ставим; libappindicator3 в Ubuntu 24.04 — от ayatana (значок у нас выключен).
+ARG SUNSHINE_CUDA12=2025.924.154138
+RUN apt-get update -qq && apt-get install -yq --no-install-recommends libayatana-appindicator3-1 libnotify4 \
+      libgtk-3-0t64 libopus0 libicu74 \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /tmp/s12.deb \
+      "https://github.com/LizardByte/Sunshine/releases/download/v${SUNSHINE_CUDA12}/sunshine-ubuntu-24.04-amd64.deb" \
+    && mkdir -p /tmp/s12 /opt/sunshine-cuda12 && dpkg-deb -x /tmp/s12.deb /tmp/s12 \
+    && cp -a /tmp/s12/usr/share/sunshine /usr/share/sunsh-12 \
+    && cp "/tmp/s12/usr/bin/sunshine-${SUNSHINE_CUDA12}" /opt/sunshine-cuda12/sunshine \
+    && python3 -c "import sys; p = sys.argv[1]; b = open(p, 'rb').read(); n = b.count(b'/usr/share/sunshine'); assert n >= 3, n; open(p, 'wb').write(b.replace(b'/usr/share/sunshine', b'/usr/share/sunsh-12'))" /opt/sunshine-cuda12/sunshine \
+    && chmod 755 /opt/sunshine-cuda12/sunshine \
+    && { ldd /opt/sunshine-cuda12/sunshine | grep -q "libappindicator3.so.1 => not found" \
+         && ln -s libayatana-appindicator3.so.1 /usr/lib/x86_64-linux-gnu/libappindicator3.so.1 || true; } \
+    && if ldd /opt/sunshine-cuda12/sunshine | grep "not found"; then echo "sunshine-cuda12: не хватает библиотек"; exit 1; fi \
+    && rm -rf /tmp/s12 /tmp/s12.deb
+
 # Steam: запускатель + библиотеки из репозитория Valve (иначе steamdeps ждёт sudo в xterm).
 # /usr/bin/steam (его зовут меню, Big Picture, Sunshine) отводим — на его место обёртка с заплатками (rootfs/usr/bin/steam).
 RUN curl -fsSL -o /tmp/steam.deb https://cdn.akamai.steamstatic.com/client/installer/steam.deb \
