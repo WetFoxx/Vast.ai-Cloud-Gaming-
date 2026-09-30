@@ -18,8 +18,9 @@ class ConsoleUI:
     def stage(self, key, text):
         print(text, flush=True)
 
-    def archive(self, name, state, text):
-        print(f"  {name:<28} {state:<5} {text}", flush=True)
+    def archive(self, name, state, text, progress=None):
+        pg = f" {progress['done'] * 100 // max(progress['total'], 1)}%" if progress else ""
+        print(f"  {name:<28} {state:<5} {text}{pg}", flush=True)
 
     def confirm(self, question, key=None, **params):
         return ask(question)

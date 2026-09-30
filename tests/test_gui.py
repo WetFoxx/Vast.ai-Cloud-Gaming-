@@ -36,7 +36,7 @@ def setUpModule():
     # Фоновый процесс в тестах — поток с той же работой (jobs.work: блокировка, job.json, уведомление)
     for obj, name, value in [(gui.jobs, "_launch", lambda kind, args: threading.Thread(
                                   target=gui.jobs.work, args=(kind, args), daemon=True).start()),
-                             (gui.jobs.notify, "send", lambda title, text: SENT.append((title, text))),
+                             (gui.jobs.notify, "send", lambda title, text, sound=False: SENT.append((title, text))),
                              (gui.moonlight, "native_display", lambda: None),      # не звать system_profiler
                              # названия игр — не спрашивать сайт Steam и не писать кэш в настоящую папку
                              (gui.steamnames, "for_archives", lambda archives: {}),
@@ -257,6 +257,24 @@ class TestPlay(unittest.TestCase):
             wait_done(self.api, session=True)
             self.assertEqual(self.api._sync(), {"steam_games": True, "other_games": True, "saves": False})
         self.assertEqual(bodies[0]["env"], {"SYNC_STEAM_GAMES": "1", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
+
+    def test_game_selection_goes_to_rental(self):
+        # [v4.6] выбор игр со страницы → VG_SYNC (base64 JSON) и тумблеры для прежних скриптов; запоминается
+        import base64, json
+        gui.settings.set("sync_sel", None)
+        self.gate.set()
+        self.api.play(5, None, None, "ru", None, False,
+                      {"games": {"sgame--The Blood of Dawnwalker": True, "game--B": False}, "saves": {"pfx--1": False}})
+        wait_done(self.api, session=True)
+        env = self.body["env"]
+        self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
+                         {"games": ["sgame--The Blood of Dawnwalker"], "saves_off": ["pfx--1"]})
+        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("1", "0", "1"))
+        # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
+        self.wait_idle()
+        self.api.play(5, None, None, "ru")
+        wait_done(self.api, session=True)
+        self.assertEqual(self.body["env"]["VG_SYNC"], env["VG_SYNC"])
 
     def test_second_click_does_not_rent_twice(self):
         self.api.play(5)

@@ -93,11 +93,12 @@ class Job:
             self.events.append({"level": "stage", "key": "stage." + key, "params": {}, "text": text})
         self._changed()
 
-    def archive(self, name, state, text):
+    def archive(self, name, state, text, progress=None):
+        """progress — ход архива {done, total, speed} (wolf-setup.sh v4.6), пока он качается или выгружается."""
         with self._lock:
-            if self.archives.get(name) == [state, text]:
+            if self.archives.get(name) == [state, text, progress]:
                 return
-            self.archives[name] = [state, text]
+            self.archives[name] = [state, text, progress]
         self._changed()
 
     def confirm(self, question, key=None, **params):
@@ -563,6 +564,24 @@ def watch_balance():
     notify.low_balance(credit, inst[0].get("dph_total") if inst else None)
 
 
+def watch_asks():
+    """Для службы автозапуска: у машины вопрос (новая / удалённая игра), а окно закрыто — уведомление со звуком и
+    карточка поверх всех окон отдельным процессом (app_main.py ask). Окно открыто — оно само. Раз в 5 минут."""
+    import asks
+    try:
+        if asks.window_open():
+            return
+        _, items = asks.pending()
+        new = asks.fresh(items)
+    except (VastgameError, OSError):
+        return
+    if new:
+        asks.mark_seen(new)
+        asks.announce(new)
+        subprocess.Popen(paths.self_cmd("ask"), cwd=HERE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def spawn(kind, **args):
     """Запустить операцию в фоновом процессе, который переживёт закрытие окна. False — уже идёт другая."""
     if running() or (state() or {}).get("active"):
@@ -610,6 +629,7 @@ def main(argv):
     if argv[0] == "resume":
         resume_when_online(log=log)
         watch_balance()
+        watch_asks()
         return None
     if not work(argv[1], json.loads(argv[2]), log=log):
         return "другая операция уже идёт"

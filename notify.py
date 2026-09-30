@@ -32,12 +32,14 @@ def t(tr, key, **params):
     return text
 
 
-def send(title, text):
-    """Показать уведомление. Ошибки глушим: уведомление не должно ломать запуск или завершение."""
+def send(title, text, sound=False):
+    """Показать уведомление. Ошибки глушим: уведомление не должно ломать запуск или завершение.
+    sound — со звуком (вопрос машины: его должны заметить и во время игры)."""
     if sys.platform != "darwin":
         return   # Windows — позже (шаг сборки)
     # Тексты передаём аргументами (argv), а не вставляем в скрипт — кавычки в тексте ничего не сломают
-    script = ["on run argv", "display notification (item 2 of argv) with title (item 1 of argv)", "end run"]
+    show = "display notification (item 2 of argv) with title (item 1 of argv)" + (' sound name "Glass"' if sound else "")
+    script = ["on run argv", show, "end run"]
     cmd = ["osascript"] + [a for line in script for a in ("-e", line)] + [title, text]
     try:
         paths.run(cmd, 10)

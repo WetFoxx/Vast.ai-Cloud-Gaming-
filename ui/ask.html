@@ -1,0 +1,157 @@
+<!doctype html>
+<!-- Карточка вопроса машины (wolf-setup.sh v4.6): «новая игра — синхронизировать?», «игру удалили — удалить из
+     облака?». Отдельное маленькое окно без рамки поверх всех окон, в том числе поверх Moonlight (gui._float).
+     Ответ — api.ask_answer; закрыть без ответа — api.card_close (спросим ещё раз перед «Закончить»). -->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VastGame</title>
+<style>
+:root {
+  --grad: linear-gradient(115deg, #ff6a00 0%, #f5162f 38%, #d60f63 68%, #7a0cb8 100%);
+  --round: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, sans-serif;
+  --card: #ffffff; --text: #16151b; --muted: #6c6b78; --border: rgba(22, 16, 40, .10);
+  --ghost: rgba(22, 16, 40, .06); --error: #e5344f;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --card: #17161d; --text: #f3f2f7; --muted: #9c9aa9; --border: rgba(255, 255, 255, .09);
+          --ghost: rgba(255, 255, 255, .08); --error: #ff5a73; }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: transparent; }
+body {
+  color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased; -webkit-user-select: none; user-select: none;
+}
+.card {
+  position: relative; height: 100%; overflow: hidden;
+  background: var(--card); border: 1px solid var(--border); border-radius: 18px;
+  padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 10px;
+}
+/* полоска градиента сверху и мягкое свечение — чтобы карточку заметили */
+.card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; background: var(--grad); }
+.card::after {
+  content: ""; position: absolute; width: 320px; height: 220px; right: -120px; top: -140px; pointer-events: none;
+  background: radial-gradient(closest-side, rgba(214, 15, 99, .22), transparent); animation: breathe 2.4s ease-in-out infinite;
+}
+.top { display: flex; align-items: center; gap: 8px; }
+.top img { height: 22px; }
+.over {
+  font: 700 11px/1 var(--round); letter-spacing: .08em; text-transform: uppercase;
+  background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.count { margin-left: auto; color: var(--muted); font-size: 12px; }
+.close {
+  border: 0; background: var(--ghost); color: var(--muted); width: 26px; height: 26px; border-radius: 50%;
+  font-size: 15px; line-height: 26px; cursor: pointer; padding: 0;
+}
+.close:hover { color: var(--text); }
+h1 { margin: 2px 0 0; font: 650 19px/1.25 var(--round); }
+.hint { margin: 0; color: var(--muted); font-size: 13px; }
+.buttons { display: flex; gap: 10px; margin-top: auto; }
+button.pill {
+  flex: 1; border: 0; border-radius: 999px; padding: 11px 14px; font: 600 14px/1 var(--round); cursor: pointer;
+  transition: transform .15s ease, filter .15s ease;
+}
+button.pill:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.06); }
+button.pill:disabled { opacity: .5; cursor: default; }
+.yes { background: var(--grad); color: #fff; box-shadow: 0 6px 18px rgba(230, 20, 80, .35); }
+.no { background: var(--ghost); color: var(--text); }
+.note { color: var(--muted); font-size: 12px; text-align: center; }
+.note.err { color: var(--error); }
+@keyframes breathe { 50% { opacity: .45; } }
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+.card { animation: pop .35s cubic-bezier(.2, .8, .2, 1); }
+@media (prefers-reduced-motion: reduce) { .card, .card::after { animation: none; } }
+</style>
+</head>
+<body>
+<div class="card" role="alertdialog" aria-labelledby="q">
+  <div class="top">
+    <img src="logo-mark.png" alt="">
+    <span class="over" id="over"></span>
+    <span class="count" id="count" hidden></span>
+    <button class="close" id="close" aria-label="close">✕</button>
+  </div>
+  <h1 id="q"></h1>
+  <p class="hint" id="hint"></p>
+  <div class="buttons">
+    <button class="pill yes" id="yes"></button>
+    <button class="pill no" id="no"></button>
+  </div>
+  <div class="note" id="note"></div>
+</div>
+<script src="i18n.js"></script>
+<script>
+let ASKS = [], busy = false, empty = 0;
+const $ = (id) => document.getElementById(id);
+
+function render() {
+  const a = ASKS[0];
+  if (!a) return;
+  $("over").textContent = t(`ask.${a.kind}.title`);
+  $("q").textContent = t(`ask.${a.kind}.q`, { name: a.name });
+  $("hint").textContent = t(`ask.${a.kind}.hint`);
+  $("yes").textContent = t(`ask.${a.kind}.yes`);
+  $("no").textContent = t(`ask.${a.kind}.no`);
+  $("count").hidden = ASKS.length < 2;
+  $("count").textContent = t("ask.more", { n: ASKS.length - 1 });
+  $("close").title = t("ask.later");
+  if (!busy) { $("note").textContent = t("ask.later.note"); $("note").className = "note"; }
+}
+
+async function load() {
+  const r = await window.pywebview.api.machine_asks();
+  if (r && r.error) return;
+  if (r.lang && I18N[r.lang]) LANG = r.lang;
+  applyStatic();
+  const list = r.asks || [];
+  // пусто дважды подряд — ответили в окне приложения (один пустой ответ бывает от сбоя связи)
+  if (!list.length) { if (++empty >= 2 && !busy) window.pywebview.api.card_close(); return; }
+  empty = 0;
+  if (!busy) { ASKS = list; render(); }
+}
+
+async function reply(yes) {
+  const a = ASKS[0];
+  if (!a || busy) return;
+  busy = true;
+  $("yes").disabled = $("no").disabled = true;
+  $("note").className = "note";
+  $("note").textContent = t(yes && a.kind === "del" ? "ask.deleting" : "ask.sending");
+  const r = await window.pywebview.api.ask_answer(a.kind, a.archive, yes);
+  busy = false;
+  $("yes").disabled = $("no").disabled = false;
+  if (r && r.error) {
+    $("note").className = "note err";
+    $("note").textContent = r.error.key && I18N.en[r.error.key] ? t(r.error.key, r.error.params || {}) : r.error.text;
+    return;
+  }
+  ASKS.shift();
+  if (ASKS.length) render();
+  load();
+}
+
+$("yes").onclick = () => reply(true);
+$("no").onclick = () => reply(false);
+$("close").onclick = () => window.pywebview.api.card_close();
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.pywebview.api.card_close(); });
+LANG = detectLanguage();
+window.addEventListener("pywebviewready", () => { load(); setInterval(load, 3000); });
+// Демо для проверки вида без машины: ask.html?demo=new|del|two (через локальный сервер ui-demo)
+const DEMO = new URLSearchParams(location.search).get("demo");
+if (DEMO && !window.pywebview) {
+  const list = { new: [["new", "sgame--Hades II", "Hades II"]], del: [["del", "sgame--The Blood of Dawnwalker", "The Blood of Dawnwalker"]],
+                 two: [["new", "sgame--Hades II", "Hades II"], ["del", "game--Witcher", "The Witcher 3"]] }[DEMO] || [];
+  let left = list.map(([kind, archive, name]) => ({ kind, archive, name }));
+  window.pywebview = { api: {
+    machine_asks: async () => ({ asks: left, lang: new URLSearchParams(location.search).get("lang") }),
+    ask_answer: async () => { await new Promise((r) => setTimeout(r, 900)); left = left.slice(1); return { ok: true }; },
+    card_close: async () => {} } };
+  setTimeout(() => window.dispatchEvent(new Event("pywebviewready")));
+}
+</script>
+</body>
+</html>

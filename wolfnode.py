@@ -31,11 +31,24 @@ def ts_node():
     return None
 
 
+class Rec(tuple):
+    """Запись страницы /json: (время, состояние, текст), как раньше; .progress — ход архива (wolf-setup.sh v4.6):
+    {"done", "total", "speed"} в байтах и байтах/с, пока он скачивается или выгружается, иначе None."""
+    progress = None
+
+
 def wolf_status(ip):
-    """Статусы архивов со страницы /json на инстансе: {имя: (время, состояние, текст)}."""
+    """Статусы архивов со страницы /json на инстансе: {имя: Rec(время, состояние, текст)}."""
     try:
         r = requests.get(f"http://{ip}:{WOLF_PORT}/json", timeout=5)
-        return {x["name"]: (x["ts"], x["state"], x["text"]) for x in r.json()}
+        out = {}
+        for x in r.json():
+            rec = Rec((x["ts"], x["state"], x["text"]))
+            pg = x.get("progress")
+            if isinstance(pg, dict) and all(isinstance(pg.get(k), int) for k in ("done", "total", "speed")):
+                rec.progress = {k: pg[k] for k in ("done", "total", "speed")}
+            out[x["name"]] = rec
+        return out
     except Exception:
         return None
 
@@ -44,7 +57,8 @@ def wolf_status(ip):
 SHELL = {"ping": lambda a: "echo ok", "time": lambda a: "date +%s", "finish": lambda a: "wolf finish",
          "push-identity": lambda a: "(NOW=1 wolf push identity </dev/null >/dev/null 2>&1 &)",
          "forget": lambda a: f"wolf forget {shlex.quote(a[0])}",
-         "sunshine-creds": lambda a: f"wolf sunshine-creds {shlex.quote(a[0])}"}
+         "sunshine-creds": lambda a: f"wolf sunshine-creds {shlex.quote(a[0])}",
+         "answer": lambda a: "wolf answer " + " ".join(shlex.quote(x) for x in a)}
 
 
 def post_cmd(ip, cmd, args=(), stdin=None, timeout=120):

@@ -29,6 +29,12 @@
       <div data-i18n="setup.banner"></div>
       <button class="primary" id="setup-banner-open" data-i18n="setup.open"></button>
     </section>
+    <!-- Вопросы машины: новая игра — синхронизировать? игру удалили — удалить из облака? -->
+    <section class="card asks-card" id="asks-card" hidden>
+      <div class="label" data-i18n="ask.main.title"></div>
+      <ul class="asks" id="asks-list"></ul>
+    </section>
+
     <section class="card" id="balance-card">
       <div class="label" data-i18n="balance.label"></div>
       <div class="big" id="balance">—</div>
@@ -45,6 +51,11 @@
       </div>
       <div class="machine" id="machine" hidden></div>
       <div class="sub" id="session-line" hidden></div>
+      <div class="task-row" id="task-row" hidden>
+        <span class="task-text" id="task-text"></span>
+        <button class="small" id="task-show" data-i18n="task.show"></button>
+      </div>
+      <ul class="archives live" id="live-archives" hidden></ul>
       <div class="links" id="links" hidden>
         <div class="ml-row">
           <button class="primary" id="ml-start" data-i18n="moonlight.start"></button>
@@ -138,14 +149,15 @@
         <button id="page-prev">‹</button><span id="page-info"></span><button id="page-next">›</button>
       </div>
     </section>
-    <section class="card sync-card">
-      <div class="label" data-i18n="sync.title"></div>
-      <label class="switch-row"><input type="checkbox" id="sync-steam_games">
-        <span><b data-i18n="sync.steam_games"></b><span class="sub" data-i18n="sync.steam_games.hint"></span></span></label>
-      <label class="switch-row"><input type="checkbox" id="sync-other_games">
-        <span><b data-i18n="sync.other_games"></b><span class="sub" data-i18n="sync.other_games.hint"></span></span></label>
-      <label class="switch-row"><input type="checkbox" id="sync-saves">
-        <span><b data-i18n="sync.saves"></b><span class="sub" data-i18n="sync.saves.hint"></span></span></label>
+    <!-- Что синхронизировать: одна строка на игру (её файлы и сохранения вместе), выбор запоминается -->
+    <section class="card sync-card" id="sync-card">
+      <div class="sync-head">
+        <span class="label" data-i18n="sync.title"></span>
+        <span class="sub" id="sync-summary" data-i18n="sync.loading"></span>
+      </div>
+      <div class="sync-cols" id="sync-cols" hidden><span></span><span></span><span data-i18n="sync.col.game"></span><span data-i18n="sync.col.saves"></span></div>
+      <ul class="sync-list" id="sync-list"></ul>
+      <div class="note" id="sync-note" hidden></div>
     </section>
     <div class="error" id="offers-error" hidden></div>
     <div class="actions">
@@ -272,6 +284,7 @@
     <div class="actions">
       <button class="primary" id="progress-offers" hidden data-i18n="offers.back_to_list"></button>
       <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
+      <button id="progress-home" hidden data-i18n="progress.home"></button>
       <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
     </div>
   </main>

@@ -113,11 +113,79 @@ function render(data) {
   if (li) $("moonlight").textContent = li.moonlight;
   if (li && st.state !== "starting") { loadMoonlightApps(li.moonlight); loadStreamSettings(); }
 
+  // Идёт запуск или выключение (фоновый процесс) — строка с этапом и «Показать ход»
+  const task = data.task && data.task.active ? data.task : null;
+  $("task-row").hidden = !task;
+  if (task) $("task-text").textContent = t("task." + task.kind) + (st.stage ? " · " + t("stage." + st.stage) : "");
+  renderLive(liveFromStatus(st));
+  renderAsks(st.asks || []);
+  liveLoop(!!(task || ["starting", "syncing"].includes(st.state)));
+
   $("play").disabled = st.state !== "none" || !!data.busy || (setupData && !setupData.ready);
   // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
   $("stop").disabled = !m || !["ready", "syncing", "error"].includes(st.state) || !!data.busy;
   $("emergency").hidden = !m || !!data.busy;
 }
+
+// ---- Живой ход на главном: архивы в работе (с процентами и скоростью) и вопросы машины. Главный экран обновляется
+// раз в 15 с (баланс и состояние — через Vast), а это — прямо со страницы машины раз в 3 с, пока что-то идёт.
+function liveFromStatus(st) {
+  const out = {};
+  for (const [n, v] of Object.entries(st.archives || {})) out[n] = [v[1], v[2], (st.progress || {})[n] || null];
+  return out;
+}
+function renderLive(archives) {
+  const names = sortedArchives(archives).filter((n) => ["down", "up", "err"].includes(archives[n][0]));
+  const ul = $("live-archives");
+  ul.hidden = !names.length;
+  ul.innerHTML = "";
+  for (const n of names) ul.appendChild(archiveRow(n, archives[n][0], archives[n][2]));
+}
+let liveTimer = null;
+function liveLoop(on) {
+  if (on && !liveTimer) liveTimer = setInterval(pollLive, 3000);
+  if (!on && liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+}
+async function pollLive() {
+  if ($("screen-main").hidden || !current || !current.status.machine || DEMO) return;
+  const d = await api().live();
+  if (!d || d.error) return;
+  if (d.game_names) GAME_NAMES = d.game_names;
+  renderLive(d.archives);
+  renderAsks(d.asks);
+}
+
+// Вопросы машины на главном: ответить можно здесь (карточка поверх всех окон — та же, её можно было закрыть)
+let asksBusy = false;
+function renderAsks(list) {
+  if (asksBusy) return;
+  $("asks-card").hidden = !list.length;
+  const ul = $("asks-list");
+  ul.innerHTML = "";
+  for (const a of list) {
+    const li = el("li");
+    const text = el("div", { className: "ask-text" });
+    text.append(el("b", {}, t(`ask.${a.kind}.q`, { name: a.name })), el("span", { className: "sub" }, t(`ask.${a.kind}.hint`)));
+    const row = el("div", { className: "ask-buttons" });
+    const note = el("div", { className: "sub ask-note" });
+    const go = async (yes) => {
+      asksBusy = true;
+      row.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      note.textContent = t(yes && a.kind === "del" ? "ask.deleting" : "ask.sending");
+      const r = DEMO ? { ok: true } : await api().ask_answer(a.kind, a.archive, yes);
+      asksBusy = false;
+      if (r && r.error) { note.textContent = errText(r.error); row.querySelectorAll("button").forEach((b) => (b.disabled = false)); return; }
+      li.remove();
+      $("asks-card").hidden = !ul.children.length;
+      if (current) current.status.asks = (current.status.asks || []).filter((x) => x.archive !== a.archive || x.kind !== a.kind);
+    };
+    row.append(button(t(`ask.${a.kind}.yes`), () => go(true), true), button(t(`ask.${a.kind}.no`), () => go(false)));
+    li.append(text, row, note);
+    ul.appendChild(li);
+  }
+}
+
+$("task-show").addEventListener("click", () => { if (current && current.task) startProgress(current.task.kind); });
 
 async function refresh() {
   try {
@@ -251,7 +319,7 @@ async function openOffers(disk, docker) {
   showTabs();
   const slider = $("disk");
   slider.min = data.disk_min; slider.max = data.disk_max; slider.value = data.disk;
-  if (!reload) for (const k of SYNC_KEYS) $("sync-" + k).checked = !!(data.sync || {})[k];
+  if (!reload) loadSyncList();
   renderOffers();
 }
 
@@ -269,8 +337,85 @@ $("tab-docker").addEventListener("click", () => { if (!offersDocker) openOffers(
 $("disk").addEventListener("input", () => { $("disk-value").textContent = t("disk.value", { gb: $("disk").value }); });
 $("disk").addEventListener("change", () => openOffers(Number($("disk").value)));
 
-const SYNC_KEYS = ["steam_games", "other_games", "saves"];
-function syncChoice() { return Object.fromEntries(SYNC_KEYS.map((k) => [k, $("sync-" + k).checked])); }
+// ---- Что синхронизировать: игры из облака — одна строка на игру (её файлы и сохранения вместе, служебное Steam
+// скрыто). «Игра» — скачивать при запуске и выгружать; «Сохранения» — то же для сохранений. Выбор запоминается.
+let syncRows = null, syncReq = 0;
+async function loadSyncList() {
+  const my = ++syncReq;
+  syncRows = null;
+  $("sync-summary").textContent = t("sync.loading");
+  $("sync-list").innerHTML = "";
+  $("sync-cols").hidden = true;
+  $("sync-note").hidden = true;
+  const d = DEMO ? demoSync() : await api().sync_list();
+  if (my !== syncReq) return;
+  if (d.error) {
+    $("sync-summary").textContent = "";
+    $("sync-note").hidden = false;
+    $("sync-note").textContent = t("sync.error", { error: errText(d.error) });
+    return;
+  }
+  syncRows = d.rows;
+  renderSync();
+}
+
+function gameCover(r) {
+  // Обложка из магазина Steam; игра не из Steam (или картинки нет) — первая буква на градиенте
+  const box = el("span", { className: "cover" }, (r.title || "?").trim().charAt(0).toUpperCase());
+  if (r.cover) {
+    const img = new Image();
+    img.alt = "";
+    img.onload = () => { box.textContent = ""; box.appendChild(img); box.classList.add("img"); };
+    img.src = r.cover;
+  }
+  return box;
+}
+
+function syncToggle(r, part) {
+  // part: "game" | "saves"; нет такого архива в облаке — прочерк с подсказкой
+  if (!r[part]) return el("span", { className: "dash", title: t(part === "game" ? "sync.no_game" : "sync.no_saves") }, "—");
+  const box = el("input", { type: "checkbox", checked: !!r["sync_" + part] });
+  box.setAttribute("aria-label", t("sync.col." + part) + ": " + (r.title || r.id));
+  box.addEventListener("change", () => { r["sync_" + part] = box.checked; syncSummary(); });
+  return box;
+}
+
+function renderSync() {
+  const ul = $("sync-list");
+  ul.innerHTML = "";
+  $("sync-cols").hidden = !syncRows.length;
+  for (const r of syncRows) {
+    const li = el("li");
+    const name = el("span", { className: "name" });
+    name.append(el("b", {}, r.title || r.appid || r.id));
+    const bits = [];
+    if (r.game) bits.push(t("sync.size.game", { size: size(r.game_bytes) }));
+    else bits.push(t("sync.no_game.short"));
+    if (r.saves) bits.push(t("sync.size.saves", { size: size(r.saves_bytes) }));
+    if (r.kind === "folder") bits.push(t("sync.folder"));
+    name.append(el("span", { className: "sub" }, bits.join(" · ")));
+    li.append(gameCover(r), name, syncToggle(r, "game"), syncToggle(r, "saves"));
+    ul.appendChild(li);
+  }
+  syncSummary();
+}
+
+function syncSummary() {
+  if (!syncRows) return;
+  if (!syncRows.length) { $("sync-summary").textContent = t("sync.empty"); return; }
+  const games = syncRows.filter((r) => r.game), on = games.filter((r) => r.sync_game);
+  const saves = syncRows.filter((r) => r.saves), savesOn = saves.filter((r) => r.sync_saves);
+  const bytes = on.reduce((a, r) => a + r.game_bytes, 0);
+  $("sync-summary").textContent = t("sync.summary", { on: on.length, all: games.length, size: size(bytes),
+                                                        saves: savesOn.length, saves_all: saves.length });
+}
+
+// Выбор для аренды: {"games": {архив: вкл}, "saves": {архив: вкл}}; список не загрузился — null (как в прошлый раз)
+function syncSelect() {
+  if (!syncRows) return null;
+  const pick = (part) => Object.fromEntries(syncRows.filter((r) => r[part]).map((r) => [r[part], !!r["sync_" + part]]));
+  return { games: pick("game"), saves: pick("saves") };
+}
 
 // ---- Фильтры списка машин: страны, скорость интернета, пинг, сортировка (запоминаются в Python)
 let filters = null, page = 0;
@@ -507,10 +652,15 @@ $("rent").addEventListener("click", async () => {
     gpu: o.gpu, country: o.country, price: money(o.price), balance: money(o.balance), hours: num(o.hours || 0),
   });
   text += "\n" + t("confirm.rent.disk", { gb: disk });
-  const sync = syncChoice();
-  const on = SYNC_KEYS.filter((k) => sync[k]).map((k) => t("sync." + k).toLowerCase());
-  text += "\n\n" + t("confirm.rent.sync", { list: on.join(", ") || t("sync.none") });
-  if (!sync.saves) text += " " + t("confirm.rent.saves_off");
+  const select = syncSelect();
+  if (select) {
+    const on = syncRows.filter((r) => r.game && r.sync_game);
+    const bytes = on.reduce((a, r) => a + r.game_bytes, 0);
+    text += "\n\n" + (on.length ? t("confirm.rent.games", { list: on.map((r) => r.title || r.id).join(", "), size: size(bytes) })
+                                  : t("confirm.rent.games_none"));
+    const off = syncRows.filter((r) => r.saves && !r.sync_saves).length;
+    if (off) text += " " + t("confirm.rent.saves_some_off", { n: off });
+  }
   if (o.bad_reason) text += "\n\n" + t("confirm.badhost", { reason: o.bad_reason });
   // Замена, если выбранная не запустится: только «не хуже» (сколько таких — в тексте подтверждения)
   const spare = spareFor(selected);
@@ -519,13 +669,22 @@ $("rent").addEventListener("click", async () => {
   const yes = await ask({ title: t("confirm.rent.title"), text, yes: t("confirm.rent.yes"), no: t("btn.no") });
   if (!yes) { $("rent").disabled = false; return; }
   if (DEMO) { startProgress(); return; }
-  const r = await api().play(o.id, sync, disk, LANG, spare, docker);   // язык — для уведомления в конце
+  const r = await api().play(o.id, null, disk, LANG, spare, docker, select);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   startProgress();
 });
 
 // ---------------------------------------------------------------- «Закончить» и аварийное удаление
 $("stop").addEventListener("click", async () => {
+  // Машина ждёт ответа о новой / удалённой игре — спросить ещё раз (карточку могли закрыть)
+  const asks = DEMO ? (current.status.asks || []) : ((await api().machine_asks()).asks || []);
+  renderAsks(asks);
+  if (asks.length) {
+    const answer = await ask({ title: t("ask.stop.title"),
+                               text: asks.map((a) => "• " + t(`ask.${a.kind}.q`, { name: a.name })).join("\n") + "\n\n" + t("ask.stop.text"),
+                               yes: t("ask.stop.answer"), no: t("ask.stop.skip") });
+    if (answer) { $("asks-card").scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+  }
   const yes = await ask({ title: t("confirm.stop.title"), text: t("confirm.stop.text"), yes: t("confirm.stop.yes"), no: t("btn.cancel") });
   if (!yes) return;
   if (DEMO) { startProgress("stop"); return; }
@@ -1250,6 +1409,7 @@ function startProgress(kind = "play") {
   $("progress-offers").hidden = true;
   $("progress-cancel").hidden = kind !== "play";
   $("progress-cancel").disabled = false;
+  $("progress-home").hidden = false;
   $("progress-note").hidden = false;
   showError("progress-error", null);
   renderStages(null, false);
@@ -1274,19 +1434,42 @@ function renderStages(stage, failed) {
   });
 }
 
+// Архивы по порядку: сначала идущие (скачивается / выгружается), потом ошибки, ждущие и готовые
+const ARCH_ORDER = { down: 0, up: 0, err: 1, wait: 2, ok: 3 };
+function sortedArchives(archives) {
+  return Object.keys(archives || {}).filter((n) => n !== "boot")
+    .sort((a, b) => (ARCH_ORDER[archives[a][0]] ?? 2) - (ARCH_ORDER[archives[b][0]] ?? 2) || archiveName(a).localeCompare(archiveName(b)));
+}
+
+// Строка архива: имя и состояние; пока он качается или выгружается (wolf-setup.sh v4.6) — полоса,
+// «45% · 12,3 из 27 ГБ» и скорость
+function archiveRow(name, state, pg) {
+  const li = el("li", { className: "arch " + state });
+  const head = el("div", { className: "arch-head" });
+  head.append(el("span", { className: "arch-name" }, archiveName(name)), el("span", { className: "st " + state }, t("arch." + state)));
+  li.append(head);
+  if (pg && (state === "down" || state === "up") && pg.total > 0) {
+    const pct = Math.min(100, Math.floor((pg.done / pg.total) * 100));
+    const bar = el("div", { className: "bar" });
+    const fill = el("span");
+    fill.style.width = pct + "%";
+    bar.append(fill);
+    const line = el("div", { className: "arch-line" });
+    line.append(el("span", {}, t("arch.progress", { pct, done: size(pg.done), total: size(pg.total) })),
+                el("span", { className: "speed" }, pg.speed > 0 ? (state === "down" ? "↓ " : "↑ ") + t("arch.speed", { speed: size(pg.speed) }) : ""));
+    li.append(bar, line);
+  }
+  return li;
+}
+
 function renderArchives(archives) {
-  const names = Object.keys(archives || {}).filter((n) => n !== "boot").sort();
+  const names = sortedArchives(archives);
   $("archives-card").hidden = !names.length;
   const ul = $("archives");
   ul.innerHTML = "";
   for (const n of names) {
-    const [state] = archives[n];
-    const li = document.createElement("li");
-    li.innerHTML = '<span></span><span class="st"></span>';
-    li.firstChild.textContent = archiveName(n);
-    li.lastChild.textContent = t("arch." + state);
-    li.lastChild.classList.add(state);
-    ul.appendChild(li);
+    const [state, , pg] = archives[n];
+    ul.appendChild(archiveRow(n, state, pg));
   }
 }
 
@@ -1352,6 +1535,7 @@ async function pollOnce() {
   if (p.done) {
     clearInterval(progTimer);
     $("progress-cancel").hidden = true;
+    $("progress-home").hidden = true;
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
@@ -1428,6 +1612,8 @@ function renderResult(r) {
 }
 
 $("progress-offers").addEventListener("click", () => { if (!DEMO) api().session_seen(); openOffers(); });
+// Запуск идёт в фоновом процессе — можно уйти на главный (посмотреть баланс, другую машину); ход — там же кнопкой
+$("progress-home").addEventListener("click", () => { clearInterval(progTimer); show("main"); refresh(); });
 $("progress-back").addEventListener("click", () => { if (!DEMO) api().session_seen(); show("main"); refresh(); });
 
 // ---------------------------------------------------------------- язык
@@ -1464,7 +1650,11 @@ function demoState(kind) {
     none: { state: "none", kind: "none", machine: null, links: null, count: 0 },
     starting: { ...base, state: "starting", kind: "restore", stage: "restore", done: 3, busy: ["steam-client", "pfx--3751260"] },
     ready: { ...base, state: "ready", kind: "ready" },
-    syncing: { ...base, state: "syncing", kind: "syncing", busy: ["pfx--3751260"] },
+    syncing: { ...base, state: "syncing", kind: "syncing", busy: ["pfx--3751260", "sgame--Hades II"],
+               archives: { "pfx--3751260": [0, "up", ""], "sgame--Hades II": [0, "up", ""], "steam-state": [0, "ok", ""] },
+               progress: { "sgame--Hades II": { done: 4.1e9, total: 11.8e9, speed: 48e6 } },
+               asks: [{ kind: "new", archive: "sgame--Hades II", name: "Hades II" },
+                      { kind: "del", archive: "sgame--The Blood of Dawnwalker", name: "The Blood of Dawnwalker" }] },
     error: { ...base, state: "error", kind: "sync_error", errors: ["steam-client"] },
     low: { ...base, state: "ready", kind: "ready" },
   }[kind] || { state: "none", kind: "none", machine: null, links: null };
@@ -1499,6 +1689,19 @@ function demoOffers(disk) {
                    offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", cc: "US", price: 0.162, traffic: 0.05, total: 0.212,
                                           reliability: 0.991, net_down: 900, net_up: 700, ping: { ms: 190, kind: "measured" } } } };
 }
+function demoSync() {
+  const cover = (id) => `https://cdn.cloudflare.steamstatic.com/steam/apps/${id}/capsule_231x87.jpg`;
+  return { rows: [
+    { id: "sgame--The Blood of Dawnwalker", title: "The Blood of Dawnwalker", kind: "steam", appid: "3751260", cover: null,
+      game: "sgame--The Blood of Dawnwalker", game_bytes: 53.2e9, saves: "pfx--3751260", saves_bytes: 21e6, sync_game: true, sync_saves: true },
+    { id: "sgame--Hades II", title: "Hades II", kind: "steam", appid: "1145350", cover: cover(1145350),
+      game: "sgame--Hades II", game_bytes: 11.8e9, saves: "pfx--1145350", saves_bytes: 3e6, sync_game: false, sync_saves: true },
+    { id: "game--Witcher3", title: "The Witcher 3 GOTY", kind: "folder", appid: "2931553111", cover: null,
+      game: "game--Witcher3", game_bytes: 48.1e9, saves: "pfx--2931553111", saves_bytes: 9e6, sync_game: false, sync_saves: true },
+    { id: "pfx--1091500", title: "Cyberpunk 2077", kind: "saves", appid: "1091500", cover: cover(1091500),
+      game: null, game_bytes: 0, saves: "pfx--1091500", saves_bytes: 41e6, sync_game: null, sync_saves: false },
+  ] };
+}
 function demoCheck() {
   const o = offerList(offersData).find((x) => x.id === selected);
   return { ...o, balance: 3.18, hours: 3.18 / o.price, bad_reason: null };
@@ -1519,7 +1722,10 @@ function demoProgress() {
              game_names: { 3751260: "The Blood of Dawnwalker" } };
   }
   const stage = demoTick < 3 ? "vast" : demoTick < 5 ? "tailscale" : demoTick < 9 ? "restore" : "ready";
-  const arch = demoTick < 5 ? {} : { identity: ["ok", ""], "steam-state": ["ok", ""], "steam-client": [demoTick < 8 ? "down" : "ok", ""], "pfx--3751260": [demoTick < 7 ? "down" : "ok", ""] };
+  const pg = (k) => ({ done: Math.min(53.2e9, k * 9.4e9), total: 53.2e9, speed: 92e6 });
+  const arch = demoTick < 5 ? {} : { identity: ["ok", ""], "steam-state": ["ok", ""], "steam-client": [demoTick < 8 ? "down" : "ok", "", { done: 0.6e9, total: 1.2e9, speed: 71e6 }],
+    "pfx--3751260": [demoTick < 7 ? "down" : "ok", ""], "sgame--The Blood of Dawnwalker": [demoTick < 9 ? "down" : "ok", "", pg(demoTick - 4)],
+    "sgame--Hades II": ["wait", ""] };
   const events = demoTick === 1 ? [{ level: "stage", key: "stage.vast" }, { level: "detail", key: "core.vast_status", params: { status: "loading", msg: "" } }] : [];
   const done = demoTick >= 9;
   return { elapsed: demoTick * 40, stage, archives: arch, events, next: 0, question: null, done,

@@ -15,6 +15,8 @@
 # Ошибки — VastgameError(сообщение, key=..., **params): в терминале печатается и завершает
 # программу, окно её перехватывает и показывает перевод по ключу.
 
+import base64
+import json
 import re
 import threading
 import time
@@ -115,13 +117,34 @@ def bad_host_reason(o):
 
 # Что синхронизировать с облаком (wolf-setup.sh v3.9 читает эти переменные при старте машины)
 SYNC_VARS = {"steam_games": "SYNC_STEAM_GAMES", "other_games": "SYNC_OTHER_GAMES", "saves": "SYNC_SAVES"}
+# Вопрос wolf-setup.sh v4.6 на странице статуса: ask--new--АРХИВ (появилась игра — синхронизировать?),
+# ask--del--АРХИВ (игру удалили — удалить и из облака?); текст записи — название игры
+ASK = re.compile(r"^ask--(new|del)--((?:s?game)--.+)$")
+
+
+def asks_of(s):
+    """Вопросы со страницы статуса по порядку появления: [{"kind", "archive", "name"}]."""
+    out = []
+    for n, v in (s or {}).items():
+        m = ASK.match(n)
+        if m:
+            out.append({"kind": m[1], "archive": m[2], "name": v[2] or m[2].split("--", 1)[1], "ts": v[0]})
+    return sorted(out, key=lambda a: (a["ts"], a["archive"]))
+
+
+def vg_sync(games, saves_off):
+    """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment."""
+    return base64.b64encode(json.dumps({"games": list(games), "saves_off": list(saves_off)},
+                                       ensure_ascii=False).encode()).decode()
 SYNC_DEFAULTS = {"steam_games": False, "other_games": True, "saves": True}
 
 
 def rental_body(tpl, disk, games=None, sync=None, docker=False):
     """Тело запроса аренды. Переменные ниже перекрывают шаблон только для этой аренды:
     games — "1"/"0" для SYNC_STEAM_GAMES (терминал: --games/--no-games);
-    sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне).
+    sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне); с выбором игр (v4.6) —
+    ещё "select": {"games": [архивы игр], "saves_off": [архивы сохранений]} → VG_SYNC (старые скрипты его не
+    знают и смотрят на тумблеры — их окно выставляет по выбору).
     docker — образ vastgame-desktop вместо шаблона KVM: тот же wolf-setup.sh (образ скачивает его по
     WOLF_SCRIPT_URL), настройки разрешения и языка Steam — из шаблона, порт Tailscale для прямой связи."""
     if docker:
@@ -142,6 +165,9 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False):
     for k, var in SYNC_VARS.items():
         if sync and k in sync:
             env[var] = "1" if sync[k] else "0"
+    sel = (sync or {}).get("select")
+    if isinstance(sel, dict):
+        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [])
     if env:
         body["env"] = env
     return body
@@ -378,16 +404,18 @@ def wait_ready(iid, t0, o, ui, docker=False):
             # (запись пишет и образ, если экран — Xorg — на хосте не поднимается)
             _failed_start(iid, f"На этой машине не работает видео: {sun[2][:120]}.", o, ui,
                           bad_host=True, key="core.fail_nvenc", msg=sun[2][:120])
-        for name, (ts, state, text) in sorted(s.items()):
-            if name == SUNSHINE:
+        for name, rec in sorted(s.items()):
+            ts, state, text = rec
+            if name == SUNSHINE or ASK.match(name):
                 continue
-            if ts >= t0 - 60 and seen.get(name) != (state, text):
-                ui.archive(name, state, text)
-                seen[name] = (state, text)
+            pg = getattr(rec, "progress", None)                  # [v4.6] ход: проценты и скорость
+            if ts >= t0 - 60 and seen.get(name) != (state, text, pg):
+                ui.archive(name, state, text, pg)
+                seen[name] = (state, text, pg)
         boot = s.get("boot")
         if boot and boot[0] >= t0 - 60 and boot[1] in ("ok", "err"):
             break
-        time.sleep(10)
+        time.sleep(3)                  # [v4.6] чаще — проценты и скорость на экране запуска живые
 
     ident = (wolf_status(ip) or {}).get("identity")
     # Настоящая задержка через Tailscale (тем же путём пойдёт трансляция) — запомнить для списка машин
@@ -442,7 +470,7 @@ def status():
     """
     out = {"state": NONE, "kind": "none", "stage": None, "text": "Машины нет", "machine": None,
            "links": None, "archives": {}, "busy": [], "errors": [], "done": 0,
-           "count": 0, "vast_status": None, "detail": ""}
+           "count": 0, "vast_status": None, "detail": "", "progress": {}, "asks": []}
     inst = list_instances()
     out["count"] = len(inst)
     if not inst:
@@ -464,6 +492,9 @@ def status():
         return dict(out, state=STARTING, kind="tailscale", stage="tailscale",
                     text="Машина запущена, жду её в Tailscale")
     _, ip, dns = node
+    asks = asks_of(s)                                                       # [v4.6] вопросы — не архивы
+    s = {n: v for n, v in s.items() if not ASK.match(n)}
+    out.update(asks=asks, progress={n: v.progress for n, v in s.items() if getattr(v, "progress", None)})
     arch = {n: v for n, v in s.items() if n not in ("boot", SUNSHINE)}     # sunshine — запись образа, не архив
     busy = sorted(n for n, v in arch.items() if v[1] in ("up", "down"))
     errors = sorted(n for n, v in arch.items() if v[1] == "err")

@@ -121,6 +121,17 @@ def ts_login_link(iid):
     return lines[1] if lines[1].startswith("https://login.tailscale.com/") else None
 
 
+def games_index():
+    """Список игр, который пишет машина (wolf-setup.sh v4.6, vastgame-games.json в папке архивов): [{"archive",
+    "appid", "name", "kind", "tool"}]. Нет файла (облако до v4.6) или он кривой — []."""
+    try:
+        r = rclone("cat", REMOTE + FOLDER + "/vastgame-games.json", timeout=60)
+        games = json.loads(r.stdout or "{}").get("games") if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return []
+    return [g for g in games or [] if isinstance(g, dict) and isinstance(g.get("archive"), str)]
+
+
 def check(tok, old=None, sizes=True):
     """Проверить токен: (почта владельца Drive, число файлов в папке или None, ГБ) или None, если не работает.
     sizes=False — не считать файлы в папке (это второй долгий запрос; простой настройке нужен только вход)."""

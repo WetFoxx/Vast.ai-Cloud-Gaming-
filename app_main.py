@@ -3,6 +3,7 @@
 #   (без параметров)           открыть окно
 #   job play|stop '<json>'     фоновая операция (её запускает окно — см. jobs.py)
 #   resume                     служба автозапуска: продолжить прерванное, проверить баланс
+#   ask                        карточка вопроса машины поверх всех окон (окно закрыто; запускает служба)
 #   balance                    напечатать баланс
 #   selftest                   проверить сборку: всё ли внутри на месте (без сети и без ключей)
 #
@@ -19,6 +20,9 @@ def main(argv):
     if cmd == "resume":
         import jobs
         return jobs.main(["resume"])
+    if cmd == "ask":
+        import gui
+        return gui.card_main()
     if cmd == "selftest":
         return selftest()
     if cmd == "balance":
@@ -38,7 +42,7 @@ def selftest():
     import subprocess
     problems = []
     for m in ("gui", "jobs", "core", "drive", "setup", "setupcheck", "autostart", "notify", "webview",
-              "webview.platforms.cocoa", "keystore", "keyring", "requests", "updater",
+              "webview.platforms.cocoa", "keystore", "keyring", "requests", "updater", "asks", "Quartz",
               "cryptography.hazmat.primitives.asymmetric.ed25519"):
         try:
             importlib.import_module(m)
@@ -75,7 +79,7 @@ def selftest():
     except Exception:                            # noqa: BLE001 — нет ключа, не base64, не 32 байта
         problems.append("нет открытого ключа выпусков (updater.PUBLIC_KEY) — обновления не будут приниматься")
     here = paths.HERE
-    for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css"):
+    for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css", "ui/ask.html"):
         if not (here / f).is_file():
             problems.append(f"нет файла {f}")
     import json

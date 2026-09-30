@@ -22,8 +22,10 @@ from pathlib import Path
 
 import webview   # pywebview: окно с веб-страницей (на Mac — системный WebKit, на Windows — Edge WebView2)
 
+import asks
 import autostart
 import cloudgames
+import drive
 import geo
 import core
 import history
@@ -56,6 +58,8 @@ TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 �
 OFFER_SORTS = ("price", "ping", "net", "rel", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
+SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
+ASK_POLL = 10       # с: как часто окно спрашивает машину, нет ли новых вопросов (новая / удалённая игра)
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
 
@@ -75,6 +79,10 @@ class Api:
         self._display = (0, None) # (когда узнали, родной экран) — system_profiler небыстрый
         self._updates = updater.Checker()   # есть ли версия новее на GitHub — проверяет в фоне
         self._update_ready = None           # {version, app} — новая версия скачана и проверена, можно ставить
+        self._card = None                   # карточка вопроса машины поверх всех окон (или None)
+        self._card_only = False             # процесс только карточки (окно закрыто) — закрыть карточку = выйти
+        self._front = None                  # приложение, которое было впереди до карточки (Moonlight) — вернуть
+        self._answer_lock = threading.Lock()  # ответы машине — по одному (второй сразу мог бы потеряться)
 
     # ---- настройки
     def settings(self):
@@ -207,15 +215,43 @@ class Api:
         saved = settings.get("sync") or {}
         return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
 
-    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False):
+    def sync_list(self):
+        """Игры в облаке для выбора синхронизации: одна строка на игру (файлы игры и её сохранения вместе, служебное
+        Steam скрыто) и запомненный выбор. Прямо с Google Drive — машина не нужна."""
+        data = cloudgames.listing()
+        rows = cloudgames.rows(data, drive.games_index())
+        unknown = [r["saves"] for r in rows if not r["title"] and r["saves"]]
+        names = steamnames.for_archives(unknown) if unknown else {}
+        steam = [r["appid"] for r in rows if r["appid"] and r["appid"].isdigit() and int(r["appid"]) < SHORTCUT_APPID]
+        covers = steamnames.covers(steam) if steam else {}
+        sel = cloudgames.selection(rows)
+        for r in rows:
+            r["title"] = r["title"] or names.get(r["appid"] or "") or ""
+            r["cover"] = covers.get(r["appid"] or "")
+            r["sync_game"] = sel["games"].get(r["game"], False) if r["game"] else None
+            r["sync_saves"] = sel["saves"].get(r["saves"], True) if r["saves"] else None
+        return {"rows": rows}
+
+    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None):
         """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
         закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
         lang — язык окна для уведомления в конце, spare — следующие машины его списка (на замену,
-        если Vast не запустит выбранную), docker — вкладка «Docker (экспериментально)»."""
+        если Vast не запустит выбранную), docker — вкладка «Docker (экспериментально)».
+        select — выбор игр ({"games": {архив: bool}, "saves": {архив: bool}}, запоминается): машина (wolf-setup.sh
+        v4.6) качает и выгружает только выбранные игры; прежним скриптам — тумблеры по этому выбору."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
-        settings.set("sync", sync)
+        if not isinstance(select, dict) and isinstance(settings.get("sync_sel"), dict):
+            select = {}                      # список игр не загрузился — выбор, запомненный в прошлый раз
+        if isinstance(select, dict):
+            chosen = cloudgames.remember(select)
+            sync.update(steam_games=any(a.startswith("sgame--") for a in chosen["games"]),
+                        other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
+            settings.set("sync", sync)
+            sync["select"] = chosen
+        else:
+            settings.set("sync", sync)
         spare = [int(x) for x in (spare or []) if str(x).isdigit() and int(x) != int(offer_id)][:SPARE]
         if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare,
                           docker=bool(docker)):
@@ -580,6 +616,80 @@ class Api:
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
 
+    def live(self):
+        """Ход архивов и вопросы работающей машины прямо с её страницы статуса (без Vast — можно часто): главный
+        экран спрашивает раз в 3 с, пока идёт запуск или синхронизация. {"archives": {имя: [состояние, текст, ход]},
+        "asks": [...]}; машины нет в Tailscale — пусто."""
+        node = wolfnode.ts_node()
+        s = (wolfnode.wolf_status(node[1]) if node else None) or {}
+        arch = {n: [v[1], v[2], getattr(v, "progress", None)] for n, v in s.items()
+                if n not in ("boot", core.SUNSHINE) and not core.ASK.match(n)}
+        return {"archives": arch, "asks": core.asks_of(s), "game_names": self._game_names(list(arch))}
+
+    # ---- Вопросы машины (wolf-setup.sh v4.6): «новая игра — синхронизировать?», «игру удалили — удалить из облака?»
+    def machine_asks(self):
+        """Вопросы машины сейчас (главный экран, карточка, «Закончить») и язык окна — для карточки."""
+        _, items = asks.pending()
+        return {"asks": items, "lang": settings.get("language") or settings.get("ui_language")}
+
+    def ask_answer(self, kind, archive, yes):
+        """Ответ человека: машине (она выгрузит / не выгрузит игру, удалит её из облака) и в выбор игр. Ответ
+        проверяем: вопрос должен исчезнуть со страницы машины."""
+        with self._answer_lock:
+            ip, items = asks.pending()
+            if not any(a["kind"] == kind and a["archive"] == archive for a in items):
+                return {"ok": True, "left": len(items)}          # уже ответили (в другом окне или раньше)
+            asks.answer(ip, kind, archive, bool(yes), on_notice=self._ssh_notice)
+            _, items = asks.pending()
+            if any(a["kind"] == kind and a["archive"] == archive for a in items):
+                raise VastgameError("Машина не приняла ответ", key="ask.failed", code=0, out="")
+        if not items:
+            self.card_close()
+        return {"ok": True, "left": len(items)}
+
+    def card_close(self):
+        """Закрыть карточку (ответили на всё или закрыли без ответа) и вернуть впереди то, что было (Moonlight)."""
+        card, self._card = self._card, None
+        if card:
+            card.destroy()
+        _activate(self._front)
+        self._front = None
+
+    def _show_card(self):
+        """Карточка вопроса поверх всех окон, в том числе полноэкранного Moonlight, и с фокусом: Moonlight, потеряв
+        фокус, отпускает мышь. Уже открыта — сама обновит список."""
+        if self._card:
+            return
+        self._front = _frontmost()
+        self._card = webview.create_window("VastGame", str(HERE / "ui" / "ask.html"), js_api=self, width=460,
+                                           height=300, resizable=False, frameless=True, easy_drag=True,
+                                           on_top=True, hidden=True, transparent=True)
+        card = self._card
+        card.events.loaded += lambda: _float(card)
+        card.events.closed += lambda: self._card_closed(card)
+
+    def _card_closed(self, card):
+        if self._card is card:
+            self._card = None
+        if self._card_only:
+            _activate(self._front)
+
+    def _watch_asks(self):
+        """Окно открыто: раз в ASK_POLL с — есть ли новые вопросы машины. Новый — уведомление со звуком и карточка
+        (один раз на вопрос; закрытую без ответа покажем ещё раз перед «Закончить» и на главном экране)."""
+        self._window.events.shown.wait()         # карточку создаём, когда окно уже работает
+        while True:
+            try:
+                _, items = asks.pending()
+                new = asks.fresh(items)
+                if new:
+                    asks.mark_seen(new)
+                    asks.announce(new)
+                    self._show_card()
+            except Exception:                    # noqa: BLE001 — следить дальше, что бы ни случилось
+                _log_error("watch_asks")
+            time.sleep(ASK_POLL)
+
     # ---- Moonlight
     def moonlight_apps(self, host):
         """Приложения Sunshine на машине и сохранённый выбор. installed=False — Moonlight не установлен."""
@@ -817,14 +927,101 @@ for _name, _fn in list(vars(Api).items()):
         setattr(Api, _name, _safe(_fn))
 
 
+def _frontmost():
+    """Mac: bundle id приложения, которое сейчас впереди (чтобы вернуть его после карточки), иначе None."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import AppKit
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        bid = app and app.bundleIdentifier()
+        return None if bid == AppKit.NSBundle.mainBundle().bundleIdentifier() else bid
+    except Exception:                            # noqa: BLE001 — не вышло — просто не вернём
+        return None
+
+
+def _activate(bundle_id):
+    """Вернуть впереди приложение (Moonlight) после карточки — там человек снова нажмёт, и мышь вернётся в игру."""
+    if sys.platform != "darwin" or not bundle_id:
+        return
+    try:
+        import AppKit
+        apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+        if apps:           # сообщение другому приложению — можно не из главного потока (процесс карточки уже выходит)
+            apps[0].activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+    except Exception:                            # noqa: BLE001
+        pass
+
+
+def _float(window):
+    """Mac: поднять карточку над всеми окнами, в том числе над полноэкранной игрой (уровень «щита» экрана — выше
+    него Moonlight в полноэкранном режиме не бывает), показать на всех рабочих столах (и в полноэкранном), по центру
+    экрана с мышью, и забрать фокус — тогда Moonlight отпускает мышь."""
+    if sys.platform != "darwin":
+        window.show()
+        return
+    import AppKit
+    import Quartz
+    from PyObjCTools import AppHelper
+
+    def go():
+        w = window.native
+        if w is None:
+            return
+        w.setLevel_(Quartz.CGShieldingWindowLevel() + 1)
+        w.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                                 | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+                                 | AppKit.NSWindowCollectionBehaviorIgnoresCycle)
+        w.setHidesOnDeactivate_(False)
+        mouse = AppKit.NSEvent.mouseLocation()
+        screen = next((sc for sc in AppKit.NSScreen.screens()
+                       if AppKit.NSPointInRect(mouse, sc.frame())), AppKit.NSScreen.mainScreen())
+        f, size = screen.frame(), w.frame().size
+        w.setFrameOrigin_((f.origin.x + (f.size.width - size.width) / 2,
+                           f.origin.y + f.size.height * 0.62 - size.height / 2))
+        w.makeKeyAndOrderFront_(None)
+        w.orderFrontRegardless()
+        AppKit.NSApp.activateIgnoringOtherApps_(True)
+    AppHelper.callAfter(go)
+
+
 def main():
     autostart.refresh()      # служба стоит, но проект переехал — поправить пути (выключенную не трогаем)
+    lock = open(asks.WINDOW_LOCK, "a")   # «окно открыто» — для службы: карточку вопроса покажет окно
+    try:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        pass                                 # второе окно или не Mac — служба просто не узнает
     api = Api()
     window = webview.create_window("VastGame", str(HERE / "ui" / "index.html"), js_api=api,
                                    width=620, height=760, min_size=(520, 600))
     api._window = window
     window.events.closing += api._on_closing
+    # Свой поток, а не webview.start(func): поток pywebview не фоновый и не дал бы процессу выйти после окна
+    threading.Thread(target=api._watch_asks, daemon=True).start()
     webview.start(debug=bool(os.environ.get("VASTGAME_DEBUG")))
+
+
+def card_main():
+    """Окно закрыто, а у машины вопрос (служба автозапуска запустила «app_main.py ask»): показать одну карточку
+    поверх всего и выйти, когда её закроют. Без значка в Dock. Карточка уже открыта или открылось окно — ничего."""
+    import fcntl
+    with open(asks.CARD_LOCK, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        if asks.window_open():
+            return
+        api = Api()
+        api._card_only = True
+        api._show_card()
+        if sys.platform == "darwin":
+            import AppKit
+            AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+                AppKit.NSApplicationActivationPolicyAccessory)
+        webview.start()
 
 
 if __name__ == "__main__":

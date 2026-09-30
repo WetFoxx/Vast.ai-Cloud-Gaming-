@@ -59,7 +59,7 @@ class FakeUI:
     def stage(self, key, text):
         self.stages.append(key)
 
-    def archive(self, name, state, text):
+    def archive(self, name, state, text, progress=None):
         self.log.append(("archive", f"{name} {state}"))
 
     def confirm(self, question, key=None, **params):
