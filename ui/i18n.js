@@ -640,8 +640,14 @@ const I18N = {
     "offers.latency.short": "«≈» — пинг по расстоянию",
     "offers.rent.to": "Арендовать {gpu} · {price}",
     "offers.replace.to": "Заменить на {gpu} · {price}",
-    "sync.edit": "Изменить ›",
-    "sync.hide": "Свернуть"
+    "sync.edit": "Выбрать игры",
+    "sync.hide": "Свернуть",
+    "games.kind.system": "системные файлы Steam",
+    "games.system.hint": "нужны для запуска игр, удалять не стоит",
+    "games.confirm.system": "Это системные файлы Steam (Proton, Steam Linux Runtime…) — без них игры не запустятся. Если удалить, Steam скачает их заново при следующем запуске (время и трафик). Удалять не стоит.",
+    "sync.none_selected": "Игры не скачиваются — только сохранения",
+    "arch.left": "осталось ~{time}",
+    "arch.left.soon": "меньше минуты"
   },
   "en": {
     "app.error_state": "Couldn't get the status: {error}",
@@ -1281,8 +1287,14 @@ const I18N = {
     "offers.latency.short": "“≈” — ping by distance",
     "offers.rent.to": "Rent {gpu} · {price}",
     "offers.replace.to": "Switch to {gpu} · {price}",
-    "sync.edit": "Change ›",
-    "sync.hide": "Hide"
+    "sync.edit": "Choose games",
+    "sync.hide": "Hide",
+    "games.kind.system": "Steam system files",
+    "games.system.hint": "needed to run games, better not delete",
+    "games.confirm.system": "These are Steam system files (Proton, Steam Linux Runtime…) — games won't start without them. If you delete them, Steam will download them again on the next launch (time and traffic). Better not delete.",
+    "sync.none_selected": "No games are downloaded — saves only",
+    "arch.left": "~{time} left",
+    "arch.left.soon": "under a minute"
   },
   "es": {
     "app.error_state": "No se pudo obtener el estado: {error}",
@@ -1922,8 +1934,14 @@ const I18N = {
     "offers.latency.short": "«≈» — ping por distancia",
     "offers.rent.to": "Alquilar {gpu} · {price}",
     "offers.replace.to": "Cambiar a {gpu} · {price}",
-    "sync.edit": "Cambiar ›",
-    "sync.hide": "Ocultar"
+    "sync.edit": "Elegir juegos",
+    "sync.hide": "Ocultar",
+    "games.kind.system": "archivos de sistema de Steam",
+    "games.system.hint": "necesarios para jugar, mejor no borrarlos",
+    "games.confirm.system": "Son archivos de sistema de Steam (Proton, Steam Linux Runtime…) — sin ellos los juegos no arrancan. Si los borras, Steam los descargará otra vez en el próximo inicio (tiempo y tráfico). Mejor no borrarlos.",
+    "sync.none_selected": "No se descargan juegos, solo partidas",
+    "arch.left": "quedan ~{time}",
+    "arch.left.soon": "menos de un minuto"
   }
 };
 

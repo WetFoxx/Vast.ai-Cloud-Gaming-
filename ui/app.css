@@ -281,6 +281,8 @@ button.danger { color: var(--error); }
 #open-games { flex: none; }
 .kind { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .kind.pfx { color: var(--syncing); }
+.kind.system { color: var(--muted); }
+tr.group.system td { color: var(--muted); font-weight: 500; }
 td.act { text-align: right; }
 td.act button { padding: 4px 10px; font-size: 12px; border-radius: 8px; }
 
@@ -482,8 +484,16 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .card.pop.countries { margin-top: 0; border-top: 1px solid var(--border); }
 .card.pop.disk-card input[type=range] { margin: 6px 0; }
 button.cancel { flex: none; padding: 12px 22px; }
+/* «Что синхронизировать» — заметная карточка: рамка цветов логотипа, крупная сводка, обложки выбранных игр */
+.sync-card { position: relative; overflow: hidden; box-shadow: 0 0 0 1.5px rgba(230, 20, 80, .5), var(--shadow); }
+.sync-card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--grad); }
 .sync-head { align-items: center; }
-.sync-head button.link { color: var(--text); font-weight: 600; }
+.sync-head-text { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sync-title { font: 700 17px/1.2 var(--round); }
+.sync-summary { font-size: 14px; color: var(--text); }
+.sync-covers { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sync-covers .cover { width: 92px; height: 35px; }
+#sync-toggle { flex: none; padding: 9px 16px; }
 .sync-body { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
 .lang-card { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .lang-card select { font-size: 14px; padding: 6px 10px; }

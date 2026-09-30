@@ -40,7 +40,9 @@ def listing():
         rest = base.split("--", 1)[1]
         games.append({"name": base, "kind": kind, "appid": rest if kind == "pfx" else None,
                       "title": names.get(rest, "") if kind == "pfx" else rest,
-                      "bytes": info["size"], "mtime": info["mtime"], "files": info["files"]})
+                      "bytes": info["size"], "mtime": info["mtime"], "files": info["files"],
+                      # служебное Steam (Proton, Runtime…) и его «сохранения» — нужно для запуска игр
+                      "system": bool(TOOL.match(base)) or (kind == "pfx" and rest in TOOL_APPIDS)})
     games.sort(key=lambda g: (KINDS.index(g["kind"]), -g["bytes"]))
     return {"games": games,
             "service": {"names": sorted(n for n, _ in service), "bytes": sum(b for _, b in service)}}

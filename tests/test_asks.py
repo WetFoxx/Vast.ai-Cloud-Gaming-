@@ -73,6 +73,20 @@ class TestRows(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], ["sgame--Hades II", "pfx--1145350"])
 
 
+class TestSystemFiles(unittest.TestCase):
+    def test_steam_system_files_marked(self):
+        # Экран «Игры в облаке»: Proton, Runtime… и их «сохранения» — отдельной группой «системные файлы Steam»
+        arch = {n: {"size": 1, "mtime": "2026-10-01", "files": [n + ".tar.zst"]} for n in
+                ("sgame--Proton - Experimental", "sgame--SteamLinuxRuntime_4", "pfx--1493710", "sgame--Hades II",
+                 "pfx--1145350", "game--Mine", "identity")}
+        with mock.patch.object(cloudgames.drive, "token", lambda: "t"), \
+             mock.patch.object(cloudgames.drive, "archives", lambda: arch), \
+             mock.patch.object(cloudgames.steamnames, "for_archives", lambda a: {}):
+            games = cloudgames.listing()["games"]
+        system = sorted(g["name"] for g in games if g["system"])
+        self.assertEqual(system, ["pfx--1493710", "sgame--Proton - Experimental", "sgame--SteamLinuxRuntime_4"])
+
+
 class TestSelection(unittest.TestCase):
     def setUp(self):
         settings.FILE.unlink(missing_ok=True)

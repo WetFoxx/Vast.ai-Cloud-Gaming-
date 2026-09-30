@@ -433,6 +433,7 @@ async function loadSyncList() {
   syncRows = null;
   $("sync-summary").textContent = t("sync.loading");
   $("sync-list").innerHTML = "";
+  $("sync-covers").innerHTML = "";
   $("sync-cols").hidden = true;
   $("sync-toggle").hidden = true;
   $("sync-note").hidden = true;
@@ -502,6 +503,12 @@ function syncSummary() {
   const bytes = on.reduce((a, r) => a + r.game_bytes, 0);
   $("sync-summary").textContent = t("sync.summary", { on: on.length, all: games.length, size: size(bytes),
                                                         saves: savesOn.length, saves_all: saves.length });
+  // Обложки выбранных игр — сразу видно, что скачается (до 6, остальное — числом)
+  const covers = $("sync-covers");
+  covers.innerHTML = "";
+  for (const r of on.slice(0, 6)) { const c = gameCover(r); c.title = r.title || r.id; covers.appendChild(c); }
+  if (on.length > 6) covers.appendChild(el("span", { className: "chip muted" }, "+" + (on.length - 6)));
+  if (!on.length) covers.appendChild(el("span", { className: "sub" }, t("sync.none_selected")));
 }
 
 // Выбор для аренды: {"games": {архив: вкл}, "saves": {архив: вкл}}; список не загрузился — null (как в прошлый раз)
@@ -1448,6 +1455,7 @@ function gameTitle(g) {
 
 $("games-search").addEventListener("input", renderGames);
 
+let gamesSystemOpen = false;   // группа «Системные файлы Steam» раскрыта
 function renderGames() {
   const d = gamesData;
   if (!d) return;
@@ -1457,10 +1465,12 @@ function renderGames() {
   $("games-card").hidden = !d.games.length;
   $("games-search").hidden = d.games.length < 8;          // поиск нужен, когда игр много
   const q = $("games-search").hidden ? "" : $("games-search").value.trim().toLowerCase();
-  const order = { sgame: 0, game: 1, pfx: 2 };
+  // Служебное Steam (Proton, Runtime…) — отдельной свёрнутой группой в конце: нужно для запуска игр
+  const order = { sgame: 0, game: 1, pfx: 2, system: 3 };
+  const grp = (g) => (g.system ? "system" : g.kind);
   const shown = d.games
     .filter((g) => !q || gameTitle(g).toLowerCase().includes(q) || g.name.toLowerCase().includes(q))
-    .sort((a, b) => order[a.kind] - order[b.kind] || b.bytes - a.bytes);
+    .sort((a, b) => order[grp(a)] - order[grp(b)] || b.bytes - a.bytes);
   const body = $("games-table").querySelector("tbody");
   body.innerHTML = "";
   if (!shown.length) {
@@ -1471,22 +1481,29 @@ function renderGames() {
   }
   let group = null;
   for (const g of shown) {
-    if (g.kind !== group) {                                  // заголовок группы: тип, сколько, сколько места
-      group = g.kind;
-      const same = shown.filter((x) => x.kind === group);
+    if (grp(g) !== group) {                                  // заголовок группы: тип, сколько, сколько места
+      group = grp(g);
+      const same = shown.filter((x) => grp(x) === group);
       const tr = document.createElement("tr");
       tr.className = "group";
       tr.innerHTML = '<td colspan="5"></td>';
       tr.firstChild.textContent = t("games.group", { kind: t("games.kind." + group), count: same.length,
         size: size(same.reduce((a, x) => a + x.bytes, 0)) });
+      if (group === "system") {                              // свёрнута, пока не раскроют (или не ищут)
+        tr.classList.add("system");
+        tr.firstChild.textContent = (gamesSystemOpen || q ? "▾ " : "▸ ") + tr.firstChild.textContent + " — " + t("games.system.hint");
+        tr.style.cursor = "pointer";
+        tr.addEventListener("click", () => { gamesSystemOpen = !gamesSystemOpen; renderGames(); });
+      }
       body.appendChild(tr);
     }
+    if (g.system && !gamesSystemOpen && !q) continue;
     const tr = document.createElement("tr");
     tr.style.cursor = "default";
     tr.innerHTML = '<td><span class="kind"></span></td><td></td><td class="num"></td><td class="num"></td><td class="act"><button></button></td>';
     const c = tr.children;
-    c[0].firstChild.textContent = t("games.kind." + g.kind);
-    c[0].firstChild.classList.add(g.kind);
+    c[0].firstChild.textContent = t("games.kind." + (g.system ? "system" : g.kind));
+    c[0].firstChild.classList.add(g.system ? "system" : g.kind);
     c[1].textContent = gameTitle(g);
     c[2].textContent = size(g.bytes);
     c[3].textContent = g.mtime;
@@ -1500,7 +1517,8 @@ function renderGames() {
 
 async function removeGame(g) {
   let text = t("games.confirm.text", { kind: t("games.kind." + g.kind), title: gameTitle(g), size: size(g.bytes) });
-  if (g.kind === "pfx") text = t("games.confirm.saves") + "\n\n" + text;
+  if (g.system) text = t("games.confirm.system") + "\n\n" + text;
+  else if (g.kind === "pfx") text = t("games.confirm.saves") + "\n\n" + text;
   if (!(await ask({ title: t("games.confirm.title"), text, yes: t("games.remove"), no: t("btn.cancel") }))) return;
   showError("games-error", null);
   const r = DEMO ? { ok: true } : await api().games_remove(g.name);
@@ -1575,8 +1593,26 @@ function sortedArchives(archives) {
     .sort((a, b) => (ARCH_ORDER[archives[a][0]] ?? 2) - (ARCH_ORDER[archives[b][0]] ?? 2) || archiveName(a).localeCompare(archiveName(b)));
 }
 
+// Честная скорость: сколько байт реально прибавилось за последние ~20 с (машина присылает скорость отдельных кусков —
+// она завышена в разы: между кусками бывают простои; живой тест 2026-10-01). Меньше 5 с наблюдений — ещё не знаем.
+const SPEED_WINDOW = 20, SPEED_MIN = 5;
+const speedHist = {};   // имя архива → [[время, сделано], …]
+function avgSpeed(name, pg) {
+  const now = Date.now() / 1000;
+  let h = speedHist[name] || [];
+  if (h.length && pg.done < h[h.length - 1][1]) h = [];          // архив начали заново
+  h.push([now, pg.done]);
+  while (h.length > 2 && now - h[1][0] >= SPEED_WINDOW) h.shift();
+  speedHist[name] = h;
+  const [t0, d0] = h[0], span = now - t0;
+  return span >= SPEED_MIN ? (pg.done - d0) / span : null;
+}
+function leftText(sec) {
+  return sec < 60 ? t("arch.left.soon") : t("arch.left", { time: hm(sec) });
+}
+
 // Строка архива: имя и состояние; пока он качается или выгружается (wolf-setup.sh v4.6) — полоса,
-// «45% · 12,3 из 27 ГБ» и скорость
+// «45% · 12,3 из 27 ГБ» и средняя скорость с «осталось ~N мин»
 function archiveRow(name, state, pg) {
   const li = el("li", { className: "arch " + state });
   const head = el("div", { className: "arch-head" });
@@ -1589,8 +1625,11 @@ function archiveRow(name, state, pg) {
     fill.style.width = pct + "%";
     bar.append(fill);
     const line = el("div", { className: "arch-line" });
+    const sp = avgSpeed(name, pg);
+    const speed = sp == null ? "" : (state === "down" ? "↓ " : "↑ ") + t("arch.speed", { speed: size(sp) })
+      + (sp > 0 ? " · " + leftText((pg.total - pg.done) / sp) : "");
     line.append(el("span", {}, t("arch.progress", { pct, done: size(pg.done), total: size(pg.total) })),
-                el("span", { className: "speed" }, pg.speed > 0 ? (state === "down" ? "↓ " : "↑ ") + t("arch.speed", { speed: size(pg.speed) }) : ""));
+                el("span", { className: "speed" }, speed));
     li.append(bar, line);
   }
   return li;
@@ -1868,8 +1907,10 @@ function demoProgress() {
 }
 
 function demoGames() {
-  const g = (name, kind, title, appid, mb, mtime) => ({ name, kind, title, appid, bytes: mb * 1e6, mtime });
+  const g = (name, kind, title, appid, mb, mtime) => ({ name, kind, title, appid, bytes: mb * 1e6, mtime,
+    system: /^sgame--(Steamworks|Proton)/.test(name) || appid === "1493710" });
   return { games: [g("sgame--Steamworks Shared", "sgame", "Steamworks Shared", null, 25, "2026-09-23"),
+                   g("sgame--Proton - Experimental", "sgame", "Proton - Experimental", null, 1100, "2026-09-23"),
                    g("game--3751260", "game", "3751260", null, 184, "2026-09-22"),
                    g("pfx--3751260", "pfx", "The Blood of Dawnwalker", "3751260", 141, "2026-09-23"),
                    g("pfx--1493710", "pfx", "", "1493710", 109, "2026-09-23"),
