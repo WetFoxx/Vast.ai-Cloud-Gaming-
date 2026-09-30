@@ -1,8 +1,8 @@
-# vastgame-desktop (experimental)
+# vastgame-desktop
 
 Docker image for cloud gaming on a regular (non-KVM) Vast.ai instance: XFCE desktop, Steam + Proton,
 Sunshine (NVENC + NvFBC), PulseAudio, Tailscale (userspace), gamepad without `/dev/uinput` (`vgpad/`).
-Used by the vastgame app ("Docker, experimental" tab). The KVM setup (`wolf-setup.sh`) stays the main one.
+Used by the vastgame app ("Docker" tab — the main mode since 0.3.1; KVM via `wolf-setup.sh` is the other one).
 
 Образ для облачной игры на обычном (не KVM) Docker-инстансе Vast.ai: рабочий стол XFCE, Steam и Proton,
 Sunshine (NVENC + NvFBC), звук, Tailscale без /dev/net/tun, геймпад без /dev/uinput (`vgpad/`).
@@ -20,4 +20,4 @@ Sunshine (NVENC + NvFBC), звук, Tailscale без /dev/net/tun, геймпа�
   как оригинал. Программы пользователя стартуют с чистым окружением (`env -i`), как на KVM.
 
 Environment: `WOLF_SCRIPT_URL` (agent mode), `RES`, `TS_HOSTNAME`, `TAILSCALE_AUTHKEY`, `SUNSHINE_PASSWORD`,
-`STEAM_AUTOSTART`, `VASTGAME_DEBUG_TOKEN` (see `entrypoint.sh`). Requires an NVIDIA driver ≥ 580 on the host (NVENC in Sunshine).
+`STEAM_AUTOSTART`, `VASTGAME_DEBUG_TOKEN` (see `entrypoint.sh`). Requires an NVIDIA driver ≥ 535 on the host: Sunshine 2026 (CUDA 13) for drivers ≥ 580, Sunshine 2025.924 (CUDA 12.9, `/opt/sunshine-cuda12`) for older ones — `sunshine-start.sh` picks one.
