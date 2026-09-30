@@ -87,6 +87,9 @@ for args in "vt7 -novtswitch -sharevts" "-novtswitch -sharevts -keeptty" "-keept
   log "Xorg не запустился с ($args)"; xerr 6 | tee -a "$LOG"
   pkill Xorg; sleep 1
 done
+# [0.3.1] Экран так и не поднялся — в журнал строки Xorg о видеокарте (разбор причины: какой вход, какой режим)
+DISPLAY=:0 xrandr >/dev/null 2>&1 || { log "журнал Xorg (NVIDIA, ошибки):"
+  grep -E "NVIDIA|\(EE\)|\(WW\)" /var/log/Xorg.0.log 2>/dev/null | grep -v "Please consult" | tail -45 | tee -a "$LOG"; }
 u /usr/local/bin/wolf-res >/dev/null 2>&1              # базовый режим, экран в 0,0
 DISPLAY=:0 xset s off -dpms 2>/dev/null
 log "экран: $(DISPLAY=:0 xrandr 2>/dev/null | grep ' connected' | cut -d' ' -f1-3)"
