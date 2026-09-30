@@ -41,8 +41,11 @@ u() { runuser -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" LANG=C.UTF-
 desktop() { u setsid startxfce4 >/var/log/xfce.log 2>&1 & }
 # Суть ошибки Xorg — строки (EE) без общих «смотри лог» и «сервер завершён»
 # («Fatal server error:» — только заголовок: причина в следующей строке, её и берём)
+# [0.3.1] и без приписок «Please consult the X.Org Foundation support / at http…» — раньше приложение получало их
+# вместо причины (живой тест 2026-10-01: Quadro RTX 6000, драйвер 535)
 xerr() { grep -A1 -E "\(EE\)|Fatal" /var/log/Xorg.0.log 2>/dev/null \
-           | grep -vE "^--$|Please also check|Server terminated|Fatal server error: *$|^(\[[^]]*\] *)?\(EE\) *$" | tail -${1:-4}; }
+           | grep -vE "^--$|Please also check|Please consult|X\.Org Foundation|for help|at http|Server terminated|Fatal server error: *$|^(\[[^]]*\] *)?\(EE\) *$" \
+           | sed 's/^\[[^]]*\] *//; s/^(EE) *//; s/(EE) *$//' | awk '!seen[$0]++' | tail -${1:-4}; }
 
 trap 'log "остановка"; pkill -TERM -u "$DU"; pkill -TERM sunshine; pkill -TERM Xorg; tailscale down 2>/dev/null; exit 0' TERM INT
 
@@ -175,7 +178,7 @@ while :; do
     log "Xorg упал — перезапуск ($xfails)"
     [ "$xfails" -le 3 ] && xerr 3 | tee -a "$LOG"
     if [ -n "$AGENT" ] && [ "$xfails" -ge 3 ] && [ -d /var/lib/wolf/st ]; then
-      echo "$(date +%s)|err|экран не запускается: $(xerr 1 | sed 's/^\[[^]]*\] *//' | cut -c1-120)" \
+      echo "$(date +%s)|err|экран не запускается: $(xerr 2 | tr '\n' ' ' | cut -c1-200)" \
         > /var/lib/wolf/st/sunshine
     fi
     setsid Xorg :0 -config /etc/X11/xorg.conf -noreset -nolisten tcp vt7 -novtswitch -sharevts >/var/log/xorg.out 2>&1 &
