@@ -17,6 +17,7 @@
 
 import base64
 import json
+import os
 import re
 import threading
 import time
@@ -151,6 +152,10 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False):
         import setup      # адрес скрипта один для KVM и Docker (setup не импортирует core)
         env = {"WOLF_SCRIPT_URL": setup.SCRIPT_URL, "-p 41641:41641/udp": "1",
                "SYNC_STEAM_GAMES": template_games(tpl)}
+        # Отладка образа (только при запуске из папки проекта с этой переменной; у людей её нет): канал команд
+        # debug_rc.py на порту 8788, только через Tailscale и только с этим одноразовым паролем
+        if os.environ.get("VASTGAME_DEBUG_TOKEN"):
+            env["VASTGAME_DEBUG_TOKEN"] = os.environ["VASTGAME_DEBUG_TOKEN"]
         for name in ("RES", "STEAM_LANG"):
             v = setup.env_value(tpl.get("env"), name)
             if v:
