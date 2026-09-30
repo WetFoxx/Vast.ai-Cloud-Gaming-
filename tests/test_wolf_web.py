@@ -171,3 +171,18 @@ class TestWolfWeb(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProgressField(unittest.TestCase):
+    def test_progress_only_while_fresh(self):
+        # [v4.6] ход архива: свежий файл — {done, total, speed}; старше 30 с или кривой — нет хода
+        import time as _t
+        d = Path(tempfile.mkdtemp())
+        ns = load_wolf_web(d / "wolf")
+        ns["PG"] = str(d) + "/"
+        (d / "sgame--A").write_text(f"50 200 10 {int(_t.time())}\n")
+        (d / "sgame--Old").write_text(f"50 200 10 {int(_t.time()) - 60}\n")
+        (d / "sgame--Bad").write_text("мусор")
+        self.assertEqual(ns["progress"]("sgame--A"), {"done": 50, "total": 200, "speed": 10})
+        for n in ("sgame--Old", "sgame--Bad", "sgame--None"):
+            self.assertIsNone(ns["progress"](n), n)

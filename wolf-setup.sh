@@ -88,6 +88,7 @@
 # при выключении, удалённая остаётся в облаке. Запущенная игра не выгружается, пока не закрыта; по выходу — не
 # чаще раза в 10 минут (раньше «мигающая» игра выгружалась каждую минуту). Список игр для приложения —
 # vastgame-games.json в облаке (wolf-games.py): архив, номер Steam (его сохранения — pfx--номер), название.
+# Ход каждого архива (проценты и скорость, скачивание и выгрузка) — в /json поле progress {done, total, speed}.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -311,7 +312,7 @@ S=/var/lib/wolf     # h/ отпечаток  m/ манифест базы  v/ в
 T=/var/tmp/wolf     # временные файлы
 L=/run/wolf         # блокировки, найденный X-дисплей, boot-done
 D=:0 SR=
-mkdir -p "$S"/{h,m,v,p,st,nt,nm,x} "$T" "$L"
+mkdir -p "$S"/{h,m,v,p,st,nt,nm,x,pg} "$T" "$L"
 [ -f "$L/x" ] && . "$L/x"
 
 # ------------------------------------------------------------------ утилиты ---
@@ -323,7 +324,7 @@ rcp() { rclone "$@" --retries=5 --low-level-retries=20 --drive-use-trash=false \
           --drive-pacer-min-sleep=10ms --drive-pacer-burst=200; }
 rd()  { cat "$1" 2>/dev/null; }
 log() { echo "[$(date '+%F %T')] $*" | tee -a /var/log/wolf.log; }
-st()  { echo "$(date +%s)|$2|$3" > "$S/st/$1"; log "$1: $2 $3"; }
+st()  { echo "$(date +%s)|$2|$3" > "$S/st/$1"; log "$1: $2 $3"; case $2 in ok|err) rm -f "$S/pg/$1" ;; esac; }
 # [HARDENING] env -i => секреты (если бы были в env root) НЕ попадают в игры
 u()   { runuser -u "$DU" -- env -i \
           HOME="$DH" USER="$DU" LOGNAME="$DU" \
@@ -367,7 +368,7 @@ rver() {
 }
 names() { sed -n -E 's/\.tar\.zst(\.parts)?\t.*//p' "$LS" | awk '!s[$0]++' | grep -E "$1"; }
 # [v4.4] Большие архивы — частями, параллельно: parts put|get|rm ОБЪЕКТ [--no-trash] (ход — в wolf.log)
-parts() { local c=$1; shift; WOLF_TMP="$T" python3 /usr/local/bin/wolf-parts.py "$c" "$R" "$@" 2>>/var/log/wolf.log; }
+parts() { local c=$1; shift; WOLF_TMP="$T" WOLF_PG="${PG:-}" python3 /usr/local/bin/wolf-parts.py "$c" "$R" "$@" 2>>/var/log/wolf.log; }
 ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null; }
 # Папка для игр не из Steam (v3.10): если её нет — создать пустой. Зовётся при загрузке и каждые
 # GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
@@ -638,12 +639,15 @@ pack() {
   fi
   st "$n" up "выгрузка $o"
   rcp deletefile "$R/$o.part" &>/dev/null       # хвост прерванной выгрузки — мимо корзины
+  # [v4.6] между tar и zstd — счётчик хода (проценты от объёма файлов, скорость) для приложения
   tar -cf - -C "$B" --no-recursion --null -T "$w/l" "${x[@]}" --ignore-failed-read \
       --warning=no-file-changed --warning=no-file-removed 2>> "$T/tar.err" \
+    | WOLF_PG="$S/pg/$n" WOLF_PG_TOTAL="$(sz "$([ $f = 1 ] && echo "$w/c" || echo "$w/d")")" \
+      python3 /usr/local/bin/wolf-parts.py count \
     | zstd -q -T0 -"$Z" \
     | parts put "$o"            # [v4.4] маленький — одним файлом (.part → переименование), большой — частями
   s=("${PIPESTATUS[@]}")
-  if [ "${s[0]}" -le 1 ] && [ "${s[1]}${s[2]}" = 00 ]; then
+  if [ "${s[0]}" -le 1 ] && [ "${s[1]}${s[2]}${s[3]}" = 000 ]; then
     if [ $f = 1 ]; then
       mv "$w/c" "$S/m/$n"
       [[ $rv = *+* ]] && parts rm "$n.tar.zst.${rv:0:8}" --no-trash &>/dev/null   # дельта к прежней базе
@@ -654,7 +658,7 @@ pack() {
     case $n in pfx--*|game--*|sgame--*) : > "$S/nt/$n" ;; esac   # сохранения — к уведомлению
     rm -rf "$w"; return 0
   fi
-  st "$n" err "ошибка выгрузки (tar/zstd/rclone: ${s[*]})"
+  st "$n" err "ошибка выгрузки (tar/счётчик/zstd/rclone: ${s[*]})"
   rcp deletefile "$R/$o.part" &>/dev/null
   rm -rf "$w"; return 1
 }
@@ -843,7 +847,7 @@ xt_user() { u tar -xpf - -C "$B" --no-overwrite-dir --delay-directory-restore \
               --warning=no-timestamp 2>>"$T/tar.err"; }
 
 get() {  # $1 объект в облаке  $2 имя  (B/K заданы spec)
-  local s h
+  local s h PG="$S/pg/$2"                        # [v4.6] ход скачивания (проценты, скорость) — для приложения
   # [v4.4] частями; [v4.5] кусками по 64 МБ, до 8 сразу, в памяти и по порядку прямо в распаковку (без временных
   # файлов — раньше части ложились на диск, и распаковка писала их ещё раз)
   if awk -F'\t' -v o="$1.parts" '$1==o {f=1} END {exit !f}' "$LS"; then
@@ -1558,6 +1562,16 @@ w /usr/local/bin/wolf-web.py <<'WEB'
 import os, time, html, glob, json, re, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ST = '/var/lib/wolf/st/'
+PG = '/var/lib/wolf/pg/'
+def progress(n):
+    """[v4.6] Ход архива, если идёт: {done, total, speed} (байты, байт/с); файл старше 30 с — не идёт."""
+    try:
+        done, total, speed, ts = open(PG + n).read().split()
+        if time.time() - int(ts) > 30:
+            return None
+        return {'done': int(done), 'total': int(total), 'speed': int(speed)}
+    except Exception:
+        return None
 COLOR = {'ok': '#3fb950', 'up': '#58a6ff', 'down': '#58a6ff', 'wait': '#d29922', 'err': '#f85149'}
 def items():
     out = []
@@ -1661,8 +1675,9 @@ class H(BaseHTTPRequestHandler):
             return self.reply(200, {'code': None, 'out': 'не закончилось за 10 минут'})
     def do_GET(self):
         if self.path.startswith('/json'):
-            body = json.dumps([dict(name=n, ts=t, state=s, text=x) for n, t, s, x in items()],
-                              ensure_ascii=False).encode()
+            body = json.dumps([dict(name=n, ts=t, state=s, text=x,
+                                    **({'progress': pg} if s in ('up', 'down') and (pg := progress(n)) else {}))
+                               for n, t, s, x in items()], ensure_ascii=False).encode()
             ctype = 'application/json; charset=utf-8'
         else:
             body = page().encode(); ctype = 'text/html; charset=utf-8'
@@ -2114,6 +2129,52 @@ def log(msg):
     print(f"parts: {msg}", file=sys.stderr, flush=True)
 
 
+class Progress:
+    """[v4.6] Ход для приложения: файл WOLF_PG — «сделано всего скорость время» (байты, байт/с), не чаще раза в
+    секунду, заменой файла целиком. Нет WOLF_PG — ничего не пишет."""
+
+    def __init__(self, total=0):
+        self.path, self.total, self.done = os.environ.get("WOLF_PG") or None, total, 0
+        self.tw, self.wdone, self.speed = time.time(), 0, 0.0
+
+    def add(self, n):
+        self.done += n
+        now = time.time()
+        if self.path and now - self.tw >= 1:
+            now_speed = (self.done - self.wdone) / (now - self.tw)
+            self.speed = now_speed if not self.speed else self.speed * 0.6 + now_speed * 0.4
+            self.tw, self.wdone = now, self.done
+            self.write(now)
+
+    def write(self, now=None):
+        if not self.path:
+            return
+        try:
+            with open(self.path + ".tmp", "w") as f:
+                f.write(f"{self.done} {self.total} {self.speed:.0f} {int(now or time.time())}\n")
+            os.replace(self.path + ".tmp", self.path)
+        except OSError:
+            pass
+
+
+def count():
+    """Поток stdin → stdout без изменений, с ходом (WOLF_PG, всего — WOLF_PG_TOTAL): между tar и zstd при выгрузке."""
+    pg = Progress(int(os.environ.get("WOLF_PG_TOTAL") or 0))
+    src, out = sys.stdin.buffer, sys.stdout.buffer
+    try:
+        while True:
+            b = src.read(BLOCK)
+            if not b:
+                break
+            out.write(b)
+            pg.add(len(b))
+        out.flush()
+    except BrokenPipeError:
+        return 1
+    pg.write()
+    return 0
+
+
 def argv(*args, trash=False):
     return [*RC, f"--drive-use-trash={'true' if trash else 'false'}", *args]
 
@@ -2417,6 +2478,7 @@ def stream(remote, segs, out):
     None — всё сошлось, иначе текст ошибки."""
     ranges = [(si, off, min(RANGE, size - off)) for si, (_, size, _) in enumerate(segs) for off in range(0, size, RANGE)]
     hashes = [hashlib.md5() for _ in segs]
+    pg = Progress(sum(size for _, size, _ in segs))           # [v4.6] ход скачивания для приложения
     futures, locks, nxt = {}, {}, 0
     with cf.ThreadPoolExecutor(WINDOW) as ex:
         def start(k, lock):
@@ -2444,6 +2506,7 @@ def stream(remote, segs, out):
                     return f"{segs[si][0]}: кусок {off}+{cnt} не скачался"
                 out.write(buf)
                 hashes[si].update(buf)
+                pg.add(len(buf))
             finally:
                 locks.pop(k).close()
             if off + cnt == segs[si][1] and hashes[si].hexdigest() != segs[si][2]:
@@ -2452,6 +2515,7 @@ def stream(remote, segs, out):
     for si, (name, size, md5) in enumerate(segs):          # пустые сегменты: кусков у них нет
         if size == 0 and hashes[si].hexdigest() != md5:
             return f"{name}: не сходится MD5"
+    pg.write()                                             # итог — даже если всё уложилось в секунду
     return None
 
 
@@ -2509,6 +2573,8 @@ def rm(remote, obj, trash, everything):
 
 
 def main(args):
+    if args[1:2] == ["count"]:
+        return count()
     if len(args) < 4 or args[1] not in ("put", "get", "cat", "rm") or (args[1] == "cat" and len(args) < 6):
         print("usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash] [--all] | cat REMOTE OBJECT SIZE MD5",
               file=sys.stderr)

@@ -199,6 +199,36 @@ class TestParts(PartsBase):
 
 
 @unittest.skipUnless(RCLONE, "нужен rclone")
+class TestProgress(PartsBase):
+    """v4.6: ход для приложения — файл WOLF_PG «сделано всего скорость время» при скачивании и выгрузке."""
+
+    def progress(self):
+        done, total, speed, ts = (self.d / "pg").read_text().split()
+        return int(done), int(total), int(speed), int(ts)
+
+    def test_download_progress(self):
+        data = os.urandom(PART * 3 + 11)
+        self.assertEqual(self.put("g.tar.zst", data), 0)
+        self.extra = {"WOLF_PG": str(self.d / "pg")}
+        code, out = self.get("g.tar.zst")
+        self.assertEqual((code, out), (0, data))                          # данные не пострадали
+        done, total, speed, ts = self.progress()
+        self.assertEqual((done, total), (len(data), len(data)))           # в конце — всё
+
+    def test_count_passes_data_and_writes_progress(self):
+        data = os.urandom(3 * 1024 * 1024 + 5)
+        self.extra = {"WOLF_PG": str(self.d / "pg"), "WOLF_PG_TOTAL": str(len(data))}
+        r = self.run_p("count", data=data)
+        self.assertEqual((r.returncode, r.stdout), (0, data))
+        self.assertEqual(self.progress()[:2], (len(data), len(data)))
+
+    def test_without_pg_nothing_written(self):
+        r = self.run_p("count", data=b"abc")
+        self.assertEqual(r.stdout, b"abc")
+        self.assertFalse((self.d / "pg").exists())
+
+
+@unittest.skipUnless(RCLONE, "нужен rclone")
 class TestRangedRead(PartsBase):
     """v4.5: одиночный файл (архив до v4.4) — кусками в несколько потоков, прямо в stdout, MD5 сверяется."""
 
