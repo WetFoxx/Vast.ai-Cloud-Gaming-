@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.6 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.7 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -89,6 +89,8 @@
 # чаще раза в 10 минут (раньше «мигающая» игра выгружалась каждую минуту). Список игр для приложения —
 # vastgame-games.json в облаке (wolf-games.py): архив, номер Steam (его сохранения — pfx--номер), название.
 # Ход каждого архива (проценты и скорость, скачивание и выгрузка) — в /json поле progress {done, total, speed}.
+# [v4.7] Игра Steam выгружается, только когда Steam установил её целиком (StateFlags в паспорте, steam_ready):
+# недокачанная не уезжает в облако частями — ни раз в 15 минут, ни при выключении, ни по выходу из игры.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -441,6 +443,23 @@ ondisk() {
   { ld "$DH/$SR/steamapps/common" sgame--; ld "$GD" game--; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \
     | LC_ALL=C sort
 }
+# [v4.7] Игра Steam установлена целиком — только такую выгружаем. Недокачанную (или обновляющуюся) Steam сам докачает
+# из магазина, а в облако она уехала бы частями — раз в 15 минут, пока качается, и при выключении. Паспорт игры
+# (appmanifest) пишет состояние в StateFlags: 4 — установлена; рядом допустимы 2 (ждёт обновления, файлы целые),
+# 8, 16 и 64 (запущена). Любой другой бит — качается, обновляется, проверяется, файлы потеряны. Паспорта нет или
+# в нём нет StateFlags — не знаем, выгружаем как раньше. Не Steam (game--) — всегда да.
+steam_ready() {
+  local d f s
+  case $1 in sgame--*) d=${1#sgame--} ;; *) return 0 ;; esac
+  for f in "$DH/$SR/steamapps"/appmanifest_*.acf; do
+    [ -e "$f" ] && [ "$(idirs "$f" | head -1)" = "$d" ] || continue
+    s=$(sed -n 's/^[[:space:]]*"StateFlags"[[:space:]]*"\([0-9]*\)".*/\1/p' "$f" | head -1)
+    [ -n "$s" ] || return 0
+    (( (s & 4) && !(s & ~(2 | 4 | 8 | 16 | 64)) ))
+    return
+  done
+  return 0
+}
 # Архивы игр, запущенных сейчас (их файлы не выгружаем, пока игра идёт: игра всё время пишет в свою папку)
 running_archives() {
   local k d
@@ -765,7 +784,7 @@ watch_games() {
       case $k in
         app:*) a=${k#app:}
                wants "pfx--$a" && arr+=("pfx--$a")
-               d=$(idir "$a"); [ -n "$d" ] && want "sgame--$d" && arr+=("sgame--$d") ;;
+               d=$(idir "$a"); [ -n "$d" ] && want "sgame--$d" && steam_ready "sgame--$d" && arr+=("sgame--$d") ;;
         dir:*) want "game--${k#dir:}" && arr+=("game--${k#dir:}") ;;
       esac
     done
@@ -1282,6 +1301,10 @@ gsync() {
   [ -n "${NOW:-}" ] || run=$(running_archives)
   { ld "$GD" game--; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; } | while IFS= read -r n; do
     grep -qxF -- "$n" <<< "$run" && continue
+    if ! steam_ready "$n"; then                     # [v4.7] Steam ещё качает — не выгружать (вывод gsync — список)
+      [ -n "${NOW:-}" ] && log "$n: Steam установил игру не до конца — не выгружаю, Steam докачает её сам" >/dev/null
+      continue
+    fi
     if want "$n"; then echo "$n"
     elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then echo "$n"
     fi

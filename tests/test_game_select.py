@@ -35,7 +35,7 @@ SHORT_PY = TMP / "wolf-shortcuts.py"
 SHORT_PY.write_text(heredoc("wolf-shortcuts.py", "SHORTCUTS"))
 FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "tool", "inlist", "addline", "rmline", "want", "wants",
                                    "ondisk", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
-                                   "gsync", "idirs"))
+                                   "gsync", "idirs", "steam_ready"))
 FUNCS += "\n" + re.search(r"^HID=.*$", WOLF, re.M).group(0)
 
 
@@ -54,11 +54,13 @@ class Machine:
         self.cloud = list(cloud)
         self.running = list(running)
 
-    def steam_game(self, appid, folder, name=None, files=True, hidden=False):
+    def steam_game(self, appid, folder, name=None, files=True, hidden=False, flags=None):
         sa = self.d / "home/sa/steamapps"
         (sa / (".vastgame-hidden" if hidden else "")).mkdir(exist_ok=True)
+        state = f'\t"StateFlags"\t\t"{flags}"\n' if flags is not None else ""
         (sa / (".vastgame-hidden" if hidden else "") / f"appmanifest_{appid}.acf").write_text(
-            f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"name"\t\t"{name or folder}"\n\t"installdir"\t\t"{folder}"\n}}\n')
+            f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"name"\t\t"{name or folder}"\n{state}'
+            f'\t"installdir"\t\t"{folder}"\n}}\n')
         if files:
             (sa / "common" / folder).mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +136,26 @@ class TestUpload(unittest.TestCase):
         m.run("addline 'sgame--New One' sel.skip", env=env)
         out = m.run("gsync", env=env + "; NOW=1")
         self.assertNotIn("sgame--New One", out)                                     # ответил «нет» — не выгружаем
+
+
+class TestSteamReady(unittest.TestCase):
+    def test_only_fully_installed_steam_games_uploaded(self):
+        # [v4.7] Steam ещё качает (1026), обновляет установленную (1030), файлы потеряны (36) — не выгружать ни в
+        # проходе, ни при выключении; установлена (4), ждёт обновления (6), запущена (68), паспорт без флагов — да
+        m = Machine()
+        games = {"Done": 4, "Downloading": 1026, "Updating": 1030, "Missing": 36, "Pending": 6, "Old": None,
+                 "Queued": 2}                                          # в очереди на установку: файлов ещё нет
+        for i, (folder, flags) in enumerate(games.items()):
+            m.steam_game(100 + i, folder, flags=flags)
+        (m.d / "home/Games/Folder").mkdir()
+        env = f'VG_SYNC="{vg_sync(["sgame--" + g for g in games] + ["game--Folder"])}"'
+        for now in ("", "; NOW=1"):
+            out = m.run("sel_init; gsync", env=env + now)
+            self.assertEqual(sorted(out.split("\n")[:-1]), ["game--Folder", "sgame--Done", "sgame--Old", "sgame--Pending"])
+        out = m.run('for f in Done Downloading; do steam_ready "sgame--$f" && echo "READY $f"; done; true', env=env)
+        self.assertEqual(out.split(), ["READY", "Done"])
+        # по выходу из игры — та же проверка (запущенная игра установлена, но бывает и обновление поверх)
+        self.assertIn('want "sgame--$d" && steam_ready "sgame--$d" && arr+=', WOLF)
 
 
 class TestQuestions(unittest.TestCase):
