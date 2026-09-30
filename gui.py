@@ -755,7 +755,7 @@ class Api:
                 if new:
                     asks.mark_seen(new)
                     asks.announce(new)
-                    self._show_card()
+                    asks.show_card()                 # отдельным «фоновым» процессом — поверх полноэкранного Moonlight
             except Exception:                    # noqa: BLE001 — следить дальше, что бы ни случилось
                 _log_error("watch_asks")
             time.sleep(ASK_POLL)
@@ -1038,6 +1038,9 @@ def _float(window):
         w = window.native
         if w is None:
             return
+        # «Фоновое» приложение без значка в Dock — только его окна macOS пускает на чужой полноэкранный стол.
+        # Здесь, а не до запуска: pywebview при загрузке сам ставит обычный режим (setActivationPolicy_(0))
+        AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         w.setLevel_(Quartz.CGShieldingWindowLevel() + 1)
         w.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
                                  | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
@@ -1052,6 +1055,15 @@ def _float(window):
         w.makeKeyAndOrderFront_(None)
         w.orderFrontRegardless()
         AppKit.NSApp.activateIgnoringOtherApps_(True)
+        AppHelper.callAfter(report)
+
+    def report():
+        # Где оказалась карточка — для разбора (поверх Moonlight её проверить можно только вживую)
+        w = window.native
+        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        settings.applog(f"карточка: видна={bool(w.isVisible())}, на текущем столе={bool(w.isOnActiveSpace())}, "
+                        f"ключевая={bool(w.isKeyWindow())}, уровень={w.level()}, режим={AppKit.NSApp.activationPolicy()}, "
+                        f"впереди={front and front.bundleIdentifier()}")
     AppHelper.callAfter(go)
 
 
@@ -1074,23 +1086,24 @@ def main():
 
 
 def card_main():
-    """Окно закрыто, а у машины вопрос (служба автозапуска запустила «app_main.py ask»): показать одну карточку
-    поверх всего и выйти, когда её закроют. Без значка в Dock. Карточка уже открыта или открылось окно — ничего."""
+    """Карточка вопроса машины отдельным процессом («app_main.py ask» — запускают окно и служба автозапуска): одна
+    карточка поверх всего, выход, когда её закроют. «Фоновое» приложение без значка в Dock. Уже открыта — ничего."""
     import fcntl
     with open(asks.CARD_LOCK, "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return
-        if asks.window_open():
-            return
-        api = Api()
-        api._card_only = True
-        api._show_card()
         if sys.platform == "darwin":
+            # «Фоновое» приложение с самого запуска: переключение уже работающего macOS не учитывает (живой тест
+            # 2026-10-01). pywebview ставит обычный режим при загрузке своего модуля Mac — загрузить его первым
+            import webview.platforms.cocoa  # noqa: F401
             import AppKit
             AppKit.NSApplication.sharedApplication().setActivationPolicy_(
                 AppKit.NSApplicationActivationPolicyAccessory)
+        api = Api()
+        api._card_only = True
+        api._show_card()
         webview.start()
 
 

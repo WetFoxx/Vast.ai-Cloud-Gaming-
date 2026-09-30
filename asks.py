@@ -70,6 +70,17 @@ def answer(ip, kind, archive, yes, on_notice=None):
     cloudgames.remember_answer(kind, archive, bool(yes))
 
 
+def show_card():
+    """Карточка — всегда отдельным процессом (app_main.py ask) в режиме «фонового» приложения без значка в Dock: только
+    такие окна macOS показывает поверх чужого полноэкранного рабочего стола (Moonlight «без рамки» живёт на своём).
+    Окно самого приложения — обычное: его карточку macOS туда не пускает (живой тест 2026-10-01). Карточка уже
+    открыта — второй процесс сам выйдет (CARD_LOCK)."""
+    import subprocess
+    import paths
+    subprocess.Popen(paths.self_cmd("ask"), cwd=paths.HERE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def window_open():
     """Открыто ли окно приложения (оно держит WINDOW_LOCK всё время, пока работает)."""
     try:

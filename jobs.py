@@ -578,8 +578,7 @@ def watch_asks():
     if new:
         asks.mark_seen(new)
         asks.announce(new)
-        subprocess.Popen(paths.self_cmd("ask"), cwd=HERE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        asks.show_card()
 
 
 def spawn(kind, **args):
