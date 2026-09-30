@@ -172,11 +172,11 @@ const I18N = {
     "offers.back_to_list": "К списку машин",
     "core.ping": "Задержка до машины: {ms} мс (запомнил для списка машин).",
     "offers.loading": "Ищу подходящие машины…",
-    "offers.summary": "Подходящих: {count} · RTX/GTX · надёжность от {rel}% · диск {disk} ГБ",
+    "offers.summary": "Подходящих: {count} · игровые и профессиональные RTX · надёжность от {rel}% · диск {disk} ГБ",
     "offers.latency": "Пинг «≈» — оценка по расстоянию; без «≈» — измерен в твоих прошлых играх. Для игр лучше до 80–100 мс.",
     "offers.mode.kvm": "KVM",
-    "offers.mode.docker": "Docker (экспериментально)",
-    "offers.mode.docker_note": "Docker — обычный контейнер вместо виртуальной машины: машин намного больше, запускаются за 1–3 минуты. Режим новый: сохранения, вход в Steam и игры — те же, что на KVM, но что-то может работать не так, как там. Нет вибрации геймпада. В Docker Vast берёт деньги за трафик (за час игры ~30 ГБ) — ограничь его цену фильтром «Трафик».",
+    "offers.mode.docker": "Docker",
+    "offers.mode.docker_note": "Docker — основной режим: машин намного больше, запускаются за 1–3 минуты. Нет вибрации геймпада. Vast берёт деньги за трафик (за час игры ~30 ГБ) — ограничь его цену фильтром «Трафик».",
     "offers.none": "Подходящих машин сейчас нет. Попробуй чуть позже.",
     "offers.last.free": "Последняя машина ({machine}, {date}) сейчас свободна — она первая в списке с пометкой «последняя». Это та же машина хоста, но с чистым диском: игры и сохранения приедут из облака, как обычно.",
     "offers.last.busy": "Последняя машина ({machine}, {date}) сейчас занята или больше не сдаётся.",
@@ -203,7 +203,7 @@ const I18N = {
     "confirm.badhost": "Внимание: на этом хосте машина раньше не запустилась ({reason}). Сбой мог быть временным, но она может не запуститься снова.",
     "confirm.rent.spare": "Если Vast не запустит эту машину, возьму вместо неё следующую из списка — только не хуже: видеокарта не слабее, цена не выше, пинг не больше. Таких сейчас: {n}.",
     "confirm.rent.nospare": "Если Vast не запустит эту машину, удалю её и верну тебя к списку: машин не хуже неё сейчас нет.",
-    "confirm.rent.docker": "Режим Docker (экспериментально). Если на машине не заработает кодировщик видео, возьму следующую из списка.",
+    "confirm.rent.docker": "Режим Docker. Если на машине не заработает кодировщик видео, возьму следующую из списка.",
     "progress.title.play": "Запуск машины",
     "stage.vast": "Vast запускает машину (обычно 2–5 мин)",
     "stage.tailscale": "Подключение к Tailscale (5–7 мин)",
@@ -647,7 +647,8 @@ const I18N = {
     "games.confirm.system": "Это системные файлы Steam (Proton, Steam Linux Runtime…) — без них игры не запустятся. Если удалить, Steam скачает их заново при следующем запуске (время и трафик). Удалять не стоит.",
     "sync.none_selected": "Игры не скачиваются — только сохранения",
     "arch.left": "осталось ~{time}",
-    "arch.left.soon": "меньше минуты"
+    "arch.left.soon": "меньше минуты",
+    "offers.mode.kvm_note": "KVM — полноценная виртуальная машина: машин мало, запускаются 5–10 минут; есть вибрация геймпада, трафик почти бесплатный."
   },
   "en": {
     "app.error_state": "Couldn't get the status: {error}",
@@ -819,11 +820,11 @@ const I18N = {
     "offers.back_to_list": "Back to the machine list",
     "core.ping": "Latency to the machine: {ms} ms (saved for the machine list).",
     "offers.loading": "Looking for suitable machines…",
-    "offers.summary": "Suitable: {count} · RTX/GTX · reliability from {rel}% · disk {disk} GB",
+    "offers.summary": "Suitable: {count} · gaming and pro RTX · reliability from {rel}% · disk {disk} GB",
     "offers.latency": "Ping with “≈” is estimated from distance; without it — measured in your previous sessions. For games, under 80–100 ms is best.",
     "offers.mode.kvm": "KVM",
-    "offers.mode.docker": "Docker (experimental)",
-    "offers.mode.docker_note": "Docker is a regular container instead of a virtual machine: many more machines, starts in 1–3 minutes. It's new: saves, Steam login and games are the same as on KVM, but some things may behave differently. No gamepad rumble. In Docker Vast charges for traffic (~30 GB per hour of play) — cap its price with the “Traffic” filter.",
+    "offers.mode.docker": "Docker",
+    "offers.mode.docker_note": "Docker is the main mode: many more machines, starts in 1–3 minutes. No gamepad rumble. Vast charges for traffic here (~30 GB per hour of play) — cap its price with the “Traffic” filter.",
     "offers.none": "No suitable machines right now. Try again a bit later.",
     "offers.last.free": "Your last machine ({machine}, {date}) is free right now — it's first in the list, marked “last”. It's the same host machine with a clean disk: games and saves come from the cloud as usual.",
     "offers.last.busy": "Your last machine ({machine}, {date}) is busy right now or no longer for rent.",
@@ -850,7 +851,7 @@ const I18N = {
     "confirm.badhost": "Heads up: a machine on this host failed to start before ({reason}). It may have been temporary, but it may fail again.",
     "confirm.rent.spare": "If Vast doesn’t start this machine, I’ll take the next one from your list instead — only one that isn’t worse: GPU not weaker, price not higher, ping not higher. Right now there are {n}.",
     "confirm.rent.nospare": "If Vast doesn’t start this machine, I’ll delete it and take you back to the list: there are no machines at least as good right now.",
-    "confirm.rent.docker": "Docker mode (experimental). If the video encoder doesn't work on the machine, I'll take the next one from the list.",
+    "confirm.rent.docker": "Docker mode. If the video encoder doesn't work on the machine, I'll take the next one from the list.",
     "progress.title.play": "Starting the machine",
     "stage.vast": "Vast starts the machine (usually 2–5 min)",
     "stage.tailscale": "Connecting to Tailscale (5–7 min)",
@@ -1294,7 +1295,8 @@ const I18N = {
     "games.confirm.system": "These are Steam system files (Proton, Steam Linux Runtime…) — games won't start without them. If you delete them, Steam will download them again on the next launch (time and traffic). Better not delete.",
     "sync.none_selected": "No games are downloaded — saves only",
     "arch.left": "~{time} left",
-    "arch.left.soon": "under a minute"
+    "arch.left.soon": "under a minute",
+    "offers.mode.kvm_note": "KVM is a full virtual machine: few machines, starts in 5–10 minutes; gamepad rumble works, traffic is almost free."
   },
   "es": {
     "app.error_state": "No se pudo obtener el estado: {error}",
@@ -1466,11 +1468,11 @@ const I18N = {
     "offers.back_to_list": "Volver a la lista de máquinas",
     "core.ping": "Latencia hasta la máquina: {ms} ms (guardada para la lista de máquinas).",
     "offers.loading": "Buscando máquinas adecuadas…",
-    "offers.summary": "Adecuadas: {count} · RTX/GTX · fiabilidad desde {rel}% · disco {disk} GB",
+    "offers.summary": "Adecuadas: {count} · RTX de juego y profesionales · fiabilidad desde {rel}% · disco {disk} GB",
     "offers.latency": "Ping con «≈»: estimado por la distancia; sin él: medido en tus sesiones anteriores. Para jugar, mejor por debajo de 80–100 ms.",
     "offers.mode.kvm": "KVM",
-    "offers.mode.docker": "Docker (experimental)",
-    "offers.mode.docker_note": "Docker es un contenedor normal en lugar de una máquina virtual: muchas más máquinas, arranca en 1–3 minutos. Es nuevo: partidas guardadas, sesión de Steam y juegos son los mismos que en KVM, pero algo puede comportarse distinto. Sin vibración del mando. En Docker Vast cobra el tráfico (~30 GB por hora de juego): limita su precio con el filtro «Tráfico».",
+    "offers.mode.docker": "Docker",
+    "offers.mode.docker_note": "Docker es el modo principal: muchas más máquinas, arrancan en 1–3 minutos. Sin vibración del mando. Aquí Vast cobra el tráfico (~30 GB por hora de juego): limita su precio con el filtro «Tráfico».",
     "offers.none": "Ahora no hay máquinas adecuadas. Inténtalo un poco más tarde.",
     "offers.last.free": "Tu última máquina ({machine}, {date}) está libre ahora: es la primera de la lista, marcada como «última». Es la misma máquina del host, pero con el disco limpio: los juegos y partidas llegan de la nube como siempre.",
     "offers.last.busy": "Tu última máquina ({machine}, {date}) está ocupada ahora o ya no se alquila.",
@@ -1497,7 +1499,7 @@ const I18N = {
     "confirm.badhost": "Atención: en este host una máquina ya no arrancó antes ({reason}). Pudo ser temporal, pero puede volver a fallar.",
     "confirm.rent.spare": "Si Vast no arranca esta máquina, tomaré la siguiente de tu lista, pero solo una que no sea peor: GPU no más débil, precio no más alto, ping no mayor. Ahora hay {n}.",
     "confirm.rent.nospare": "Si Vast no arranca esta máquina, la borraré y te llevaré de vuelta a la lista: ahora no hay máquinas igual de buenas.",
-    "confirm.rent.docker": "Modo Docker (experimental). Si el codificador de vídeo no funciona en la máquina, tomaré la siguiente de la lista.",
+    "confirm.rent.docker": "Modo Docker. Si el codificador de vídeo no funciona en la máquina, tomaré la siguiente de la lista.",
     "progress.title.play": "Iniciando la máquina",
     "stage.vast": "Vast inicia la máquina (normalmente 2–5 min)",
     "stage.tailscale": "Conexión con Tailscale (5–7 min)",
@@ -1941,7 +1943,8 @@ const I18N = {
     "games.confirm.system": "Son archivos de sistema de Steam (Proton, Steam Linux Runtime…) — sin ellos los juegos no arrancan. Si los borras, Steam los descargará otra vez en el próximo inicio (tiempo y tráfico). Mejor no borrarlos.",
     "sync.none_selected": "No se descargan juegos, solo partidas",
     "arch.left": "quedan ~{time}",
-    "arch.left.soon": "menos de un minuto"
+    "arch.left.soon": "menos de un minuto",
+    "offers.mode.kvm_note": "KVM es una máquina virtual completa: pocas máquinas, arrancan en 5–10 minutos; el mando vibra y el tráfico es casi gratis."
   }
 };
 

@@ -214,7 +214,7 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=
     На Vast часть KVM-хостов подолгу (или навсегда) висит в Create/Loading: машину, которую Vast не запустил
     за VAST_START_MIN или хост сломал, удаляем (до running Vast берёт только за диск — ~$0.001) и берём
     следующую из spare — списка «не хуже выбранной», который отобрала страница (_race, RACE машин сразу).
-    docker — вкладка «Docker (экспериментально)»: контейнер из образа vastgame-desktop вместо KVM; машину
+    docker — вкладка «Docker» (основная с 0.3.1): контейнер из образа vastgame-desktop вместо KVM; машину
     без работающего NVENC wait_ready заменяет так же, как не запустившуюся (core.try_another)."""
     try:
         tpl = core.template()

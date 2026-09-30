@@ -382,7 +382,7 @@ $("task-replace").addEventListener("click", openReplace);
 $("progress-replace").addEventListener("click", openReplace);
 
 let offersReq = 0;   // номер последнего запроса списка: ответ на устаревший (другой диск) не показывать
-let offersDocker = null;   // вкладка: false — KVM, true — Docker (экспериментально); null — как в прошлый раз
+let offersDocker = null;   // вкладка: false — KVM, true — Docker (основная); null — как в прошлый раз
 async function openOffers(disk, docker) {
   const reload = disk != null;       // смена диска: тумблеры синхронизации не сбрасывать
   if (docker != null) offersDocker = docker;
@@ -414,7 +414,8 @@ async function openOffers(disk, docker) {
 function showTabs() {
   $("tab-kvm").classList.toggle("active", !offersDocker);
   $("tab-docker").classList.toggle("active", !!offersDocker);
-  $("offers-docker-note").hidden = !offersDocker;
+  $("offers-docker-note").textContent = t(offersDocker ? "offers.mode.docker_note" : "offers.mode.kvm_note");
+  $("offers-docker-note").hidden = false;
   $("f-traffic").hidden = !offersDocker;
 }
 // Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
@@ -538,7 +539,13 @@ function filtersActive() {
 // самый полезный порядок: цена и пинг от меньшего, интернет и надёжность от большего.
 // Модель видеокарты — по номеру серии («RTX 4070» → 4070), внутри серии: обычная < Super < Ti < Ti Super;
 // ноутбучная — ниже настольной с тем же номером. GTX 1660 < RTX 2060 < … < RTX 5090. Первое нажатие — старшие сверху
+// Профессиональные видеокарты — место среди игровых примерно по силе (для сортировки и замены «не хуже»)
+const PRO_RANK = { "RTX A2000": 30500, "RTX A4000": 30602, "RTX A4500": 30700, "RTX A5000": 30800, "RTX A6000": 30900,
+  "Q RTX 4000": 20700, "Q RTX 5000": 20800, "Q RTX 6000": 20802, "Q RTX 8000": 20802, "Titan RTX": 20803,
+  "RTX 4000Ada": 40602, "RTX 4500Ada": 40700, "RTX 5000Ada": 40800, "RTX 5880Ada": 40900, "RTX 6000Ada": 40900,
+  "RTX PRO 4000": 50700, "RTX PRO 4500": 50702, "RTX PRO 5000": 50800, "RTX PRO 6000 WS": 50900, "RTX PRO 6000 Max-Q": 50895 };
 function gpuRank(o) {
+  if (PRO_RANK[o.gpu]) return PRO_RANK[o.gpu];
   const m = /^(?:RTX|GTX)\s*(\d{3,4})\s*(.*)$/i.exec(o.gpu || "");
   if (!m) return null;
   const rest = m[2].toLowerCase(), ti = /\bti\b/.test(rest), sup = /\bs\b|super/.test(rest);

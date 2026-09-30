@@ -143,9 +143,10 @@ class Api:
         return jobs.disk_size(disk, tpl)
 
     def _docker(self, docker):
-        """Вкладка списка машин: выбор человека (запоминается), иначе прошлый, иначе KVM."""
+        """Вкладка списка машин: выбор человека (запоминается), иначе прошлый, иначе Docker — основной режим с 0.3.1
+        (машин в нём в разы больше, чем в KVM)."""
         if docker is None:
-            return bool(settings.get("offers_docker"))
+            return bool(settings.get("offers_docker", True))
         settings.set("offers_docker", bool(docker))
         return bool(docker)
 
@@ -160,7 +161,7 @@ class Api:
 
     def offers(self, disk=None, docker=None, replace=False):
         """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс.
-        docker — вкладка «Docker (экспериментально)» (None — как в прошлый раз).
+        docker — вкладка «Docker» (основная с 0.3.1) (None — как в прошлый раз).
         replace — каталог во время запуска («Сменить машину»): машина уже есть — это та, что запускается;
         в ответе current — она (для сравнения цены и пинга), replace — идёт ли ещё запуск."""
         launching = self._launching() if replace else None
@@ -257,7 +258,7 @@ class Api:
         """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
         закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
         lang — язык окна для уведомления в конце, spare — следующие машины его списка (на замену,
-        если Vast не запустит выбранную), docker — вкладка «Docker (экспериментально)».
+        если Vast не запустит выбранную), docker — вкладка «Docker» (основная с 0.3.1).
         select — выбор игр ({"games": {архив: bool}, "saves": {архив: bool}}, запоминается): машина (wolf-setup.sh
         v4.6) качает и выгружает только выбранные игры; прежним скриптам — тумблеры по этому выбору."""
         if self._busy():

@@ -50,7 +50,7 @@ class TestRentalBody(unittest.TestCase):
 class TestSearch(unittest.TestCase):
     def run_search(self, docker):
         sent = {}
-        rows = [offer(1, vms=True), offer(2), offer(3, driver="570.124.06"), offer(4, gpu="RTX A4000"),
+        rows = [offer(1, vms=True), offer(2), offer(3, driver="570.124.06"), offer(4, gpu="A100 SXM4"),
                 offer(5, vms=True, deverified=True), offer(6, driver=None)]
 
         def call(method, path, body=None, **k):
@@ -63,12 +63,21 @@ class TestSearch(unittest.TestCase):
     def test_docker_needs_driver_not_kvm(self):
         ids, sent = self.run_search(True)
         self.assertNotIn("vms_enabled", sent)
-        self.assertEqual(sorted(ids), [1, 2, 5])        # 3 — драйвер 570, 4 — не игровая, 6 — драйвер неизвестен
+        self.assertEqual(sorted(ids), [1, 2, 5])        # 3 — драйвер 570, 4 — без кодировщика видео, 6 — драйвер неизвестен
 
     def test_kvm_as_before(self):
         ids, sent = self.run_search(False)
         self.assertEqual(sent["vms_enabled"], {"eq": True})
         self.assertEqual(sorted(ids), [1, 2, 3, 6])     # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь
+
+    def test_gpu_models(self):
+        # [0.3.1] профессиональные с кодировщиком и выходами на монитор — подходят; без них — нет
+        for name in ("RTX 4090", "GTX 1660 Ti", "RTX A4000", "RTX A6000", "RTX PRO 4000", "RTX PRO 6000 Max-Q",
+                     "RTX PRO 6000 WS", "RTX 6000Ada", "RTX 4000Ada", "Q RTX 5000", "Titan RTX"):
+            self.assertTrue(market.gpu_ok(name), name)
+        for name in ("A100 SXM4", "H100 PCIE", "CMP 170HX", "L4", "L40S", "Tesla T4", "A40", "RTX PRO 6000 S",
+                     "Tesla V100", "", None):
+            self.assertFalse(market.gpu_ok(name), name)
 
     def test_traffic_price_left_to_the_filter(self):
         # Цену трафика выбирает человек фильтром «Трафик» на странице — поиск ничего не отсекает

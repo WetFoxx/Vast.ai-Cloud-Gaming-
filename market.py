@@ -16,8 +16,18 @@ STREAM_GB = 15        # трафик стрима, ГБ в час — для о�
 MAX_TRAFFIC = None
 
 # Игровые видеокарты: "RTX 4090", "GTX 1660 Ti", "RTX 4070S Ti".
-# Не подходят профессиональные: "RTX A4000" (после RTX буква), "RTX 6000Ada" (Ada сразу после цифр).
 GAMING = re.compile(r"^(RTX|GTX) \d{4}(?!Ada)")
+# [0.3.1, решение 2026-10-01] Профессиональные с кодировщиком видео и выходами на монитор (Xorg в контейнере им
+# нужен): RTX A2000–A6000, RTX PRO 4000–6000 (кроме серверной «S»), RTX 4000–6000 Ada, Quadro RTX, Titan RTX.
+# Не подходят: без кодировщика (A100, H100, H200, B200) и майнинговые CMP; серверные без выходов (L4, L40, T4,
+# A10, A40, RTX PRO 6000 S) — экран без монитора Sunshine не снимает (разбор 2026-09-27)
+PRO = re.compile(r"^(RTX A(2000|4000|4500|5000|6000)|RTX PRO (4000|4500|5000|6000)( Max-Q| WS)?"
+                 r"|RTX (4000|4500|5000|5880|6000) ?Ada|Q RTX (4000|5000|6000|8000)|Titan RTX)$")
+
+
+def gpu_ok(name):
+    """Видеокарта подходит для игр по трансляции: игровая или профессиональная с кодировщиком и выходами."""
+    return bool(GAMING.match(name or "") or PRO.match(name or ""))
 # Docker (образ vastgame-desktop): Sunshine 2026 собрана с CUDA 13 — NVENC работает с драйвером хоста от 580
 DOCKER_DRIVER = 580
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
@@ -129,7 +139,7 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         starts = {}
     rows = []
     for o in offers:
-        if not GAMING.match(o["gpu_name"]):
+        if not gpu_ok(o["gpu_name"]):
             continue
         # Vast снял с хоста допуск к виртуальным машинам (у KVM на Vast часть хостов висит в Create/
         # Loading) — общая отметка verified тут ни при чём: у быстрой машины Алексея она «deverified»
