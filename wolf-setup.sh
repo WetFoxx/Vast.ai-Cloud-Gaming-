@@ -80,6 +80,14 @@
 # Маленькие архивы (вход в Steam, личность, сохранения) — одним файлом, как раньше.
 # СКАЧИВАНИЕ КУСКАМИ (v4.5). Архивы качаются кусками по 64 МБ, до 8 сразу, прямо в распаковку, без временных
 # файлов — в том числе большие одиночные архивы, выгруженные до v4.4 (им не нужно заново выгружаться частями).
+# ВЫБОР ИГР (v4.6). Приложение передаёт, какие игры скачивать и выгружать (VG_SYNC: игры и выключенные
+# сохранения; нет его — как раньше, выключатели SYNC_*). Служебное Steam (Proton, Runtime…) — всегда. Паспорта
+# невыбранных игр прячутся от Steam. Во время игры раз в 30 с: игру удалили, а она есть в облаке, — вопрос
+# «удалить и оттуда?» (ask--del--АРХИВ на странице статуса); появилась невыбранная — «синхронизировать?»
+# (ask--new--АРХИВ); ответ — wolf answer (приложение, /cmd). Без ответа ничего не теряется: новая выгружается
+# при выключении, удалённая остаётся в облаке. Запущенная игра не выгружается, пока не закрыта; по выходу — не
+# чаще раза в 10 минут (раньше «мигающая» игра выгружалась каждую минуту). Список игр для приложения —
+# vastgame-games.json в облаке (wolf-games.py): архив, номер Steam (его сохранения — pfx--номер), название.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -385,7 +393,7 @@ acf_hide() {
     [ -n "$d" ] && [ -d "$s/common/$d" ] && continue
     u mkdir -p "$s/$HID" && u mv -f "$f" "$s/$HID/" && n=$((n + 1))
   done
-  [ $n = 0 ] || log "игры Steam: паспортов без файлов — $n, спрятаны от Steam (синхронизация игр Steam выключена); в облаке сохранены"
+  [ $n = 0 ] || log "игры Steam: паспортов без файлов — $n, спрятаны от Steam (их игры сюда не скачиваются); в облаке сохранены"
   return 0
 }
 acf_unhide() {
@@ -397,6 +405,122 @@ acf_unhide() {
   done
   [ $n = 0 ] || log "игры Steam: возвращено паспортов — $n (синхронизация игр Steam включена)"
   return 0
+}
+
+# ------------------------------------------------------- выбор игр (v4.6) ---
+# Приложение передаёт, какие игры синхронизировать: VG_SYNC — base64 от JSON {"games": [архивы игр],
+# "saves_off": [архивы сохранений, которые не синхронизировать]} (base64 — чтобы имена с пробелами пережили
+# /etc/environment). Нет VG_SYNC — как раньше: SYNC_STEAM_GAMES / SYNC_OTHER_GAMES. Выбор этой машины — файлы
+# $S/sel.*: при загрузке из VG_SYNC, дальше — ответы человека (wolf answer). Служебные «игры» Steam (Proton,
+# Steam Linux Runtime, Steamworks Shared, настройки контроллера) синхронизируются всегда, в приложении их нет.
+sel_init() {
+  rm -f "$S"/sel.* "$S/present"
+  [ -n "${VG_SYNC:-}" ] || return 0
+  printf '%s' "$VG_SYNC" | base64 -d 2>/dev/null | S="$S" python3 -c '
+import json, os, sys
+d, s = json.load(sys.stdin), os.environ["S"]
+ok = lambda n: isinstance(n, str) and n and "/" not in n and "\n" not in n
+for key, f in (("games", "sel.games"), ("saves_off", "sel.saves_off")):
+    open(os.path.join(s, f), "w").write("".join(n + "\n" for n in d.get(key) or [] if ok(n)))
+open(os.path.join(s, "sel.on"), "w").close()' || log "VG_SYNC не разобран — синхронизация как раньше"
+}
+selon()  { [ -e "$S/sel.on" ]; }
+tool()   { case $1 in sgame--Proton*|sgame--SteamLinuxRuntime*|"sgame--Steam Linux Runtime"*|"sgame--Steamworks Shared"|"sgame--Steam Controller Configs") return 0 ;; esac; return 1; }
+inlist() { grep -qxF -- "$1" "$S/$2" 2>/dev/null; }
+addline() { inlist "$1" "$2" || printf '%s\n' "$1" >> "$S/$2"; }
+rmline() { [ -e "$S/$2" ] || return 0; grep -vxF -- "$1" "$S/$2" > "$S/$2.new"; mv -f "$S/$2.new" "$S/$2"; }
+# Синхронизировать ли архив игры (sgame--/game--) и сохранения (pfx--)
+want() {
+  if selon; then tool "$1" || inlist "$1" sel.games; return; fi
+  case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
+}
+wants() { [ "$SV" = 1 ] && ! inlist "$1" sel.saves_off; }
+# Игры на диске: sgame--ПАПКА (steamapps/common) и game--ПАПКА ($GD), без служебных
+ondisk() {
+  { ld "$DH/$SR/steamapps/common" sgame--; ld "$GD" game--; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \
+    | LC_ALL=C sort
+}
+# Архивы игр, запущенных сейчас (их файлы не выгружаем, пока игра идёт: игра всё время пишет в свою папку)
+running_archives() {
+  local k d
+  running_keys | while IFS= read -r k; do
+    case $k in
+      app:*) d=$(idir "${k#app:}"); [ -n "$d" ] && echo "sgame--$d" ;;
+      dir:*) echo "game--${k#dir:}" ;;
+    esac
+  done
+}
+# Название игры: из списка игр, из её паспорта Steam (в том числе спрятанного), иначе папка
+aname() {
+  local d=${1#*game--} f x
+  x=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "$1" name 2>/dev/null)
+  [ -n "$x" ] && { echo "$x"; return; }
+  case $1 in sgame--*)
+    for f in "$DH/$SR/steamapps"/appmanifest_*.acf "$DH/$SR/steamapps/$HID"/appmanifest_*.acf; do
+      [ "$(idirs "$f" | head -1)" = "$d" ] || continue
+      x=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$f" | head -1)
+      [ -n "$x" ] && { echo "$x"; return; }
+    done ;;
+  esac
+  echo "$d"
+}
+# Вопрос человеку: запись ask--new--АРХИВ / ask--del--АРХИВ на странице статуса (состояние ask, текст — название
+# игры). Приложение показывает вопрос и отвечает командой wolf answer. Без ответа ничего не теряется: новая игра
+# выгружается при выключении, удалённая остаётся в облаке.
+ask()   { [ -e "$S/st/ask--$1--$2" ] || st "ask--$1--$2" ask "$3"; }
+unask() { rm -f "$S/st/ask--$1--$2"; }
+# Раз в 30 с (из wolf watch): игру удалили с диска — есть в облаке? спросить, удалить ли и оттуда; появилась
+# игра, которую не выбирали, — спросить, синхронизировать ли. Первый проход запоминает, что есть после загрузки.
+scan_games() {
+  local n cur old lsd="" f="$T/ls.scan"
+  selon && [ -e "$L/boot-done" ] || return 0
+  [ -n "$SR" ] || sr
+  [ -d "$DH/$SR/steamapps/common" ] || return 0          # нет папки — не повод считать игры удалёнными
+  cur=$(ondisk)
+  [ -e "$S/present" ] || { printf '%s\n' "$cur" > "$S/present"; return 0; }
+  old=$(cat "$S/present")
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$cur" || continue
+    unask new "$n"; rmline "$n" sel.games
+    inlist "$n" sel.keep && continue
+    if [ -z "$lsd" ]; then rl > "$f" 2>/dev/null || return 0; lsd=1; fi    # нет связи — спросим в следующий раз
+    awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" && ask del "$n" "$(aname "$n")"
+  done <<< "$old"
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$old" || continue
+    want "$n" || inlist "$n" sel.skip || ask new "$n" "$(aname "$n")"
+  done <<< "$cur"
+  printf '%s\n' "$cur" > "$S/present"
+}
+# wolf answer new|del АРХИВ yes|no — ответ человека (через bk: свежий список облака для forget)
+answer() {
+  local k=$1 n=$2 a=$3 p
+  case $n in game--*|sgame--*) ;; *) log "answer: '$n' — не архив игры"; return 1 ;; esac
+  case $k:$a in
+    new:yes) addline "$n" sel.games; rmline "$n" sel.skip; log "$n: синхронизировать — выбрано" ;;
+    new:no)  addline "$n" sel.skip; log "$n: не синхронизировать — выбрано" ;;
+    del:yes) p=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "$n" appid 2>/dev/null)
+             forget "$n"; [ -n "$p" ] && awk -F'\t' -v o="pfx--$p.tar.zst" 'index($1, o)==1 {f=1} END {exit !f}' "$LS" \
+               && forget "pfx--$p"
+             rmline "$n" sel.games ;;
+    del:no)  addline "$n" sel.keep; log "$n: оставить в облаке — выбрано" ;;
+    *)       log "answer: не понял '$k $a'"; return 1 ;;
+  esac
+  unask "$k" "$n"
+}
+# Список игр для приложения — в облако файлом vastgame-games.json, когда меняется (wolf-games.py)
+gindex() {
+  local j="$S/index.json" nj="$T/index.new"
+  [ -n "$SR" ] || sr
+  [ -n "$SR" ] || return 0
+  if [ ! -s "$j" ]; then
+    # прежний список из облака: в нём и игры, которых на этой машине нет; не скачался, хотя есть, — не трогаем
+    if grep -q $'^vastgame-games.json\t' "$LS" 2>/dev/null; then rc cat "$R/vastgame-games.json" > "$j" || { rm -f "$j"; return 0; }; fi
+  fi
+  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --index 2>/dev/null \
+    | python3 /usr/local/bin/wolf-games.py index "$DH/$SR/steamapps" "$j" > "$nj" || return 0
+  cmp -s "$nj" "$j" 2>/dev/null && return 0
+  rc rcat "$R/vastgame-games.json" < "$nj" && mv -f "$nj" "$j" && log "список игр для приложения обновлён"
 }
 
 # ----------------------------------------------------------------- манифест ---
@@ -608,13 +732,14 @@ running_keys() {
 # Раз в 5 с сверяет запущенные игры. Игра, которой нет 10+ с, считается закрытой:
 # её архивы сразу выгружаются (wolf push) на низком приоритете, затем уведомление.
 watch_games() {
-  local now k a d t arr
-  declare -A seen=() cur=()
+  local now k a d t arr scan=0
+  declare -A seen=() cur=() last=()
   while :; do
     sleep 5
     [ -e "$L/boot-done" ] || continue
     [ -n "$SR" ] || sr
     now=$(date +%s); cur=()
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; fi     # [v4.6] вопросы о новых и удалённых
     while IFS= read -r k; do
       case $k in
         nm:*)  k=${k#nm:}
@@ -627,13 +752,17 @@ watch_games() {
     arr=()
     for k in "${!seen[@]}"; do
       [ -n "${cur[$k]:-}" ] && continue
-      t=${seen[$k]}; [ $(( now - t )) -ge 10 ] || continue
+      # [v4.6] закрытой считаем игру, которой нет 30 с (раньше 10: игра «мигала» и выгружалась по кругу),
+      # и одну и ту же выгружаем по выходу не чаще раза в 10 минут — остальное подхватят таймеры и выключение
+      t=${seen[$k]}; [ $(( now - t )) -ge 30 ] || continue
       unset 'seen[$k]'
+      [ $(( now - ${last[$k]:-0} )) -ge 600 ] || continue
+      last[$k]=$now
       case $k in
         app:*) a=${k#app:}
-               [ "$SV" = 1 ] && arr+=("pfx--$a")
-               if [ "$SG" = 1 ]; then d=$(idir "$a"); [ -n "$d" ] && arr+=("sgame--$d"); fi ;;
-        dir:*) [ "$SO" = 1 ] && arr+=("game--${k#dir:}") ;;
+               wants "pfx--$a" && arr+=("pfx--$a")
+               d=$(idir "$a"); [ -n "$d" ] && want "sgame--$d" && arr+=("sgame--$d") ;;
+        dir:*) want "game--${k#dir:}" && arr+=("game--${k#dir:}") ;;
       esac
     done
     if [ ${#arr[@]} -gt 0 ]; then
@@ -986,6 +1115,7 @@ boot() {
   local ok=0 m0 e lu d f k p=() g=() ka=() sh=() dirs=() offnote=
   rm -f "$L/boot-done"                          # [HARDENING #5] гейт закрыт на время boot
   rm -rf "${T:?}"/* "$S"/st/* "$S"/nt/*; : > "$FL"
+  sel_init                                      # [v4.6] выбор игр этой машины
   find /var/log/wolf.log -size +20M -delete 2>/dev/null
   st boot up "старт"
 
@@ -1039,13 +1169,13 @@ boot() {
   if sr; then
     p=()
     if [ "$SV" = 1 ]; then
-      mapfile -t p < <(names '^pfx--')
+      mapfile -t p < <(names '^pfx--' | while IFS= read -r k; do wants "$k" && echo "$k"; done)   # [v4.6] выбор
       [ ${#p[@]} -gt 0 ] || p=(compatdata)
     else
       log "сохранения: синхронизация выключена (SYNC_SAVES=0) — из облака не восстанавливаю"
     fi
     pool unpack steam-client steam-cache "${p[@]}"
-    if [ "$SG" = 1 ]; then acf_unhide; else acf_hide; fi     # [v4.2] до запуска Steam
+    if [ "$SG" = 1 ] || selon; then acf_unhide; else acf_hide; fi     # [v4.2] до запуска Steam; [v4.6] выбор — ниже
     # [v4.3] Steam Input по умолчанию выключен (до запуска Steam; папка игр ещё не восстановлена — только это)
     log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --steam-input 2>&1)"
     if [ -e "$DH/$SR/steam.sh" ]; then
@@ -1071,14 +1201,15 @@ boot() {
   # appmanifest_*.acf с таким installdir. Иначе архив игры, удалённой в Steam, скачивался
   # бы на каждом инстансе в папку, которую Steam не видит. Такой архив помечается версией
   # «?»: если игру поставят снова, новая выгрузка спокойно его перезапишет.
-  [ "$SG" = 1 ] || steam_go
+  [ "$SG" = 1 ] || selon || steam_go
   st boot down "игры"
   [ -n "$SR" ] && mapfile -t dirs < <(idirs "$DH/$SR"/steamapps/appmanifest_*.acf)
   while IFS= read -r k; do
     case $k in
       sgame--*)
-        if [ "$SG" != 1 ]; then
-          st "$k" ok "синхронизация игр Steam выключена — не восстанавливаю"
+        if ! want "$k"; then
+          if selon; then st "$k" ok "не выбрана — не скачиваю"
+          else st "$k" ok "синхронизация игр Steam выключена — не восстанавливаю"; fi
         elif printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
           g+=("$k")
         else
@@ -1086,7 +1217,8 @@ boot() {
           st "$k" ok "игры нет в библиотеке Steam — не восстанавливаю; убрать из облака: sudo wolf forget '$k'"
         fi ;;
       *)
-        if [ "$SO" = 1 ]; then g+=("$k")
+        if want "$k"; then g+=("$k")
+        elif selon; then st "$k" ok "не выбрана — не скачиваю"
         else st "$k" ok "синхронизация игр из папки выключена — не восстанавливаю"; fi ;;
     esac
   done < <(names '^s?game--')
@@ -1098,7 +1230,7 @@ boot() {
   # удалили раньше, чем игра успела выгрузиться) — убираем манифест, и Steam покажет игру
   # неустановленной, а не сломанной. Только при полном списке облака и восстановленном
   # steam-state: иначе «нет в облаке» может оказаться сбоем, а не удалением.
-  if [ "$SG" = 1 ] && [ -n "$SR" ] && [ $ok = 1 ] && ! grep -qx steam-state "$FL"; then
+  if { [ "$SG" = 1 ] || selon; } && [ -n "$SR" ] && [ $ok = 1 ] && ! grep -qx steam-state "$FL"; then
     for f in "$DH/$SR"/steamapps/appmanifest_*.acf; do
       [ -e "$f" ] || continue
       d=$(idirs "$f" | head -1)
@@ -1108,6 +1240,8 @@ boot() {
       log "sgame--$d: игры нет ни на диске, ни в облаке — манифест убран, Steam покажет её неустановленной"
     done
   fi
+  # [v4.6] Невыбранные игры Steam на эту машину не скачивались — их паспорта прячем, иначе Steam начнёт качать сам
+  selon && [ -n "$SR" ] && acf_hide
   # [v4.1] Игры из папки — в библиотеку Steam. Без синхронизации игр Steam он уже запущен: если есть что
   # добавить или убрать — закрыть на время записи и запустить снова (обычно это первые минуты, до игры)
   if [ -n "$SR" ]; then
@@ -1118,7 +1252,9 @@ boot() {
       shortcuts
     fi
   fi
-  [ "$SG" = 1 ] && steam_go
+  { [ "$SG" = 1 ] || selon; } && steam_go
+  selon && ondisk > "$S/present"                # [v4.6] что есть после загрузки — с этим сравнивает scan_games
+  ( gindex ) &
 
   touch "$L/boot-done"   # [HARDENING #5] снять гейт с таймеров и wolf-watch только теперь
   [ -n "$offnote" ] && ntf "Steam запущен онлайн" \
@@ -1133,6 +1269,21 @@ boot() {
 }
 
 # ------------------------------------------------------------------- backup ---
+# [v4.6] Игры на диске, которые выгружать в проходе игр: выбранные и служебные; новые, о которых человек ещё не
+# ответил, — только при выключении (NOW: ничего не теряем); запущенные сейчас — после выхода (иначе игра, которая
+# всё время пишет в свою папку, выгружалась бы по кругу — живой случай 2026-09-28, Dawnwalker раз в минуту).
+gsync() {
+  local n run=""
+  [ -n "$SR" ] || sr
+  [ -n "${NOW:-}" ] || run=$(running_archives)
+  { ld "$GD" game--; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; } | while IFS= read -r n; do
+    grep -qxF -- "$n" <<< "$run" && continue
+    if want "$n"; then echo "$n"
+    elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then echo "$n"
+    fi
+  done
+}
+
 bk() {
   local m=$1 n=() a
   LS=$T/ls.$m FL=$T/fail.$m
@@ -1157,19 +1308,23 @@ bk() {
         # подряд не менялся (DB=1): значит, Steam его не пишет и копия целая. При выключении
         # (NOW) — только если Steam уже закрыт.
         { [ -z "${NOW:-}" ] || ! pgrep -x steam >/dev/null; } && n+=(steam-cache)
-        [ "$SV" = 1 ] && mapfile -tO ${#n[@]} n < <(ld "$DH/$SR/steamapps/compatdata" pfx--)
+        [ "$SV" = 1 ] && mapfile -tO ${#n[@]} n < <(ld "$DH/$SR/steamapps/compatdata" pfx-- \
+          | while IFS= read -r a; do wants "$a" && echo "$a"; done)
       fi ;;
     games)
       mkgd
-      mapfile -t n < <([ "$SO" = 1 ] && ld "$GD" game--; [ "$SG" = 1 ] && [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--) ;;
+      mapfile -t n < <(gsync) ;;
     push)
       shift; n=("$@") ;;
     restore)
       shift; pool unpack "$@"; return 0 ;;
     forget)
       shift; for a in "$@"; do forget "$a"; done; return 0 ;;
+    answer)
+      shift; answer "$@"; return ;;
   esac
   [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
+  [ "$m" = state ] && gindex
   saves_notify
   return 0
 }
@@ -1310,7 +1465,7 @@ case ${1:-} in
   finish)                                    finish_start ;;
   sunshine-creds)                            shift; sunshine_creds "$@" ;;
   finish-run)                                finish_run ;;
-  state|games|shutdown|restore|push|forget)  bk "$@" ;;
+  state|games|shutdown|restore|push|forget|answer)  bk "$@" ;;
   watch)                                     watch_games ;;
   supervise)                                 supervise ;;
   firewall)                                  setup_sunshine_firewall ;;
@@ -1441,6 +1596,7 @@ WOLF = '/usr/local/bin/wolf'
 # символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
 ARCHIVE = re.compile(r'^(game|sgame|pfx)--[^/\x00-\x1f]{1,200}$')
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
 def command(c, a):
     """Закрытый список: (команда, в фоне?) или None — такой команды нет."""
     arg = a[0] if len(a) == 1 and isinstance(a[0], str) else ''
@@ -1449,6 +1605,9 @@ def command(c, a):
             'finish': ([WOLF, 'finish'], False),                  # сам уходит в фон службой (v3.11)
             'push-identity': ([WOLF, 'push', 'identity'], True),
             'forget': ([WOLF, 'forget', arg], False) if ARCHIVE.match(arg) else None,
+            # [v4.6] ответ на вопрос о новой / удалённой игре: [new|del, архив игры, yes|no]
+            'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and a[0] in ('new', 'del') and isinstance(a[1], str)
+                      and GAME.match(a[1]) and a[2] in ('yes', 'no') else None,
             'sunshine-creds': ([WOLF, 'sunshine-creds', arg], False) if LOGIN.match(arg) else None}.get(c)
 def tsjson(sub, *args):
     # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
@@ -1776,6 +1935,14 @@ def steam_input_off(steam_root):
 
 
 def main(games_dir, steam_root):
+    if "--index" in sys.argv:                              # [v4.6] для списка игр приложения (wolf-games.py)
+        for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
+            folder = os.path.join(games_dir, d)
+            exe = None if d.startswith(".") or not os.path.isdir(folder) else main_exe(folder)
+            if exe:
+                name, quoted = d.replace("_", " ").strip(), '"' + exe + '"'     # как в sync_user (без \\ в f-строке: Python 3.10)
+                print(f"game--{d}\t{appid(quoted, name)}\t{name}")
+        return 0
     if "--steam-input" in sys.argv:
         changed = steam_input_off(steam_root)
         if not CHECK:
@@ -1813,6 +1980,72 @@ if __name__ == "__main__":
 SHORTCUTS
 
 # =============================== wolf-parts.py =================================
+w /usr/local/bin/wolf-games.py <<'GAMES'
+#!/usr/bin/env python3
+# [v4.6] Список игр для приложения vastgame — какой архив какой игре принадлежит. Лежит в облаке файлом
+# vastgame-games.json: {"version": 1, "games": [{"archive": "sgame--ПАПКА", "appid": "123",
+# "name": "Название", "kind": "steam"|"folder", "tool": false}, ...]}. По нему приложение показывает одну строку
+# на игру (её файлы + сохранения pfx--<appid>) и прячет служебное (Proton, Steam Linux Runtime…).
+#   wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] < «game--ПАПКА\tномер\tназвание»   → новый JSON в stdout
+#       (игры Steam — из паспортов appmanifest_*.acf, в том числе спрятанных; прежние записи игр, которых
+#        на этой машине нет, сохраняются)
+#   wolf-games.py get ИНДЕКС.json АРХИВ appid|name                                  → поле или пусто
+import glob, json, os, re, sys
+
+HID = ".vastgame-hidden"
+TOOL = re.compile(r"^sgame--(Proton|SteamLinuxRuntime|Steam Linux Runtime|Steamworks Shared$|Steam Controller Configs$)")
+
+
+def acf(path):
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return {}
+    return {k: v for k, v in re.findall(r'^\s*"(appid|name|installdir)"\s+"(.*)"\s*$', text, re.M)}
+
+
+def load(path):
+    try:
+        games = json.load(open(path, encoding="utf-8")).get("games") or []
+        return [g for g in games if isinstance(g, dict) and isinstance(g.get("archive"), str)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def index(steamapps, old_path=None):
+    new = {}
+    for f in sorted(glob.glob(os.path.join(steamapps, "appmanifest_*.acf"))
+                    + glob.glob(os.path.join(steamapps, HID, "appmanifest_*.acf"))):
+        m = acf(f)
+        if m.get("installdir") and m.get("appid"):
+            a = "sgame--" + m["installdir"]
+            new[a] = {"archive": a, "appid": m["appid"], "name": m.get("name") or m["installdir"], "kind": "steam"}
+    for line in sys.stdin:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 3 and parts[0].startswith("game--"):
+            new[parts[0]] = {"archive": parts[0], "appid": parts[1], "name": parts[2], "kind": "folder"}
+    for g in load(old_path) if old_path else []:
+        new.setdefault(g["archive"], g)
+    games = []
+    for a in sorted(new):
+        g = dict(new[a])
+        g["tool"] = bool(TOOL.match(a))
+        games.append(g)
+    return json.dumps({"version": 1, "games": games}, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["index"]:
+        sys.stdout.write(index(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None))
+    elif sys.argv[1:2] == ["get"] and len(sys.argv) == 5:
+        for g in load(sys.argv[2]):
+            if g["archive"] == sys.argv[3]:
+                print(g.get(sys.argv[4]) or "")
+                break
+    else:
+        sys.exit("wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] | get ИНДЕКС.json АРХИВ appid|name")
+GAMES
+
 w /usr/local/bin/wolf-parts.py <<'PARTS'
 #!/usr/bin/env python3
 # [v4.4] Большие архивы в облаке — частями, параллельно. Google Drive отдаёт и принимает один файл одним потоком

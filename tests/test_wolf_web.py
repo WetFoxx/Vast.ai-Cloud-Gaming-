@@ -122,6 +122,17 @@ class TestWolfWeb(unittest.TestCase):
         self.assertEqual(self.run_cmd("forget", ["sgame--Proton - Experimental"])[0], 0)
         self.assertEqual(self.calls(), ["forget sgame--The Blood of Dawnwalker", "forget sgame--Proton - Experimental"])
 
+    def test_answer_checked(self):
+        # [v4.6] ответ о новой / удалённой игре: только new|del, архив игры (не сохранений), yes|no
+        for bad in (["new", "sgame--X"], ["new", "sgame--X", "maybe"], ["kill", "sgame--X", "yes"],
+                    ["del", "pfx--1", "yes"], ["del", "identity", "yes"], ["del", "sgame--a/b", "yes"],
+                    ["new", "sgame--X\nfinish", "yes"]):
+            self.assertIsNone(wolfnode.post_cmd("127.0.0.1", "answer", bad)[0], bad)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.run_cmd("answer", ["del", "sgame--The Blood of Dawnwalker", "yes"])[0], 0)
+        self.assertEqual(self.run_cmd("answer", ["new", "game--My Game", "no"])[0], 0)
+        self.assertEqual(self.calls(), ["answer del sgame--The Blood of Dawnwalker yes", "answer new game--My Game no"])
+
     def test_login_strict(self):
         self.assertIsNone(wolfnode.post_cmd("127.0.0.1", "sunshine-creds", ["a b"], stdin="x")[0])
         self.assertEqual(self.calls(), [])
