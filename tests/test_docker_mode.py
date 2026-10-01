@@ -72,7 +72,7 @@ class TestSearch(unittest.TestCase):
 
     def test_pairs_only_when_machine_has_no_single(self):
         # [0.3.1] Docker: машина, которая сдаётся только парой видеокарт, — в списке с пометкой; если у той же машины
-        # есть и одиночное предложение — пара не нужна. KVM — пар нет. Порог поколения — от GTX 10xx
+        # есть и одиночное предложение — пара не нужна. KVM — пар нет. Порог поколения — от GTX 16xx / RTX 20xx
         singles = [offer(1), offer(2)]
         pairs = [offer(2), offer(7)]
         sent = []
@@ -83,7 +83,7 @@ class TestSearch(unittest.TestCase):
         with mock.patch.object(market, "call", call), mock.patch.object(market, "bad_hosts", lambda: {}):
             rows = market.search(60, docker=True)
             self.assertEqual(sorted((o["id"], o.get("_gpus", 1)) for o in rows), [(1, 1), (2, 1), (7, 2)])
-            self.assertEqual(sent[0]["compute_cap"], {"gte": 600})
+            self.assertEqual(sent[0]["compute_cap"], {"gte": 750})
             sent.clear()
             self.assertEqual(sorted(o["id"] for o in market.search(60, docker=False)), [1, 2])
             self.assertEqual(len(sent), 1)                              # KVM — без запроса пар

@@ -33,7 +33,10 @@ def gpu_ok(name):
 # (Quadro RTX 6000 / 535, RTX 3060 Ti / 570, RTX 3060 / 570) — на всех экран не поднимается, «Failed to acquire
 # modesetting permission» (видеокартой владеет хост), до Sunshine не доходит. Такие хосты — в основном домашние.
 DOCKER_DRIVER = 580
-MIN_COMPUTE = 600     # поколение видеокарты (compute capability ×100): от GTX 10xx (Pascal); Maxwell (GTX 9xx) — нет
+# Поколение видеокарты (compute capability ×100): от GTX 16xx / RTX 20xx. GTX 10xx (Pascal, 600) пробовали 2026-10-01:
+# CUDA 13 (Sunshine 2026) их не поддерживает, а со старой Sunshine на CUDA 12.9 машина зависла при подключении
+# Moonlight (кончились процессы) — отложено
+MIN_COMPUTE = 750
 PAIRS = True          # Docker: показывать машины, которые сдаются только парой видеокарт
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
 # машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
@@ -130,7 +133,6 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         "rentable": {"eq": True},
         "num_gpus": {"eq": 1},
         **({} if docker else {"vms_enabled": {"eq": True}}),   # KVM-образ — только там, где Vast разрешил VM
-        # [0.3.1] от GTX 10xx (Pascal, 6.x; решение 2026-10-01 — «человек сам решит»); было от GTX 16xx / RTX 20xx (7.5)
         "compute_cap": {"gte": MIN_COMPUTE},
         "reliability": {"gte": min_rel},
         "disk_space": {"gte": disk},        # на машине хватает места под наш диск
