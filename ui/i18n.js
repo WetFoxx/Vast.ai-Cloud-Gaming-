@@ -654,7 +654,8 @@ const I18N = {
     "offers.rel.hint": "Надёжность хоста: {rel}%",
     "confirm.rent.traffic": "Трафик: {price} за ТБ — час игры ≈ {hour}",
     "confirm.rent.traffic_games": ", скачать выбранные игры ({size}) ≈ {cost}",
-    "confirm.rent.traffic_free": "Трафик на этой машине бесплатный."
+    "confirm.rent.traffic_free": "Трафик на этой машине бесплатный.",
+    "offers.pair.hint": "Хост сдаёт эту машину только парой видеокарт: игра идёт на одной, вторая простаивает. Цена — за обе."
   },
   "en": {
     "app.error_state": "Couldn't get the status: {error}",
@@ -1308,7 +1309,8 @@ const I18N = {
     "offers.rel.hint": "Host reliability: {rel}%",
     "confirm.rent.traffic": "Traffic: {price} per TB — an hour of play ≈ {hour}",
     "confirm.rent.traffic_games": ", downloading the selected games ({size}) ≈ {cost}",
-    "confirm.rent.traffic_free": "Traffic on this machine is free."
+    "confirm.rent.traffic_free": "Traffic on this machine is free.",
+    "offers.pair.hint": "The host rents this machine only with two GPUs: the game runs on one, the other stays idle. The price is for both."
   },
   "es": {
     "app.error_state": "No se pudo obtener el estado: {error}",
@@ -1962,7 +1964,8 @@ const I18N = {
     "offers.rel.hint": "Fiabilidad del host: {rel}%",
     "confirm.rent.traffic": "Tráfico: {price} por TB — una hora de juego ≈ {hour}",
     "confirm.rent.traffic_games": ", descargar los juegos elegidos ({size}) ≈ {cost}",
-    "confirm.rent.traffic_free": "El tráfico en esta máquina es gratis."
+    "confirm.rent.traffic_free": "El tráfico en esta máquina es gratis.",
+    "offers.pair.hint": "El host alquila esta máquina solo con dos GPU: el juego usa una y la otra queda libre. El precio es por ambas."
   }
 };
 

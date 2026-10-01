@@ -70,6 +70,24 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(sent["vms_enabled"], {"eq": True})
         self.assertEqual(sorted(ids), [1, 2, 3, 6])     # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь
 
+    def test_pairs_only_when_machine_has_no_single(self):
+        # [0.3.1] Docker: машина, которая сдаётся только парой видеокарт, — в списке с пометкой; если у той же машины
+        # есть и одиночное предложение — пара не нужна. KVM — пар нет. Порог поколения — от GTX 10xx
+        singles = [offer(1), offer(2)]
+        pairs = [offer(2), offer(7)]
+        sent = []
+
+        def call(method, path, body=None, **k):
+            sent.append(body)
+            return {"offers": [dict(o) for o in (pairs if body["num_gpus"]["eq"] == 2 else singles)]}
+        with mock.patch.object(market, "call", call), mock.patch.object(market, "bad_hosts", lambda: {}):
+            rows = market.search(60, docker=True)
+            self.assertEqual(sorted((o["id"], o.get("_gpus", 1)) for o in rows), [(1, 1), (2, 1), (7, 2)])
+            self.assertEqual(sent[0]["compute_cap"], {"gte": 600})
+            sent.clear()
+            self.assertEqual(sorted(o["id"] for o in market.search(60, docker=False)), [1, 2])
+            self.assertEqual(len(sent), 1)                              # KVM — без запроса пар
+
     def test_gpu_models(self):
         # [0.3.1] профессиональные с кодировщиком и выходами на монитор — подходят; без них — нет
         for name in ("RTX 4090", "GTX 1660 Ti", "RTX A4000", "RTX A6000", "RTX PRO 4000", "RTX PRO 6000 Max-Q",

@@ -191,7 +191,7 @@ class Api:
                     # цена трафика, $ за ТБ (дороже из двух сторон) — фильтр «Трафик» во вкладке Docker
                     "traffic_tb": round(max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0) * 1000, 2),
                     # $ за ТБ отдельно: ↓ на машину (игры и сохранения из облака), ↑ с машины (трансляция, выгрузка)
-                    **_traffic(o),
+                    **_traffic(o), "gpus": o.get("_gpus", 1),
                     "ping": latency.for_offer(o, remembered, me)}
         current = None
         if launching is not None:

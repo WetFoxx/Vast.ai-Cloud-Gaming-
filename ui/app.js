@@ -748,6 +748,7 @@ function renderOffers() {
       tag.className = cls; tag.textContent = text; if (title) tag.title = title;
       c[1].appendChild(tag);
     };
+    if (o.gpus === 2) addTag("tag", "×2", t("offers.pair.hint"));   // сдаётся только парой: работает одна, цена — за обе
     if (o.last) addTag("tag", t("offers.last.tag"));
     if (o.start_min && !o.failed) addTag("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
     if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке

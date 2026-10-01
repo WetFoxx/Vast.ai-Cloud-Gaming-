@@ -33,6 +33,8 @@ def gpu_ok(name):
 # (Quadro RTX 6000 / 535, RTX 3060 Ti / 570, RTX 3060 / 570) — на всех экран не поднимается, «Failed to acquire
 # modesetting permission» (видеокартой владеет хост), до Sunshine не доходит. Такие хосты — в основном домашние.
 DOCKER_DRIVER = 580
+MIN_COMPUTE = 600     # поколение видеокарты (compute capability ×100): от GTX 10xx (Pascal); Maxwell (GTX 9xx) — нет
+PAIRS = True          # Docker: показывать машины, которые сдаются только парой видеокарт
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
 # машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
 BLOCKED = {"CN"}
@@ -123,18 +125,28 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
     _traffic ($/ч за стрим), _total (аренда с диском + трафик).
     """
     # Фильтры поиска — проверены на живом API (см. CLAUDE.md, раздел Vast API)
-    offers = call("POST", "bundles/", {
+    query = {
         "type": "ondemand",
         "rentable": {"eq": True},
         "num_gpus": {"eq": 1},
         **({} if docker else {"vms_enabled": {"eq": True}}),   # KVM-образ — только там, где Vast разрешил VM
-        "compute_cap": {"gte": 750},        # как в шаблоне: видеокарты от GTX 16xx / RTX 20xx
+        # [0.3.1] от GTX 10xx (Pascal, 6.x; решение 2026-10-01 — «человек сам решит»); было от GTX 16xx / RTX 20xx (7.5)
+        "compute_cap": {"gte": MIN_COMPUTE},
         "reliability": {"gte": min_rel},
         "disk_space": {"gte": disk},        # на машине хватает места под наш диск
         "allocated_storage": disk,          # чтобы цена в час сразу включала этот диск
         "limit": 1000,
         **(where or {}),
-    }).get("offers", [])
+    }
+    offers = call("POST", "bundles/", query).get("offers", [])
+    if docker and PAIRS:
+        # [0.3.1] Машины, которые сдаются только парой видеокарт (одной — нет): игра идёт на первой, вторая простаивает,
+        # цена — за обе (~130 машин, 2026-10-01). Только Docker: в KVM две карты в виртуальной машине не проверялись
+        singles = {o.get("machine_id") for o in offers}
+        for o in call("POST", "bundles/", {**query, "num_gpus": {"eq": 2}}).get("offers", []):
+            if o.get("machine_id") not in singles:
+                o["_gpus"] = 2
+                offers.append(o)
     bad = bad_hosts()
     try:
         starts = json.loads(STARTS.read_text())
