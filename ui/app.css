@@ -520,6 +520,8 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .mods-save .sub { font-size: 12px; }
 .mods-save input[type=checkbox] { margin: 0; }
 .mods-save.on { border-color: rgba(23, 178, 106, .55); box-shadow: 0 0 18px rgba(23, 178, 106, .12); }
+.mods-save.locked { cursor: default; }
+.mods-save.locked input[type=checkbox] { opacity: .55; cursor: default; }
 /* Машины нет: крупно баланс и «Играть» по центру */
 .hero.empty { align-items: stretch; text-align: center; padding: 26px 20px 22px; }
 .hero.empty .hero-top { flex-direction: column; align-items: center; gap: 6px; }

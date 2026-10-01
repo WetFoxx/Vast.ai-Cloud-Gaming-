@@ -931,17 +931,19 @@ function renderOffersGame() {
 
 // [v5.1] Один тумблер «Моды» у игры (заметный блок на карточке игры и на главном во время игры): включён — моды из облака
 // накладываются поверх игры из Steam и изменения сохраняются обратно; выключен — чистая игра, ничего не сохраняется
-// (моды в облаке остаются). Во время игры тумблер управляет сохранением — машине сразу (set_mods_save).
+// (моды в облаке остаются). Выбирается перед арендой; на главном во время игры — только виден (locked): машина
+// получила выбор при аренде, менять его на ходу нельзя (решение Алексея 2026-10-02).
 function modsSaveOn(appid) { return !!(libData && libData.mods_save && libData.mods_save[appid]); }
-function modsSaveBlock(appid, info, onChange) {
-  const on = modsSaveOn(appid);
-  const box = el("label", { className: "mods-save" + (on ? " on" : "") });
-  const cb = el("input", { type: "checkbox", checked: on });
+function modsSaveBlock(appid, info, onChange, locked = false, state = null) {
+  const on = state === null ? modsSaveOn(appid) : state;
+  const box = el("label", { className: "mods-save" + (on ? " on" : "") + (locked ? " locked" : "") });
+  const cb = el("input", { type: "checkbox", checked: on, disabled: locked });
   const txt = el("div");
   const head = el("b", {}, t("mods.toggle"));
   if (info) head.appendChild(el("span", { className: "mods-cloud" }, " · " + t("mods.cloud", { size: size(info.bytes), date: info.mtime || "" })));
-  txt.append(head, el("span", { className: "sub" }, t(on ? "mods.on" : "mods.off")));
+  txt.append(head, el("span", { className: "sub" }, t(on ? "mods.on" : "mods.off") + (locked ? " " + t("mods.locked") : "")));
   box.append(txt, cb);
+  if (locked) return box;
   cb.addEventListener("change", async () => {
     if (libData) libData.mods_save = { ...(libData.mods_save || {}), [appid]: cb.checked };
     box.classList.toggle("on", cb.checked);
@@ -982,7 +984,7 @@ function renderPlay(play, game, streaming) {
     main.append(bar, el("div", { className: "sub" }, `${pct}% · ${size(pg.done)} / ${size(pg.total)}`
       + (sp ? " · " + t("arch.speed", { speed: size(sp) }) + (sp > 0 ? " · " + leftText((pg.total - pg.done) / sp) : "") : "")));
   }
-  if (game && game.appid && ["download", "launch", "mods", "running"].includes(key)) main.appendChild(modsSaveBlock(game.appid));
+  if (game && game.appid) main.appendChild(modsSaveBlock(game.appid, null, null, true, !!game.mods));
   if (["login", "other", "err", "running"].includes(key) && current && current.status.links) {
     main.appendChild(button(t("play.open"), () => startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop"), key !== "running"));
   }

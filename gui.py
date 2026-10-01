@@ -740,22 +740,13 @@ class Api:
                 "mods_save": settings.get("mods_sel") or {}}
 
     def set_mods_save(self, appid, on):
-        """[v5.1] Тумблер «Сохранять моды в облако» у игры: запомнить (следующие машины) и, если машина работает, сказать
-        ей сразу (wolf answer mod: включили — выгрузит моды сейчас). {"ok", "machine": сказали ли машине}."""
+        """[v5.1] Тумблер «Моды» у игры на карточке перед арендой — запомнить (уходит машине при аренде: накладывать и
+        сохранять). Во время игры он заблокирован — машине на ходу не передаётся."""
         appid = str(appid)
         if not appid.isdigit():
             return {"error": {"key": "library.bad_game", "params": {}, "text": "bad appid"}}
         cloudgames.remember_mods(appid, bool(on))
-        node = wolfnode.ts_node() if core.list_instances() else None
-        if not node:
-            return {"ok": True, "machine": False}
-        try:
-            code, out = wolfnode.run(node[1], "answer", ["mod", f"mod--{appid}", "yes" if on else "no"], timeout=120,
-                                     on_notice=self._ssh_notice, ssh=wolfnode.ssh_run)
-        except VastgameError:
-            return {"ok": True, "machine": False}
-        settings.applog(f"моды {appid}: сохранять — {'да' if on else 'нет'} (машине: код {code})")
-        return {"ok": True, "machine": code == 0}
+        return {"ok": True}
 
     def _library_game(self, game):
         """Игра из библиотеки, которую можно запустить этим аккаунтом: {"appid", "account", "name", "cap"} или None.
