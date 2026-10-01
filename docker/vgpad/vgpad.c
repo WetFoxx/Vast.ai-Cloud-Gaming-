@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -78,6 +79,28 @@ static struct fdent fds[MAXFD];
 static int real_close_fd(int fd) {
     REAL(int, close, int);
     return real_close(fd);
+}
+
+/* Steam с включённым Steam Input велит играм не замечать «настоящие» геймпады Xbox (SDL_GAMECONTROLLER_IGNORE_DEVICES,
+ * в списке и Xbox 360 045e/028e) и подставляет свой виртуальный — а в контейнере без /dev/uinput он не создаётся, и игра
+ * остаётся без геймпада. Список задаётся при запуске игры, поэтому выключить Steam Input на ходу не помогало (живой тест
+ * 2026-10-01, Dawnwalker на Proton). Наш геймпад — всегда Xbox 360 от Sunshine: вычёркиваем его из списка в каждой
+ * программе, куда подгружена библиотека, — игра видит его при любом Steam Input. */
+__attribute__((constructor)) static void vg_unignore(void) {
+    const char *v = getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES");
+    if (!v || !*v) return;
+    char *buf = strdup(v), *out = malloc(strlen(v) + 1), *save = NULL;
+    if (!buf || !out) { free(buf); free(out); return; }
+    out[0] = 0;
+    int dropped = 0;
+    for (char *t = strtok_r(buf, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        if (!strcasecmp(t, "0x045e/0x028e")) { dropped = 1; continue; }
+        if (out[0]) strcat(out, ",");
+        strcat(out, t);
+    }
+    if (dropped) setenv("SDL_GAMECONTROLLER_IGNORE_DEVICES", out, 1);
+    free(buf);
+    free(out);
 }
 
 static const char *sock_path(void) {
