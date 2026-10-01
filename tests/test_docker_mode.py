@@ -64,8 +64,8 @@ class TestSearch(unittest.TestCase):
     def test_docker_needs_driver_not_kvm(self):
         ids, sent = self.run_search(True)
         self.assertNotIn("vms_enabled", sent)
-        # 3 — драйвер 570, 4 — без кодировщика видео, 6 — драйвер неизвестен, 7 и 8 — драйвер 610+ (кодировщик не открывается)
-        self.assertEqual(sorted(ids), [1, 2, 5, 9])
+        # 3 — драйвер 570, 4 — без кодировщика видео, 6 — драйвер неизвестен; 610+ (7, 8) — в списке
+        self.assertEqual(sorted(ids), [1, 2, 5, 7, 8, 9])
 
     def test_kvm_as_before(self):
         ids, sent = self.run_search(False)
