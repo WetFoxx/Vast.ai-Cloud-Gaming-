@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.0 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.1 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -108,6 +108,9 @@
 # сразу и потом сама; без ответа — при выключении (кроме одних логов, дампов и кэшей). Запуск из библиотеки «с модами»
 # (VG_PLAY "mods": true): Steam поставил чистую игру → моды из облака поверх → запуск. Steam обновил игру за сессию — моды
 # этой игры не выгружаются (обновление могло затереть их часть — облако не перезаписываем неполным архивом).
+# [v5.1] Вопросов о модах нет (решение Алексея 2026-10-02): моды выгружаются, только если у игры включён тумблер
+# «Сохранять моды в облако» в приложении (VG_SYNC "mods": {"yes": [...]}; во время игры — wolf answer mod mod--НОМЕР
+# yes|no). Выключен — моды остаются только на этой машине.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -551,7 +554,7 @@ answer() {
   case $k:$a in
     mod:yes) p=${n#mod--}; addline "$p" sel.mods_yes; rmline "$p" sel.mods_no; log "моды $p: сохранять — выбрано"
              ( NOW=1 "$0" mods "$p" >/dev/null 2>&1 & ) ;;
-    mod:no)  p=${n#mod--}; addline "$p" sel.mods_no; rmline "$p" sel.mods_yes; log "моды $p: не сохранять — выбрано" ;;
+    mod:no)  p=${n#mod--}; rmline "$p" sel.mods_yes; log "моды $p: не сохранять — выбрано" ;;
     new:yes) addline "$n" sel.games; rmline "$n" sel.skip; log "$n: синхронизировать — выбрано" ;;
     new:no)  addline "$n" sel.skip; log "$n: не синхронизировать — выбрано" ;;
     del:yes) p=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "$n" appid 2>/dev/null)
@@ -680,15 +683,14 @@ mods_scan() {
     fi
   done
 }
-# После выхода из игры: появились моды — спросить (или выгрузить, если человек уже сказал «да»)
+# После выхода из игры: тумблер «Сохранять моды» включён и моды изменились — выгрузить (в фоне)
 mods_check() {
   local a=$1 d cnt fp junk
-  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.upd" ] && ! inlist "$a" sel.mods_no || return 0
+  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.upd" ] && inlist "$a" sel.mods_yes || return 0
   d=$(idir "$a"); [ -n "$d" ] || return 0
   read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || return 0
   [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && return 0
-  if inlist "$a" sel.mods_yes; then ( NOW=1 "$0" mods "$a" >/dev/null 2>&1 & )
-  elif [ "${cnt:-0}" -gt 0 ] && [ "$junk" = 0 ]; then ask mod "mod--$a" "$(aname "sgame--$d")"; fi
+  ( NOW=1 "$0" mods "$a" >/dev/null 2>&1 & )
 }
 # wolf mods [НОМЕР...] (через bk: свежий список облака) — выгрузить моды; без номеров — всех запомненных игр (выключение)
 mods_push() {
@@ -697,11 +699,10 @@ mods_push() {
   for a in "$@"; do
     [[ $a =~ ^[0-9]+$ ]] && [ -e "$S/van/$a.tsv" ] || continue
     [ -e "$S/van/$a.upd" ] && { log "моды $a: Steam обновлял игру в этой сессии — не выгружаю"; continue; }
-    inlist "$a" sel.mods_no && continue
+    inlist "$a" sel.mods_yes || continue                 # [v5.1] только с включённым тумблером
     d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
     read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || continue
     [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && continue
-    inlist "$a" sel.mods_yes || { [ "${cnt:-0}" -gt 0 ] && [ "$junk" = 0 ]; } || continue
     mods_pack "$a" "$d"
   done
 }
