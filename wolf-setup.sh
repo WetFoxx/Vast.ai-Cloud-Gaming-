@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.1 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.2 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -111,6 +111,7 @@
 # [v5.1] Вопросов о модах нет (решение Алексея 2026-10-02): моды выгружаются, только если у игры включён тумблер
 # «Сохранять моды в облако» в приложении (VG_SYNC "mods": {"yes": [...]}; во время игры — wolf answer mod mod--НОМЕР
 # yes|no). Выключен — моды остаются только на этой машине.
+# [v5.2] У ссылок в папке игры время не сравнивается (распаковка ставит им «сейчас») — те же моды не выгружаются повторно.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -2505,7 +2506,7 @@ w /usr/local/bin/wolf-mods.py <<'MODS'
 #   pack ПАПКА СНИМОК АРХИВ НОМЕР СБОРКА  упаковать моды (zstd) → «сколько отпечаток»; 0 — модов нет, архив не создан
 #   apply ПАПКА                         stdin — распакованный tar модов: наложить поверх игры, удалить удалённое → «сколько отпечаток»
 #   arch НОМЕР ПАСПОРТ                  имя архива: mod--НОМЕР--Название (из паспорта Steam)
-import hashlib, io, json, os, re, subprocess, sys, tarfile
+import hashlib, io, json, os, re, stat, subprocess, sys, tarfile
 
 META = ".vastgame-mod.json"
 JUNK_DIRS = {"logs", "log", "crashes", "crashdumps", "crash", "cache", "caches", "shadercache", "__pycache__", "temp", "tmp"}
@@ -2522,7 +2523,8 @@ def walk(root):
                 st = os.lstat(p)
             except OSError:
                 continue
-            out[os.path.relpath(p, root)] = (st.st_size, int(st.st_mtime))
+            # у ссылки время не сравниваем: распаковка ставит ей «сейчас», а не время из архива (отпечаток бы не совпал)
+            out[os.path.relpath(p, root)] = (st.st_size, 0 if stat.S_ISLNK(st.st_mode) else int(st.st_mtime))
     return out
 
 

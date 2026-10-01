@@ -61,6 +61,7 @@ class TestRoundTrip(unittest.TestCase):
         os.utime(game / "data/textures.pak", (old, old))
         (game / "data/intro.bik").unlink()
         os.symlink("plugins/Mod.dll", game / "BepInEx/current.dll")
+        os.utime(game / "BepInEx/current.dll", (old, old), follow_symlinks=False)   # распаковка поставит ссылке «сейчас»
         code, out, _ = run("diff", game, snap)
         cnt, fp, junk = out.split()
         self.assertEqual((cnt, junk), ("4", "0"))
