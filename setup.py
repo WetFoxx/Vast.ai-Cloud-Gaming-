@@ -277,7 +277,7 @@ def step_tailscale():
 # пока здесь не поменяют коммит и не обновят шаблон (vastgame setup → шаг «Шаблон»).
 SCRIPT_VERSION = "v5.3"
 SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-              "e940d166193782fa707b6711a6304033fa110b65/wolf-setup.sh")
+              "46ee2b9a98b41dd8b235fc30726b16570ce26098/wolf-setup.sh")
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
 # Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
 # Tailscale (41641/udp, 3478/udp — STUN)
