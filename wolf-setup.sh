@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.8 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -99,6 +99,8 @@
 # статуса (wait login → down с progress → up → ok), скачалась — запуск (steam -applaunch). wolf-steam.py.
 # VG_SYNC и VG_PLAY теперь доходят и до загрузки на KVM (раньше служба systemd их не видела — выбор игр там не
 # работал): сохраняются в /etc/wolf/env как VGS и VGP.
+# [v4.9] Вход в Steam для игры из библиотеки определяется надёжнее: вход нужным аккаунтом после запуска Steam
+# (а не последняя строка журнала) или идущее скачивание.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -602,7 +604,8 @@ play_watch() {
       sp=$(( ( sp + (d - last) / (now - lt > 0 ? now - lt : 1) ) / 2 )); moved=$now
     fi
     [ "${d:-0}" -ne "$last" ] && { last=${d:-0}; lt=$now; }
-    on=$(u python3 /usr/local/bin/wolf-steam.py logon "$DH/$SR" "$acc" 2>/dev/null)
+    if [ "$moved" = "$now" ] && [ "$last" -gt 0 ]; then on=on   # [v4.9] качается — значит, вошёл
+    else on=$(u python3 /usr/local/bin/wolf-steam.py logon "$DH/$SR" "$acc" "$(( t0 - 10 ))" 2>/dev/null); fi
     if [ "$on" = on ] && [ "${tot:-0}" -gt 0 ]; then
       echo "$d $tot $sp $now" > "$S/pg/play"
       [ "$mode" = down ] || { mode=down; st play down "download"; }
@@ -2191,9 +2194,12 @@ w /usr/local/bin/wolf-steam.py <<'STEAMPY'
 #                                 3 — нет: Steam покажет окно входа (человек войдёт сам — QR или пароль)
 #   manifest STEAM APPID STEAMID НАЗВАНИЕ   паспорт игры: Steam сам скачает её при запуске. Игра уже на диске — не трогаем
 #   state STEAM APPID             «флаги скачано всего папка»: ход скачивания по файлам (Steam пишет в паспорт редко)
-#   logon STEAM STEAMID           on — Steam вошёл этим аккаунтом, other — другим, off — не вошёл (по connection_log)
+#   logon STEAM STEAMID [С]       on — Steam вошёл этим аккаунтом, other — другим, off — не вошёл (по connection_log;
+#                                 С — unix-время: строки раньше не считаются). [v4.9] Вход засчитывается, даже если
+#                                 после него в журнале строки переподключения (живой случай 2026-10-01: Steam качал,
+#                                 а по последней строке выходило «не вошёл»)
 # STEAM — папка Steam (debian-installation и т.п.). Пароли и пропуска входа не читаются и не пишутся.
-import base64, json, os, re, sys
+import base64, json, os, re, sys, time
 from pathlib import Path
 
 BASE = 76561197960265728                       # steamid64 = BASE + номер аккаунта ([U:1:номер] в журналах Steam)
@@ -2312,25 +2318,29 @@ def state(root, appid):
     return 0
 
 
-def logon(root, sid):
+def logon(root, sid, since=0):
     acc = int(sid) - BASE
     try:
         with open(root / "logs/connection_log.txt", "rb") as f:
             f.seek(0, 2)
-            f.seek(max(0, f.tell() - 65536))
+            f.seek(max(0, f.tell() - 262144))
             tail = f.read().decode(errors="replace")
     except OSError:
         print("off")
         return 0
-    last = None
-    for m in re.finditer(r"\[([A-Za-z ]+), [^\]]*\] \[U:1:(\d+)\]", tail):
-        last = m
-    if not last or last.group(2) == "0":
-        print("off")
-    elif int(last.group(2)) != acc:
-        print("other" if last.group(1) == "Logged On" else "off")
-    else:
-        print("on" if last.group(1) == "Logged On" else "off")
+    me = other = False
+    for m in re.finditer(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[Logged On, [^\]]*\] \[U:1:(\d+)\]", tail, re.M):
+        try:
+            ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        if ts < since or m.group(2) == "0":
+            continue
+        if int(m.group(2)) == acc:
+            me = True
+        else:
+            other = True
+    print("on" if me else "other" if other else "off")
     return 0
 
 
@@ -2362,8 +2372,8 @@ if __name__ == "__main__":
             sys.exit(manifest(Path(a[1]), a[2], a[3], a[4]))
         if a[:1] == ["state"] and len(a) == 3 and a[2].isdigit():
             sys.exit(state(Path(a[1]), a[2]))
-        if a[:1] == ["logon"] and len(a) == 3 and a[2].isdigit():
-            sys.exit(logon(Path(a[1]), a[2]))
+        if a[:1] == ["logon"] and len(a) in (3, 4) and a[2].isdigit():
+            sys.exit(logon(Path(a[1]), a[2], int(a[3]) if len(a) == 4 and a[3].isdigit() else 0))
     except (OSError, ValueError) as e:
         print(f"wolf-steam: ошибка {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
