@@ -33,8 +33,8 @@ GAMES_PY = TMP / "wolf-games.py"
 GAMES_PY.write_text(heredoc("wolf-games.py", "GAMES"))
 SHORT_PY = TMP / "wolf-shortcuts.py"
 SHORT_PY.write_text(heredoc("wolf-shortcuts.py", "SHORTCUTS"))
-FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "tool", "inlist", "addline", "rmline", "want", "wants",
-                                   "ondisk", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
+FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "store", "tool", "inlist", "addline", "rmline", "want", "wants",
+                                   "ondisk", "askable", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
                                    "gsync", "idirs", "steam_ready"))
 FUNCS += "\n" + re.search(r"^HID=.*$", WOLF, re.M).group(0)
 

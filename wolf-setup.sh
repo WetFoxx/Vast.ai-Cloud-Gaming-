@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.7 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v4.8 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -91,6 +91,14 @@
 # Ход каждого архива (проценты и скорость, скачивание и выгрузка) — в /json поле progress {done, total, speed}.
 # [v4.7] Игра Steam выгружается, только когда Steam установил её целиком (StateFlags в паспорте, steam_ready):
 # недокачанная не уезжает в облако частями — ни раз в 15 минут, ни при выключении, ни по выходу из игры.
+# [v4.8] ИГРЫ STEAM — ИЗ STEAM. Новое приложение (VG_SYNC с "steam": "store") больше не синхронизирует игры Steam
+# с облаком: их качает сам Steam (быстрее, чем Google Drive); вопросов о них нет, архивы sgame-- в облаке не
+# трогаются. Игры из папки Games, сохранения и вход в Steam — как раньше. Игра, выбранная в библиотеке приложения
+# (VG_PLAY: номер, аккаунт, название), — перед запуском Steam: вход нужным аккаунтом (если им на машине уже входили;
+# иначе Steam покажет окно входа), паспорт игры (Steam сам начнёт качать), ход скачивания — запись play на странице
+# статуса (wait login → down с progress → up → ok), скачалась — запуск (steam -applaunch). wolf-steam.py.
+# VG_SYNC и VG_PLAY теперь доходят и до загрузки на KVM (раньше служба systemd их не видела — выбор игр там не
+# работал): сохраняются в /etc/wolf/env как VGS и VGP.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -158,6 +166,7 @@ SF="$STEAM_FREEZE"; SG="$SYNC_STEAM_GAMES"; SO="$SYNC_OTHER_GAMES"; SV="$SYNC_SA
 SL="${STEAM_LANG:-}"                           # пусто = не передавать -language вообще
 RES="${RES:-1920x1200}"                        # базовое разрешение рабочего стола
 PAR="${PAR:-4}"                                # архивов параллельно
+VGS="${VG_SYNC:-}"; VGP="${VG_PLAY:-}"         # [v4.8] выбор игр и игра для запуска (не секреты) — в /etc/wolf/env
 ZL="${ZSTD_STATE:-3}"                          # zstd для состояния/префиксов
 ZG="${ZSTD_GAMES:-1}"                          # zstd для игр
 SMIN="${STATE_SYNC_MIN:-5}"                    # период синхронизации состояния, мин
@@ -229,7 +238,7 @@ VI="${CONTAINER_ID:-}"                          # номер инстанса в
 umask 022
 
 # /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf, ключ Vast -> vastkey)
-declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD VI WM > /etc/wolf/env
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD VI WM VGS VGP > /etc/wolf/env
 chmod 600 /etc/wolf/env
 
 # Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
@@ -417,24 +426,33 @@ acf_unhide() {
 # $S/sel.*: при загрузке из VG_SYNC, дальше — ответы человека (wolf answer). Служебные «игры» Steam (Proton,
 # Steam Linux Runtime, Steamworks Shared, настройки контроллера) синхронизируются всегда, в приложении их нет.
 sel_init() {
+  local v=${VG_SYNC:-${VGS:-}}                    # [v4.8] на KVM — из /etc/wolf/env (службе systemd окружение аренды не видно)
   rm -f "$S"/sel.* "$S/present"
-  [ -n "${VG_SYNC:-}" ] || return 0
-  printf '%s' "$VG_SYNC" | base64 -d 2>/dev/null | S="$S" python3 -c '
+  [ -n "$v" ] || return 0
+  printf '%s' "$v" | base64 -d 2>/dev/null | S="$S" python3 -c '
 import json, os, sys
 d, s = json.load(sys.stdin), os.environ["S"]
 ok = lambda n: isinstance(n, str) and n and "/" not in n and "\n" not in n
 for key, f in (("games", "sel.games"), ("saves_off", "sel.saves_off")):
     open(os.path.join(s, f), "w").write("".join(n + "\n" for n in d.get(key) or [] if ok(n)))
+if d.get("steam") == "store":
+    open(os.path.join(s, "sel.store"), "w").close()
 open(os.path.join(s, "sel.on"), "w").close()' || log "VG_SYNC не разобран — синхронизация как раньше"
 }
 selon()  { [ -e "$S/sel.on" ]; }
+# [v4.8] Игры Steam качает Steam: не скачивать из облака, не выгружать, не спрашивать о них
+store()  { [ -e "$S/sel.store" ]; }
 tool()   { case $1 in sgame--Proton*|sgame--SteamLinuxRuntime*|"sgame--Steam Linux Runtime"*|"sgame--Steamworks Shared"|"sgame--Steam Controller Configs") return 0 ;; esac; return 1; }
 inlist() { grep -qxF -- "$1" "$S/$2" 2>/dev/null; }
 addline() { inlist "$1" "$2" || printf '%s\n' "$1" >> "$S/$2"; }
 rmline() { [ -e "$S/$2" ] || return 0; grep -vxF -- "$1" "$S/$2" > "$S/$2.new"; mv -f "$S/$2.new" "$S/$2"; }
 # Синхронизировать ли архив игры (sgame--/game--) и сохранения (pfx--)
 want() {
-  if selon; then tool "$1" || inlist "$1" sel.games; return; fi
+  if selon; then
+    tool "$1" && return 0
+    case $1 in sgame--*) store && return 1 ;; esac
+    inlist "$1" sel.games; return
+  fi
   case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
 }
 wants() { [ "$SV" = 1 ] && ! inlist "$1" sel.saves_off; }
@@ -443,6 +461,8 @@ ondisk() {
   { ld "$DH/$SR/steamapps/common" sgame--; ld "$GD" game--; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \
     | LC_ALL=C sort
 }
+# [v4.8] Игры, о которых спрашивать человека: без игр Steam, если их качает Steam
+askable() { if store; then ondisk | grep -v '^sgame--' || true; else ondisk; fi; }
 # [v4.7] Игра Steam установлена целиком — только такую выгружаем. Недокачанную (или обновляющуюся) Steam сам докачает
 # из магазина, а в облако она уехала бы частями — раз в 15 минут, пока качается, и при выключении. Паспорт игры
 # (appmanifest) пишет состояние в StateFlags: 4 — установлена; рядом допустимы 2 (ждёт обновления, файлы целые),
@@ -496,7 +516,7 @@ scan_games() {
   selon && [ -e "$L/boot-done" ] || return 0
   [ -n "$SR" ] || sr
   [ -d "$DH/$SR/steamapps/common" ] || return 0          # нет папки — не повод считать игры удалёнными
-  cur=$(ondisk)
+  cur=$(askable)
   [ -e "$S/present" ] || { printf '%s\n' "$cur" > "$S/present"; return 0; }
   old=$(cat "$S/present")
   while IFS= read -r n; do
@@ -541,6 +561,76 @@ gindex() {
     | python3 /usr/local/bin/wolf-games.py index "$DH/$SR/steamapps" "$j" > "$nj" || return 0
   cmp -s "$nj" "$j" 2>/dev/null && return 0
   rc rcat "$R/vastgame-games.json" < "$nj" && mv -f "$nj" "$j" && log "список игр для приложения обновлён"
+}
+
+# ---------------------------------------------- игра из библиотеки (v4.8) ---
+# VG_PLAY — игра, выбранная в библиотеке приложения: её качает и запускает сам Steam. Ход — запись play на странице
+# статуса: wait login (войти в Steam на машине; other — вошли не тем аккаунтом), down download (+progress),
+# up launch, ok running; err stuck / launch. Один раз за аренду (play.done): перезагрузка машины игру не перезапускает.
+play_init() {
+  local v=${VG_PLAY:-${VGP:-}}
+  rm -f "$S"/play.app "$S"/play.acc "$S"/play.name
+  [ -n "$v" ] || return 0
+  log "$(printf '%s' "$v" | python3 /usr/local/bin/wolf-steam.py vgplay "$S" 2>&1)"
+}
+# До запуска Steam: аккаунт (registry.vdf/loginusers.vdf) и паспорт игры
+play_prepare() {
+  local a acc
+  a=$(rd "$S/play.app"); acc=$(rd "$S/play.acc")
+  [ -n "$a" ] && [ -n "$acc" ] && [ ! -e "$S/play.done" ] && [ -n "$SR" ] || return 0
+  pgrep -x steam >/dev/null && { steam_off || log "play: Steam не закрылся — аккаунт может быть не тот"; }
+  log "play: $(u python3 /usr/local/bin/wolf-steam.py account "$DH/$SR" "$acc" 2>&1)"
+  log "play: $(u python3 /usr/local/bin/wolf-steam.py manifest "$DH/$SR" "$a" "$acc" "$(rd "$S/play.name")" 2>&1)"
+  st play wait "steam"
+}
+# StateFlags: игра установлена целиком (как steam_ready)
+flags_ready() { (( ($1 & 4) && !($1 & ~(2 | 4 | 8 | 16 | 64)) )); }
+# После запуска Steam (в фоне): ждать вход, следить за скачиванием, запустить игру
+play_watch() {
+  local a acc fl d tot dir on now t0 last=-1 lt sp=0 seen="" mode="" moved
+  a=$(rd "$S/play.app"); acc=$(rd "$S/play.acc")
+  [ -n "$a" ] && [ ! -e "$S/play.done" ] && [ -n "$SR" ] || return 0
+  exec 8>"$L/play.lock"; flock -n 8 || return 0
+  t0=$(date +%s); moved=$t0; lt=$t0
+  while [ ! -e "$S/play.done" ]; do
+    sleep "${PLAY_POLL:-4}"; now=$(date +%s)
+    read -r fl d tot dir < <(u python3 /usr/local/bin/wolf-steam.py state "$DH/$SR" "$a" 2>/dev/null) || continue
+    if flags_ready "${fl:-0}" && [ -n "$dir" ] && [ -d "$DH/$SR/steamapps/common/$dir" ]; then
+      play_launch "$a"; return 0
+    fi
+    if [ "${d:-0}" -gt "$last" ] && [ "$last" -ge 0 ]; then
+      sp=$(( ( sp + (d - last) / (now - lt > 0 ? now - lt : 1) ) / 2 )); moved=$now
+    fi
+    [ "${d:-0}" -ne "$last" ] && { last=${d:-0}; lt=$now; }
+    on=$(u python3 /usr/local/bin/wolf-steam.py logon "$DH/$SR" "$acc" 2>/dev/null)
+    if [ "$on" = on ] && [ "${tot:-0}" -gt 0 ]; then
+      echo "$d $tot $sp $now" > "$S/pg/play"
+      [ "$mode" = down ] || { mode=down; st play down "download"; }
+      if [ $(( now - moved )) -ge "${PLAY_STUCK:-900}" ] && [ -z "$seen" ]; then
+        seen=1; log "play: $a — скачивание стоит $(( (now - moved) / 60 )) мин"
+      fi
+    elif [ "$on" = other ]; then
+      [ "$mode" = other ] || { mode=other; st play wait "other"; }
+    elif [ "$on" != on ]; then
+      [ $(( now - t0 )) -ge "${PLAY_LOGIN_WAIT:-30}" ] && { [ "$mode" = login ] || { mode=login; st play wait "login"; }; }
+    else
+      moved=$now                                   # вошёл, Steam готовит скачивание
+    fi
+  done
+}
+# Скачалась — запустить и убедиться, что игра пошла (процесс Steam с её номером)
+play_launch() {
+  local a=$1 k i
+  st play up "launch"
+  for k in 1 2; do
+    u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+    for i in $(seq "${PLAY_LAUNCH_WAIT:-40}"); do
+      sleep 3
+      running_keys | grep -qxF "app:$a" && { echo "$a" > "$S/play.done"; st play ok "running"; return 0; }
+    done
+  done
+  echo "$a" > "$S/play.done"
+  st play err "launch"
 }
 
 # ----------------------------------------------------------------- манифест ---
@@ -1139,6 +1229,7 @@ boot() {
   rm -f "$L/boot-done"                          # [HARDENING #5] гейт закрыт на время boot
   rm -rf "${T:?}"/* "$S"/st/* "$S"/nt/*; : > "$FL"
   sel_init                                      # [v4.6] выбор игр этой машины
+  play_init                                     # [v4.8] игра из библиотеки приложения
   find /var/log/wolf.log -size +20M -delete 2>/dev/null
   st boot up "старт"
 
@@ -1231,7 +1322,8 @@ boot() {
     case $k in
       sgame--*)
         if ! want "$k"; then
-          if selon; then st "$k" ok "не выбрана — не скачиваю"
+          if store; then :                                         # [v4.8] игры Steam качает Steam — архив не трогаем
+          elif selon; then st "$k" ok "не выбрана — не скачиваю"
           else st "$k" ok "синхронизация игр Steam выключена — не восстанавливаю"; fi
         elif printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
           g+=("$k")
@@ -1275,8 +1367,10 @@ boot() {
       shortcuts
     fi
   fi
-  { [ "$SG" = 1 ] || selon; } && steam_go
-  selon && ondisk > "$S/present"                # [v4.6] что есть после загрузки — с этим сравнивает scan_games
+  play_prepare                                  # [v4.8] аккаунт и паспорт игры — до запуска Steam
+  { [ "$SG" = 1 ] || selon || [ -e "$S/play.app" ]; } && steam_go
+  [ -e "$S/play.app" ] && ( play_watch & )      # [v4.8] вход, скачивание и запуск игры — в фоне
+  selon && askable > "$S/present"              # [v4.6] что есть после загрузки — с этим сравнивает scan_games
   ( gindex ) &
 
   touch "$L/boot-done"   # [HARDENING #5] снять гейт с таймеров и wolf-watch только теперь
@@ -1301,6 +1395,7 @@ gsync() {
   [ -n "${NOW:-}" ] || run=$(running_archives)
   { ld "$GD" game--; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; } | while IFS= read -r n; do
     grep -qxF -- "$n" <<< "$run" && continue
+    case $n in sgame--*) store && ! tool "$n" && continue ;; esac   # [v4.8] игры Steam качает Steam — не выгружаем
     if ! steam_ready "$n"; then                     # [v4.7] Steam ещё качает — не выгружать (вывод gsync — список)
       [ -n "${NOW:-}" ] && log "$n: Steam установил игру не до конца — не выгружаю, Steam докачает её сам" >/dev/null
       continue
@@ -1319,6 +1414,7 @@ bk() {
   : > "$FL"; sr
   if [ "$m" = shutdown ]; then
     export NOW=1
+    [ -e "$S/play.app" ] && [ ! -e "$S/play.done" ] && echo stop > "$S/play.done"   # [v4.8] не запускать игру при выключении
     steam_off
     shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
     "$0" state; "$0" games
@@ -1440,7 +1536,7 @@ finish_run() {
   "$0" shutdown
   for f in "$S"/st/*; do
     n=${f##*/}
-    case $n in boot|finish) continue ;; esac
+    case $n in boot|finish|play|sunshine) continue ;; esac   # [v4.8] play и sunshine — не архивы
     IFS='|' read -r ts s rest < "$f"
     [ "${ts:-0}" -ge "$t0" ] && case $s in up|down|err) bad+=("$n") ;; esac
   done
@@ -2083,6 +2179,196 @@ if __name__ == "__main__":
     else:
         sys.exit("wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] | get ИНДЕКС.json АРХИВ appid|name")
 GAMES
+
+# =============================== wolf-steam.py =================================
+w /usr/local/bin/wolf-steam.py <<'STEAMPY'
+#!/usr/bin/env python3
+# [v4.8] Игра из библиотеки VastGame — её качает и запускает сам Steam (проверено вживую 2026-10-01: паспорт
+# с StateFlags 1026 → Steam сам начал скачивание через 9 с после запуска; переключение аккаунта через
+# registry.vdf/loginusers.vdf — вход без пароля, если этим аккаунтом на машине уже входили).
+#   vgplay ПАПКА_СОСТОЯНИЯ        stdin — VG_PLAY (base64 JSON {appid, account, name}) → play.app/.acc/.name
+#   account STEAM STEAMID         войти этим аккаунтом при запуске Steam. 0 — он есть на машине (войдёт сам),
+#                                 3 — нет: Steam покажет окно входа (человек войдёт сам — QR или пароль)
+#   manifest STEAM APPID STEAMID НАЗВАНИЕ   паспорт игры: Steam сам скачает её при запуске. Игра уже на диске — не трогаем
+#   state STEAM APPID             «флаги скачано всего папка»: ход скачивания по файлам (Steam пишет в паспорт редко)
+#   logon STEAM STEAMID           on — Steam вошёл этим аккаунтом, other — другим, off — не вошёл (по connection_log)
+# STEAM — папка Steam (debian-installation и т.п.). Пароли и пропуска входа не читаются и не пишутся.
+import base64, json, os, re, sys
+from pathlib import Path
+
+BASE = 76561197960265728                       # steamid64 = BASE + номер аккаунта ([U:1:номер] в журналах Steam)
+
+
+def kv(text, key, value):
+    """Строка "key" "value" в блоке VDF: заменить или вставить сразу после первой «{»."""
+    pat = re.compile(r'("' + re.escape(key) + r'"\s*")[^"]*(")', re.I)
+    if pat.search(text):
+        return pat.sub(lambda m: m.group(1) + value + m.group(2), text, count=1)
+    i = text.index("{") + 1
+    return text[:i] + f'\n\t\t"{key}"\t\t"{value}"' + text[i:]
+
+
+def users(text):
+    """[(steamid, начало, конец блока)] из loginusers.vdf — блоки без вложенных скобок."""
+    return [(m.group(1), m.start(), m.end()) for m in re.finditer(r'"(\d{17})"\s*\{[^{}]*\}', text)]
+
+
+def account(root, sid):
+    lu = root / "config/loginusers.vdf"
+    text = lu.read_text(errors="replace") if lu.exists() else ""
+    name, out, pos = None, [], 0
+    for s, a, b in users(text):
+        blk = text[a:b]
+        me = s == sid
+        if me:
+            m = re.search(r'"AccountName"\s*"([^"]*)"', blk)
+            name = m.group(1) if m else None
+        blk = kv(blk, "MostRecent", "1" if me else "0")
+        if me:
+            blk = kv(kv(blk, "AllowAutoLogin", "1"), "WantsOfflineMode", "0")
+        out += [text[pos:a], blk]
+        pos = b
+    if text:
+        lu.write_text("".join(out) + text[pos:])
+    reg = root.parent / "registry.vdf"
+    if not reg.exists():
+        reg = Path(os.path.expanduser("~/.steam/registry.vdf"))
+    if reg.exists():
+        r = reg.read_text(errors="replace")
+        if re.search(r'"AutoLoginUser"', r, re.I):
+            r = re.sub(r'("AutoLoginUser"\s*")[^"]*(")', lambda m: m.group(1) + (name or "") + m.group(2), r, count=1, flags=re.I)
+        else:
+            m = re.search(r'"Valve"\s*\{\s*"Steam"\s*\{', r, re.I)
+            if m:
+                r = r[:m.end()] + f'\n\t\t\t\t\t"AutoLoginUser"\t\t"{name or ""}"' + r[m.end():]
+        reg.write_text(r)
+    if name:
+        print(f"Steam войдёт аккаунтом {name}")
+        return 0
+    print("этим аккаунтом на машине ещё не входили — Steam покажет окно входа")
+    return 3
+
+
+def folder(name, appid):
+    d = re.sub(r"[^\w .()&'+-]", "", name or "", flags=re.U).strip(" .")[:80]
+    return d or f"app{appid}"
+
+
+def manifest(root, appid, sid, name):
+    sa = root / "steamapps"
+    acf, hid = sa / f"appmanifest_{appid}.acf", sa / ".vastgame-hidden" / f"appmanifest_{appid}.acf"
+    if not acf.exists() and hid.exists():
+        os.replace(hid, acf)                           # паспорт из облака (игра была на другой машине) — его данные точнее
+    if acf.exists():
+        text = acf.read_text(errors="replace")
+        m = re.search(r'"installdir"\s*"([^"]*)"', text)
+        if m and (sa / "common" / m.group(1)).is_dir():
+            print(f"{appid}: игра на диске — Steam сам проверит, нужно ли обновление")
+            return 0
+        acf.write_text(kv(kv(text, "StateFlags", "1026"), "LastOwner", sid))
+        print(f"{appid}: паспорт есть, файлов нет — Steam скачает игру заново")
+        return 0
+    sa.mkdir(parents=True, exist_ok=True)
+    acf.write_text('"AppState"\n{\n'
+                   f'\t"appid"\t\t"{appid}"\n\t"Universe"\t\t"1"\n\t"name"\t\t"{name.replace(chr(34), "")}"\n'
+                   f'\t"StateFlags"\t\t"1026"\n\t"installdir"\t\t"{folder(name, appid)}"\n\t"LastOwner"\t\t"{sid}"\n}}\n')
+    print(f"{appid}: паспорт записан — Steam скачает игру сам")
+    return 0
+
+
+def size(p):
+    n = 0
+    for d, _, files in os.walk(p):
+        for f in files:
+            try:
+                n += os.lstat(os.path.join(d, f)).st_size
+            except OSError:
+                pass
+    return n
+
+
+def state(root, appid):
+    sa = root / "steamapps"
+    acf = sa / f"appmanifest_{appid}.acf"
+    text = acf.read_text(errors="replace") if acf.exists() else ""
+    get = lambda k: (re.search(r'"' + k + r'"\s*"([^"]*)"', text, re.I) or [None, ""])[1]
+    sf = get("StateFlags")
+    flags = int(sf) if sf.isdigit() else 0
+    d = get("installdir")
+    done = size(sa / "downloading" / appid) + (size(sa / "common" / d) if d else 0)
+    total = 0
+    try:                                               # «update started : download 0/A, … stage 0/B» — B: сколько ляжет на диск
+        with open(root / "logs/content_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode(errors="replace")
+        for m in re.finditer(rf"AppID {appid} update started : download \d+/(\d+).*?stage \d+/(\d+)", tail):
+            total = int(m.group(2)) or int(m.group(1))
+    except OSError:
+        pass
+    bts = get("BytesToStage")
+    total = total or (int(bts) if bts.isdigit() else 0)
+    print(flags, done, max(total, done) if total else 0, d)
+    return 0
+
+
+def logon(root, sid):
+    acc = int(sid) - BASE
+    try:
+        with open(root / "logs/connection_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        print("off")
+        return 0
+    last = None
+    for m in re.finditer(r"\[([A-Za-z ]+), [^\]]*\] \[U:1:(\d+)\]", tail):
+        last = m
+    if not last or last.group(2) == "0":
+        print("off")
+    elif int(last.group(2)) != acc:
+        print("other" if last.group(1) == "Logged On" else "off")
+    else:
+        print("on" if last.group(1) == "Logged On" else "off")
+    return 0
+
+
+def vgplay(sdir):
+    try:
+        d = json.loads(base64.b64decode(sys.stdin.read().strip()))
+        appid, sid, name = str(d["appid"]), str(d["account"]), str(d.get("name") or "")
+    except Exception:
+        print("VG_PLAY не разобран")
+        return 1
+    if not (appid.isdigit() and len(appid) <= 10 and re.fullmatch(r"7656\d{13}", sid)):
+        print("VG_PLAY: непонятная игра или аккаунт")
+        return 1
+    name = re.sub(r"[\x00-\x1f]", "", name)[:200]
+    for k, v in (("play.app", appid), ("play.acc", sid), ("play.name", name)):
+        Path(sdir, k).write_text(v)
+    print(f"игра для запуска: {name or appid} ({appid})")
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["vgplay"] and len(a) == 2:
+            sys.exit(vgplay(a[1]))
+        if a[:1] == ["account"] and len(a) == 3:
+            sys.exit(account(Path(a[1]), a[2]))
+        if a[:1] == ["manifest"] and len(a) == 5 and a[2].isdigit():
+            sys.exit(manifest(Path(a[1]), a[2], a[3], a[4]))
+        if a[:1] == ["state"] and len(a) == 3 and a[2].isdigit():
+            sys.exit(state(Path(a[1]), a[2]))
+        if a[:1] == ["logon"] and len(a) == 3 and a[2].isdigit():
+            sys.exit(logon(Path(a[1]), a[2]))
+    except (OSError, ValueError) as e:
+        print(f"wolf-steam: ошибка {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-steam.py vgplay|account|manifest|state|logon …")
+STEAMPY
 
 w /usr/local/bin/wolf-parts.py <<'PARTS'
 #!/usr/bin/env python3
