@@ -445,11 +445,12 @@ def tailscale_login(open_url, wait=600):
 def reset_local():
     """Удалить всё, что vastgame хранит на ЭТОМ Mac: ключи в Связке ключей (и записи прежних версий),
     службы автозапуска, папку настроек (настройки, история сессий, журналы). После этого приложение ведёт
-    себя как после первой установки. Аккаунты Vast/Google/Tailscale, шаблон и переменные в Vast,
+    себя как после первой установки (и без входа в Steam). Аккаунты Vast/Google/Tailscale, шаблон и переменные в Vast,
     игры и сохранения на Drive — не трогает. Возвращает {"deleted": стёрто записей, "left": осталось}
     (как стираются ключи и почему не «до первой ошибки» — keystore.wipe)."""
     import autostart
-    r = keystore.wipe()
+    import steamlib
+    r = keystore.wipe(steamlib.key_names())
     for name in autostart.NAMES:
         autostart.uninstall(name)
     shutil.rmtree(settings.config_dir(), ignore_errors=True)

@@ -11,6 +11,7 @@
     <div class="brand"><img class="brand-mark" src="logo-mark.png" alt=""><img class="brand-word" src="logo-word.png" alt="VastGame"><span class="version" id="app-version"></span></div>
     <!-- Разделы — значками справа (подписи — во всплывающих подсказках) -->
     <nav class="header-right icons">
+      <button class="icon-btn labeled" id="open-library"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h4v16h-4zM16.5 4.5l3.8 1-4 15-3.8-1z"/></svg><span data-i18n="library.open"></span></button>
       <button class="icon-btn" id="open-games" data-i18n-title="games.open"><svg viewBox="0 0 24 24"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg></button>
       <button class="icon-btn" id="open-history" data-i18n-title="history.open"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></button>
       <button class="icon-btn" id="open-setup" data-i18n-title="setup.open"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
@@ -106,6 +107,14 @@
       <button class="link danger" id="emergency" data-i18n="btn.emergency"></button>
       <button id="stop" disabled data-i18n="btn.stop"></button>
     </div>
+    <!-- Библиотека Steam на главном: обложки последних игр; Steam не привязан — «Войти в Steam» -->
+    <section class="card lib-card" id="lib-card" hidden>
+      <div class="lib-card-top">
+        <div><div class="title" data-i18n="library.main.title"></div><div class="sub" id="lib-card-sub"></div></div>
+        <button class="small primary" id="lib-card-open" data-i18n="library.main.all"></button>
+      </div>
+      <div class="lib-strip" id="lib-strip"></div>
+    </section>
     <div class="error" id="error" hidden></div>
   </main>
 
@@ -206,6 +215,10 @@
       <ul class="setup-steps" id="setup-steps"></ul>
     </section>
     <div class="error" id="setup-error" hidden></div>
+    <section class="card steam-card">
+      <div class="label" data-i18n="steam.accounts"></div>
+      <div class="steam-accounts" id="setup-steam"></div>
+    </section>
     <section class="card lang-card">
       <span class="label">Language · Язык · Idioma</span>
       <select id="lang" aria-label="Language"></select>
@@ -247,6 +260,27 @@
     <div class="note" data-i18n="history.note"></div>
     <div class="error" id="history-error" hidden></div>
     <div class="actions"><button class="primary" id="history-back" data-i18n="btn.back"></button></div>
+  </main>
+
+  <!-- ===== Библиотека Steam ===== -->
+  <main id="screen-library" hidden>
+    <div class="lib-top">
+      <h1 data-i18n="library.title"></h1>
+      <button class="small" id="library-refresh" data-i18n="library.refresh" hidden></button>
+    </div>
+    <div class="sub" id="library-summary"></div>
+    <section class="card lib-empty" id="library-empty" hidden>
+      <div class="title" data-i18n="library.empty.title"></div>
+      <div class="sub" data-i18n="library.empty.text"></div>
+      <button class="primary" id="library-login" data-i18n="steam.login"></button>
+      <div class="sub" id="library-login-msg" hidden></div>
+    </section>
+    <input type="search" id="library-search" data-i18n-placeholder="library.search" hidden>
+    <div class="lib-chips" id="library-chips"></div>
+    <div class="lib-grid" id="library-grid"></div>
+    <div class="note" id="library-soon" data-i18n="library.soon" hidden></div>
+    <div class="error" id="library-error" hidden></div>
+    <div class="actions"><button id="library-back" data-i18n="btn.back"></button></div>
   </main>
 
   <!-- ===== Игры в облаке ===== -->

@@ -268,6 +268,10 @@ class TestOtherSystems(unittest.TestCase):
             keystore.put("VAST_API_KEY", "v")
             self.assertEqual((keystore.get("VAST_API_KEY"), store), ("v", {(OLD, "VAST_API_KEY"): "v"}))
             self.assertEqual(keystore.wipe(), {"deleted": 1, "left": 0})
+            # Пропуска Steam (имя с номером аккаунта, их нет в NAMES) — сброс стирает и их
+            keystore.put("STEAM_76561198000000001", "t")
+            self.assertEqual(keystore.wipe(["STEAM_76561198000000001"]), {"deleted": 1, "left": 0})
+            self.assertEqual(store, {})
 
 
 class TestSafety(unittest.TestCase):

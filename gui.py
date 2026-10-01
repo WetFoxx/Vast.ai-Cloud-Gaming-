@@ -44,6 +44,7 @@ import setup
 import setupcheck
 import sshkey
 from vastapi import KEY_FILE
+import steamlib
 import steamnames
 import updater
 from jobs import Job, error_data
@@ -65,6 +66,7 @@ SPARE = 10          # машин из списка человека на зам�
 SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
 REPLACE_WAIT = 180   # с: «Сменить машину» — сколько ждать, пока прежний запуск закончится и Vast уберёт машину
 REPLACE_POLL = 2
+STEAM_LOGIN_MIN = 20   # мин: окно входа Steam ждёт человека
 ASK_POLL = 10       # с: как часто окно спрашивает машину, нет ли новых вопросов (новая / удалённая игра)
 # Установка программ через Homebrew (Mac). --cask — приложение, иначе — программа командной строки
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
@@ -89,6 +91,7 @@ class Api:
         self._card_only = False             # процесс только карточки (окно закрыто) — закрыть карточку = выйти
         self._front = None                  # приложение, которое было впереди до карточки (Moonlight) — вернуть
         self._answer_lock = threading.Lock()  # ответы машине — по одному (второй сразу мог бы потеряться)
+        self._steam_lock = threading.Lock()   # окно входа Steam — одно
 
     # ---- настройки
     def settings(self):
@@ -703,6 +706,63 @@ class Api:
         arch = {n: [v[1], v[2], getattr(v, "progress", None)] for n, v in s.items()
                 if n not in ("boot", core.SUNSHINE) and not core.ASK.match(n)}
         return {"archives": arch, "asks": core.asks_of(s), "game_names": self._game_names(list(arch))}
+
+    # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
+    def library(self, fresh=False):
+        """Библиотека: fresh=False — прошлый список (сразу), True — свежий из Steam (секунды). Без аккаунтов — пусто."""
+        if not steamlib.accounts():
+            return {"accounts": [], "games": [], "errors": []}
+        return (None if fresh else steamlib.cached()) or steamlib.library()
+
+    def steam_accounts(self):
+        return {"accounts": steamlib.accounts()}
+
+    def steam_login(self, title="Steam"):
+        """Окно входа Steam (страница самой Steam: QR или логин с паролем). Ждёт, пока человек войдёт или закроет
+        окно (до STEAM_LOGIN_MIN). Долгий пропуск перехватывается в окне (steamlib.HOOK) и сразу уходит в Связку
+        ключей — в страницу он не попадает. {"ok", "account"} / {"cancelled"}."""
+        if not self._steam_lock.acquire(blocking=False):
+            return {"error": {"key": "steam.login_open", "params": {}, "text": "login window is open"}}
+        try:
+            self._clear_web()                    # прошлый вход в Steam не должен «узнать» человека — нужен чистый
+            w = webview.create_window(str(title)[:60], steamlib.LOGIN_URL, width=900, height=760)
+            closed = threading.Event()
+            w.events.closed += closed.set
+            token, until = None, time.time() + STEAM_LOGIN_MIN * 60
+            while not closed.is_set() and time.time() < until:
+                time.sleep(0.4)
+                try:
+                    w.evaluate_js(steamlib.HOOK)    # после каждого перехода страницы — заново
+                    token = w.evaluate_js(steamlib.TAKE)
+                except Exception:                   # noqa: BLE001 — страница ещё грузится или окно закрыли
+                    continue
+                if token:
+                    break
+            if not closed.is_set():
+                w.destroy()
+            self._clear_web()                    # cookie сайта Steam в окне не оставляем
+            if not isinstance(token, str) or not token:
+                return {"cancelled": True}
+            acc = steamlib.add_account(token)
+            settings.applog(f"steam: аккаунт …{acc['id'][-4:]} привязан")
+            return {"ok": True, "account": acc}
+        finally:
+            self._steam_lock.release()
+
+    def steam_logout(self, sid):
+        steamlib.remove_account(sid)
+        settings.applog(f"steam: аккаунт …{str(sid)[-4:]} отвязан")
+        return {"ok": True, "accounts": steamlib.accounts()}
+
+    def _clear_web(self):
+        """Стереть cookie и данные сайтов в окнах приложения (хранилище у всех окон одно; сама страница vastgame
+        ничего в нём не держит). Асинхронно — короткая пауза."""
+        if self._window:
+            try:
+                self._window.clear_cookies()
+                time.sleep(0.5)
+            except Exception:                       # noqa: BLE001
+                pass
 
     # ---- Вопросы машины (wolf-setup.sh v4.6): «новая игра — синхронизировать?», «игру удалили — удалить из облака?»
     def machine_asks(self):

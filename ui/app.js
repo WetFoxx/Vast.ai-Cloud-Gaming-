@@ -35,8 +35,8 @@ function duration(sec) {
 }
 
 function show(screen) {
-  for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard"]) $("screen-" + s).hidden = s !== screen;
-  for (const s of ["games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen);
+  for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["library", "games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen);
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -200,6 +200,7 @@ function renderAsks(list) {
 $("task-show").addEventListener("click", () => { if (current && current.task) startProgress(current.task.kind); });
 
 async function refresh() {
+  renderMainLibrary();
   try {
     render(DEMO ? demoState(DEMO) : await api().state(LANG));
   } catch (e) {
@@ -922,6 +923,7 @@ async function openSetup() {
 }
 
 function renderSetup() {
+  renderSteamAccounts($("setup-steam"));
   const d = setupData;
   if (!d) return;
   $("setup-summary").textContent = t(d.ready ? "setup.ready" : "setup.not_ready");
@@ -1397,6 +1399,188 @@ function wizFinished() {
 $("wiz-advanced").addEventListener("click", () => { wizStop(); openSetup(); });
 $("setup-wizard").addEventListener("click", openWizard);
 
+// ---------------------------------------------------------------- библиотека Steam
+// Игры всех привязанных аккаунтов Steam — прямо из Steam (машина не нужна). Сначала прошлый список (сразу),
+// потом свежий; при возврате в окно — снова свежий (купил игру на сайте — она уже тут).
+let libData = null, libFilter = "all", libLoading = false, libAt = 0;
+const LIB_STALE_MS = 30000;   // при возврате в окно — обновлять, если список старше
+
+$("open-library").addEventListener("click", openLibrary);
+$("library-back").addEventListener("click", () => { show("main"); refresh(); renderMainLibrary(true); });
+$("library-refresh").addEventListener("click", () => loadLibrary(true));
+$("library-login").addEventListener("click", () => steamLogin($("library-login-msg")));
+$("library-search").addEventListener("input", renderLibrary);
+window.addEventListener("focus", () => {
+  if (!$("screen-library").hidden && libData && libData.accounts.length && Date.now() - libAt > LIB_STALE_MS) loadLibrary(true);
+});
+
+async function openLibrary() {
+  const login = !$("screen-main").hidden && libData && !libData.accounts.length;
+  show("library");
+  showError("library-error", null);
+  if (!libData) $("library-summary").textContent = t("library.loading");
+  await loadLibrary(false);
+  if (libData && libData.accounts.length) loadLibrary(true);
+  else if (login) steamLogin($("library-login-msg"));
+}
+
+async function loadLibrary(fresh) {
+  if (libLoading && fresh) return;
+  libLoading = libLoading || fresh;
+  $("library-refresh").disabled = libLoading;
+  try {
+    const d = DEMO ? demoLibrary() : await api().library(fresh);
+    if (d.error) { showError("library-error", d.error); return; }
+    libData = d;
+    if (fresh) libAt = Date.now();
+    renderLibrary();
+  } finally {
+    if (fresh) libLoading = false;
+    $("library-refresh").disabled = libLoading;
+  }
+}
+
+function accName(id) {
+  const a = ((libData && libData.accounts) || []).find((x) => x.id === id);
+  return a ? a.name : "…" + id.slice(-4);
+}
+
+function renderLibrary() {
+  const d = libData;
+  if (!d) return;
+  const none = !d.accounts.length;
+  $("library-empty").hidden = !none;
+  for (const id of ["library-search", "library-refresh", "library-soon"]) $(id).hidden = none;
+  $("library-chips").innerHTML = "";
+  $("library-grid").innerHTML = "";
+  if (none) { $("library-summary").textContent = ""; return; }
+  const games = d.games || [];
+  const when = d.at ? new Date(d.at * 1000).toLocaleTimeString(LANG, { hour: "2-digit", minute: "2-digit" }) : "";
+  $("library-summary").textContent = t("library.summary", { n: games.length, accounts: d.accounts.length })
+    + (when ? " · " + t("library.updated", { time: when }) : "");
+  // Ярлыки: все, по аккаунтам (истёкший — «войди заново»), семья, «+ Войти в Steam»
+  const chips = $("library-chips");
+  const chip = (label, key, cls = "") => {
+    const b = el("button", { className: "chip " + cls + (libFilter === key ? " on" : "") }, label);
+    b.addEventListener("click", () => { libFilter = key; renderLibrary(); });
+    chips.appendChild(b);
+  };
+  chip(t("library.all", { n: games.length }), "all");
+  for (const a of d.accounts) {
+    if (a.expired) {
+      const b = el("button", { className: "chip warn" }, "⚠ " + t("steam.expired_chip", { name: a.name }));
+      b.addEventListener("click", () => steamLogin(null));
+      chips.appendChild(b);
+    } else {
+      chip(`${a.name} · ${games.filter((g) => g.accounts.includes(a.id)).length}`, a.id);
+    }
+  }
+  const fam = games.filter((g) => !g.accounts.length && g.family.length).length;
+  if (fam) chip(t("library.family_chip", { n: fam }), "family");
+  const more = el("button", { className: "chip" }, t("steam.login_more"));
+  more.addEventListener("click", () => steamLogin(null));
+  chips.appendChild(more);
+  // Плитки
+  const q = $("library-search").value.trim().toLowerCase();
+  const shown = games.filter((g) =>
+    (libFilter === "all" || (libFilter === "family" ? !g.accounts.length && g.family.length : g.accounts.includes(libFilter)))
+    && (!q || (g.name || "").toLowerCase().includes(q)));
+  const grid = $("library-grid");
+  if (!shown.length) { grid.appendChild(el("div", { className: "note" }, t("library.nothing"))); return; }
+  for (const g of shown) grid.appendChild(gameTile(g));
+}
+
+function gameTile(g) {
+  const tile = el("div", { className: "game-tile", title: g.name || g.appid });
+  tile.appendChild(el("div", { className: "ph" }, g.name || "#" + g.appid));
+  // Обложка 600x900; нет её — широкая картинка (вписана), нет и её — градиент с названием
+  const pics = [[g.cap, ""], [g.header, "wide"]].filter(([u]) => u);
+  const tryPic = (i) => {
+    if (i >= pics.length) return;
+    const img = el("img", { alt: "", loading: "lazy", src: pics[i][0], className: pics[i][1] });
+    img.onerror = () => { img.remove(); tryPic(i + 1); };
+    tile.appendChild(img);
+  };
+  tryPic(0);
+  const badges = el("div", { className: "badges" });
+  for (const id of g.accounts) badges.appendChild(el("span", { className: "badge" }, accName(id)));
+  if (!g.accounts.length && g.family.length) badges.appendChild(el("span", { className: "badge family" }, t("library.family")));
+  tile.appendChild(badges);
+  tile.appendChild(el("div", { className: "name" }, g.name || "#" + g.appid));
+  return tile;
+}
+
+// Карточка «Твои игры» на главном: обложки последних игр из запомненного списка (Steam не спрашиваем — это делает
+// сама библиотека); Steam не привязан — приглашение войти. Обновляется не чаще раза в минуту и после библиотеки.
+const LIB_STRIP = 7;
+let libCardAt = 0;
+$("lib-card").addEventListener("click", (e) => {
+  if (e.target.closest("button") && e.target.id !== "lib-card-open") return;
+  openLibrary();
+});
+async function renderMainLibrary(force = false) {
+  if (!force && Date.now() - libCardAt < 60000) return;
+  libCardAt = Date.now();
+  let d = libData;
+  if (!d) {
+    try { d = DEMO ? demoLibrary() : await api().library(false); } catch (e) { return; }
+    if (!d || d.error) return;
+    if (!libData) libData = d;
+  }
+  const card = $("lib-card"), strip = $("lib-strip");
+  card.hidden = false;
+  strip.innerHTML = "";
+  const none = !d.accounts.length;
+  $("lib-card-open").textContent = none ? t("steam.login") : t("library.main.all");
+  $("lib-card-sub").textContent = none ? t("library.main.login")
+    : d.games.length ? t("library.main.count", { n: d.games.length }) : t("library.main.empty");
+  strip.hidden = none || !d.games.length;
+  for (const g of d.games.slice(0, LIB_STRIP)) strip.appendChild(gameTile(g));
+}
+
+// Войти в Steam: окно со страницей самой Steam (QR или логин с паролем). msgEl — где писать ход (может не быть)
+async function steamLogin(msgEl) {
+  const say = (text) => { if (msgEl) { msgEl.hidden = !text; msgEl.textContent = text || ""; } };
+  say(t("steam.login.wait"));
+  showError("library-error", null);
+  const r = DEMO ? { ok: true, account: { id: "76561198000000003", name: "Demo" } } : await api().steam_login(t("steam.login.window"));
+  if (r.error) { say(""); showError(!$("screen-setup").hidden ? "setup-error" : "library-error", r.error); return; }
+  say(r.ok ? t("steam.login.done", { name: r.account.name }) : "");
+  if (r.ok) {
+    if (!$("screen-setup").hidden) renderSteamAccounts($("setup-steam"));
+    if (!$("screen-library").hidden) { libFilter = "all"; await loadLibrary(true); }
+  }
+}
+
+// Список аккаунтов с «Выйти» и кнопка «Войти в Steam» (экран «Настройка»)
+async function renderSteamAccounts(box) {
+  const d = DEMO ? { accounts: demoLibrary().accounts } : await api().steam_accounts();
+  box.innerHTML = "";
+  const msg = el("div", { className: "sub" });
+  msg.hidden = true;
+  if (!d.accounts || !d.accounts.length) box.appendChild(el("div", { className: "sub" }, t("steam.accounts.none")));
+  for (const a of d.accounts || []) {
+    const row = el("div", { className: "steam-acc" });
+    const left = el("div");
+    left.appendChild(el("div", {}, a.name));
+    const date = a.until ? new Date(a.until * 1000).toLocaleDateString(LANG, { day: "numeric", month: "long", year: "numeric" }) : "";
+    left.appendChild(el("div", { className: "sub" + (a.expired ? " warn" : "") }, a.expired ? t("steam.expired") : date ? t("steam.expires", { date }) : ""));
+    row.appendChild(left);
+    row.appendChild(a.expired ? button(t("steam.login"), () => steamLogin(msg), true) : button(t("steam.logout"), async () => {
+      if (!await ask({ title: t("steam.logout.confirm.title", { name: a.name }), text: t("steam.logout.confirm.text"), yes: t("steam.logout"), no: t("btn.cancel") })) return;
+      const r = DEMO ? { ok: true } : await api().steam_logout(a.id);
+      if (r.error) { showError("setup-error", r.error); return; }
+      libData = null; libCardAt = 0;
+      renderSteamAccounts(box);
+    }));
+    box.appendChild(row);
+  }
+  const add = button(d.accounts && d.accounts.length ? t("steam.login_more") : t("steam.login"), () => steamLogin(msg), !(d.accounts && d.accounts.length));
+  add.style.alignSelf = "flex-start";
+  box.appendChild(add);
+  box.appendChild(msg);
+}
+
 // ---------------------------------------------------------------- история и траты
 let historyData = null, historyDays = 30, historyAll = false;
 $("open-history").addEventListener("click", () => openHistory(historyDays));
@@ -1847,6 +2031,7 @@ $("lang").addEventListener("change", (e) => {
   if (!$("screen-games").hidden) renderGames();
   if (!$("screen-setup").hidden) renderSetup();
   if (!$("screen-history").hidden) openHistory(historyDays);
+  if (!$("screen-library").hidden) renderLibrary();
   if (!$("screen-progress").hidden && prog) $("progress-log").textContent = prog.log.map(eventText).join("\n");
   if (!DEMO) api().set_language(LANG, true);   // выбор запоминается
 });
@@ -1942,6 +2127,19 @@ function demoProgress() {
   return { elapsed: demoTick * 40, stage, archives: arch, events, next: 0, question: null, done,
            result: done ? { minutes: 7, links: { moonlight: "vastai-gaming-4.tail3d42c9.ts.net", sunshine: "https://x:47990" }, notes: [] } : null,
            error: null, game_names: { 3751260: "The Blood of Dawnwalker" } };
+}
+
+function demoLibrary() {
+  const A = "76561198000000001", B = "76561198000000002";
+  const g = (appid, name, accounts, family = [], last = 0) => ({ appid: String(appid), name, accounts, family, minutes: 600, last,
+    cap: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appid}/library_600x900.jpg`, header: "", hero: "" });
+  return {
+    accounts: new URLSearchParams(location.search).get("lib") === "none" ? [] :
+      [{ id: A, name: "Alex", until: 1809000000, expired: false }, { id: B, name: "Bob", until: 1790000000, expired: new URLSearchParams(location.search).get("lib") === "expired" }],
+    games: [g(1245620, "ELDEN RING", [A, B], [], 9), g(1091500, "Cyberpunk 2077", [A], [], 8), g(1145350, "Hades II", [A], [], 7),
+      g(1086940, "Baldur's Gate 3", [B], [], 6), g(1174180, "Red Dead Redemption 2", [], [A]), g(292030, "The Witcher 3", [A]),
+      g(570, "Dota 2", [A, B]), g(2050650, "Resident Evil 4", [B]), g(9999999, "Неизвестная игра", [A])],
+    errors: [], at: Math.floor(Date.now() / 1000) };
 }
 
 function demoGames() {

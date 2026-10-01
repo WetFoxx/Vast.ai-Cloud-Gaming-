@@ -142,13 +142,14 @@ def move_old():
             _moved = True
 
 
-def wipe():
-    """Стереть все ключи vastgame на этом компьютере — и записи прежних версий. Возвращает
+def wipe(extra=()):
+    """Стереть все ключи vastgame на этом компьютере — и записи прежних версий. extra — имена с номером внутри
+    (пропуска аккаунтов Steam: STEAM_<steamid>, steamlib.key_names) — их нет в NAMES. Возвращает
     {"deleted": стёрто ключей, "left": сколько осталось}. Не останавливается на неудаче."""
     global _moved, _refused
     _refused = None
     deleted = 0
-    for name in NAMES:
+    for name in (*NAMES, *extra):
         if exists(name):
             deleted += delete(name)
     if MAC:
@@ -160,7 +161,7 @@ def wipe():
                 if _security("delete-generic-password", "-s", service)[0] != 0:
                     break
                 deleted += 1
-    left = sum(exists(n) for n in NAMES)
+    left = sum(exists(n) for n in (*NAMES, *extra))
     if MAC and not left:
         left = int(_found(SERVICE) or _found(OLD))
     return {"deleted": deleted, "left": left}

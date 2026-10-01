@@ -683,7 +683,7 @@ class TestReset(unittest.TestCase):
         tmp.mkdir()
         (tmp / "settings.json").write_text("{}")
         removed = []
-        with mock.patch.object(gui.setup.keystore, "wipe", lambda: {"deleted": 3, "left": 1}), \
+        with mock.patch.object(gui.setup.keystore, "wipe", lambda extra=(): {"deleted": 3, "left": 1}), \
              mock.patch.object(gui.setup.settings, "config_dir", lambda: tmp), \
              mock.patch("autostart.uninstall", lambda name: removed.append(name)):
             r = gui.Api().reset_local()

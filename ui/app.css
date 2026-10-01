@@ -455,6 +455,40 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
   background: var(--card-2); border: 1px solid var(--border); font-size: 12.5px; color: var(--text); white-space: nowrap; }
 .chip.strong { font-weight: 600; }
 .chip.muted { color: var(--muted); }
+/* Библиотека Steam: обложки 2:3, метки аккаунтов, ярлыки-фильтры */
+.icon-btn.labeled { width: auto; gap: 7px; padding: 0 14px 0 11px; font-weight: 600; font-size: 13.5px; color: var(--text); }
+.icon-btn.labeled.active { color: #fff; }
+.lib-card { cursor: pointer; display: flex; flex-direction: column; gap: 12px; }
+.lib-card-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.lib-card-top .small { flex: none; width: auto; }
+.lib-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+.lib-strip .game-tile { border-radius: 9px; }
+.lib-strip .game-tile .name, .lib-strip .game-tile .badges { display: none; }
+.lib-strip .game-tile .ph { font-size: 11px; padding: 6px; }
+@media (max-width: 560px) { .lib-strip { grid-template-columns: repeat(4, 1fr); } .lib-strip .game-tile:nth-child(n+5) { display: none; } }
+.lib-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.lib-empty { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.lib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lib-chips .chip { cursor: pointer; font: inherit; font-size: 12.5px; width: auto; flex: none; margin: 0; }
+.lib-chips .chip.on { background: var(--grad); color: #fff; border-color: transparent; font-weight: 600; }
+.lib-chips .chip.warn { color: var(--error); }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 12px; }
+.game-tile { position: relative; border-radius: 12px; overflow: hidden; aspect-ratio: 2 / 3; background: var(--grad);
+  box-shadow: var(--shadow); }
+.game-tile .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 12px;
+  color: #fff; text-align: center; font: 700 15px/1.2 var(--round); }
+.game-tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.game-tile img.wide { object-fit: contain; background: #000; }
+.game-tile .badges { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+.game-tile .badge { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 6px; background: rgba(0, 0, 0, .66);
+  color: #fff; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.game-tile .badge.family { background: rgba(122, 92, 255, .85); }
+.game-tile .name { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 8px 7px; font-size: 12px; font-weight: 600;
+  color: #fff; background: linear-gradient(transparent, rgba(0, 0, 0, .85)); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.steam-accounts { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.steam-acc { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.steam-acc .sub.warn { color: var(--error); }
 /* Машины нет: крупно баланс и «Играть» по центру */
 .hero.empty { align-items: stretch; text-align: center; padding: 26px 20px 22px; }
 .hero.empty .hero-top { flex-direction: column; align-items: center; gap: 6px; }
@@ -530,6 +564,24 @@ main > :nth-child(n+7) { animation-delay: .24s; }
   animation: flow 1.4s linear infinite;
 }
 
+/* Наведение на обложку: приподнимается и чуть растёт (мягкая пружина), картинка внутри медленно приближается,
+   по ней проходит блик, вокруг — свечение цветов логотипа; соседние обложки слегка приглушаются */
+.game-tile { transition: transform .38s cubic-bezier(.2, .9, .25, 1.15), box-shadow .38s ease, filter .3s ease; will-change: transform; }
+.game-tile img { transition: transform .7s cubic-bezier(.2, .8, .2, 1); }
+.game-tile .name { transition: transform .35s ease, padding .35s ease; }
+.game-tile::after { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  background: linear-gradient(115deg, transparent 30%, rgba(255, 255, 255, .28) 48%, transparent 66%);
+  transform: translateX(-120%); transition: transform .8s cubic-bezier(.2, .8, .2, 1), opacity .3s ease; }
+.game-tile:hover { transform: translateY(-6px) scale(1.045); z-index: 2;
+  box-shadow: 0 0 0 2px rgba(245, 22, 47, .75), 0 14px 30px rgba(0, 0, 0, .45), 0 0 26px rgba(255, 106, 0, .35); }
+.game-tile:hover img { transform: scale(1.07); }
+.game-tile:hover .name { transform: translateY(-2px); }
+.game-tile:hover::after { opacity: 1; transform: translateX(120%); }
+.lib-grid:hover .game-tile:not(:hover), .lib-strip:hover .game-tile:not(:hover) { filter: brightness(.78) saturate(.85); }
+.lib-strip .game-tile:hover { transform: translateY(-4px) scale(1.06); }
+.lib-card { transition: transform .3s cubic-bezier(.2, .9, .25, 1.1), box-shadow .3s ease, border-color .3s ease; }
+.lib-card:hover { transform: translateY(-2px); border-color: rgba(245, 22, 47, .35);
+  box-shadow: var(--shadow), 0 0 30px rgba(214, 15, 99, .14); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0s !important;
     animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
