@@ -744,7 +744,8 @@ class Api:
             return None
         if acc not in {a["id"] for a in steamlib.accounts()}:
             return None
-        return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or ""}
+        return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or "",
+                "hero": g.get("hero") or "", "header": g.get("header") or ""}
 
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}

@@ -61,6 +61,16 @@ class TestLastMachine(unittest.TestCase):
             ids = {o["id"] for o in market.search(100)}
         self.assertEqual(ids, {2, 3})
 
+    def test_small_memory_hidden(self):
+        # 7.7 ГБ — как у двух машин в Японии, что замолкали при скачивании; 15.5 — это «16-гиговая» (часть у хоста)
+        small = dict(OFFER, id=1, cpu_ram=7864)
+        sixteen = dict(OFFER, id=2, cpu_ram=15872)
+        big = dict(OFFER, id=3, cpu_ram=64000)
+        unknown = dict(OFFER, id=4)                                      # Vast не сообщил — не прячем
+        with self.fake_call([small, sixteen, big, unknown]):
+            ids = {o["id"] for o in market.search(100)}
+        self.assertEqual(ids, {2, 3, 4})
+
     def test_busy(self):
         with self.fake_call([]):
             last = market.last_machine(100)

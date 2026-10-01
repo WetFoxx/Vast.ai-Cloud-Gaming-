@@ -502,6 +502,14 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .play-box .pb-title { font-weight: 600; }
 .play-box .small { align-self: flex-start; width: auto; }
 .play-box.warn .pb-title { color: var(--error); }
+/* Экран запуска игры из библиотеки: широкая картинка игры с названием (library_hero из магазина Steam) */
+.game-banner { position: relative; border-radius: 20px; overflow: hidden; min-height: 170px; display: flex;
+  align-items: flex-end; box-shadow: var(--shadow); background: var(--grad); }
+.game-banner img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.game-banner .shade { position: absolute; inset: 0; background: linear-gradient(transparent 25%, rgba(0, 0, 0, .82)); }
+.game-banner .gb-text { position: relative; padding: 18px 22px; }
+.game-banner h1 { color: #fff; margin: 0; }
+.game-banner .sub { color: rgba(255, 255, 255, .78); }
 /* Машины нет: крупно баланс и «Играть» по центру */
 .hero.empty { align-items: stretch; text-align: center; padding: 26px 20px 22px; }
 .hero.empty .hero-top { flex-direction: column; align-items: center; gap: 6px; }

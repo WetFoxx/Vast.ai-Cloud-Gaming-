@@ -888,7 +888,8 @@ function startGame(g) {
     .concat(g.family.filter((id) => !g.accounts.includes(id)).map((id) => ({ id, family: true })))
     .filter((c) => !((libData && libData.accounts) || []).find((a) => a.id === c.id && a.expired));
   if (!choices.length) { steamLogin(null); return; }
-  playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", account: choices[0].id, choices };
+  playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
+               header: g.header || "", account: choices[0].id, choices };
   replaceMode = false; replaceBlocked = false;
   openOffers();
 }
@@ -1883,11 +1884,26 @@ async function removeGame(g) {
 // ---------------------------------------------------------------- ход операции
 const STAGES = { play: ["vast", "tailscale", "restore", "ready"], stop: ["shutdown", "verify", "deleted"] };
 
+// Баннер игры на экране запуска: широкая картинка (нет — обложка), на ней «Запуск: название» и время
+function renderBanner(kind) {
+  const g = kind === "play" && playNow;
+  const pic = g && (g.hero || g.header || g.cap);
+  $("progress-banner").hidden = !g;
+  $("progress-title").hidden = $("progress-elapsed").hidden = !!g;
+  if (!g) return;
+  const img = $("progress-banner-img");
+  img.hidden = !pic;
+  if (pic && img.getAttribute("src") !== pic) { img.src = pic; img.onerror = () => (img.hidden = true); }
+  $("progress-banner-title").textContent = g.name;
+  $("progress-banner-sub").textContent = $("progress-elapsed").textContent;
+}
+
 function startProgress(kind = "play") {
   show("progress");
   prog = { since: 0, log: [], shownQ: 0, kind };
   $("progress-title").textContent = kind === "play" && playNow ? t("progress.title.play_game", { name: playNow.name })
     : t("progress.title." + kind);
+  renderBanner(kind);
   $("progress-note").textContent = t(kind === "stop" ? "progress.background_stop" : "progress.background");
   $("tailscale-box").hidden = true;
   $("progress-alert").hidden = true;
@@ -2032,6 +2048,7 @@ async function pollOnce() {
   prog.since = p.next;
   $("progress-log").textContent = prog.log.map(eventText).join("\n");
   $("progress-elapsed").textContent = t("progress.elapsed", { time: duration(p.elapsed) });
+  renderBanner(p.kind);
   renderStages(p.stage, !!p.error);
   renderArchives(p.archives);
 

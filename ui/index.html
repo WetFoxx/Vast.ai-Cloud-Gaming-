@@ -321,6 +321,12 @@
 
   <!-- ===== Ход операции (запуск или завершение) ===== -->
   <main id="screen-progress" hidden>
+    <!-- Игра из библиотеки: широкая картинка игры, на ней название и время (вместо заголовка) -->
+    <section class="game-banner" id="progress-banner" hidden>
+      <img id="progress-banner-img" alt="">
+      <div class="shade"></div>
+      <div class="gb-text"><h1 id="progress-banner-title"></h1><div class="sub" id="progress-banner-sub"></div></div>
+    </section>
     <h1 id="progress-title"></h1>
     <div class="sub" id="progress-elapsed"></div>
     <div class="warn-line" id="progress-alert" hidden></div>

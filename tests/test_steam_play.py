@@ -150,15 +150,24 @@ class TestStateAndLogon(unittest.TestCase):
         self.assertEqual(py("state", root, 10)[1].split(), ["1026", "3000", "8000", "Ten"])
 
     def test_logon(self):
+        import time
         root = steam_dir()
         log = root / "logs/connection_log.txt"
+        at = lambda ts: time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime(ts))
+        now = int(time.time())
         self.assertEqual(py("logon", root, A)[1].strip(), "off")       # журнала ещё нет
-        log.write_text("[x] [Logged Off, 0, 0] [U:1:0] CCMInterface::SetSteamID( [U:1:0] )\n")
+        log.write_text(f"{at(now)} [Logged Off, 0, 0] [U:1:0] CCMInterface::SetSteamID( [U:1:0] )\n")
         self.assertEqual(py("logon", root, A)[1].strip(), "off")
-        log.write_text(log.read_text() + "[x] [Logged On, 4, 7] [U:1:692993918] RecvMsgClientLogOnResponse()\n")
+        log.write_text(log.read_text() + f"{at(now)} [Logged On, 4, 7] [U:1:692993918] RecvMsgClientLogOnResponse()\n")
         self.assertEqual(py("logon", root, A)[1].strip(), "other")      # вошли не тем аккаунтом
-        log.write_text(log.read_text() + "[x] [Logged On, 4, 7] [U:1:99044033] RecvMsgClientLogOnResponse()\n")
+        log.write_text(log.read_text() + f"{at(now)} [Logged On, 4, 7] [U:1:99044033] RecvMsgClientLogOnResponse()\n")
         self.assertEqual(py("logon", root, A)[1].strip(), "on")
+        # [v4.9] после входа — строки переподключения: вход всё равно есть (Steam качает)
+        log.write_text(log.read_text() + f"{at(now)} [Connecting, 4, 7] [U:1:99044033] CCMInterface::Connect\n"
+                       f"{at(now)} [Logged Off, 4, 7] [U:1:0] x\n")
+        self.assertEqual(py("logon", root, A)[1].strip(), "on")
+        # вход был до запуска Steam (прошлая сессия в журнале) — не считается
+        self.assertEqual(py("logon", root, A, now + 60)[1].strip(), "off")
 
     def test_vgplay(self):
         d = Path(tempfile.mkdtemp(dir=TMP))
@@ -214,7 +223,7 @@ play_watch
         scenario = r'''
 step() {
   case $1 in
-    3) echo "[x] [Logged On, 4, 7] [U:1:99044033] x" > "$ROOT/logs/connection_log.txt"
+    3) echo "[$(date '+%Y-%m-%d %H:%M:%S')] [Logged On, 4, 7] [U:1:99044033] x" > "$ROOT/logs/connection_log.txt"
        echo "AppID 10 update started : download 0/500, store 0/0, reuse 0/0, delta 0/0, stage 0/1000 " > "$ROOT/logs/content_log.txt"
        mkdir -p "$ROOT/steamapps/downloading/10"; head -c 100 /dev/zero > "$ROOT/steamapps/downloading/10/a" ;;
     4) head -c 600 /dev/zero > "$ROOT/steamapps/downloading/10/a" ;;
@@ -232,9 +241,23 @@ step() {
         self.assertGreater(int(speed), 0)
         self.assertRegex((root.parent / "registry.vdf").read_text(), r'"AutoLoginUser"\s*"alex"')
 
+    def test_downloading_means_logged_in(self):
+        # [v4.9] журнал входа ничего не показал, а Steam качает — значит, вошёл: «войди в Steam» не показываем
+        scenario = r'''
+step() {
+  case $1 in
+    1) echo "AppID 10 update started : download 0/500, store 0/0, reuse 0/0, delta 0/0, stage 0/1000 " > "$ROOT/logs/content_log.txt"
+       mkdir -p "$ROOT/steamapps/downloading/10"; head -c 100 /dev/zero > "$ROOT/steamapps/downloading/10/a" ;;
+    *) head -c $(( 100 * $1 )) /dev/zero > "$ROOT/steamapps/downloading/10/a" ;;
+  esac
+}'''
+        _, s, states = self.run_watch(scenario, steps=6)
+        self.assertNotIn("wait login", states[1:])
+        self.assertEqual(states[-1], "down download")
+
     def test_wrong_account_is_reported(self):
         scenario = r'''
-step() { [ $1 = 2 ] && echo "[x] [Logged On, 4, 7] [U:1:692993918] x" > "$ROOT/logs/connection_log.txt"; return 0; }'''
+step() { [ $1 = 2 ] && echo "[$(date '+%Y-%m-%d %H:%M:%S')] [Logged On, 4, 7] [U:1:692993918] x" > "$ROOT/logs/connection_log.txt"; return 0; }'''
         _, s, states = self.run_watch(scenario, steps=5)
         self.assertEqual(states[-1], "wait other")
         self.assertFalse((s / "play.done").exists())
