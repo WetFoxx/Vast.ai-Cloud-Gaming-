@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.2 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.3 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -112,6 +112,10 @@
 # «Сохранять моды в облако» в приложении (VG_SYNC "mods": {"yes": [...]}; во время игры — wolf answer mod mod--НОМЕР
 # yes|no). Выключен — моды остаются только на этой машине.
 # [v5.2] У ссылок в папке игры время не сравнивается (распаковка ставит им «сейчас») — те же моды не выгружаются повторно.
+# [v5.3] Вышли из аккаунта Steam на машине — его данные (userdata/НОМЕР) при выключении убираются и уходят из облака
+# вместе со steam-state (вход и пропуск Steam убирает сам): убирается папка любого аккаунта, которого нет в списке
+# входа Steam (loginusers.vdf), — и вышедшего за сессию, и раньше. Только если steam-state при загрузке восстановлен.
+# Сохранения (pfx--) не трогаются.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -1322,6 +1326,16 @@ steam_off() {
   for _ in {1..60}; do pgrep -x steam >/dev/null || return 0; sleep 1; done
   return 1
 }
+# [v5.3] Из аккаунта Steam вышли (Steam сам убрал его вход и пропуск) — убрать и его данные userdata/НОМЕР,
+# иначе они останутся в облаке со steam-state. Только при закрытом Steam и восстановленном при загрузке steam-state
+steam_gone() {
+  local out
+  [ -n "$SR" ] && [ -s "$S/steam.seen" ] || return 0
+  pgrep -x steam >/dev/null && return 0
+  out=$(python3 /usr/local/bin/wolf-steam.py gone "$DH/$SR" "$S/steam.seen" 2>&1)
+  [ -n "$out" ] && log "$out"
+  return 0
+}
 # [v4.1] Игры из папки GD — в библиотеку Steam сторонними, с Proton (wolf-shortcuts.py). Только при
 # закрытом Steam: иначе при выходе он вернёт свой список. Код 3 — список изменился
 shortcuts() {
@@ -1390,8 +1404,11 @@ boot() {
 
   # 4. Steam: вход/настройки, затем клиент, кэш (для офлайн-режима) и префиксы Proton
   st boot down "Steam"
+  rm -f "$S/steam.seen"
   ( unpack steam-state ) || echo steam-state >> "$FL"
   if sr; then
+    # [v5.3] steam-state восстановлен — при выключении можно убрать данные аккаунтов, из которых вышли
+    grep -qx steam-state "$FL" || log "$(python3 /usr/local/bin/wolf-steam.py seen "$DH/$SR" "$S/steam.seen" 2>&1)"
     p=()
     if [ "$SV" = 1 ]; then
       mapfile -t p < <(names '^pfx--' | while IFS= read -r k; do wants "$k" && echo "$k"; done)   # [v4.6] выбор
@@ -1526,7 +1543,7 @@ bk() {
   if [ "$m" = shutdown ]; then
     export NOW=1
     [ -e "$S/play.app" ] && [ ! -e "$S/play.done" ] && echo stop > "$S/play.done"   # [v4.8] не запускать игру при выключении
-    steam_off
+    steam_off && steam_gone                      # [v5.3] данные аккаунтов, из которых вышли, — до выгрузки
     shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
     "$0" state; "$0" games
     "$0" mods                                    # [v5.0] моды игр Steam
@@ -2306,12 +2323,15 @@ w /usr/local/bin/wolf-steam.py <<'STEAMPY'
 #                                 3 — нет: Steam покажет окно входа (человек войдёт сам — QR или пароль)
 #   manifest STEAM APPID STEAMID НАЗВАНИЕ   паспорт игры: Steam сам скачает её при запуске. Игра уже на диске — не трогаем
 #   state STEAM APPID             «флаги скачано всего папка»: ход скачивания по файлам (Steam пишет в паспорт редко)
+#   seen STEAM ФАЙЛ               [v5.3] аккаунты (loginusers.vdf) и папки userdata при загрузке → ФАЙЛ (JSON)
+#   gone STEAM ФАЙЛ               [v5.3] при выключении (Steam закрыт): аккаунта нет в loginusers.vdf (из него вышли —
+#                                 за сессию или раньше) — убрать userdata/НОМЕР. ФАЙЛ (seen) — steam-state восстановлен
 #   logon STEAM STEAMID [С]       on — Steam вошёл этим аккаунтом, other — другим, off — не вошёл (по connection_log;
 #                                 С — unix-время: строки раньше не считаются). [v4.9] Вход засчитывается, даже если
 #                                 после него в журнале строки переподключения (живой случай 2026-10-01: Steam качал,
 #                                 а по последней строке выходило «не вошёл»)
 # STEAM — папка Steam (debian-installation и т.п.). Пароли и пропуска входа не читаются и не пишутся.
-import base64, json, os, re, sys, time
+import base64, json, os, re, shutil, sys, time
 from pathlib import Path
 
 BASE = 76561197960265728                       # steamid64 = BASE + номер аккаунта ([U:1:номер] в журналах Steam)
@@ -2365,6 +2385,48 @@ def account(root, sid):
         return 0
     print("этим аккаунтом на машине ещё не входили — Steam покажет окно входа")
     return 3
+
+
+def userids(root):
+    """steamid из loginusers.vdf; None — файла нет или он не разобран (тогда ничего не удаляем)."""
+    try:
+        text = (root / "config/loginusers.vdf").read_text(errors="replace")
+    except OSError:
+        return None
+    ids = [s for s, _, _ in users(text)]
+    if not ids and "AccountName" in text:
+        return None
+    return ids
+
+
+def seen(root, rec):
+    ids = userids(root) or []
+    ud = root / "userdata"
+    dirs = sorted(d.name for d in ud.iterdir() if d.name.isdigit()) if ud.is_dir() else []
+    Path(rec).write_text(json.dumps({"users": ids, "dirs": dirs}))
+    print(f"аккаунтов Steam на машине: {len(ids)}")
+    return 0
+
+
+def gone(root, rec):
+    try:
+        json.loads(Path(rec).read_text())["users"]
+    except (OSError, ValueError, KeyError, TypeError):
+        print("аккаунты Steam: нет записи с загрузки — данные аккаунтов не трогаю")
+        return 0
+    now = userids(root)
+    if now is None:
+        print("аккаунты Steam: loginusers.vdf не прочитан — данные аккаунтов не трогаю")
+        return 0
+    nowacc = {str(int(s) - BASE) for s in now}
+    ud = root / "userdata"
+    for d in sorted(ud.iterdir()) if ud.is_dir() else []:
+        n = d.name
+        if not n.isdigit() or n == "0" or n in nowacc or d.is_symlink() or not d.is_dir():
+            continue
+        shutil.rmtree(d)
+        print(f"аккаунт Steam [U:1:{n}]: из него вышли — его данные (userdata) убраны, из облака уйдут со steam-state")
+    return 0
 
 
 def folder(name, appid):
@@ -2485,12 +2547,14 @@ if __name__ == "__main__":
             sys.exit(manifest(Path(a[1]), a[2], a[3], a[4]))
         if a[:1] == ["state"] and len(a) == 3 and a[2].isdigit():
             sys.exit(state(Path(a[1]), a[2]))
+        if a[:1] in (["seen"], ["gone"]) and len(a) == 3:
+            sys.exit((seen if a[0] == "seen" else gone)(Path(a[1]), a[2]))
         if a[:1] == ["logon"] and len(a) in (3, 4) and a[2].isdigit():
             sys.exit(logon(Path(a[1]), a[2], int(a[3]) if len(a) == 4 and a[3].isdigit() else 0))
     except (OSError, ValueError) as e:
         print(f"wolf-steam: ошибка {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
-    sys.exit("wolf-steam.py vgplay|account|manifest|state|logon …")
+    sys.exit("wolf-steam.py vgplay|account|manifest|state|seen|gone|logon …")
 STEAMPY
 
 # ================================ wolf-mods.py =================================
