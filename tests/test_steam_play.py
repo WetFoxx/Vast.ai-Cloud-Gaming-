@@ -305,6 +305,74 @@ ls "$S/st"; echo ---; NOW=1 gsync''')
         self.assertIn("STORE", out)
 
 
+class TestSignOut(unittest.TestCase):
+    """[v5.3] Вышли из аккаунта Steam — его userdata убирается при выключении (и уходит из облака со steam-state)."""
+    C = "76561198000000009"                     # [U:1:39735281] — вошёл за сессию
+
+    def setUp(self):
+        self.root = steam_dir()
+        self.ud = self.root / "userdata"
+        for n in ("99044033", "692993918", "555", "0"):   # A, B, старая чужая папка, служебная
+            (self.ud / n / "config").mkdir(parents=True)
+            (self.ud / n / "config/localconfig.vdf").write_text("x")
+        self.rec = self.root.parent / "seen.json"
+        self.assertEqual(py("seen", self.root, self.rec)[0], 0)
+
+    def lu(self, *keep):
+        text = (self.root / "config/loginusers.vdf").read_text()
+        for s, blk in ((A, block(text, A)), (B, block(text, B))):
+            if s not in keep:
+                text = text.replace(blk, "")
+        (self.root / "config/loginusers.vdf").write_text(text)
+
+    def left(self):
+        return sorted(d.name for d in self.ud.iterdir())
+
+    def test_signed_out_account_data_removed(self):
+        self.lu(A)
+        code, out = py("gone", self.root, self.rec)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.left(), ["0", "555", "99044033"])
+        self.assertIn("692993918", out)
+
+    def test_nobody_signed_out(self):
+        py("gone", self.root, self.rec)
+        self.assertEqual(self.left(), ["0", "555", "692993918", "99044033"])
+
+    def test_session_account_in_and_out(self):
+        (self.ud / "39735281/config").mkdir(parents=True)          # вошёл за сессию и вышел — в списке его нет
+        (self.ud / "1234").mkdir()
+        text = (self.root / "config/loginusers.vdf").read_text()   # 1234 вошёл и остался
+        (self.root / "config/loginusers.vdf").write_text(text.replace(
+            '"users"\n{', '"users"\n{\n\t"' + str(76561197960265728 + 1234) + '"\n\t{\n\t\t"AccountName"\t\t"c"\n\t}'))
+        py("gone", self.root, self.rec)
+        self.assertEqual(self.left(), ["0", "1234", "555", "692993918", "99044033"])
+
+    def test_unreadable_list_deletes_nothing(self):
+        (self.root / "config/loginusers.vdf").write_text('"users"\n{\n\t"AccountName" broken')
+        py("gone", self.root, self.rec)
+        (self.root / "config/loginusers.vdf").unlink()
+        py("gone", self.root, self.rec)
+        (self.root / "config/loginusers.vdf").write_text(LOGIN)
+        self.rec.unlink()
+        self.lu()
+        code, out = py("gone", self.root, self.rec)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.left(), ["0", "555", "692993918", "99044033"])
+
+    def test_symlink_not_followed(self):
+        outside = Path(tempfile.mkdtemp(dir=TMP))
+        (outside / "keep").write_text("x")
+        (self.ud / "692993918").rename(self.ud / "old")
+        (self.ud / "692993918").symlink_to(outside)
+        (self.ud / "777").mkdir()                    # вошёл за сессию и вышел — убирается и рядом со ссылкой
+        self.lu(A)
+        code, out = py("gone", self.root, self.rec)
+        self.assertEqual(code, 0, out)
+        self.assertTrue((outside / "keep").exists())
+        self.assertFalse((self.ud / "777").exists())
+
+
 class TestScript(unittest.TestCase):
     def test_env_file_and_boot_wiring(self):
         src = (Path(__file__).resolve().parent.parent / "wolf-setup.sh").read_text()
@@ -313,6 +381,12 @@ class TestScript(unittest.TestCase):
         self.assertLess(boot.index("play_prepare"), boot.index("&& steam_go\n  [ -e \"$S/play.app\" ] && ( play_watch & )"))
         self.assertIn("play_init", boot)
         self.assertRegex(WOLF, r"case \$n in boot\|finish\|play\|sunshine\) continue")
+        # [v5.3] список аккаунтов — после восстановления steam-state, до запуска Steam; при выключении — сразу после
+        # закрытия Steam и до выгрузки state
+        self.assertLess(boot.index("( unpack steam-state )"), boot.index("wolf-steam.py seen"))
+        self.assertLess(boot.index("wolf-steam.py seen"), boot.index("steam_go"))
+        bk = fn("bk")
+        self.assertLess(bk.index("steam_off && steam_gone"), bk.index('"$0" state'))
 
 
 if __name__ == "__main__":

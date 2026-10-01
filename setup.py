@@ -275,7 +275,7 @@ def step_tailscale():
 # Скрипт wolf-setup.sh — в репозитории проекта на GitHub, ссылка закреплена на коммит (v3.9,
 # побайтно совпадает с wolf-setup.sh в проекте). Изменения в репозитории не попадут на машины,
 # пока здесь не поменяют коммит и не обновят шаблон (vastgame setup → шаг «Шаблон»).
-SCRIPT_VERSION = "v5.2"
+SCRIPT_VERSION = "v5.3"
 SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
               "e940d166193782fa707b6711a6304033fa110b65/wolf-setup.sh")
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
