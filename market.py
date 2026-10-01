@@ -33,6 +33,10 @@ def gpu_ok(name):
 # (Quadro RTX 6000 / 535, RTX 3060 Ti / 570, RTX 3060 / 570) — на всех экран не поднимается, «Failed to acquire
 # modesetting permission» (видеокартой владеет хост), до Sunshine не доходит. Такие хосты — в основном домашние.
 DOCKER_DRIVER = 580
+# Драйвер 610 и новее — видеокодировщик не открывается (решение 2026-10-02): «OpenEncodeSessionEx failed: unsupported
+# device» у Sunshine образа — проверено на двух хостах, разных видеокартах и сборках (RTX 5060 Ti Вьетнам 610.43.02,
+# RTX 3060 Техас 610.57.04); на 595 всё работает. Внутри контейнера не исправить — пока не показываем (83 из 736).
+DOCKER_DRIVER_MAX = 610
 # Поколение видеокарты (compute capability ×100): от GTX 16xx / RTX 20xx. GTX 10xx (Pascal, 600) пробовали 2026-10-01:
 # CUDA 13 (Sunshine 2026) их не поддерживает, а со старой Sunshine на CUDA 12.9 машина зависла при подключении
 # Moonlight (кончились процессы) — отложено
@@ -169,7 +173,7 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
             continue
         if o.get("is_vm_deverified") and not docker:
             continue
-        if docker and driver_major(o) < DOCKER_DRIVER:
+        if docker and not DOCKER_DRIVER <= driver_major(o) < DOCKER_DRIVER_MAX:
             continue
         if (o.get("disk_bw") or MIN_DISK_BW) < MIN_DISK_BW:
             continue

@@ -51,7 +51,8 @@ class TestSearch(unittest.TestCase):
     def run_search(self, docker):
         sent = {}
         rows = [offer(1, vms=True), offer(2), offer(3, driver="570.124.06"), offer(4, gpu="A100 SXM4"),
-                offer(5, vms=True, deverified=True), offer(6, driver=None)]
+                offer(5, vms=True, deverified=True), offer(6, driver=None),
+                offer(7, driver="610.43.02"), offer(8, driver="615.10", vms=True), offer(9, driver="595.84")]
 
         def call(method, path, body=None, **k):
             sent.update(body)
@@ -63,12 +64,14 @@ class TestSearch(unittest.TestCase):
     def test_docker_needs_driver_not_kvm(self):
         ids, sent = self.run_search(True)
         self.assertNotIn("vms_enabled", sent)
-        self.assertEqual(sorted(ids), [1, 2, 5])        # 3 — драйвер 570, 4 — без кодировщика видео, 6 — драйвер неизвестен
+        # 3 — драйвер 570, 4 — без кодировщика видео, 6 — драйвер неизвестен, 7 и 8 — драйвер 610+ (кодировщик не открывается)
+        self.assertEqual(sorted(ids), [1, 2, 5, 9])
 
     def test_kvm_as_before(self):
         ids, sent = self.run_search(False)
         self.assertEqual(sent["vms_enabled"], {"eq": True})
-        self.assertEqual(sorted(ids), [1, 2, 3, 6])     # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь
+        # фильтр KVM — у Vast; снятый допуск к VM (5) — прочь; драйвер хоста KVM не важен (в VM свой) — 7, 8 на месте
+        self.assertEqual(sorted(ids), [1, 2, 3, 6, 7, 8, 9])
 
     def test_pairs_only_when_machine_has_no_single(self):
         # [0.3.1] Docker: машина, которая сдаётся только парой видеокарт, — в списке с пометкой; если у той же машины
