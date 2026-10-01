@@ -55,7 +55,7 @@ OFFERS_PAGE = 15    # машин на странице выбора (показ�
 # Фильтры списка машин по умолчанию: все страны, любая скорость и пинг, сначала дешёвые
 OFFER_FILTERS = {"countries": [], "gpus": [], "speed": 0, "ping": 0, "traffic": 1, "sort": "price", "dir": "asc"}
 TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 — любой, 0.1 — бесплатный); только вкладка Docker
-OFFER_SORTS = ("price", "ping", "net", "rel", "gpu")   # колонки, по которым сортирует страница
+OFFER_SORTS = ("price", "ping", "net", "traffic", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
 SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
@@ -190,12 +190,14 @@ class Api:
                     "net_down": round(o.get("inet_down") or 0), "net_up": round(o.get("inet_up") or 0),
                     # цена трафика, $ за ТБ (дороже из двух сторон) — фильтр «Трафик» во вкладке Docker
                     "traffic_tb": round(max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0) * 1000, 2),
+                    # $ за ТБ отдельно: ↓ на машину (игры и сохранения из облака), ↑ с машины (трансляция, выгрузка)
+                    **_traffic(o),
                     "ping": latency.for_offer(o, remembered, me)}
         current = None
         if launching is not None:
             o = launching
             current = o and {"gpu": o.get("gpu_name") or "?", "country": market.country(o), "price": o.get("dph_total"),
-                             "ping": latency.for_offer(o, remembered, me), "machine_id": o.get("machine_id")}
+                             "ping": latency.for_offer(o, remembered, me), "machine_id": o.get("machine_id"), **_traffic(o)}
         return {"replace": launching is not None, "current": current,
                 "docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
@@ -213,7 +215,7 @@ class Api:
             return {"error": error_data(e)}
         return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o), "price": o["dph_total"],
                 "disk": disk, "balance": credit, "hours": credit / o["dph_total"] if o["dph_total"] else None,
-                "bad_reason": core.bad_host_reason(o)}
+                "bad_reason": core.bad_host_reason(o), **_traffic(o)}
 
     def _offer_filters(self):
         saved = settings.get("offer_filters") or {}
@@ -996,6 +998,12 @@ def _log_error(where):
 for _name, _fn in list(vars(Api).items()):
     if callable(_fn) and not _name.startswith("_"):
         setattr(Api, _name, _safe(_fn))
+
+
+def _traffic(o):
+    """Цена трафика машины в $ за ТБ: tb_down — скачивание на машину (игры и сохранения из облака), tb_up — с машины
+    (трансляция Moonlight и выгрузка в облако). Ставку задаёт хост; у Docker-машин Vast её списывает, у KVM — нет."""
+    return {"tb_down": round((o.get("inet_down_cost") or 0) * 1000, 2), "tb_up": round((o.get("inet_up_cost") or 0) * 1000, 2)}
 
 
 def _frontmost():

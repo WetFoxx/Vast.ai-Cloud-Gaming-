@@ -219,6 +219,11 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 .task-text { font-weight: 600; font-size: 14px; }
 .task-buttons { display: flex; gap: 6px; flex: none; }
 .tag.good { background: rgba(23, 178, 106, .16); color: var(--ready); white-space: nowrap; }
+/* Колонка «Трафик, $ за ТБ» (только Docker): ↓ на машину / ↑ с машины, «бесплатно» — зелёным */
+#offers-table.kvm .col-traffic { display: none; }
+#offers-table th .unit { display: block; font-size: 10px; font-weight: 400; }
+#offers-table td.traffic { font-size: 12px; line-height: 1.3; white-space: pre-line; }
+#offers-table td.traffic.free { color: var(--ready); font-weight: 600; }
 /* Вопросы машины на главном */
 .asks-card { display: flex; flex-direction: column; gap: 10px; position: relative; overflow: hidden;
   box-shadow: 0 0 0 1.5px rgba(230, 20, 80, .55), var(--shadow); }

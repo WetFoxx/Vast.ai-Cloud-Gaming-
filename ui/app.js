@@ -366,6 +366,7 @@ function renderReplace() {
   if (replaceBlocked) { box.textContent = t("replace.ready"); return; }
   const c = d && d.current;
   box.textContent = c ? t("replace.current", { machine: `${c.gpu} · ${c.country} · ${money(c.price)}`,
+                                               traffic: offersDocker && c.tb_up != null ? " · " + t("traffic.short", { price: trafficText(c) }) : "",
                                                ping: c.ping && c.ping.ms != null ? (c.ping.kind === "estimate" ? "≈ " : "") + t("unit.ms", { n: c.ping.ms }) : "—" })
                       : t("replace.current_unknown");
 }
@@ -412,6 +413,7 @@ async function openOffers(disk, docker) {
 }
 
 function showTabs() {
+  $("offers-table").classList.toggle("kvm", !offersDocker);       // у KVM трафик Vast не списывает — колонки нет
   $("tab-kvm").classList.toggle("active", !offersDocker);
   $("tab-docker").classList.toggle("active", !!offersDocker);
   $("offers-docker-note").textContent = t(offersDocker ? "offers.mode.docker_note" : "offers.mode.kvm_note");
@@ -551,8 +553,16 @@ function gpuRank(o) {
   const rest = m[2].toLowerCase(), ti = /\bti\b/.test(rest), sup = /\bs\b|super/.test(rest);
   return Number(m[1]) * 10 + (ti ? 2 : 0) + (sup ? 1 : 0) - (/laptop|mobile|max-q/.test(rest) ? 5 : 0);
 }
-const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, rel: (o) => o.reliability, gpu: gpuRank };
-const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", rel: "desc", gpu: "desc" };
+// Трафик сортируется по ↑ (с машины к тебе): за час игры уходит ~30 ГБ трансляции — это основная часть трат
+const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, traffic: (o) => o.tb_up ?? o.traffic_tb, gpu: gpuRank };
+const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", traffic: "asc", gpu: "desc" };
+const STREAM_TB_HOUR = 0.03;   // ТБ за час трансляции (~30 ГБ)
+// Цена трафика: «$3.91» (в обе стороны одинаково), «↓ $4.00 / ↑ $5.33», «бесплатно»
+function trafficText(o, sep = " / ") {
+  const d = o.tb_down || 0, u = o.tb_up || 0;
+  if (d < 0.1 && u < 0.1) return t("traffic.free");
+  return Math.abs(d - u) < 0.005 ? money(d) : `↓ ${money(d)}${sep}↑ ${money(u)}`;
+}
 
 // Замены выбранной машины (решение 2026-09-27): одновременно арендуется только она; если Vast её не запустит (10 минут
 // или ошибка хоста), фоновый процесс возьмёт следующую из этого списка — в порядке и с фильтрами человека, но только
@@ -578,7 +588,8 @@ function applyFilters(list) {
     && (!f.speed || netSpeed(o) >= f.speed)
     && (!f.ping || (o.ping.ms != null && o.ping.ms <= f.ping)));
   // Цена — только аренда: трафик по реальным списаниям почти не берётся. Неизвестное (пинг «—») — всегда в конце
-  const val = SORT_VALUE[f.sort] || SORT_VALUE.price, dir = f.dir === "desc" ? -1 : 1;
+  const key = f.sort === "traffic" && !offersDocker ? "price" : f.sort;   // на KVM колонки трафика нет
+  const val = SORT_VALUE[key] || SORT_VALUE.price, dir = f.dir === "desc" ? -1 : 1;
   r.sort((a, b) => {
     const x = val(a), y = val(b);
     if (x == null || y == null) return (x == null) - (y == null) || a.price - b.price;
@@ -728,7 +739,7 @@ function renderOffers() {
     const tr = document.createElement("tr");
     tr.className = o.id === selected ? "selected" : "";
     tr.innerHTML = `<td><input type="radio" name="offer"></td><td></td><td></td>
-      <td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td>`;
+      <td class="num"></td><td class="num"></td><td class="num col-traffic traffic"></td><td class="num"></td>`;
     const c = tr.children;
     c[0].firstChild.checked = o.id === selected;
     c[1].textContent = o.gpu;
@@ -742,12 +753,16 @@ function renderOffers() {
     if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке
     betterTags(o, addTag);
     c[2].textContent = o.country;
+    c[2].title = t("offers.rel.hint", { rel: num(o.reliability * 100) });   // надёжность — подсказкой, колонки больше нет
     pingCell(c[3], o.ping);
     c[4].textContent = t("unit.mbps", { n: netSpeed(o) });
-    c[4].title = t("net.both", { down: o.net_down, up: o.net_up })
-      + (offersDocker ? "\n" + t("net.traffic", { price: o.traffic_tb < 0.1 ? "$0" : "$" + num(o.traffic_tb) }) : "");
-    c[5].textContent = money(o.price);
-    c[6].textContent = num(o.reliability * 100) + "%";
+    c[4].title = t("net.both", { down: o.net_down, up: o.net_up });
+    c[5].innerHTML = "";
+    const tt = trafficText(o, "\n");
+    for (const [i, line] of tt.split("\n").entries()) { if (i) c[5].appendChild(el("br")); c[5].append(line); }
+    c[5].classList.toggle("free", tt === t("traffic.free"));
+    c[5].title = t("traffic.hint");
+    c[6].textContent = money(o.price);
     tr.addEventListener("click", () => { selected = o.id; renderOffers(); });
     body.appendChild(tr);
   }
@@ -790,6 +805,13 @@ $("rent").addEventListener("click", async () => {
                                   : t("confirm.rent.games_none"));
     const off = syncRows.filter((r) => r.saves && !r.sync_saves).length;
     if (off) text += " " + t("confirm.rent.saves_some_off", { n: off });
+  }
+  if (docker) {
+    // Трафик в деньгах: час трансляции (~30 ГБ ↑) и скачивание выбранных игр (↓)
+    const gamesBytes = syncRows ? syncRows.filter((r) => r.game && r.sync_game).reduce((a, r) => a + r.game_bytes, 0) : 0;
+    text += "\n\n" + (o.tb_down < 0.1 && o.tb_up < 0.1 ? t("confirm.rent.traffic_free")
+      : t("confirm.rent.traffic", { price: trafficText(o), hour: money((o.tb_up || 0) * STREAM_TB_HOUR) })
+        + (gamesBytes ? t("confirm.rent.traffic_games", { size: size(gamesBytes), cost: money((o.tb_down || 0) * gamesBytes / 1e12) }) : "") + ".");
   }
   if (o.bad_reason) text += "\n\n" + t("confirm.badhost", { reason: o.bad_reason });
   // Замена, если выбранная не запустится: только «не хуже» (сколько таких — в тексте подтверждения)
@@ -1855,7 +1877,7 @@ function demoOffers(disk) {
     const kind = i === 3 ? "measured" : i % 10 === 1 ? "region" : "estimate";
     offers.push({ id: 100 + i, gpu: gpus[i * 7 % gpus.length], country, cc: country.split(",").pop().trim(),
                   price, traffic: 0.01, total: price + 0.01, reliability: 0.97 + (i % 3) / 100,
-                  net_down: 90 + (i * 131 % 1800), net_up: 80 + (i * 97 % 1500), traffic_tb: [0, 0.4, 1, 3, 5][i % 5],
+                  net_down: 90 + (i * 131 % 1800), net_up: 80 + (i * 97 % 1500), traffic_tb: [0, 0.4, 1, 3, 5.33][i % 5], tb_down: [0, 0.4, 1, 3, 4][i % 5], tb_up: [0, 0.4, 1, 3, 5.33][i % 5],
                   ping: { ms: kind === "estimate" ? est : est + 40, kind },
                   failed: i === 2 ? "Машина перешла в состояние «exited» и не запустится." : null });
   }

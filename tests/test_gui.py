@@ -73,6 +73,24 @@ class TestOffers(unittest.TestCase):
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
         self.row = row
 
+    def test_traffic_prices_per_tb(self):
+        # Колонка «Трафик» и подтверждение аренды: ↓ на машину и ↑ с машины, $ за ТБ (Vast отдаёт $ за ГБ)
+        self.row.update(inet_down_cost=0.004, inet_up_cost=0.00533)
+        with mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None), \
+             mock.patch.object(gui.core, "offer_by_id", lambda oid, disk, docker=False: dict(self.row)):
+            r = gui.Api().offers()["offers"][0]
+            c = gui.Api().check_offer(5)
+        self.assertEqual((r["tb_down"], r["tb_up"]), (4.0, 5.33))
+        self.assertEqual((c["tb_down"], c["tb_up"]), (4.0, 5.33))
+
+    def test_old_reliability_sort_falls_back(self):
+        # Колонки «Надёжность» больше нет: сохранённая сортировка по ней — цена
+        api = gui.Api()
+        api.save_offer_filters({"sort": "rel", "dir": "desc"})
+        self.assertEqual(gui.settings.get("offer_filters")["sort"], "price")
+        api.save_offer_filters({"sort": "traffic", "dir": "asc"})
+        self.assertEqual(gui.settings.get("offer_filters")["sort"], "traffic")
+
     def test_last_machine_free(self):
         last = {"gpu": "RTX 3060", "country": "Ohio, US", "start": 5, "offer": dict(self.row, id=77)}
         with mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: last):
