@@ -53,7 +53,11 @@ HERE = Path(__file__).resolve().parent
 LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
 OFFERS_PAGE = 15    # машин на странице выбора (показываются все подходящие, по страницам)
 # Фильтры списка машин по умолчанию: все страны, любая скорость и пинг, сначала дешёвые
-OFFER_FILTERS = {"countries": [], "gpus": [], "speed": 0, "ping": 0, "traffic": 1, "sort": "price", "dir": "asc"}
+OFFER_FILTERS = {"countries": [], "gpus": [], "speed": 0, "ping": 0, "traffic": 1, "rel": 97, "sort": "price", "dir": "asc"}
+# [0.3.2] Надёжность хоста, % — не ниже (фильтр на странице; по умолчанию 97, как было). Ниже REL_FLOOR не показываем:
+# такие машины слишком часто пропадают (у Vast «надёжность» — доля времени, когда хост был на связи)
+REL_LEVELS = (97, 95, 90)
+REL_FLOOR = 0.90
 TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 — любой, 0.1 — бесплатный); только вкладка Docker
 OFFER_SORTS = ("price", "ping", "net", "traffic", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
@@ -171,7 +175,7 @@ class Api:
             tpl = core.template()
             disk = self._disk(disk, tpl)
             docker = self._docker(docker)
-            rows = market.search(disk, docker=docker)
+            rows = market.search(disk, min_rel=REL_FLOOR, docker=docker)    # порог надёжности — фильтром на странице
             credit = core.balance()
         except VastgameError as e:
             return {"error": error_data(e)}
@@ -229,6 +233,7 @@ class Api:
                  "gpus": [g for g in f.get("gpus") or [] if isinstance(g, str)][:100],
                  "speed": max(0, int(f.get("speed") or 0)), "ping": max(0, int(f.get("ping") or 0)),
                  "traffic": f.get("traffic") if f.get("traffic") in TRAFFIC_LIMITS else OFFER_FILTERS["traffic"],
+                 "rel": f.get("rel") if f.get("rel") in REL_LEVELS else OFFER_FILTERS["rel"],
                  "sort": f.get("sort") if f.get("sort") in OFFER_SORTS else "price",
                  "dir": "desc" if f.get("dir") == "desc" else "asc"}
         settings.set("offer_filters", clean)

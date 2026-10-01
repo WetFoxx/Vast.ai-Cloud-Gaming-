@@ -69,9 +69,16 @@ class TestOffers(unittest.TestCase):
         for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
                                  (gui.core, "template", lambda: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
-                                 (gui.market, "search", lambda disk, docker=False: [row])]:
+                                 (gui.market, "search", lambda disk, docker=False, min_rel=None: [row])]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
         self.row = row
+
+    def test_search_reaches_down_to_90_percent(self):
+        asked = []
+        with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None: asked.append(min_rel) or [self.row]), \
+             mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
+            gui.Api().offers()
+        self.assertEqual(asked, [0.90])
 
     def test_traffic_prices_per_tb(self):
         # Колонка «Трафик» и подтверждение аренды: ↓ на машину и ↑ с машины, $ за ТБ (Vast отдаёт $ за ГБ)
@@ -100,7 +107,7 @@ class TestOffers(unittest.TestCase):
 
     def test_all_machines_with_ping_speed_and_filters(self):
         rows = [dict(self.row, id=i, inet_down=500 + i, inet_up=300, geolocation="Japan, JP") for i in range(40)]
-        with mock.patch.object(gui.market, "search", lambda disk, docker=False: rows), \
+        with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None: rows), \
              mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
             d = gui.Api().offers()
         self.assertEqual(len(d["offers"]), 40)                        # все, а не 10 лучших — страницы на экране
@@ -116,7 +123,11 @@ class TestOffers(unittest.TestCase):
         self.assertEqual(api.save_offer_filters({"countries": ["JP", 5], "gpus": ["RTX 3060", None], "speed": "300",
                                                  "ping": -1, "sort": "evil", "dir": "sideways"}), {"ok": True})
         self.assertEqual(api._offer_filters(), {"countries": ["JP"], "gpus": ["RTX 3060"], "speed": 300, "ping": 0,
-                                                "traffic": 1, "sort": "price", "dir": "asc"})
+                                                "traffic": 1, "rel": 97, "sort": "price", "dir": "asc"})
+        api.save_offer_filters({"rel": 90})
+        self.assertEqual(api._offer_filters()["rel"], 90)
+        api.save_offer_filters({"rel": 50})                          # ниже 90% — не бывает, по умолчанию 97
+        self.assertEqual(api._offer_filters()["rel"], 97)
         api.save_offer_filters({"traffic": 0.1})
         self.assertEqual(api._offer_filters()["traffic"], 0.1)
         api.save_offer_filters({"traffic": 7})                       # не из списка — по умолчанию
@@ -151,7 +162,7 @@ class TestReplaceCatalog(unittest.TestCase):
         for obj, name, value in [(gui.core, "require_no_machine", running),
                                  (gui.core, "template", lambda: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
-                                 (gui.market, "search", lambda disk, docker=False: [row]),
+                                 (gui.market, "search", lambda disk, docker=False, min_rel=None: [row]),
                                  (gui.market, "last_machine", lambda disk, docker=False: None),
                                  (gui.Api, "_launching", lambda self: launching)]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)

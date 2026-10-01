@@ -655,7 +655,12 @@ const I18N = {
     "confirm.rent.traffic": "Трафик: {price} за ТБ — час игры ≈ {hour}",
     "confirm.rent.traffic_games": ", скачать выбранные игры ({size}) ≈ {cost}",
     "confirm.rent.traffic_free": "Трафик на этой машине бесплатный.",
-    "offers.pair.hint": "Хост сдаёт эту машину только парой видеокарт: игра идёт на одной, вторая простаивает. Цена — за обе."
+    "offers.pair.hint": "Хост сдаёт эту машину только парой видеокарт: игра идёт на одной, вторая простаивает. Цена — за обе.",
+    "filter.rel": "Надёжность",
+    "filter.rel.from": "от {n}%",
+    "filter.rel.title": "Надёжность хоста — доля времени, когда он был на связи. Ниже 97% машин больше и бывают дешевле, но они чаще пропадают посреди игры.",
+    "offers.rel.tag": "надёжность {rel}%",
+    "offers.rel.risk": "Хост чаще бывает недоступен (выключение, сбой интернета). Если машина пропадёт посреди игры, трансляция оборвётся, а несохранённое с последней выгрузки (до 15 минут) может потеряться."
   },
   "en": {
     "app.error_state": "Couldn't get the status: {error}",
@@ -1310,7 +1315,12 @@ const I18N = {
     "confirm.rent.traffic": "Traffic: {price} per TB — an hour of play ≈ {hour}",
     "confirm.rent.traffic_games": ", downloading the selected games ({size}) ≈ {cost}",
     "confirm.rent.traffic_free": "Traffic on this machine is free.",
-    "offers.pair.hint": "The host rents this machine only with two GPUs: the game runs on one, the other stays idle. The price is for both."
+    "offers.pair.hint": "The host rents this machine only with two GPUs: the game runs on one, the other stays idle. The price is for both.",
+    "filter.rel": "Reliability",
+    "filter.rel.from": "from {n}%",
+    "filter.rel.title": "Host reliability — the share of time it was online. Below 97% there are more and sometimes cheaper machines, but they drop out mid-game more often.",
+    "offers.rel.tag": "reliability {rel}%",
+    "offers.rel.risk": "This host is offline more often (shutdowns, internet outages). If the machine drops out mid-game, the stream ends and anything not yet uploaded (up to 15 minutes) may be lost."
   },
   "es": {
     "app.error_state": "No se pudo obtener el estado: {error}",
@@ -1965,7 +1975,12 @@ const I18N = {
     "confirm.rent.traffic": "Tráfico: {price} por TB — una hora de juego ≈ {hour}",
     "confirm.rent.traffic_games": ", descargar los juegos elegidos ({size}) ≈ {cost}",
     "confirm.rent.traffic_free": "El tráfico en esta máquina es gratis.",
-    "offers.pair.hint": "El host alquila esta máquina solo con dos GPU: el juego usa una y la otra queda libre. El precio es por ambas."
+    "offers.pair.hint": "El host alquila esta máquina solo con dos GPU: el juego usa una y la otra queda libre. El precio es por ambas.",
+    "filter.rel": "Fiabilidad",
+    "filter.rel.from": "desde {n}%",
+    "filter.rel.title": "Fiabilidad del host: la parte del tiempo que estuvo en línea. Por debajo del 97% hay más máquinas y a veces más baratas, pero se caen a mitad de partida con más frecuencia.",
+    "offers.rel.tag": "fiabilidad {rel}%",
+    "offers.rel.risk": "Este host se desconecta con más frecuencia (apagones, cortes de internet). Si la máquina se cae a mitad de partida, la transmisión se corta y lo que aún no se subió (hasta 15 minutos) puede perderse."
   }
 };
 
