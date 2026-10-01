@@ -130,7 +130,8 @@ class Api:
         notify.low_balance(credit, price, lang)
         return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session, "task": task,
                 "hours_left": credit / price if price else None, "status": st,
-                "game_names": self._game_names(st["archives"]), "busy": self._busy()}
+                "game_names": self._game_names(st["archives"]), "busy": self._busy(),
+                "play_now": settings.get("play_now") if st["machine"] or task else None}
 
     def _game_names(self, archive_names):
         missing = [n for n in archive_names if n.startswith("pfx--") and n[5:] not in self._names]
@@ -256,6 +257,9 @@ class Api:
         names = steamnames.for_archives(unknown) if unknown else {}
         steam = [r["appid"] for r in rows if r["appid"] and r["appid"].isdigit() and int(r["appid"]) < SHORTCUT_APPID]
         covers = steamnames.covers(steam) if steam else {}
+        # [v4.8] Игры Steam качает сам Steam — в выборе синхронизации от них остаются только сохранения
+        rows = [r if r["kind"] != "steam" else {**r, "kind": "saves", "game": None, "game_bytes": 0}
+                for r in rows if r["kind"] != "steam" or r["saves"]]
         sel = cloudgames.selection(rows)
         for r in rows:
             r["title"] = r["title"] or names.get(r["appid"] or "") or ""
@@ -264,37 +268,47 @@ class Api:
             r["sync_saves"] = sel["saves"].get(r["saves"], True) if r["saves"] else None
         return {"rows": rows}
 
-    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None):
+    def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None, game=None):
         """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
         закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
         lang — язык окна для уведомления в конце, spare — следующие машины его списка (на замену,
         если Vast не запустит выбранную), docker — вкладка «Docker» (основная с 0.3.1).
         select — выбор игр ({"games": {архив: bool}, "saves": {архив: bool}}, запоминается): машина (wolf-setup.sh
-        v4.6) качает и выгружает только выбранные игры; прежним скриптам — тумблеры по этому выбору."""
+        v4.6) качает и выгружает только выбранные игры; прежним скриптам — тумблеры по этому выбору.
+        game — игра из библиотеки ({"appid", "account"}): машина (v4.8) входит в Steam этим аккаунтом, Steam сам
+        качает и запускает игру. Без неё — просто машина с рабочим столом, как раньше."""
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
-        return self._start_play(offer_id, sync, disk, lang, spare, docker, select)
+        return self._start_play(offer_id, sync, disk, lang, spare, docker, select, game)
 
-    def _start_play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None):
+    def _start_play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None, game=None):
         """Сама аренда в фоне (play и replace). Идёт другая операция с машиной — busy."""
+        play = self._library_game(game) if game else None
+        if game and not play:
+            return {"error": {"key": "library.bad_game", "params": {}, "text": "game is not in the library"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
         if not isinstance(select, dict) and isinstance(settings.get("sync_sel"), dict):
             select = {}                      # список игр не загрузился — выбор, запомненный в прошлый раз
         if isinstance(select, dict):
             chosen = cloudgames.remember(select)
-            sync.update(steam_games=any(a.startswith("sgame--") for a in chosen["games"]),
+            chosen["games"] = [a for a in chosen["games"] if not a.startswith("sgame--")]   # [v4.8] их качает Steam
+            sync.update(steam_games=False,
                         other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
             settings.set("sync", sync)
             sync["select"] = chosen
         else:
             settings.set("sync", sync)
+        settings.set("play_now", play)       # что запускаем — экрану хода и главному (окно могут закрыть и открыть)
+        if play:
+            sync["play"] = play
+            settings.applog(f"play: {play['appid']} аккаунтом …{play['account'][-4:]}")
         spare = [int(x) for x in (spare or []) if str(x).isdigit() and int(x) != int(offer_id)][:SPARE]
         if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare,
                           docker=bool(docker)):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 
-    def replace(self, offer_id, disk=None, lang=None, spare=None, docker=False, select=None):
+    def replace(self, offer_id, disk=None, lang=None, spare=None, docker=False, select=None, game=None):
         """«Заменить машину» из каталога во время запуска (человек подтвердил): отменить запуск, удалить машину, что
         запускается, дождаться, что фоновый процесс закончил и у Vast машин нет, — и только тогда арендовать
         выбранную. Двух машин не бывает ни на миг: аренда — тем же путём, что «Играть» (там ещё раз проверяется,
@@ -306,7 +320,7 @@ class Api:
             d = jobs.state() or {}
             if d.get("kind") == "play" and d.get("done") and not d.get("error"):
                 return {"error": {"key": "replace.ready", "params": {}, "text": "machine is ready"}}
-            return self.play(offer_id, None, disk, lang, spare, docker, select)
+            return self.play(offer_id, None, disk, lang, spare, docker, select, game)
         job = self._job = Job("replace")
 
         def run():
@@ -326,7 +340,7 @@ class Api:
                     time.sleep(REPLACE_POLL)
                 jobs.mark_seen()                        # итог отменённого запуска показывать незачем
                 job.say("Арендую выбранную машину", "info", key="replace.renting")
-                r = self._start_play(offer_id, None, disk, lang, spare, docker, select)
+                r = self._start_play(offer_id, None, disk, lang, spare, docker, select, game)
                 job.error, job.result = r.get("error"), None if r.get("error") else {"ok": True}
             except VastgameError as e:
                 job.error = error_data(e)
@@ -704,8 +718,12 @@ class Api:
         node = wolfnode.ts_node()
         s = (wolfnode.wolf_status(node[1]) if node else None) or {}
         arch = {n: [v[1], v[2], getattr(v, "progress", None)] for n, v in s.items()
-                if n not in ("boot", core.SUNSHINE) and not core.ASK.match(n)}
-        return {"archives": arch, "asks": core.asks_of(s), "game_names": self._game_names(list(arch))}
+                if n not in ("boot", *core.NOT_ARCHIVES) and not core.ASK.match(n)}
+        p = s.get(core.PLAY)
+        play = p and {"state": p[1], "text": p[2], "progress": getattr(p, "progress", None)}
+        return {"archives": arch, "asks": core.asks_of(s), "game_names": self._game_names(list(arch)),
+                "play": play, "play_game": settings.get("play_now") if play else None,
+                "streaming": moonlight.streaming() if play else None}
 
     # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
     def library(self, fresh=False):
@@ -713,6 +731,20 @@ class Api:
         if not steamlib.accounts():
             return {"accounts": [], "games": [], "errors": []}
         return (None if fresh else steamlib.cached()) or steamlib.library()
+
+    def _library_game(self, game):
+        """Игра из библиотеки, которую можно запустить этим аккаунтом: {"appid", "account", "name", "cap"} или None.
+        Аккаунт — тот, у кого игра своя, или член семьи, которому её дали (Steam сам запишет настоящего владельца)."""
+        if not isinstance(game, dict):
+            return None
+        appid, acc = str(game.get("appid") or ""), str(game.get("account") or "")
+        lib = steamlib.cached() or {}
+        g = next((x for x in lib.get("games") or [] if x["appid"] == appid), None)
+        if not appid.isdigit() or not g or acc not in g["accounts"] + g.get("family", []):
+            return None
+        if acc not in {a["id"] for a in steamlib.accounts()}:
+            return None
+        return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or ""}
 
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}

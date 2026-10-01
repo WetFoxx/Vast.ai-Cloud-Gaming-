@@ -325,6 +325,15 @@ class TestStatus(Base):
         self.assertEqual(self.machine(page=dict(ok, x=(3, "up", "")))["kind"], "syncing")
         self.assertEqual(self.machine(page=ok)["kind"], "ready")
 
+    def test_library_game_record_is_not_an_archive(self):
+        # [v4.8] play — ход игры из библиотеки (Steam качает): не архив, машина готова, ход — отдельно
+        ok = {"boot": (1, "ok", ""), "steam-state": (2, "ok", ""), "play": (3, "down", "download")}
+        r = self.machine(page=ok)
+        self.assertEqual((r["state"], r["kind"], r["busy"]), (core.READY, "ready", []))
+        self.assertNotIn("play", r["archives"])
+        self.assertEqual((r["play"]["state"], r["play"]["text"]), ("down", "download"))
+        self.assertEqual(self.machine(page=dict(ok, play=(3, "err", "launch")))["state"], core.READY)
+
 
 class TestStop(Base):
     def setup_machine(self, after, shutdown_code=0, answer=True):
@@ -365,6 +374,12 @@ class TestStop(Base):
         self.assertIn("НЕ подтверждена", str(e.exception))
         self.assertEqual(self.deleted, [])
         self.assertEqual(ui.questions, [])
+
+    def test_library_game_record_does_not_block(self):
+        # [v4.8] при «Закончить» игра ещё качалась или не запустилась — это не невыгруженный архив
+        ui = self.setup_machine({"steam-state": (T0 + 20, "ok", ""), "play": (T0 + 30, "err", "launch")})
+        r = core.stop(ui)
+        self.assertEqual((r["uploaded"], self.deleted), (["steam-state"], [42]))
 
     def test_old_error_does_not_block(self):
         ui = self.setup_machine({"pfx--1": (T0 - 500, "err", "старая ошибка"), "steam-state": (T0 + 5, "ok", "")})

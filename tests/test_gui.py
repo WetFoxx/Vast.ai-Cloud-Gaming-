@@ -391,6 +391,33 @@ class TestPlay(unittest.TestCase):
             self.assertEqual(self.api._sync(), {"steam_games": True, "other_games": True, "saves": False})
         self.assertEqual(bodies[0]["env"], {"SYNC_STEAM_GAMES": "1", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
 
+    def test_library_game_goes_to_machine(self):
+        # [v4.8] игра из библиотеки → VG_PLAY (номер, аккаунт, название из библиотеки); чужая/неизвестная — отказ
+        import base64, json
+        A, B = "76561198059309761", "76561198653259646"
+        lib = {"games": [{"appid": "10", "name": "Ten", "accounts": [A], "family": [], "cap": "https://x/c.jpg"},
+                         {"appid": "20", "name": "Twenty", "accounts": [], "family": [A]}]}
+        accs = [{"id": A, "name": "Alex", "until": 0, "expired": False}, {"id": B, "name": "Bob", "until": 0, "expired": False}]
+        with mock.patch.object(gui.steamlib, "cached", lambda: lib), mock.patch.object(gui.steamlib, "accounts", lambda: accs):
+            # B привязан, но игры 10 у него нет; C не привязан; 99 нет в библиотеке
+            for bad in ({"appid": "10", "account": B}, {"appid": "10", "account": "76561198000000003"},
+                        {"appid": "99", "account": A}, {"appid": "10; x", "account": A}):
+                self.assertEqual(self.api.play(5, None, None, "ru", None, False, None, bad)["error"]["key"],
+                                 "library.bad_game")
+            self.assertEqual(self.rented, [])
+            self.gate.set()
+            self.assertEqual(self.api.play(5, None, None, "ru", None, False, None, {"appid": "20", "account": A}), {"ok": True})
+            wait_done(self.api, session=True)
+        self.assertEqual(json.loads(base64.b64decode(self.body["env"]["VG_PLAY"])),
+                         {"appid": "20", "account": A, "name": "Twenty"})     # семейная — тоже можно
+        self.assertEqual(gui.settings.get("play_now")["name"], "Twenty")
+        # Следующая аренда без игры — просто рабочий стол, прежняя игра забыта
+        self.wait_idle()
+        self.api.play(5, None, None, "ru")
+        wait_done(self.api, session=True)
+        self.assertNotIn("VG_PLAY", self.body.get("env") or {})
+        self.assertIsNone(gui.settings.get("play_now"))
+
     def test_game_selection_goes_to_rental(self):
         # [v4.6] выбор игр со страницы → VG_SYNC (base64 JSON) и тумблеры для прежних скриптов; запоминается
         import base64, json
@@ -400,9 +427,10 @@ class TestPlay(unittest.TestCase):
                       {"games": {"sgame--The Blood of Dawnwalker": True, "game--B": False}, "saves": {"pfx--1": False}})
         wait_done(self.api, session=True)
         env = self.body["env"]
+        # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": ["sgame--The Blood of Dawnwalker"], "saves_off": ["pfx--1"]})
-        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("1", "0", "1"))
+                         {"games": [], "saves_off": ["pfx--1"], "steam": "store"})
+        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
         # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
         self.wait_idle()
         self.api.play(5, None, None, "ru")

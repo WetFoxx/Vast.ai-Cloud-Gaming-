@@ -56,6 +56,15 @@ def apps(host, timeout=25):
     return names or None
 
 
+def streaming():
+    """Идёт ли трансляция Moonlight (запущен «Moonlight stream …»): второй запуск оборвал бы обе (Sunshine отвечает
+    «приложение уже запущено»), поэтому окно открывает Moonlight само, только когда трансляции нет."""
+    try:
+        return subprocess.run(["pgrep", "-f", "Moonlight.* stream "], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def stream(host, app, size=None, fps=None, bitrate=None):
     """Открыть трансляцию в Moonlight и не ждать её конца. False — если Moonlight не установлен.
     size — (ширина, высота), fps — кадров в секунду, bitrate — Мбит/с (None — подберёт Moonlight)."""

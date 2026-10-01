@@ -473,7 +473,7 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .lib-chips .chip.on { background: var(--grad); color: #fff; border-color: transparent; font-weight: 600; }
 .lib-chips .chip.warn { color: var(--error); }
 .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 12px; }
-.game-tile { position: relative; border-radius: 12px; overflow: hidden; aspect-ratio: 2 / 3; background: var(--grad);
+.game-tile { cursor: pointer; position: relative; border-radius: 12px; overflow: hidden; aspect-ratio: 2 / 3; background: var(--grad);
   box-shadow: var(--shadow); }
 .game-tile .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 12px;
   color: #fff; text-align: center; font: 700 15px/1.2 var(--round); }
@@ -489,6 +489,19 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .steam-accounts { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .steam-acc { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .steam-acc .sub.warn { color: var(--error); }
+/* Игра из библиотеки: карточка на выборе машины и ход на главном */
+.offers-game, .play-box { display: flex; gap: 14px; align-items: center; }
+.offers-game img, .play-box img { width: 64px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 8px; flex: none;
+  box-shadow: var(--shadow); background: var(--grad); }
+.offers-game .og-main, .play-box .pb-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.offers-game .seg { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.offers-game .seg .chip { cursor: pointer; font: inherit; font-size: 12.5px; width: auto; margin: 0; flex: none; }
+.offers-game .seg .chip.on { background: var(--grad); color: #fff; border-color: transparent; font-weight: 600; }
+.offers-game .link { align-self: flex-start; width: auto; flex: none; padding-left: 0; }
+.play-box { padding: 12px 0 2px; border-top: 1px solid var(--border); margin-top: 6px; }
+.play-box .pb-title { font-weight: 600; }
+.play-box .small { align-self: flex-start; width: auto; }
+.play-box.warn .pb-title { color: var(--error); }
 /* Машины нет: крупно баланс и «Играть» по центру */
 .hero.empty { align-items: stretch; text-align: center; padding: 26px 20px 22px; }
 .hero.empty .hero-top { flex-direction: column; align-items: center; gap: 6px; }

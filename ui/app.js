@@ -88,6 +88,7 @@ function render(data) {
   showError("error", null);
   current = data;
   if (data.game_names) GAME_NAMES = data.game_names;
+  if (data.play_now !== undefined && !playGame) playNow = data.play_now;   // окно открыли заново — что запускали
 
   setBalance(data.balance);
   const st = data.status, m = st.machine;
@@ -129,7 +130,9 @@ function render(data) {
   if (task) $("task-text").textContent = t("task." + task.kind) + (st.stage ? " · " + t("stage." + st.stage) : "");
   renderLive(liveFromStatus(st));
   renderAsks(st.asks || []);
-  liveLoop(!!(task || ["starting", "syncing"].includes(st.state)));
+  if (st.play) renderPlay(st.play, playNowGame(), null); else renderPlay(null);
+  const playing = st.play && !["ok", "err"].includes(st.play.state);
+  liveLoop(!!(task || playing || ["starting", "syncing"].includes(st.state)));
 
   $("play").hidden = !!m;
   $("play").disabled = st.state !== "none" || !!data.busy || (setupData && !setupData.ready);
@@ -165,7 +168,11 @@ async function pollLive() {
   if (d.game_names) GAME_NAMES = d.game_names;
   renderLive(d.archives);
   renderAsks(d.asks);
+  if (d.play_game) playNow = d.play_game;
+  renderPlay(d.play, playNowGame(), d.streaming);
 }
+let playNow = null;          // игра, с которой арендована машина (Python помнит её: окно могли закрыть)
+function playNowGame() { return playNow || (playGame && { ...playGame }); }
 
 // Вопросы машины на главном: ответить можно здесь (карточка поверх всех окон — та же, её можно было закрыть)
 let asksBusy = false;
@@ -334,7 +341,7 @@ $("show-login").addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------- выбор машины
-$("play").addEventListener("click", () => { replaceMode = false; replaceBlocked = false; openOffers(); });
+$("play").addEventListener("click", () => { replaceMode = false; replaceBlocked = false; playGame = null; openOffers(); });
 
 // ---- «Сменить машину»: каталог во время запуска. Две машины сразу — никогда: выбранную арендуем только после того,
 // как запуск текущей отменён, она удалена и Vast её больше не показывает (Api.replace). Готовую — только через «Закончить».
@@ -389,6 +396,7 @@ async function openOffers(disk, docker) {
   const reload = disk != null;       // смена диска: тумблеры синхронизации не сбрасывать
   if (docker != null) offersDocker = docker;
   show("offers");
+  renderOffersGame();
   offersData = null; selected = null;
   $("rent").disabled = true;
   $("offers-summary").textContent = t("offers.loading");
@@ -807,6 +815,7 @@ $("rent").addEventListener("click", async () => {
     gpu: o.gpu, country: o.country, price: money(o.price), balance: money(o.balance), hours: num(o.hours || 0),
   });
   text += "\n" + t("confirm.rent.disk", { gb: disk });
+  if (playGame && !replaceMode) text += "\n\n" + t("confirm.rent.game", { name: playGame.name, account: accName(playGame.account) });
   const select = syncSelect();
   if (select) {
     const on = syncRows.filter((r) => r.game && r.sync_game);
@@ -839,7 +848,7 @@ $("rent").addEventListener("click", async () => {
   if (DEMO) { startProgress(); return; }
   if (replaceMode) {
     // Замена: отменить запуск, удалить машину, дождаться, что у Vast её нет, — и арендовать выбранную
-    const r = await api().replace(o.id, disk, LANG, spare, docker, select);
+    const r = await api().replace(o.id, disk, LANG, spare, docker, select, null);
     if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
     $("offers-cancel").disabled = true;
     const p = await waitJob((ev) => ($("offers-summary").textContent = eventText(ev)));
@@ -854,10 +863,107 @@ $("rent").addEventListener("click", async () => {
     startProgress();
     return;
   }
-  const r = await api().play(o.id, null, disk, LANG, spare, docker, select);   // язык — для уведомления в конце
+  const game = playGame ? { appid: playGame.appid, account: playGame.account } : null;
+  const r = await api().play(o.id, null, disk, LANG, spare, docker, select, game);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
+  playNow = playGame ? { ...playGame } : null;
+  for (const k of Object.keys(playOpened)) delete playOpened[k];
   startProgress();
 });
+
+// ---------------------------------------------------------------- игра из библиотеки
+// Нажал на игру → выбор машины с карточкой игры (аккаунт — если игра есть на нескольких) → аренда с игрой: машина
+// (wolf-setup.sh v4.8) входит в Steam нужным аккаунтом, Steam сам качает и запускает игру. Ход — на главном
+// (запись play): вход в Steam → скачивание → запуск. Moonlight открывается сам: когда нужно войти и когда игра
+// запустилась — один раз и только если трансляция ещё не идёт (вторая оборвала бы обе).
+let playGame = null;      // выбранная игра: {appid, name, cap, account, choices: [{id, family}]}
+const playOpened = {};    // авто-открытие Moonlight: состояние → уже открывали
+
+function startGame(g) {
+  if (current && current.status && current.status.machine) {
+    ask({ title: t("play.busy.title"), text: t("play.busy.text"), yes: t("btn.back"), no: t("btn.cancel") });
+    return;
+  }
+  const choices = g.accounts.map((id) => ({ id, family: false }))
+    .concat(g.family.filter((id) => !g.accounts.includes(id)).map((id) => ({ id, family: true })))
+    .filter((c) => !((libData && libData.accounts) || []).find((a) => a.id === c.id && a.expired));
+  if (!choices.length) { steamLogin(null); return; }
+  playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", account: choices[0].id, choices };
+  replaceMode = false; replaceBlocked = false;
+  openOffers();
+}
+
+function renderOffersGame() {
+  const box = $("offers-game");
+  box.hidden = !playGame || replaceMode;
+  box.innerHTML = "";
+  if (box.hidden) return;
+  if (playGame.cap) {
+    const img = el("img", { alt: "", src: playGame.cap });
+    img.onerror = () => img.remove();
+    box.appendChild(img);
+  }
+  const main = el("div", { className: "og-main" });
+  main.append(el("div", { className: "title" }, t("play.offers.title", { name: playGame.name })),
+              el("div", { className: "sub" }, t("play.offers.sub")));
+  if (playGame.choices.length > 1) {
+    const seg = el("div", { className: "seg" });
+    seg.appendChild(el("span", { className: "sub" }, t("play.offers.account")));
+    for (const c of playGame.choices) {
+      const label = c.family ? t("play.offers.family", { name: accName(c.id) }) : accName(c.id);
+      const b = el("button", { className: "chip" + (c.id === playGame.account ? " on" : "") }, label);
+      b.addEventListener("click", () => { playGame.account = c.id; renderOffersGame(); });
+      seg.appendChild(b);
+    }
+    main.appendChild(seg);
+  }
+  const none = el("button", { className: "link" }, t("play.offers.none"));
+  none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
+  main.appendChild(none);
+  box.appendChild(main);
+}
+
+// Ход игры на главном (из status.play или live().play)
+function renderPlay(play, game, streaming) {
+  const box = $("play-box");
+  box.hidden = !play;
+  if (!play) return;
+  const name = (game && game.name) || "";
+  const key = play.state === "wait" ? (play.text === "login" ? "login" : play.text === "other" ? "other" : "steam")
+    : play.state === "down" ? "download" : play.state === "up" ? "launch" : play.state === "ok" ? "running" : "err";
+  box.innerHTML = "";
+  box.classList.toggle("warn", key === "err" || key === "other");
+  if (game && game.cap) {
+    const img = el("img", { alt: "", src: game.cap });
+    img.onerror = () => img.remove();
+    box.appendChild(img);
+  }
+  const main = el("div", { className: "pb-main" });
+  main.appendChild(el("div", { className: "pb-title" },
+    t("play.state." + key, { name, account: game ? accName(game.account) : "" })));
+  const pg = play.progress;
+  if (key === "download" && pg && pg.total > 0) {
+    const pct = Math.min(100, Math.floor((pg.done / pg.total) * 100));
+    const bar = el("div", { className: "bar" });
+    const fill = el("span");
+    fill.style.width = pct + "%";
+    bar.append(fill);
+    const sp = avgSpeed("play", pg);
+    main.append(bar, el("div", { className: "sub" }, `${pct}% · ${size(pg.done)} / ${size(pg.total)}`
+      + (sp ? " · " + t("arch.speed", { speed: size(sp) }) + (sp > 0 ? " · " + leftText((pg.total - pg.done) / sp) : "") : "")));
+  }
+  if (["login", "other", "err", "running"].includes(key) && current && current.status.links) {
+    main.appendChild(button(t("play.open"), () => startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop"), key !== "running"));
+  }
+  box.appendChild(main);
+  // Moonlight — сам: войти в Steam и когда игра пошла; трансляция уже идёт — не трогаем
+  if (["login", "other", "running"].includes(key) && !playOpened[key] && streaming === false && current && current.status.links && !DEMO) {
+    playOpened[key] = true;
+    if (key !== "running") playOpened.running = playOpened.running || false;
+    startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop");
+  }
+}
+
 
 // ---------------------------------------------------------------- «Закончить» и аварийное удаление
 $("stop").addEventListener("click", async () => {
@@ -1487,7 +1593,11 @@ function renderLibrary() {
     && (!q || (g.name || "").toLowerCase().includes(q)));
   const grid = $("library-grid");
   if (!shown.length) { grid.appendChild(el("div", { className: "note" }, t("library.nothing"))); return; }
-  for (const g of shown) grid.appendChild(gameTile(g));
+  for (const g of shown) {
+    const tile = gameTile(g);
+    tile.addEventListener("click", () => startGame(g));
+    grid.appendChild(tile);
+  }
 }
 
 function gameTile(g) {
@@ -1535,7 +1645,11 @@ async function renderMainLibrary(force = false) {
   $("lib-card-sub").textContent = none ? t("library.main.login")
     : d.games.length ? t("library.main.count", { n: d.games.length }) : t("library.main.empty");
   strip.hidden = none || !d.games.length;
-  for (const g of d.games.slice(0, LIB_STRIP)) strip.appendChild(gameTile(g));
+  for (const g of d.games.slice(0, LIB_STRIP)) {
+    const tile = gameTile(g);
+    tile.addEventListener("click", (e) => { e.stopPropagation(); startGame(g); });
+    strip.appendChild(tile);
+  }
 }
 
 // Войти в Steam: окно со страницей самой Steam (QR или логин с паролем). msgEl — где писать ход (может не быть)
@@ -1772,7 +1886,8 @@ const STAGES = { play: ["vast", "tailscale", "restore", "ready"], stop: ["shutdo
 function startProgress(kind = "play") {
   show("progress");
   prog = { since: 0, log: [], shownQ: 0, kind };
-  $("progress-title").textContent = t("progress.title." + kind);
+  $("progress-title").textContent = kind === "play" && playNow ? t("progress.title.play_game", { name: playNow.name })
+    : t("progress.title." + kind);
   $("progress-note").textContent = t(kind === "stop" ? "progress.background_stop" : "progress.background");
   $("tailscale-box").hidden = true;
   $("progress-alert").hidden = true;
@@ -1887,7 +2002,8 @@ async function pollOnce() {
   if (p.game_names) GAME_NAMES = p.game_names;
   if (p.kind && p.kind !== prog.kind) {          // окно открыли заново посреди операции — узнаём какой
     prog.kind = p.kind;
-    $("progress-title").textContent = t("progress.title." + p.kind);
+    $("progress-title").textContent = p.kind === "play" && playNow ? t("progress.title.play_game", { name: playNow.name })
+      : t("progress.title." + p.kind);
     $("progress-note").textContent = t(p.kind === "stop" ? "progress.background_stop" : "progress.background");
     $("progress-cancel").hidden = p.kind !== "play";
     $("progress-replace").hidden = p.kind !== "play";
@@ -1979,6 +2095,18 @@ function renderResult(r) {
   ok.className = "result-ok";
   ok.textContent = t("progress.ready", { min: r.minutes });
   box.appendChild(ok);
+  if (playNow) {
+    // Игра из библиотеки: дальше всё на главном (вход в Steam, скачивание, запуск) — туда и уходим
+    box.appendChild(el("div", { className: "sub" }, t("play.result", { name: playNow.name })));
+    setTimeout(() => {
+      if ($("screen-progress").hidden) return;
+      clearInterval(progTimer);
+      if (!DEMO) api().session_seen();
+      show("main");
+      refresh();
+    }, 2500);
+    return;
+  }
   // Адреса — тот же блок, что на главном экране. Приложение Sunshine, разрешение и битрейт — как
   // выбраны на главном; id у копии убираем, чтобы на странице не было двух одинаковых
   const links = $("links").cloneNode(true);

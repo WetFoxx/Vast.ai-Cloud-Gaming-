@@ -51,6 +51,8 @@
           <div class="sub" id="balance-sub"></div>
         </div>
       </div>
+      <!-- Игра из библиотеки на машине: вход в Steam → скачивание → запуск (запись play wolf-setup.sh v4.8) -->
+      <div class="play-box" id="play-box" hidden></div>
       <div class="task-row" id="task-row" hidden>
         <span class="task-text" id="task-text"></span>
         <span class="task-buttons">
@@ -121,6 +123,8 @@
   <!-- ===== Выбор машины ===== -->
   <main id="screen-offers" hidden>
     <h1 data-i18n="offers.title"></h1>
+    <!-- Игра из библиотеки: её скачает и запустит Steam на машине; аккаунт — если игра есть на нескольких -->
+    <section class="card offers-game" id="offers-game" hidden></section>
     <div class="tabs" role="tablist">
       <button id="tab-docker" role="tab" data-i18n="offers.mode.docker"></button>
       <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
@@ -278,7 +282,7 @@
     <input type="search" id="library-search" data-i18n-placeholder="library.search" hidden>
     <div class="lib-chips" id="library-chips"></div>
     <div class="lib-grid" id="library-grid"></div>
-    <div class="note" id="library-soon" data-i18n="library.soon" hidden></div>
+    <div class="note" id="library-soon" data-i18n="library.hint" hidden></div>
     <div class="error" id="library-error" hidden></div>
     <div class="actions"><button id="library-back" data-i18n="btn.back"></button></div>
   </main>

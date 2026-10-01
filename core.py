@@ -44,6 +44,8 @@ RESTORE_MIN = 120        # восстановление: дольше — ост
 # Новая сборка образа не попадёт на машины, пока здесь не поменяют тег
 DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:b3caa3bfe35a98e913ec45699f5dedc1f1f4e5fd"
 SUNSHINE = "sunshine"    # запись образа на странице wolf: заработал ли NVENC (не архив)
+PLAY = "play"            # [v4.8] запись wolf: игра из библиотеки — вход в Steam, скачивание, запуск (не архив)
+NOT_ARCHIVES = (SUNSHINE, PLAY)
 
 
 # ------------------------------------------------------------------ подготовка аренды ---
@@ -134,8 +136,19 @@ def asks_of(s):
 
 
 def vg_sync(games, saves_off):
-    """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment."""
-    return base64.b64encode(json.dumps({"games": list(games), "saves_off": list(saves_off)},
+    """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment.
+    [v4.8] "steam": "store" — игры Steam качает сам Steam: машина не скачивает их из облака, не выгружает и не
+    спрашивает о них (игры из папки Games — по выбору, как раньше)."""
+    return base64.b64encode(json.dumps({"games": [g for g in games if not g.startswith("sgame--")],
+                                        "saves_off": list(saves_off), "steam": "store"},
+                                       ensure_ascii=False).encode()).decode()
+
+
+def vg_play(play):
+    """VG_PLAY для wolf-setup.sh v4.8 — игра из библиотеки: {"appid", "account" (steamid64), "name"}. Машина входит
+    в Steam этим аккаунтом, пишет паспорт игры (Steam сам её скачает) и запускает её, когда скачалась."""
+    return base64.b64encode(json.dumps({"appid": str(play["appid"]), "account": str(play["account"]),
+                                        "name": str(play.get("name") or "")[:200]},
                                        ensure_ascii=False).encode()).decode()
 SYNC_DEFAULTS = {"steam_games": False, "other_games": True, "saves": True}
 
@@ -173,6 +186,9 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False):
     sel = (sync or {}).get("select")
     if isinstance(sel, dict):
         env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [])
+    play = (sync or {}).get("play")
+    if isinstance(play, dict) and play.get("appid") and play.get("account"):
+        env["VG_PLAY"] = vg_play(play)
     if env:
         body["env"] = env
     return body
@@ -411,7 +427,7 @@ def wait_ready(iid, t0, o, ui, docker=False):
                           bad_host=True, key="core.fail_nvenc", msg=sun[2][:120])
         for name, rec in sorted(s.items()):
             ts, state, text = rec
-            if name == SUNSHINE or ASK.match(name):
+            if name in NOT_ARCHIVES or ASK.match(name):
                 continue
             pg = getattr(rec, "progress", None)                  # [v4.6] ход: проценты и скорость
             if ts >= t0 - 60 and seen.get(name) != (state, text, pg):
@@ -500,11 +516,14 @@ def status():
     asks = asks_of(s)                                                       # [v4.6] вопросы — не архивы
     s = {n: v for n, v in s.items() if not ASK.match(n)}
     out.update(asks=asks, progress={n: v.progress for n, v in s.items() if getattr(v, "progress", None)})
-    arch = {n: v for n, v in s.items() if n not in ("boot", SUNSHINE)}     # sunshine — запись образа, не архив
+    if PLAY in s:                                                          # [v4.8] ход игры из библиотеки
+        v = s[PLAY]
+        out["play"] = {"state": v[1], "text": v[2], "ts": v[0], "progress": getattr(v, "progress", None)}
+    arch = {n: v for n, v in s.items() if n not in ("boot", *NOT_ARCHIVES)}  # sunshine, play — не архивы
     busy = sorted(n for n, v in arch.items() if v[1] in ("up", "down"))
     errors = sorted(n for n, v in arch.items() if v[1] == "err")
     done = sum(1 for v in arch.values() if v[1] == "ok")
-    out.update(links=links(ip, dns), archives={n: v for n, v in s.items() if n != SUNSHINE}, busy=busy, errors=errors, done=done, detail="")
+    out.update(links=links(ip, dns), archives={n: v for n, v in s.items() if n not in NOT_ARCHIVES}, busy=busy, errors=errors, done=done, detail="")
     boot = s.get("boot")
     if boot and boot[1] == "err":
         return dict(out, state=ERROR, kind="boot_error", detail=boot[2],
@@ -715,9 +734,9 @@ def _verify_and_delete(ui, iid, after, t0, self_delete=False):
     if after is None:
         raise VastgameError("!!! Страница статуса не отвечает после выгрузки — НЕ удаляю.",
                             key="core.no_status_after")
-    fresh = {n: v for n, v in after.items() if v[0] >= t0 and n not in ("boot", "finish", SUNSHINE)}
+    fresh = {n: v for n, v in after.items() if v[0] >= t0 and n not in ("boot", "finish", *NOT_ARCHIVES)}
     bad = {n: v for n, v in fresh.items() if v[1] in ("up", "down", "err")}
-    old_err = {n: v for n, v in after.items() if v[0] < t0 and v[1] == "err" and n != SUNSHINE}
+    old_err = {n: v for n, v in after.items() if v[0] < t0 and v[1] == "err" and n not in NOT_ARCHIVES}
     uploaded = sorted(n for n, v in fresh.items() if v[1] == "ok")
     if uploaded:
         ui.say(f"Выгружено в этот раз: {len(uploaded)} архив(ов): {', '.join(uploaded)}",

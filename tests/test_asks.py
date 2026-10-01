@@ -128,13 +128,22 @@ class TestSelection(unittest.TestCase):
 
 class TestRental(unittest.TestCase):
     def test_vg_sync_survives_spaces(self):
-        body = core.rental_body({"hash_id": "h"}, 100, sync={"steam_games": True, "other_games": False, "saves": True,
-                                "select": {"games": ["sgame--The Blood of Dawnwalker"], "saves_off": ["pfx--1"]}})
+        body = core.rental_body({"hash_id": "h"}, 100, sync={"steam_games": False, "other_games": True, "saves": True,
+                                "select": {"games": ["game--The Blood of Dawnwalker", "sgame--Hades II"],
+                                           "saves_off": ["pfx--1"]}})
         env = body["env"]
-        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("1", "0", "1"))
+        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "1", "1"))
         self.assertNotIn(" ", env["VG_SYNC"])
+        # [v4.8] игры Steam качает Steam: в выборе их нет, машине сказано "steam": "store"
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": ["sgame--The Blood of Dawnwalker"], "saves_off": ["pfx--1"]})
+                         {"games": ["game--The Blood of Dawnwalker"], "saves_off": ["pfx--1"], "steam": "store"})
+        self.assertNotIn("VG_PLAY", env)
+
+    def test_library_game_goes_to_machine(self):
+        body = core.rental_body({"hash_id": "h"}, 100, sync={"select": {"games": [], "saves_off": []},
+                                "play": {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends"}})
+        self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_PLAY"])),
+                         {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends"})
 
     def test_without_select_no_vg_sync(self):
         self.assertNotIn("VG_SYNC", core.rental_body({"hash_id": "h"}, 100, sync={"saves": True})["env"])
@@ -254,7 +263,9 @@ class TestSyncList(unittest.TestCase):
             rows = gui.Api().sync_list()["rows"]
         by = {r["id"]: r for r in rows}
         self.assertEqual(len(rows), 3)
-        self.assertEqual((by["sgame--Hades II"]["sync_game"], by["sgame--Hades II"]["sync_saves"]), (True, True))
+        # [v4.8] игру Steam качает Steam — от её строки остаются сохранения
+        self.assertEqual((by["sgame--Hades II"]["kind"], by["sgame--Hades II"]["game"]), ("saves", None))
+        self.assertEqual((by["sgame--Hades II"]["sync_game"], by["sgame--Hades II"]["sync_saves"]), (None, True))
         self.assertEqual((by["game--Mine"]["sync_game"], by["game--Mine"]["sync_saves"]), (False, None))
         self.assertEqual((by["pfx--1091500"]["title"], by["pfx--1091500"]["sync_saves"]), ("Cyberpunk 2077", False))
         self.assertEqual(by["sgame--Hades II"]["cover"], "https://x.steamstatic.com/c.jpg")
