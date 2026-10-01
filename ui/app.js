@@ -817,7 +817,7 @@ $("rent").addEventListener("click", async () => {
   text += "\n" + t("confirm.rent.disk", { gb: disk });
   if (playGame && !replaceMode) {
     text += "\n\n" + t("confirm.rent.game", { name: playGame.name, account: accName(playGame.account) });
-    if (playGame.modsInfo) text += " " + t(playGame.mods ? "confirm.rent.mods" : "confirm.rent.clean");
+    text += " " + t(playGame.mods ? "confirm.rent.mods" : "confirm.rent.clean");
   }
   const select = syncSelect();
   if (select) {
@@ -892,9 +892,8 @@ function startGame(g) {
     .filter((c) => !((libData && libData.accounts) || []).find((a) => a.id === c.id && a.expired));
   if (!choices.length) { steamLogin(null); return; }
   const mods = (libData && libData.mods && libData.mods[g.appid]) || null;
-  const was = libData && libData.mods_play ? libData.mods_play[g.appid] : undefined;
   playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
-               header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: !!mods && was !== false };
+               header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: modsSaveOn(g.appid) };
   replaceMode = false; replaceBlocked = false;
   openOffers();
 }
@@ -923,37 +922,31 @@ function renderOffersGame() {
     }
     main.appendChild(seg);
   }
-  if (playGame.modsInfo) {
-    const mi = playGame.modsInfo;
-    const seg = el("div", { className: "seg" });
-    seg.appendChild(el("span", { className: "sub" }, t("play.offers.mods", { size: size(mi.bytes), date: mi.mtime || "" })));
-    for (const [on, key] of [[true, "play.offers.with_mods"], [false, "play.offers.clean"]]) {
-      const b = el("button", { className: "chip" + (playGame.mods === on ? " on" : "") }, t(key));
-      b.addEventListener("click", () => { playGame.mods = on; renderOffersGame(); });
-      seg.appendChild(b);
-    }
-    main.appendChild(seg);
-  }
-  main.appendChild(modsSaveBlock(playGame.appid));
+  main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; }));
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
   main.appendChild(none);
   box.appendChild(main);
 }
 
-// [v5.1] Тумблер «Сохранять моды в облако» у игры — заметный блок (карточка игры перед арендой и главный во время игры)
+// [v5.1] Один тумблер «Моды» у игры (заметный блок на карточке игры и на главном во время игры): включён — моды из облака
+// накладываются поверх игры из Steam и изменения сохраняются обратно; выключен — чистая игра, ничего не сохраняется
+// (моды в облаке остаются). Во время игры тумблер управляет сохранением — машине сразу (set_mods_save).
 function modsSaveOn(appid) { return !!(libData && libData.mods_save && libData.mods_save[appid]); }
-function modsSaveBlock(appid) {
+function modsSaveBlock(appid, info, onChange) {
   const on = modsSaveOn(appid);
   const box = el("label", { className: "mods-save" + (on ? " on" : "") });
   const cb = el("input", { type: "checkbox", checked: on });
   const txt = el("div");
-  txt.append(el("b", {}, t("mods.save")), el("span", { className: "sub" }, t(on ? "mods.save.hint" : "mods.save.off")));
+  const head = el("b", {}, t("mods.toggle"));
+  if (info) head.appendChild(el("span", { className: "mods-cloud" }, " · " + t("mods.cloud", { size: size(info.bytes), date: info.mtime || "" })));
+  txt.append(head, el("span", { className: "sub" }, t(on ? "mods.on" : "mods.off")));
   box.append(txt, cb);
   cb.addEventListener("change", async () => {
     if (libData) libData.mods_save = { ...(libData.mods_save || {}), [appid]: cb.checked };
     box.classList.toggle("on", cb.checked);
-    txt.lastChild.textContent = t(cb.checked ? "mods.save.hint" : "mods.save.off");
+    txt.lastChild.textContent = t(cb.checked ? "mods.on" : "mods.off");
+    if (onChange) onChange(cb.checked);
     if (!DEMO) await api().set_mods_save(appid, cb.checked);
   });
   return box;
@@ -2325,7 +2318,7 @@ function demoLibrary() {
       g(1086940, "Baldur's Gate 3", [B], [], 6), g(1174180, "Red Dead Redemption 2", [], [A]), g(292030, "The Witcher 3", [A]),
       g(570, "Dota 2", [A, B]), g(2050650, "Resident Evil 4", [B]), g(9999999, "Неизвестная игра", [A])],
     errors: [], at: Math.floor(Date.now() / 1000),
-    mods: { "1245620": { name: "mod--1245620--ELDEN RING", bytes: 340e6, mtime: "2026-09-28" } }, mods_play: {} };
+    mods: { "1245620": { name: "mod--1245620--ELDEN RING", bytes: 340e6, mtime: "2026-09-28" } }, mods_save: { "1245620": true } };
 }
 
 function demoGames() {

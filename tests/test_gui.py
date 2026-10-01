@@ -411,6 +411,13 @@ class TestPlay(unittest.TestCase):
         self.assertEqual(json.loads(base64.b64decode(self.body["env"]["VG_PLAY"])),
                          {"appid": "20", "account": A, "name": "Twenty", "mods": False})     # семейная — тоже можно
         self.assertEqual(gui.settings.get("play_now")["name"], "Twenty")
+        self.assertEqual(gui.cloudgames.mods_answers()["yes"], [])     # тумблер «Моды» выключен — запомнен
+        self.wait_idle()
+        with mock.patch.object(gui.steamlib, "cached", lambda: lib), mock.patch.object(gui.steamlib, "accounts", lambda: accs):
+            self.api.play(5, None, None, "ru", None, False, None, {"appid": "10", "account": A, "mods": True})
+            wait_done(self.api, session=True)
+        self.assertTrue(json.loads(base64.b64decode(self.body["env"]["VG_PLAY"]))["mods"])
+        self.assertEqual(gui.cloudgames.mods_answers()["yes"], ["10"])  # включён — накладывать и сохранять
         # Следующая аренда без игры — просто рабочий стол, прежняя игра забыта
         self.wait_idle()
         self.api.play(5, None, None, "ru")

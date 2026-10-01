@@ -729,7 +729,7 @@ class Api:
     # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
     def library(self, fresh=False):
         """Библиотека: fresh=False — прошлый список (сразу), True — свежий из Steam (секунды). Без аккаунтов — пусто.
-        [v5.0] mods — моды игр в облаке {номер: {name, bytes, mtime}} (свежие — с Drive), mods_play — выбор «с модами»."""
+        [v5.0] mods — моды игр в облаке {номер: {name, bytes, mtime}} (свежие — с Drive); mods_save — тумблер «Моды»."""
         if not steamlib.accounts():
             return {"accounts": [], "games": [], "errors": []}
         lib = (None if fresh else steamlib.cached()) or steamlib.library()
@@ -737,7 +737,7 @@ class Api:
         if mods is not None:
             settings.set("mods_known", mods)
         return {**lib, "mods": mods if mods is not None else settings.get("mods_known") or {},
-                "mods_play": settings.get("mods_play") or {}, "mods_save": settings.get("mods_sel") or {}}
+                "mods_save": settings.get("mods_sel") or {}}
 
     def set_mods_save(self, appid, on):
         """[v5.1] Тумблер «Сохранять моды в облако» у игры: запомнить (следующие машины) и, если машина работает, сказать
@@ -769,10 +769,8 @@ class Api:
             return None
         if acc not in {a["id"] for a in steamlib.accounts()}:
             return None
-        mods = bool(game.get("mods"))
-        played = dict(settings.get("mods_play") or {})
-        played[appid] = mods                      # «с модами / чистая» — запомнить для этой игры
-        settings.set("mods_play", played)
+        mods = bool(game.get("mods"))            # [v5.1] тумблер «Моды»: накладывать и сохранять — одно и то же
+        cloudgames.remember_mods(appid, mods)
         return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or "",
                 "hero": g.get("hero") or "", "header": g.get("header") or "", "mods": mods}
 
