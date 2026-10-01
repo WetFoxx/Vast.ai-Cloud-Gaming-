@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v4.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.0 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -101,6 +101,13 @@
 # работал): сохраняются в /etc/wolf/env как VGS и VGP.
 # [v4.9] Вход в Steam для игры из библиотеки определяется надёжнее: вход нужным аккаунтом после запуска Steam
 # (а не последняя строка журнала) или идущее скачивание.
+# [v5.0] МОДЫ. Игру качает Steam (чистую), моды — то, что потом появилось или изменилось в её папке, — уезжают в облако
+# отдельным архивом mod--НОМЕР--Название (wolf-mods.py): только эти файлы и список удалённых. Чистая игра запоминается,
+# как только Steam её поставил (снимок в $S/van). После выхода из игры — вопрос «сохранять моды?» (ask--mod--mod--НОМЕР;
+# ответ запоминается, приложение передаёт прежние ответы в VG_SYNC "mods": {"yes": [...], "no": [...]}); «да» — выгрузка
+# сразу и потом сама; без ответа — при выключении (кроме одних логов, дампов и кэшей). Запуск из библиотеки «с модами»
+# (VG_PLAY "mods": true): Steam поставил чистую игру → моды из облака поверх → запуск. Steam обновил игру за сессию — моды
+# этой игры не выгружаются (обновление могло затереть их часть — облако не перезаписываем неполным архивом).
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -389,7 +396,7 @@ ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null
 mkgd()  { [ -d "$GD" ] || { u mkdir -p "$GD" && log "папка для игр $GD создана"; }; }
 sz()    { tr '\0' '\n' < "$1" | awk -F'\t' '{s+=$3} END{printf "%.0f", s}'; }
 # Архив одной игры: его можно убрать из облака (wolf forget или вручную на Drive)
-gamearch() { case $1 in game--*|sgame--*|pfx--*) return 0 ;; esac; return 1; }
+gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*) return 0 ;; esac; return 1; }
 # Перестать синхронизировать архив на этом инстансе: забыть версию, манифест и
 # отпечаток и поставить метку x/, чтобы таймеры и wolf-watch не выгрузили его снова
 drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1"; : > "$S/x/$1"; }
@@ -437,6 +444,9 @@ d, s = json.load(sys.stdin), os.environ["S"]
 ok = lambda n: isinstance(n, str) and n and "/" not in n and "\n" not in n
 for key, f in (("games", "sel.games"), ("saves_off", "sel.saves_off")):
     open(os.path.join(s, f), "w").write("".join(n + "\n" for n in d.get(key) or [] if ok(n)))
+mods = d.get("mods") if isinstance(d.get("mods"), dict) else {}
+for key in ("yes", "no"):                                        # [v5.0] прежние ответы «сохранять моды?» по номерам игр
+    open(os.path.join(s, "sel.mods_" + key), "w").write("".join(str(n) + "\n" for n in mods.get(key) or [] if str(n).isdigit()))
 if d.get("steam") == "store":
     open(os.path.join(s, "sel.store"), "w").close()
 open(os.path.join(s, "sel.on"), "w").close()' || log "VG_SYNC не разобран — синхронизация как раньше"
@@ -537,8 +547,11 @@ scan_games() {
 # wolf answer new|del АРХИВ yes|no — ответ человека (через bk: свежий список облака для forget)
 answer() {
   local k=$1 n=$2 a=$3 p
-  case $n in game--*|sgame--*) ;; *) log "answer: '$n' — не архив игры"; return 1 ;; esac
+  case $n in game--*|sgame--*|mod--*) ;; *) log "answer: '$n' — не архив игры"; return 1 ;; esac
   case $k:$a in
+    mod:yes) p=${n#mod--}; addline "$p" sel.mods_yes; rmline "$p" sel.mods_no; log "моды $p: сохранять — выбрано"
+             ( NOW=1 "$0" mods "$p" >/dev/null 2>&1 & ) ;;
+    mod:no)  p=${n#mod--}; addline "$p" sel.mods_no; rmline "$p" sel.mods_yes; log "моды $p: не сохранять — выбрано" ;;
     new:yes) addline "$n" sel.games; rmline "$n" sel.skip; log "$n: синхронизировать — выбрано" ;;
     new:no)  addline "$n" sel.skip; log "$n: не синхронизировать — выбрано" ;;
     del:yes) p=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "$n" appid 2>/dev/null)
@@ -571,7 +584,7 @@ gindex() {
 # up launch, ok running; err stuck / launch. Один раз за аренду (play.done): перезагрузка машины игру не перезапускает.
 play_init() {
   local v=${VG_PLAY:-${VGP:-}}
-  rm -f "$S"/play.app "$S"/play.acc "$S"/play.name
+  rm -f "$S"/play.app "$S"/play.acc "$S"/play.name "$S"/play.mods
   [ -n "$v" ] || return 0
   log "$(printf '%s' "$v" | python3 /usr/local/bin/wolf-steam.py vgplay "$S" 2>&1)"
 }
@@ -598,6 +611,10 @@ play_watch() {
     sleep "${PLAY_POLL:-4}"; now=$(date +%s)
     read -r fl d tot dir < <(u python3 /usr/local/bin/wolf-steam.py state "$DH/$SR" "$a" 2>/dev/null) || continue
     if flags_ready "${fl:-0}" && [ -n "$dir" ] && [ -d "$DH/$SR/steamapps/common/$dir" ]; then
+      if store; then                               # [v5.0] чистая игра — запомнить; «с модами» — моды поверх
+        [ -e "$S/van/$a.tsv" ] || mods_snap "$a" "$dir" "$(acf_get "$DH/$SR/steamapps/appmanifest_$a.acf" buildid)"
+        mods_apply "$a" "$dir"
+      fi
       play_launch "$a"; return 0
     fi
     if [ "${d:-0}" -gt "$last" ] && [ "$last" -ge 0 ]; then
@@ -634,6 +651,94 @@ play_launch() {
   done
   echo "$a" > "$S/play.done"
   st play err "launch"
+}
+
+# ------------------------------------------------------------ моды (v5.0) ---
+# Снимок чистой игры: $S/van/НОМЕР.tsv (файлы), .build (сборка Steam), .upd (Steam обновил игру за сессию),
+# .fp (отпечаток модов, которые уже в облаке или наложены из него — не выгружать то же самое снова)
+acf_get() { sed -n "s/^[[:space:]]*\"$2\"[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" 2>/dev/null | head -1; }
+# mods_snap НОМЕР ПАПКА СБОРКА
+mods_snap() {
+  mkdir -p "$S/van"
+  python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/$2" "$S/van/$1.tsv" && echo "$3" > "$S/van/$1.build" \
+    && log "моды $1: чистая игра запомнена"
+}
+# Раз в 30 с (wolf watch): игры, которые Steam только что поставил, — запомнить чистыми; обновил — пометить
+mods_scan() {
+  local f a d b
+  store && [ -n "$SR" ] || return 0
+  for f in "$DH/$SR/steamapps"/appmanifest_*.acf; do
+    [ -e "$f" ] || continue
+    a=${f##*appmanifest_}; a=${a%.acf}
+    d=$(idirs "$f" | head -1)
+    [[ $a =~ ^[0-9]+$ ]] && [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] && ! tool "sgame--$d" || continue
+    flags_ready "$(acf_get "$f" StateFlags || echo 0)" 2>/dev/null || continue
+    b=$(acf_get "$f" buildid)
+    if [ ! -e "$S/van/$a.tsv" ]; then mods_snap "$a" "$d" "$b"
+    elif [ "$(rd "$S/van/$a.build")" != "$b" ] && [ ! -e "$S/van/$a.upd" ]; then
+      : > "$S/van/$a.upd"; log "моды $a: Steam обновил игру — моды в этот раз не выгружаю (обновление могло затереть их часть)"
+    fi
+  done
+}
+# После выхода из игры: появились моды — спросить (или выгрузить, если человек уже сказал «да»)
+mods_check() {
+  local a=$1 d cnt fp junk
+  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.upd" ] && ! inlist "$a" sel.mods_no || return 0
+  d=$(idir "$a"); [ -n "$d" ] || return 0
+  read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || return 0
+  [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && return 0
+  if inlist "$a" sel.mods_yes; then ( NOW=1 "$0" mods "$a" >/dev/null 2>&1 & )
+  elif [ "${cnt:-0}" -gt 0 ] && [ "$junk" = 0 ]; then ask mod "mod--$a" "$(aname "sgame--$d")"; fi
+}
+# wolf mods [НОМЕР...] (через bk: свежий список облака) — выгрузить моды; без номеров — всех запомненных игр (выключение)
+mods_push() {
+  local a d cnt fp junk
+  [ $# -gt 0 ] || set -- $(ls "$S/van" 2>/dev/null | sed -n 's/\.tsv$//p')    # номера игр — только цифры
+  for a in "$@"; do
+    [[ $a =~ ^[0-9]+$ ]] && [ -e "$S/van/$a.tsv" ] || continue
+    [ -e "$S/van/$a.upd" ] && { log "моды $a: Steam обновлял игру в этой сессии — не выгружаю"; continue; }
+    inlist "$a" sel.mods_no && continue
+    d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
+    read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || continue
+    [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && continue
+    inlist "$a" sel.mods_yes || { [ "${cnt:-0}" -gt 0 ] && [ "$junk" = 0 ]; } || continue
+    mods_pack "$a" "$d"
+  done
+}
+# mods_pack НОМЕР ПАПКА
+mods_pack() {
+  local a=$1 d=$2 base out r cnt fp n
+  base=$(python3 /usr/local/bin/wolf-mods.py arch "$a" "$DH/$SR/steamapps/appmanifest_$a.acf") || return 1
+  [ -e "$S/x/$base" ] && { log "$base: убран из облака на этой машине — не выгружаю"; return 0; }
+  out="$T/$base.tar.zst"
+  st "$base" up "моды"
+  r=$(python3 /usr/local/bin/wolf-mods.py pack "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" "$out" "$a" \
+      "$(rd "$S/van/$a.build")" 2>>/var/log/wolf.log) || { rm -f "$out"; st "$base" err "не удалось собрать архив модов"; return 1; }
+  read -r cnt fp <<< "$r"
+  if [ "$cnt" = 0 ]; then
+    names "^mod--$a--" | while IFS= read -r n; do forget "$n"; done
+    st "$base" ok "модов больше нет — архив убран из облака (в корзине Drive 30 дней)"
+  else
+    rc copyto "$out" "$R/$base.tar.zst" --drive-chunk-size=64M || { rm -f "$out"; st "$base" err "выгрузка модов не удалась"; return 1; }
+    rm -f "$out"
+    names "^mod--$a--" | while IFS= read -r n; do [ "$n" = "$base" ] || rc deletefile "$R/$n.tar.zst"; done   # прежнее название
+    st "$base" ok "моды выгружены: файлов $cnt"
+  fi
+  echo "$fp" > "$S/van/$a.fp"
+}
+# Запуск из библиотеки «с модами»: после установки Steam (снимок уже снят) — моды из облака поверх чистой игры
+# mods_apply НОМЕР ПАПКА
+mods_apply() {
+  local a=$1 d=$2 base r
+  [ "$(rd "$S/play.mods")" = 1 ] || return 0
+  base=$(rl 2>/dev/null | sed -n -E "s/^(mod--$a--[^\t]*)\.tar\.zst\t.*/\1/p" | head -1)
+  [ -n "$base" ] || { log "моды $a: в облаке их нет — запускаю чистую игру"; return 0; }
+  st play up "mods"
+  if r=$(rc cat "$R/$base.tar.zst" | zstd -d -q | u python3 /usr/local/bin/wolf-mods.py apply "$DH/$SR/steamapps/common/$d" 2>>/var/log/wolf.log); then
+    log "моды $a: наложено файлов ${r%% *}"; echo "${r##* }" > "$S/van/$a.fp"
+  else
+    log "моды $a: наложить не удалось — запускаю как есть"
+  fi
 }
 
 # ----------------------------------------------------------------- манифест ---
@@ -780,7 +885,7 @@ pack() {
 # больше не выгружается; на следующих инстансах её архива уже не будет.
 forget() {
   local n=$1 o=()
-  gamearch "$n" || { log "forget: '$n' — не архив игры (нужен game--, sgame-- или pfx--)"; return 1; }
+  gamearch "$n" || { log "forget: '$n' — не архив игры (нужен game--, sgame--, pfx-- или mod--)"; return 1; }
   exec 8> "$L/$n.lock"; flock -w 900 8 || return 1
   mapfile -t o < <(awk -F'\t' -v b="$n.tar.zst" '$1==b || index($1, b".")==1 {print $1}' "$LS")
   # [v4.4] все файлы архива (части, дельты) — параллельно, оглавления первыми; список берётся свежий
@@ -855,7 +960,7 @@ watch_games() {
     [ -e "$L/boot-done" ] || continue
     [ -n "$SR" ] || sr
     now=$(date +%s); cur=()
-    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; fi     # [v4.6] вопросы о новых и удалённых
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; fi   # [v4.6] вопросы; [v5.0] чистые игры
     while IFS= read -r k; do
       case $k in
         nm:*)  k=${k#nm:}
@@ -876,6 +981,7 @@ watch_games() {
       last[$k]=$now
       case $k in
         app:*) a=${k#app:}
+               mods_check "$a"                                       # [v5.0] появились моды — спросить
                wants "pfx--$a" && arr+=("pfx--$a")
                d=$(idir "$a"); [ -n "$d" ] && want "sgame--$d" && steam_ready "sgame--$d" && arr+=("sgame--$d") ;;
         dir:*) want "game--${k#dir:}" && arr+=("game--${k#dir:}") ;;
@@ -1421,6 +1527,7 @@ bk() {
     steam_off
     shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
     "$0" state; "$0" games
+    "$0" mods                                    # [v5.0] моды игр Steam
     return 0
   fi
   rl > "$LS" || { log "$m: не удалось получить список облака"; return 1; }
@@ -1448,6 +1555,8 @@ bk() {
       shift; for a in "$@"; do forget "$a"; done; return 0 ;;
     answer)
       shift; answer "$@"; return ;;
+    mods)
+      shift; mods_push "$@"; return 0 ;;
   esac
   [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
   [ "$m" = state ] && gindex
@@ -1591,7 +1700,7 @@ case ${1:-} in
   finish)                                    finish_start ;;
   sunshine-creds)                            shift; sunshine_creds "$@" ;;
   finish-run)                                finish_run ;;
-  state|games|shutdown|restore|push|forget|answer)  bk "$@" ;;
+  state|games|shutdown|restore|push|forget|answer|mods)  bk "$@" ;;
   watch)                                     watch_games ;;
   supervise)                                 supervise ;;
   firewall)                                  setup_sunshine_firewall ;;
@@ -1730,9 +1839,10 @@ def page():
 WOLF = '/usr/local/bin/wolf'
 # Имя архива игры: папки бывают с пробелами («sgame--The Blood of Dawnwalker»); без «/» и управляющих
 # символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
-ARCHIVE = re.compile(r'^(game|sgame|pfx)--[^/\x00-\x1f]{1,200}$')
+ARCHIVE = re.compile(r'^(game|sgame|pfx|mod)--[^/\x00-\x1f]{1,200}$')
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
+MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
 def command(c, a):
     """Закрытый список: (команда, в фоне?) или None — такой команды нет."""
     arg = a[0] if len(a) == 1 and isinstance(a[0], str) else ''
@@ -1742,8 +1852,8 @@ def command(c, a):
             'push-identity': ([WOLF, 'push', 'identity'], True),
             'forget': ([WOLF, 'forget', arg], False) if ARCHIVE.match(arg) else None,
             # [v4.6] ответ на вопрос о новой / удалённой игре: [new|del, архив игры, yes|no]
-            'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and a[0] in ('new', 'del') and isinstance(a[1], str)
-                      and GAME.match(a[1]) and a[2] in ('yes', 'no') else None,
+            'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and isinstance(a[1], str) and a[2] in ('yes', 'no')
+                      and ((a[0] in ('new', 'del') and GAME.match(a[1])) or (a[0] == 'mod' and MOD.match(a[1]))) else None,
             'sunshine-creds': ([WOLF, 'sunshine-creds', arg], False) if LOGIN.match(arg) else None}.get(c)
 def tsjson(sub, *args):
     # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
@@ -2355,7 +2465,8 @@ def vgplay(sdir):
         print("VG_PLAY: непонятная игра или аккаунт")
         return 1
     name = re.sub(r"[\x00-\x1f]", "", name)[:200]
-    for k, v in (("play.app", appid), ("play.acc", sid), ("play.name", name)):
+    for k, v in (("play.app", appid), ("play.acc", sid), ("play.name", name),
+                 ("play.mods", "1" if d.get("mods") else "0")):          # [v5.0] наложить моды из облака
         Path(sdir, k).write_text(v)
     print(f"игра для запуска: {name or appid} ({appid})")
     return 0
@@ -2379,6 +2490,172 @@ if __name__ == "__main__":
         sys.exit(1)
     sys.exit("wolf-steam.py vgplay|account|manifest|state|logon …")
 STEAMPY
+
+# ================================ wolf-mods.py =================================
+w /usr/local/bin/wolf-mods.py <<'MODS'
+#!/usr/bin/env python3
+# [v5.0] Моды игр Steam. Игру качает Steam (чистую), моды — то, что потом появилось или изменилось в её папке, —
+# хранятся в облаке отдельным архивом mod--НОМЕР--Название.tar.zst (только эти файлы; удалённые файлы игры — списком).
+# Как мод устроен, неважно: сохраняется результат на диске (папка Proton с менеджерами и библиотеками уезжает и так —
+# это сохранения pfx--).
+#   snap ПАПКА СНИМОК                   запомнить чистую игру: «путь размер время» каждого файла (Steam только что поставил)
+#   diff ПАПКА СНИМОК                   «сколько отпечаток мусор»: изменённые/новые/удалённые файлы; мусор=1 — только логи,
+#                                       дампы и кэши (не повод спрашивать человека)
+#   pack ПАПКА СНИМОК АРХИВ НОМЕР СБОРКА  упаковать моды (zstd) → «сколько отпечаток»; 0 — модов нет, архив не создан
+#   apply ПАПКА                         stdin — распакованный tar модов: наложить поверх игры, удалить удалённое → «сколько отпечаток»
+#   arch НОМЕР ПАСПОРТ                  имя архива: mod--НОМЕР--Название (из паспорта Steam)
+import hashlib, io, json, os, re, subprocess, sys, tarfile
+
+META = ".vastgame-mod.json"
+JUNK_DIRS = {"logs", "log", "crashes", "crashdumps", "crash", "cache", "caches", "shadercache", "__pycache__", "temp", "tmp"}
+JUNK_EXT = (".log", ".dmp", ".mdmp", ".tmp", ".etl")
+
+
+def walk(root):
+    """{путь: (размер, время)} — файлы и ссылки (каталоги не храним: их создаёт распаковка)."""
+    out = {}
+    for d, dirs, files in os.walk(root):
+        for name in files + [x for x in dirs if os.path.islink(os.path.join(d, x))]:
+            p = os.path.join(d, name)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            out[os.path.relpath(p, root)] = (st.st_size, int(st.st_mtime))
+    return out
+
+
+def snap(root, out):
+    tmp = out + ".tmp"
+    with open(tmp, "w") as f:
+        for rel, (size, mt) in sorted(walk(root).items()):
+            if "\t" not in rel and "\n" not in rel:
+                f.write(f"{rel}\t{size}\t{mt}\n")
+    os.replace(tmp, out)
+    return 0
+
+
+def load(path):
+    base = {}
+    with open(path) as f:
+        for line in f:
+            rel, size, mt = line.rstrip("\n").split("\t")
+            base[rel] = (int(size), int(mt))
+    return base
+
+
+def junk(rel):
+    parts = rel.lower().split("/")
+    return parts[-1].endswith(JUNK_EXT) or parts[-1].startswith("crash") or any(p in JUNK_DIRS for p in parts[:-1])
+
+
+def changes(root, snapf):
+    base, now = load(snapf), walk(root)
+    files = sorted(r for r, v in now.items() if base.get(r) != v and r != META)
+    deleted = sorted(r for r in base if r not in now)
+    h = hashlib.sha1()
+    for r in files:
+        h.update(f"+{r}\t{now[r][0]}\t{now[r][1]}\n".encode())
+    for r in deleted:
+        h.update(f"-{r}\n".encode())
+    return files, deleted, now, ("0" if not files and not deleted else h.hexdigest()[:16])
+
+
+def diff(root, snapf):
+    files, deleted, _, fp = changes(root, snapf)
+    only_junk = int(bool(files) and not deleted and all(junk(r) for r in files))
+    print(len(files) + len(deleted), fp, only_junk)
+    return 0
+
+
+def pack(root, snapf, out, appid, build):
+    files, deleted, now, fp = changes(root, snapf)
+    if not files and not deleted:
+        print(0, fp)
+        return 0
+    meta = json.dumps({"version": 1, "appid": appid, "build": build, "fp": fp, "deleted": deleted,
+                       "files": len(files), "bytes": sum(now[r][0] for r in files)}).encode()
+    p = subprocess.Popen(["zstd", "-q", "-f", "-T0", "-3", "-o", out], stdin=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=p.stdin, mode="w|", format=tarfile.PAX_FORMAT) as t:
+            info = tarfile.TarInfo(META)
+            info.size, info.mode = len(meta), 0o644
+            t.addfile(info, io.BytesIO(meta))
+            for r in files:
+                t.add(os.path.join(root, r), arcname=r, recursive=False)
+    finally:
+        p.stdin.close()
+    if p.wait() != 0:
+        raise OSError("zstd не упаковал моды")
+    print(len(files) + len(deleted), fp)
+    return 0
+
+
+def safe(rel):
+    """Путь внутри папки игры: не абсолютный, без «..», без управляющих символов."""
+    n = os.path.normpath(rel)
+    return bool(rel) and not os.path.isabs(rel) and n != ".." and not n.startswith("../") \
+        and not re.search(r"[\x00-\x1f]", rel)
+
+
+def apply(root):
+    meta, count = {}, 0
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
+        for m in t:
+            if m.name == META:
+                meta = json.loads(t.extractfile(m).read())
+                continue
+            if not safe(m.name) or not (m.isfile() or m.isdir() or m.issym()):
+                print(f"пропущен небезопасный файл: {m.name!r}", file=sys.stderr)
+                continue
+            if m.issym() and (os.path.isabs(m.linkname) or not safe(os.path.join(os.path.dirname(m.name), m.linkname))):
+                print(f"пропущена ссылка наружу: {m.name!r}", file=sys.stderr)
+                continue
+            dest = os.path.join(root, m.name)
+            if os.path.islink(dest) or (m.issym() and os.path.lexists(dest)):
+                os.remove(dest)
+            t.extract(m, root, set_attrs=True)
+            count += not m.isdir()
+    for rel in meta.get("deleted") or []:
+        if safe(rel):
+            p = os.path.join(root, rel)
+            if os.path.isfile(p) or os.path.islink(p):
+                os.remove(p)
+                count += 1
+    print(count, meta.get("fp") or "0")
+    return 0
+
+
+def arch(appid, acf):
+    name = ""
+    try:
+        m = re.search(r'"name"\s*"([^"]*)"', open(acf, errors="replace").read())
+        name = m.group(1) if m else ""
+    except OSError:
+        pass
+    name = re.sub(r"[^\w .()&'+-]", "", name, flags=re.U).strip(" .")[:80] or f"app{appid}"
+    print(f"mod--{appid}--{name}")
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["snap"] and len(a) == 3:
+            sys.exit(snap(a[1], a[2]))
+        if a[:1] == ["diff"] and len(a) == 3:
+            sys.exit(diff(a[1], a[2]))
+        if a[:1] == ["pack"] and len(a) == 6 and a[4].isdigit():
+            sys.exit(pack(a[1], a[2], a[3], a[4], a[5]))
+        if a[:1] == ["apply"] and len(a) == 2:
+            sys.exit(apply(a[1]))
+        if a[:1] == ["arch"] and len(a) == 3 and a[1].isdigit():
+            sys.exit(arch(a[1], a[2]))
+    except (OSError, ValueError, tarfile.TarError) as e:
+        print(f"wolf-mods: ошибка {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-mods.py snap|diff|pack|apply|arch …")
+MODS
 
 w /usr/local/bin/wolf-parts.py <<'PARTS'
 #!/usr/bin/env python3
