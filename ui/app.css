@@ -286,6 +286,7 @@ button.danger { color: var(--error); }
 #open-games { flex: none; }
 .kind { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .kind.pfx { color: var(--syncing); }
+.kind.mod { color: var(--ready); }
 .kind.system { color: var(--muted); }
 tr.group.system td { color: var(--muted); font-weight: 500; }
 td.act { text-align: right; }
@@ -483,6 +484,7 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .game-tile .badge { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 6px; background: rgba(0, 0, 0, .66);
   color: #fff; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .game-tile .badge.family { background: rgba(122, 92, 255, .85); }
+.game-tile .badge.mods { background: rgba(23, 178, 106, .9); }
 .game-tile .name { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 8px 7px; font-size: 12px; font-weight: 600;
   color: #fff; background: linear-gradient(transparent, rgba(0, 0, 0, .85)); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }

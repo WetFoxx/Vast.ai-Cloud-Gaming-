@@ -122,7 +122,7 @@ def bad_host_reason(o):
 SYNC_VARS = {"steam_games": "SYNC_STEAM_GAMES", "other_games": "SYNC_OTHER_GAMES", "saves": "SYNC_SAVES"}
 # Вопрос wolf-setup.sh v4.6 на странице статуса: ask--new--АРХИВ (появилась игра — синхронизировать?),
 # ask--del--АРХИВ (игру удалили — удалить и из облака?); текст записи — название игры
-ASK = re.compile(r"^ask--(new|del)--((?:s?game)--.+)$")
+ASK = re.compile(r"^ask--(new|del|mod)--((?:s?game|mod)--.+)$")   # [v5.0] mod — «сохранять моды?» (mod--НОМЕР)
 
 
 def asks_of(s):
@@ -135,12 +135,13 @@ def asks_of(s):
     return sorted(out, key=lambda a: (a["ts"], a["archive"]))
 
 
-def vg_sync(games, saves_off):
+def vg_sync(games, saves_off, mods=None):
     """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment.
     [v4.8] "steam": "store" — игры Steam качает сам Steam: машина не скачивает их из облака, не выгружает и не
     спрашивает о них (игры из папки Games — по выбору, как раньше)."""
     return base64.b64encode(json.dumps({"games": [g for g in games if not g.startswith("sgame--")],
-                                        "saves_off": list(saves_off), "steam": "store"},
+                                        "saves_off": list(saves_off), "steam": "store",
+                                        "mods": mods or {"yes": [], "no": []}},
                                        ensure_ascii=False).encode()).decode()
 
 
@@ -148,7 +149,7 @@ def vg_play(play):
     """VG_PLAY для wolf-setup.sh v4.8 — игра из библиотеки: {"appid", "account" (steamid64), "name"}. Машина входит
     в Steam этим аккаунтом, пишет паспорт игры (Steam сам её скачает) и запускает её, когда скачалась."""
     return base64.b64encode(json.dumps({"appid": str(play["appid"]), "account": str(play["account"]),
-                                        "name": str(play.get("name") or "")[:200]},
+                                        "name": str(play.get("name") or "")[:200], "mods": bool(play.get("mods"))},
                                        ensure_ascii=False).encode()).decode()
 SYNC_DEFAULTS = {"steam_games": False, "other_games": True, "saves": True}
 
@@ -185,7 +186,7 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False):
             env[var] = "1" if sync[k] else "0"
     sel = (sync or {}).get("select")
     if isinstance(sel, dict):
-        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [])
+        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"))
     play = (sync or {}).get("play")
     if isinstance(play, dict) and play.get("appid") and play.get("account"):
         env["VG_PLAY"] = vg_play(play)

@@ -14,7 +14,8 @@ from vastapi import VastgameError, list_instances
 import wolfnode
 from wolfnode import ssh_run, ts_node
 
-KINDS = ("sgame", "game", "pfx")   # игра Steam, игра не из Steam, сохранения (префикс Proton)
+KINDS = ("sgame", "game", "pfx", "mod")   # игра Steam, игра не из Steam, сохранения (префикс Proton), моды (v5.0)
+MOD = re.compile(r"^mod--(\d+)--(.*)$")      # моды игры Steam: mod--НОМЕР--Название
 
 
 def listing():
@@ -38,8 +39,12 @@ def listing():
             service.append((base, info["size"]))
             continue
         rest = base.split("--", 1)[1]
-        games.append({"name": base, "kind": kind, "appid": rest if kind == "pfx" else None,
-                      "title": names.get(rest, "") if kind == "pfx" else rest,
+        mod = MOD.match(base)
+        if kind == "mod" and not mod:
+            service.append((base, info["size"]))
+            continue
+        games.append({"name": base, "kind": kind, "appid": rest if kind == "pfx" else mod[1] if mod else None,
+                      "title": names.get(rest, "") if kind == "pfx" else mod[2] if mod else rest,
                       "bytes": info["size"], "mtime": info["mtime"], "files": info["files"],
                       # служебное Steam (Proton, Runtime…) и его «сохранения» — нужно для запуска игр
                       "system": bool(TOOL.match(base)) or (kind == "pfx" and rest in TOOL_APPIDS)})
@@ -119,10 +124,40 @@ def remember(choice):
             "saves_off": sorted(k for k, v in sel["saves"].items() if not v)}
 
 
+def mods():
+    """{номер игры: {"name", "bytes", "mtime"}} — моды в облаке (v5.0); Drive не открылся — None."""
+    arch = drive.archives()
+    if arch is None:
+        return None
+    out = {}
+    for base, info in arch.items():
+        m = MOD.match(base)
+        if m:
+            out[m[1]] = {"name": base, "bytes": info["size"], "mtime": info["mtime"]}
+    return out
+
+
+def remember_mods(appid, yes):
+    """Ответ «сохранять моды этой игры?» — для следующих машин (VG_SYNC "mods")."""
+    sel = dict(settings.get("mods_sel") or {})
+    sel[str(appid)] = bool(yes)
+    settings.set("mods_sel", sel)
+
+
+def mods_answers():
+    """{"yes": [номера], "no": [номера]} — прежние ответы о модах, для машины."""
+    sel = settings.get("mods_sel") or {}
+    return {"yes": sorted(a for a, v in sel.items() if v and str(a).isdigit()),
+            "no": sorted(a for a, v in sel.items() if not v and str(a).isdigit())}
+
+
 def remember_answer(kind, archive, yes):
     """Ответ на вопрос машины — в выбор для следующих запусков: новая игра «да» — качать, «нет» — не качать;
     удалённая: «да» — её больше нет нигде, «нет» — осталась в облаке, но в следующий раз не качать (её удалили
     с машины — значит, сейчас она не нужна; включить можно в списке)."""
+    if kind == "mod":
+        remember_mods(archive.split("--", 1)[1], yes)
+        return
     sel = settings.get("sync_sel")
     sel = {"games": dict((sel or {}).get("games") or {}), "saves": dict((sel or {}).get("saves") or {})}
     if kind == "del" and yes:

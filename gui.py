@@ -292,6 +292,7 @@ class Api:
         if isinstance(select, dict):
             chosen = cloudgames.remember(select)
             chosen["games"] = [a for a in chosen["games"] if not a.startswith("sgame--")]   # [v4.8] их качает Steam
+            chosen["mods"] = cloudgames.mods_answers()                                     # [v5.0] «сохранять моды?»
             sync.update(steam_games=False,
                         other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
             settings.set("sync", sync)
@@ -727,10 +728,16 @@ class Api:
 
     # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
     def library(self, fresh=False):
-        """Библиотека: fresh=False — прошлый список (сразу), True — свежий из Steam (секунды). Без аккаунтов — пусто."""
+        """Библиотека: fresh=False — прошлый список (сразу), True — свежий из Steam (секунды). Без аккаунтов — пусто.
+        [v5.0] mods — моды игр в облаке {номер: {name, bytes, mtime}} (свежие — с Drive), mods_play — выбор «с модами»."""
         if not steamlib.accounts():
             return {"accounts": [], "games": [], "errors": []}
-        return (None if fresh else steamlib.cached()) or steamlib.library()
+        lib = (None if fresh else steamlib.cached()) or steamlib.library()
+        mods = cloudgames.mods() if fresh and drive.token() else None
+        if mods is not None:
+            settings.set("mods_known", mods)
+        return {**lib, "mods": mods if mods is not None else settings.get("mods_known") or {},
+                "mods_play": settings.get("mods_play") or {}}
 
     def _library_game(self, game):
         """Игра из библиотеки, которую можно запустить этим аккаунтом: {"appid", "account", "name", "cap"} или None.
@@ -744,8 +751,12 @@ class Api:
             return None
         if acc not in {a["id"] for a in steamlib.accounts()}:
             return None
+        mods = bool(game.get("mods"))
+        played = dict(settings.get("mods_play") or {})
+        played[appid] = mods                      # «с модами / чистая» — запомнить для этой игры
+        settings.set("mods_play", played)
         return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or "",
-                "hero": g.get("hero") or "", "header": g.get("header") or ""}
+                "hero": g.get("hero") or "", "header": g.get("header") or "", "mods": mods}
 
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}

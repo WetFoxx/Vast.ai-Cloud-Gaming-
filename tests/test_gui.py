@@ -409,7 +409,7 @@ class TestPlay(unittest.TestCase):
             self.assertEqual(self.api.play(5, None, None, "ru", None, False, None, {"appid": "20", "account": A}), {"ok": True})
             wait_done(self.api, session=True)
         self.assertEqual(json.loads(base64.b64decode(self.body["env"]["VG_PLAY"])),
-                         {"appid": "20", "account": A, "name": "Twenty"})     # семейная — тоже можно
+                         {"appid": "20", "account": A, "name": "Twenty", "mods": False})     # семейная — тоже можно
         self.assertEqual(gui.settings.get("play_now")["name"], "Twenty")
         # Следующая аренда без игры — просто рабочий стол, прежняя игра забыта
         self.wait_idle()
@@ -429,7 +429,7 @@ class TestPlay(unittest.TestCase):
         env = self.body["env"]
         # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": [], "saves_off": ["pfx--1"], "steam": "store"})
+                         {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}})
         self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
         # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
         self.wait_idle()

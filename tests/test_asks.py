@@ -126,6 +126,43 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(settings.get("sync_sel")["games"], {"sgame--N": True, "sgame--M": False, "game--K": False})
 
 
+class TestMods(unittest.TestCase):
+    """[v5.0] Моды в облаке: какой архив от какой игры, ответы «сохранять моды?» и выбор «с модами» — к машине."""
+
+    def setUp(self):
+        settings.FILE.unlink(missing_ok=True)
+
+    def test_listing_names_game_by_archive(self):
+        arch = {"mod--2424420--Avatar Legends The Fighting Game": {"size": 340, "mtime": "2026-10-01", "files": ["x"]},
+                "mod--bad": {"size": 1, "mtime": "", "files": ["y"]}, "steam-state": {"size": 5, "mtime": "", "files": []}}
+        with mock.patch.object(cloudgames.drive, "token", lambda: "t"), \
+             mock.patch.object(cloudgames.drive, "archives", lambda: arch), \
+             mock.patch.object(cloudgames.steamnames, "for_archives", lambda a: {}):
+            data = cloudgames.listing()
+            mods = cloudgames.mods()
+        [g] = [g for g in data["games"] if g["kind"] == "mod"]
+        self.assertEqual((g["appid"], g["title"], g["bytes"]), ("2424420", "Avatar Legends The Fighting Game", 340))
+        self.assertIn("mod--bad", data["service"]["names"])                 # не по образцу — не трогаем
+        self.assertEqual(mods, {"2424420": {"name": "mod--2424420--Avatar Legends The Fighting Game", "bytes": 340,
+                                            "mtime": "2026-10-01"}})
+
+    def test_answers_go_to_next_machine(self):
+        cloudgames.remember_answer("mod", "mod--10", True)
+        cloudgames.remember_answer("mod", "mod--20", False)
+        cloudgames.remember_answer("mod", "mod--30", True)
+        cloudgames.remember_answer("mod", "mod--30", False)                 # передумал
+        self.assertEqual(cloudgames.mods_answers(), {"yes": ["10"], "no": ["20", "30"]})
+        body = core.rental_body({"hash_id": "h"}, 100, sync={"select": {"games": [], "saves_off": [],
+                                                                       "mods": cloudgames.mods_answers()},
+                                                            "play": {"appid": "10", "account": "76561198059309761", "mods": True}})
+        self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_SYNC"]))["mods"], {"yes": ["10"], "no": ["20", "30"]})
+        self.assertTrue(json.loads(base64.b64decode(body["env"]["VG_PLAY"]))["mods"])
+
+    def test_mod_question_is_recognised(self):
+        s = {"ask--mod--mod--2424420": (5, "ask", "Avatar Legends"), "mod--2424420--Avatar Legends": (6, "ok", "")}
+        self.assertEqual(core.asks_of(s), [{"kind": "mod", "archive": "mod--2424420", "name": "Avatar Legends", "ts": 5}])
+
+
 class TestRental(unittest.TestCase):
     def test_vg_sync_survives_spaces(self):
         body = core.rental_body({"hash_id": "h"}, 100, sync={"steam_games": False, "other_games": True, "saves": True,
@@ -136,14 +173,15 @@ class TestRental(unittest.TestCase):
         self.assertNotIn(" ", env["VG_SYNC"])
         # [v4.8] игры Steam качает Steam: в выборе их нет, машине сказано "steam": "store"
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": ["game--The Blood of Dawnwalker"], "saves_off": ["pfx--1"], "steam": "store"})
+                         {"games": ["game--The Blood of Dawnwalker"], "saves_off": ["pfx--1"], "steam": "store",
+                          "mods": {"yes": [], "no": []}})
         self.assertNotIn("VG_PLAY", env)
 
     def test_library_game_goes_to_machine(self):
         body = core.rental_body({"hash_id": "h"}, 100, sync={"select": {"games": [], "saves_off": []},
                                 "play": {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends"}})
         self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_PLAY"])),
-                         {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends"})
+                         {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends", "mods": False})
 
     def test_without_select_no_vg_sync(self):
         self.assertNotIn("VG_SYNC", core.rental_body({"hash_id": "h"}, 100, sync={"saves": True})["env"])

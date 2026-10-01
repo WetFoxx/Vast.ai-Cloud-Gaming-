@@ -815,7 +815,10 @@ $("rent").addEventListener("click", async () => {
     gpu: o.gpu, country: o.country, price: money(o.price), balance: money(o.balance), hours: num(o.hours || 0),
   });
   text += "\n" + t("confirm.rent.disk", { gb: disk });
-  if (playGame && !replaceMode) text += "\n\n" + t("confirm.rent.game", { name: playGame.name, account: accName(playGame.account) });
+  if (playGame && !replaceMode) {
+    text += "\n\n" + t("confirm.rent.game", { name: playGame.name, account: accName(playGame.account) });
+    if (playGame.modsInfo) text += " " + t(playGame.mods ? "confirm.rent.mods" : "confirm.rent.clean");
+  }
   const select = syncSelect();
   if (select) {
     const on = syncRows.filter((r) => r.game && r.sync_game);
@@ -863,7 +866,7 @@ $("rent").addEventListener("click", async () => {
     startProgress();
     return;
   }
-  const game = playGame ? { appid: playGame.appid, account: playGame.account } : null;
+  const game = playGame ? { appid: playGame.appid, account: playGame.account, mods: !!playGame.mods } : null;
   const r = await api().play(o.id, null, disk, LANG, spare, docker, select, game);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   playNow = playGame ? { ...playGame } : null;
@@ -888,8 +891,10 @@ function startGame(g) {
     .concat(g.family.filter((id) => !g.accounts.includes(id)).map((id) => ({ id, family: true })))
     .filter((c) => !((libData && libData.accounts) || []).find((a) => a.id === c.id && a.expired));
   if (!choices.length) { steamLogin(null); return; }
+  const mods = (libData && libData.mods && libData.mods[g.appid]) || null;
+  const was = libData && libData.mods_play ? libData.mods_play[g.appid] : undefined;
   playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
-               header: g.header || "", account: choices[0].id, choices };
+               header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: !!mods && was !== false };
   replaceMode = false; replaceBlocked = false;
   openOffers();
 }
@@ -918,6 +923,17 @@ function renderOffersGame() {
     }
     main.appendChild(seg);
   }
+  if (playGame.modsInfo) {
+    const mi = playGame.modsInfo;
+    const seg = el("div", { className: "seg" });
+    seg.appendChild(el("span", { className: "sub" }, t("play.offers.mods", { size: size(mi.bytes), date: mi.mtime || "" })));
+    for (const [on, key] of [[true, "play.offers.with_mods"], [false, "play.offers.clean"]]) {
+      const b = el("button", { className: "chip" + (playGame.mods === on ? " on" : "") }, t(key));
+      b.addEventListener("click", () => { playGame.mods = on; renderOffersGame(); });
+      seg.appendChild(b);
+    }
+    main.appendChild(seg);
+  }
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
   main.appendChild(none);
@@ -931,7 +947,8 @@ function renderPlay(play, game, streaming) {
   if (!play) return;
   const name = (game && game.name) || "";
   const key = play.state === "wait" ? (play.text === "login" ? "login" : play.text === "other" ? "other" : "steam")
-    : play.state === "down" ? "download" : play.state === "up" ? "launch" : play.state === "ok" ? "running" : "err";
+    : play.state === "down" ? "download" : play.state === "up" ? (play.text === "mods" ? "mods" : "launch")
+    : play.state === "ok" ? "running" : "err";
   box.innerHTML = "";
   box.classList.toggle("warn", key === "err" || key === "other");
   if (game && game.cap) {
@@ -1616,6 +1633,7 @@ function gameTile(g) {
   const badges = el("div", { className: "badges" });
   for (const id of g.accounts) badges.appendChild(el("span", { className: "badge" }, accName(id)));
   if (!g.accounts.length && g.family.length) badges.appendChild(el("span", { className: "badge family" }, t("library.family")));
+  if (libData && libData.mods && libData.mods[g.appid]) badges.appendChild(el("span", { className: "badge mods" }, t("library.mods")));
   tile.appendChild(badges);
   tile.appendChild(el("div", { className: "name" }, g.name || "#" + g.appid));
   return tile;
@@ -1785,6 +1803,7 @@ async function openGames() {
 // Номер игры не из Steam, добавленной в Steam ярлыком, — большой (старший бит установлен)
 const SHORTCUT_APPID = 2147483648;
 function gameTitle(g) {
+  if (g.kind === "mod") return g.title || `appid ${g.appid}`;
   if (g.kind !== "pfx") return g.title;
   if (g.title) return `${g.title} (appid ${g.appid})`;
   return Number(g.appid) >= SHORTCUT_APPID ? t("games.pfx_shortcut", { appid: g.appid }) : `appid ${g.appid}`;
@@ -1803,7 +1822,7 @@ function renderGames() {
   $("games-search").hidden = d.games.length < 8;          // поиск нужен, когда игр много
   const q = $("games-search").hidden ? "" : $("games-search").value.trim().toLowerCase();
   // Служебное Steam (Proton, Runtime…) — отдельной свёрнутой группой в конце: нужно для запуска игр
-  const order = { sgame: 0, game: 1, pfx: 2, system: 3 };
+  const order = { sgame: 0, game: 1, pfx: 2, mod: 3, system: 4 };
   const grp = (g) => (g.system ? "system" : g.kind);
   const shown = d.games
     .filter((g) => !q || gameTitle(g).toLowerCase().includes(q) || g.name.toLowerCase().includes(q))
@@ -1853,7 +1872,8 @@ function renderGames() {
 }
 
 async function removeGame(g) {
-  let text = t("games.confirm.text", { kind: t("games.kind." + g.kind), title: gameTitle(g), size: size(g.bytes) });
+  let text = g.kind === "mod" ? t("games.confirm.mod", { title: gameTitle(g), size: size(g.bytes) })
+    : t("games.confirm.text", { kind: t("games.kind." + g.kind), title: gameTitle(g), size: size(g.bytes) });
   if (g.system) text = t("games.confirm.system") + "\n\n" + text;
   else if (g.kind === "pfx") text = t("games.confirm.saves") + "\n\n" + text;
   if (!(await ask({ title: t("games.confirm.title"), text, yes: t("games.remove"), no: t("btn.cancel") }))) return;
@@ -2284,7 +2304,8 @@ function demoLibrary() {
     games: [g(1245620, "ELDEN RING", [A, B], [], 9), g(1091500, "Cyberpunk 2077", [A], [], 8), g(1145350, "Hades II", [A], [], 7),
       g(1086940, "Baldur's Gate 3", [B], [], 6), g(1174180, "Red Dead Redemption 2", [], [A]), g(292030, "The Witcher 3", [A]),
       g(570, "Dota 2", [A, B]), g(2050650, "Resident Evil 4", [B]), g(9999999, "Неизвестная игра", [A])],
-    errors: [], at: Math.floor(Date.now() / 1000) };
+    errors: [], at: Math.floor(Date.now() / 1000),
+    mods: { "1245620": { name: "mod--1245620--ELDEN RING", bytes: 340e6, mtime: "2026-09-28" } }, mods_play: {} };
 }
 
 function demoGames() {
@@ -2296,6 +2317,7 @@ function demoGames() {
                    g("pfx--3751260", "pfx", "The Blood of Dawnwalker", "3751260", 141, "2026-09-23"),
                    g("pfx--1493710", "pfx", "", "1493710", 109, "2026-09-23"),
                    g("pfx--3001234567", "pfx", "", "3001234567", 12, "2026-09-20"),
+                   g("mod--1245620--ELDEN RING", "mod", "ELDEN RING", "1245620", 340, "2026-09-28"),
                    ...Array.from({ length: 12 }, (_, i) => g("sgame--Game " + (i + 1), "sgame", "Game " + (i + 1), null, 1000 * (i + 3), "2026-09-1" + (i % 10)))],
            service: { names: ["identity", "steam-cache", "steam-client", "steam-state"], bytes: 1.4e9 } };
 }

@@ -1,5 +1,5 @@
 # asks.py — вопросы машины человеку (wolf-setup.sh v4.6): «появилась игра — синхронизировать её?» и «игру удалили
-# с машины — удалить и из облака?». Машина пишет их на свою страницу статуса (записи ask--new--АРХИВ и
+# с машины — удалить и из облака?», [v5.0] «в игре появились моды — сохранять?». Машина пишет их на свою страницу статуса (записи ask--new--АРХИВ и
 # ask--del--АРХИВ, текст — название игры), приложение сообщает о них заметно — уведомлением со звуком и карточкой
 # поверх всех окон, в том числе поверх Moonlight, — и отвечает машине командой answer.
 # Без ответа ничего не теряется: новая игра выгрузится при «Закончить», удалённая останется в облаке.
@@ -58,7 +58,7 @@ def announce(asks, lang=None):
 def answer(ip, kind, archive, yes, on_notice=None):
     """Ответ машине и запомнить выбор для следующих запусков. «Да» на «удалили» — машина убирает из облака и игру,
     и её сохранения (в корзину Google Drive, 30 дней)."""
-    if kind not in ("new", "del") or not isinstance(archive, str) or not core.ASK.match(f"ask--{kind}--{archive}"):
+    if kind not in ("new", "del", "mod") or not isinstance(archive, str) or not core.ASK.match(f"ask--{kind}--{archive}"):
         raise VastgameError("Непонятный вопрос", key="ask.bad")
     if not ip:
         raise VastgameError("Машина не отвечает", key="ask.no_machine")
