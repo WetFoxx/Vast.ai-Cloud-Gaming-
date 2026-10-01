@@ -23,7 +23,10 @@ CONF=$C/sunshine-docker.conf
 SUN=sunshine
 STATE=$C/sunshine_state.json
 DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1 | tr -dc 0-9)
-if [ -n "$DRV" ] && [ "$DRV" -lt 580 ] && [ -x /opt/sunshine-cuda12/sunshine ]; then
+# [0.3.1] и видеокарты поколения Pascal (GTX 10xx, compute 6.x): CUDA 13 их больше не поддерживает — у нынешней
+# Sunshine на них «NVENC не работает» (живой тест 2026-10-01, 2× GTX 1070), а CUDA 12.9 — поддерживает
+CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -dc 0-9)
+if { { [ -n "$DRV" ] && [ "$DRV" -lt 580 ]; } || { [ -n "$CC" ] && [ "$CC" -lt 75 ]; }; } && [ -x /opt/sunshine-cuda12/sunshine ]; then
   SUN=/opt/sunshine-cuda12/sunshine
   STATE=$C/sunshine_state_cuda12.json
   [ -s "$STATE" ] || { [ -s "$C/sunshine_state.json" ] && cp "$C/sunshine_state.json" "$STATE" && chown "$DU:" "$STATE"; }
