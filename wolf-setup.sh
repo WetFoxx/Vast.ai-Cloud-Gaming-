@@ -113,8 +113,9 @@
 # yes|no). Выключен — моды остаются только на этой машине.
 # [v5.2] У ссылок в папке игры время не сравнивается (распаковка ставит им «сейчас») — те же моды не выгружаются повторно.
 # [v5.3] Вышли из аккаунта Steam на машине — его данные (userdata/НОМЕР) при выключении убираются и уходят из облака
-# вместе со steam-state (вход и пропуск Steam убирает сам). Сравнение — со списком аккаунтов при загрузке; аккаунт,
-# вошедший за сессию и вышедший, — тоже. Сохранения (pfx--) не трогаются.
+# вместе со steam-state (вход и пропуск Steam убирает сам): убирается папка любого аккаунта, которого нет в списке
+# входа Steam (loginusers.vdf), — и вышедшего за сессию, и раньше. Только если steam-state при загрузке восстановлен.
+# Сохранения (pfx--) не трогаются.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -1325,8 +1326,8 @@ steam_off() {
   for _ in {1..60}; do pgrep -x steam >/dev/null || return 0; sleep 1; done
   return 1
 }
-# [v5.3] Из аккаунта Steam за сессию вышли (Steam сам убрал его вход и пропуск) — убрать и его данные
-# userdata/НОМЕР, иначе они уедут в облако со steam-state. Только при закрытом Steam
+# [v5.3] Из аккаунта Steam вышли (Steam сам убрал его вход и пропуск) — убрать и его данные userdata/НОМЕР,
+# иначе они останутся в облаке со steam-state. Только при закрытом Steam и восстановленном при загрузке steam-state
 steam_gone() {
   local out
   [ -n "$SR" ] && [ -s "$S/steam.seen" ] || return 0
@@ -1406,7 +1407,7 @@ boot() {
   rm -f "$S/steam.seen"
   ( unpack steam-state ) || echo steam-state >> "$FL"
   if sr; then
-    # [v5.3] аккаунты Steam при загрузке — при выключении с ними сравнивается, из какого вышли
+    # [v5.3] steam-state восстановлен — при выключении можно убрать данные аккаунтов, из которых вышли
     grep -qx steam-state "$FL" || log "$(python3 /usr/local/bin/wolf-steam.py seen "$DH/$SR" "$S/steam.seen" 2>&1)"
     p=()
     if [ "$SV" = 1 ]; then
@@ -2323,8 +2324,8 @@ w /usr/local/bin/wolf-steam.py <<'STEAMPY'
 #   manifest STEAM APPID STEAMID НАЗВАНИЕ   паспорт игры: Steam сам скачает её при запуске. Игра уже на диске — не трогаем
 #   state STEAM APPID             «флаги скачано всего папка»: ход скачивания по файлам (Steam пишет в паспорт редко)
 #   seen STEAM ФАЙЛ               [v5.3] аккаунты (loginusers.vdf) и папки userdata при загрузке → ФАЙЛ (JSON)
-#   gone STEAM ФАЙЛ               [v5.3] при выключении (Steam закрыт): аккаунт был при загрузке или появился за сессию,
-#                                 а в loginusers.vdf его больше нет (из него вышли) — убрать userdata/НОМЕР
+#   gone STEAM ФАЙЛ               [v5.3] при выключении (Steam закрыт): аккаунта нет в loginusers.vdf (из него вышли —
+#                                 за сессию или раньше) — убрать userdata/НОМЕР. ФАЙЛ (seen) — steam-state восстановлен
 #   logon STEAM STEAMID [С]       on — Steam вошёл этим аккаунтом, other — другим, off — не вошёл (по connection_log;
 #                                 С — unix-время: строки раньше не считаются). [v4.9] Вход засчитывается, даже если
 #                                 после него в журнале строки переподключения (живой случай 2026-10-01: Steam качал,
@@ -2409,9 +2410,7 @@ def seen(root, rec):
 
 def gone(root, rec):
     try:
-        was = json.loads(Path(rec).read_text())
-        wasacc = {str(int(s) - BASE) for s in was["users"]}
-        before = set(was["dirs"])
+        json.loads(Path(rec).read_text())["users"]
     except (OSError, ValueError, KeyError, TypeError):
         print("аккаунты Steam: нет записи с загрузки — данные аккаунтов не трогаю")
         return 0
@@ -2425,9 +2424,8 @@ def gone(root, rec):
         n = d.name
         if not n.isdigit() or n == "0" or n in nowacc or d.is_symlink() or not d.is_dir():
             continue
-        if n in wasacc or n not in before:           # вышел за сессию (или вошёл и вышел) — старые чужие папки не трогаем
-            shutil.rmtree(d)
-            print(f"аккаунт Steam [U:1:{n}]: из него вышли — его данные (userdata) убраны, из облака уйдут со steam-state")
+        shutil.rmtree(d)
+        print(f"аккаунт Steam [U:1:{n}]: из него вышли — его данные (userdata) убраны, из облака уйдут со steam-state")
     return 0
 
 

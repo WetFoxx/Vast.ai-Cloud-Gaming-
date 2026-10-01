@@ -332,12 +332,12 @@ class TestSignOut(unittest.TestCase):
         self.lu(A)
         code, out = py("gone", self.root, self.rec)
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.left(), ["0", "555", "99044033"])
+        self.assertEqual(self.left(), ["0", "99044033"])
         self.assertIn("692993918", out)
 
-    def test_nobody_signed_out(self):
-        py("gone", self.root, self.rec)
-        self.assertEqual(self.left(), ["0", "555", "692993918", "99044033"])
+    def test_nobody_signed_out_only_old_leftover_removed(self):
+        py("gone", self.root, self.rec)                            # 555 — вышли раньше (вход уже не в списке)
+        self.assertEqual(self.left(), ["0", "692993918", "99044033"])
 
     def test_session_account_in_and_out(self):
         (self.ud / "39735281/config").mkdir(parents=True)          # вошёл за сессию и вышел — в списке его нет
@@ -346,7 +346,7 @@ class TestSignOut(unittest.TestCase):
         (self.root / "config/loginusers.vdf").write_text(text.replace(
             '"users"\n{', '"users"\n{\n\t"' + str(76561197960265728 + 1234) + '"\n\t{\n\t\t"AccountName"\t\t"c"\n\t}'))
         py("gone", self.root, self.rec)
-        self.assertEqual(self.left(), ["0", "1234", "555", "692993918", "99044033"])
+        self.assertEqual(self.left(), ["0", "1234", "692993918", "99044033"])
 
     def test_unreadable_list_deletes_nothing(self):
         (self.root / "config/loginusers.vdf").write_text('"users"\n{\n\t"AccountName" broken')
