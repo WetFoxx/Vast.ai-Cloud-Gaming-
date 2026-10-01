@@ -44,6 +44,7 @@
 #define VG_MAX 8
 #define MAXFD 4096
 #define DEFAULT_SOCK "/tmp/.vgpad/sock"
+#define PRODUCER_WAIT_MS 1000  /* сколько Sunshine ждёт посредника на одно событие геймпада */
 
 /* Кадры обмена с посредником: u32 длина данных, u8 тип, данные */
 enum { T_CREATE = 1, T_ASSIGNED = 2, T_EVENTS = 3, T_OPEN = 4, T_DESC = 5, T_ERROR = 6 };
@@ -383,8 +384,10 @@ int dup3(int fd, int to, int flags) {
 ssize_t write(int fd, const void *buf, size_t n) {
     struct fdent *e = ent(fd);
     if (e && e->kind == K_PRODUCER) {
-        /* события геймпада → посреднику; у несозданного устройства — выбросить */
-        if (e->pad >= 0 && n && n <= 4096 && send_frame(fd, T_EVENTS, buf, (uint32_t)n, 20)) {
+        /* события геймпада → посреднику; у несозданного устройства — выбросить. Ждём посредника до 1 с: он бывает
+         * занят до 50 мс на «зависшем» читателе (потом его отбрасывает), а ошибку Sunshine считает концом геймпада
+         * до конца сессии (было 20 мс — живой тест 2026-10-01: 7 ошибок при запуске игры, и геймпада больше нет) */
+        if (e->pad >= 0 && n && n <= 4096 && send_frame(fd, T_EVENTS, buf, (uint32_t)n, PRODUCER_WAIT_MS)) {
             errno = EIO;
             return -1;
         }
