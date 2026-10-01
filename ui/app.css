@@ -512,6 +512,13 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .game-banner .gb-text { position: relative; padding: 18px 22px; }
 .game-banner h1 { color: #fff; margin: 0; }
 .game-banner .sub { color: rgba(255, 255, 255, .78); }
+.mods-save { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 12px; cursor: pointer;
+  background: var(--card-2); border: 1px solid var(--border); transition: border-color .25s, box-shadow .25s; }
+.mods-save > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.mods-save b { font-size: 14px; }
+.mods-save .sub { font-size: 12px; }
+.mods-save input[type=checkbox] { margin: 0; }
+.mods-save.on { border-color: rgba(23, 178, 106, .55); box-shadow: 0 0 18px rgba(23, 178, 106, .12); }
 /* Машины нет: крупно баланс и «Играть» по центру */
 .hero.empty { align-items: stretch; text-align: center; padding: 26px 20px 22px; }
 .hero.empty .hero-top { flex-direction: column; align-items: center; gap: 6px; }

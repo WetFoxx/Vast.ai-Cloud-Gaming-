@@ -934,10 +934,29 @@ function renderOffersGame() {
     }
     main.appendChild(seg);
   }
+  main.appendChild(modsSaveBlock(playGame.appid));
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
   main.appendChild(none);
   box.appendChild(main);
+}
+
+// [v5.1] Тумблер «Сохранять моды в облако» у игры — заметный блок (карточка игры перед арендой и главный во время игры)
+function modsSaveOn(appid) { return !!(libData && libData.mods_save && libData.mods_save[appid]); }
+function modsSaveBlock(appid) {
+  const on = modsSaveOn(appid);
+  const box = el("label", { className: "mods-save" + (on ? " on" : "") });
+  const cb = el("input", { type: "checkbox", checked: on });
+  const txt = el("div");
+  txt.append(el("b", {}, t("mods.save")), el("span", { className: "sub" }, t(on ? "mods.save.hint" : "mods.save.off")));
+  box.append(txt, cb);
+  cb.addEventListener("change", async () => {
+    if (libData) libData.mods_save = { ...(libData.mods_save || {}), [appid]: cb.checked };
+    box.classList.toggle("on", cb.checked);
+    txt.lastChild.textContent = t(cb.checked ? "mods.save.hint" : "mods.save.off");
+    if (!DEMO) await api().set_mods_save(appid, cb.checked);
+  });
+  return box;
 }
 
 // Ход игры на главном (из status.play или live().play)
@@ -970,6 +989,7 @@ function renderPlay(play, game, streaming) {
     main.append(bar, el("div", { className: "sub" }, `${pct}% · ${size(pg.done)} / ${size(pg.total)}`
       + (sp ? " · " + t("arch.speed", { speed: size(sp) }) + (sp > 0 ? " · " + leftText((pg.total - pg.done) / sp) : "") : "")));
   }
+  if (game && game.appid && ["download", "launch", "mods", "running"].includes(key)) main.appendChild(modsSaveBlock(game.appid));
   if (["login", "other", "err", "running"].includes(key) && current && current.status.links) {
     main.appendChild(button(t("play.open"), () => startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop"), key !== "running"));
   }

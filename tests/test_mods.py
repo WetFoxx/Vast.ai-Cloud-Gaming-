@@ -157,26 +157,29 @@ mkdir -p "$S/van" "$S/x"; : > "$S/sel.on"; : > "$S/sel.store"
         script = script.replace('( NOW=1 "$0" mods "$a" >/dev/null 2>&1 & )', 'echo "PUSH $a"')
         return m.run(script)
 
-    def test_snapshot_ask_and_push(self):
+    def test_toggle_decides_upload(self):
+        # [v5.1] вопросов нет: моды уходят в облако, только если у игры включён тумблер «Сохранять моды»
         m = self.machine()
         game = m.d / "home/sa/steamapps/common/Ten"
         out = self.run_m(m, "mods_scan; ls $S/van")
         self.assertIn("10.tsv", out)
         (game / "mod.dll").write_bytes(b"M")
-        # Ответа ещё нет: после выхода из игры — вопрос; при выключении — выгрузить (ничего не теряем)
-        out = self.run_m(m, 'mods_check 10; cat "$S/st/ask--mod--mod--10"; mods_push')
-        self.assertIn("ask|Ten", out)
+        # Тумблер выключен — ни вопроса, ни выгрузки (ни после игры, ни при выключении)
+        out = self.run_m(m, "mods_check 10; mods_push; ls $S/st; echo END")
+        self.assertNotIn("ask--mod", out)
+        self.assertNotIn("PACK", out)
+        self.assertNotIn("PUSH", out)
+        # Включён — после выхода из игры сразу в фон, при выключении — упаковать
+        on = 'echo 10 > "$S/sel.mods_yes"'
+        out = self.run_m(m, "mods_check 10; mods_push", sel=on)
+        self.assertIn("PUSH 10", out)
         self.assertIn("PACK 10 Ten", out)
-        # «Да» — сразу в фон; «нет» — ни вопроса, ни выгрузки
-        self.assertIn("PUSH 10", self.run_m(m, "rm -f $S/st/ask*; mods_check 10", sel='echo 10 > "$S/sel.mods_yes"'))
-        out = self.run_m(m, "rm -f $S/st/ask*; mods_check 10; mods_push; ls $S/st", sel='echo 10 > "$S/sel.mods_no"')
-        self.assertNotIn("ask--mod", out)
-        self.assertNotIn("PACK", out)
         # Уже в облаке то же самое (отпечаток совпал) — не выгружаем
-        out = self.run_m(m, '''rm -f "$S"/sel.mods_* "$S"/st/ask*; read -r c fp j < <(python3 "%s" diff "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"); echo "$fp" > "$S/van/10.fp"
-                               mods_push; mods_check 10; ls $S/st''' % PY)
+        same = ('read -r c fp j < <(python3 "%s" diff "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"); '
+                'echo "$fp" > "$S/van/10.fp"; mods_push; mods_check 10') % PY
+        out = self.run_m(m, same, sel=on)
         self.assertNotIn("PACK", out)
-        self.assertNotIn("ask--mod", out)
+        self.assertNotIn("PUSH", out)
 
     def test_steam_update_blocks_upload(self):
         m = self.machine()
@@ -193,15 +196,6 @@ mkdir -p "$S/van" "$S/x"; : > "$S/sel.on"; : > "$S/sel.store"
         m = self.machine()
         out = self.run_m(m, 'rm -f "$S/sel.store"; mods_scan; ls $S/van; echo END')
         self.assertNotIn("10.tsv", out)
-
-    def test_only_junk_is_not_asked(self):
-        m = self.machine()
-        self.run_m(m, "mods_scan")
-        (m.d / "home/sa/steamapps/common/Ten/output.log").write_text("x")
-        out = self.run_m(m, "mods_check 10; mods_push; ls $S/st; echo END")
-        self.assertNotIn("ask--mod", out)
-        self.assertNotIn("PACK", out)
-
 
 class TestScript(unittest.TestCase):
     def test_wiring(self):

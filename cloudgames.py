@@ -138,17 +138,17 @@ def mods():
 
 
 def remember_mods(appid, yes):
-    """Ответ «сохранять моды этой игры?» — для следующих машин (VG_SYNC "mods")."""
+    """Тумблер «Сохранять моды в облако» этой игры — для следующих машин (VG_SYNC "mods")."""
     sel = dict(settings.get("mods_sel") or {})
     sel[str(appid)] = bool(yes)
     settings.set("mods_sel", sel)
 
 
 def mods_answers():
-    """{"yes": [номера], "no": [номера]} — прежние ответы о модах, для машины."""
+    """{"yes": [номера], "no": []} — игры с включённым тумблером «Сохранять моды в облако», для машины (v5.1: вопросов
+    нет; выключенный тумблер — моды остаются на машине)."""
     sel = settings.get("mods_sel") or {}
-    return {"yes": sorted(a for a, v in sel.items() if v and str(a).isdigit()),
-            "no": sorted(a for a, v in sel.items() if not v and str(a).isdigit())}
+    return {"yes": sorted(a for a, v in sel.items() if v and str(a).isdigit()), "no": []}
 
 
 def remember_answer(kind, archive, yes):

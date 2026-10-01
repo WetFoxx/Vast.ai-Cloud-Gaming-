@@ -704,6 +704,24 @@ class TestUpdateInstall(unittest.TestCase):
             self.assertEqual(gui.Api().settings()["update"], told)
 
 
+class TestModsSave(unittest.TestCase):
+    """[v5.1] Тумблер «Сохранять моды в облако»: запоминается для следующих машин; работающей — сразу говорим."""
+
+    def test_toggle_remembered_and_sent(self):
+        api, calls = gui.Api(), []
+        gui.settings.set("mods_sel", None)
+        with mock.patch.object(gui.core, "list_instances", lambda: []):
+            self.assertEqual(api.set_mods_save("10", True), {"ok": True, "machine": False})
+        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": ["10"], "no": []})
+        with mock.patch.object(gui.core, "list_instances", lambda: [{"id": 1}]), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "n")), \
+             mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args, **kw: calls.append((cmd, args)) or (0, "")):
+            self.assertEqual(api.set_mods_save("10", False), {"ok": True, "machine": True})
+        self.assertEqual(calls, [("answer", ["mod", "mod--10", "no"])])
+        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": [], "no": []})
+        self.assertIn("error", api.set_mods_save("10; rm", True))
+
+
 class TestReset(unittest.TestCase):
     def test_reset_removes_keys_services_and_settings(self):
         # Как стираются ключи — tests/test_keystore.py (TestWipe); здесь — что сброс делает всё остальное
