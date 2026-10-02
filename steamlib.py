@@ -261,12 +261,14 @@ def art(appids):
     return {str(a): known.get(str(a)) or {} for a in appids}
 
 
-def library():
+def library(only=None):
     """Свежая библиотека всех аккаунтов: {"accounts": [...], "games": [{"appid", "name", "accounts": [steamid...],
     "family": [steamid...], "minutes", "last", "cap", "hero", "header"}], "errors": [{"id", "key"}]}.
     Аккаунт, вход которого истёк, помечается (expired) — его игры берутся из прошлого списка. Уже обновляет
-    другой поток — прошлый список (он вот-вот обновится)."""
-    if not _lock.acquire(blocking=False):
+    другой поток — прошлый список (он вот-вот обновится).
+    [0.4.5] only — steamid только что добавленного аккаунта: из Steam — только его игры, у остальных — прошлый
+    список. Идёт полное обновление — дождаться его (оно могло начаться до входа и нового аккаунта не знать)."""
+    if not _lock.acquire(blocking=bool(only), timeout=120 if only else -1):
         return cached() or {"accounts": accounts(), "games": [], "errors": []}
     try:
         old = {g["appid"]: g for g in (cached() or {}).get("games", [])}
@@ -280,6 +282,8 @@ def library():
             g["last"] = max(g["last"], last or 0)
 
         def fetch(sid):
+            if only and sid != only:
+                return None, None                    # не тот аккаунт — его прошлый список (ниже)
             token = access(sid)
             return _owned(sid, token), _family(sid, token)
 
@@ -291,7 +295,8 @@ def library():
             sid = a["id"]
             try:
                 own, fam = f.result()
-                _mark(sid, False)
+                if own is not None:
+                    _mark(sid, False)
             except SteamExpired:
                 _mark(sid, True)
                 errors.append({"id": sid, "key": "steam.expired"})

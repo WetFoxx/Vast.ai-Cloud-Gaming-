@@ -20,7 +20,7 @@ import moonlight
 import paths
 import setup   # функции мастера: при import он НЕ запускается (защищён __main__)
 import sshkey
-from vastapi import KEY_FILE, VastgameError, call, check_key, my_template
+from vastapi import KEY_FILE, TEMPLATE_TTL, VastgameError, call, check_key, my_template
 
 
 def _step(id_, level, key, **params):
@@ -166,7 +166,7 @@ def tailscale_key(secrets):
 
 
 def template():
-    tpl = my_template()
+    tpl = my_template(max_age=TEMPLATE_TTL)       # [0.4.5] запомненный окном не старше 10 мин (мастер сбрасывает)
     if not tpl:
         return _step("template", "missing", "setup.template.missing")
     if tpl.get("onstart") != setup.ONSTART:

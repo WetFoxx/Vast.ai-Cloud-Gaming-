@@ -50,7 +50,7 @@ import steamlib
 import steamnames
 import updater
 from jobs import Job, error_data
-from vastapi import VastgameError, my_template
+from vastapi import TEMPLATE_TTL, VastgameError, my_template
 
 HERE = Path(__file__).resolve().parent
 LOW_BALANCE = notify.LOW_BALANCE   # $: ниже — предупреждение «баланс заканчивается»
@@ -182,7 +182,7 @@ class Api:
 
         try:
             *_, tpl, credit = parallel.run(*([core.require_no_machine] if launching is None else []),
-                                           core.template, core.balance)
+                                           lambda: core.template(TEMPLATE_TTL), core.balance)
             disk = self._disk(disk, tpl)
             docker = self._docker(docker)
             rows, last = parallel.run(lambda: market.search(disk, min_rel=REL_FLOOR, docker=docker),  # порог надёжности —
@@ -221,7 +221,7 @@ class Api:
     def check_offer(self, offer_id, disk=None, docker=False):
         """Свежие данные машины прямо перед подтверждением аренды."""
         try:
-            disk = self._disk(disk, core.template())
+            disk = self._disk(disk, core.template(TEMPLATE_TTL))
             o, credit = parallel.run(lambda: core.offer_by_id(int(offer_id), disk, bool(docker)), core.balance)
         except VastgameError as e:
             return {"error": error_data(e)}
@@ -825,6 +825,12 @@ class Api:
                 return {"cancelled": True}
             acc = steamlib.add_account(token)
             settings.applog(f"steam: аккаунт …{acc['id'][-4:]} привязан")
+            # [0.4.5] Игры нового аккаунта — в библиотеку сразу (секунды; остальные аккаунты — из прошлого списка):
+            # раньше после входа из «Настройки» библиотека показывала их только после полного обновления
+            try:
+                steamlib.library(only=acc["id"])
+            except Exception:                   # noqa: BLE001 — вход удался; список догонит обычное обновление
+                _log_error("steam_login library")
             return {"ok": True, "account": acc}
         finally:
             self._steam_lock.release()

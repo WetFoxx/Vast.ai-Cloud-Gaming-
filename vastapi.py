@@ -2,11 +2,14 @@
 # Его используют balance.py, offers.py, play.py и следующие команды,
 # чтобы чтение ключа и запросы не повторялись в каждом файле.
 
+import copy
+import hashlib
 import json
 import time
 from pathlib import Path
 
 import keystore
+import parallel
 import requests
 
 HOST = "https://console.vast.ai/"
@@ -79,6 +82,8 @@ def call(method, path, body=None, params=None, base=API):
     except requests.RequestException as e:
         raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}", key="vast.network",
                             error=type(e).__name__)
+    if method != "GET" and path.startswith("template"):
+        _templates.clear()                     # шаблон меняли — память окна о нём больше не верна
     if r.status_code == 401:
         raise VastgameError("Vast не принял ключ (401) — замени его: vastgame setup", key="vast.bad_key")
     if r.status_code != 200:
@@ -92,15 +97,29 @@ def call(method, path, body=None, params=None, base=API):
     return r.json()
 
 
-def my_template(name=TEMPLATE_NAME):
-    """Мой шаблон с таким именем (dict) или None. Чужие шаблоны с тем же именем не берём."""
-    me = call("GET", "users/current/").get("id")
-    ts = call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}).get("templates", [])
+TEMPLATE_TTL = 600    # [0.4.5] окну хватает шаблона не старше 10 минут (Vast отвечает на него 2–7 с)
+_templates = {}       # (отпечаток ключа, имя) → (когда, шаблон); сбрасывается при любой правке шаблона через API
+
+
+def my_template(name=TEMPLATE_NAME, max_age=0):
+    """Мой шаблон с таким именем (dict) или None. Чужие шаблоны с тем же именем не берём.
+    max_age — секунды: окну (список машин, «Настройка») годится запомненный не старше; аренде и мастеру — свежий (0).
+    Шаблон меняет только мастер (через API — тогда память сбрасывается) или человек на сайте Vast."""
+    k = (hashlib.sha256(read_key().encode()).hexdigest()[:16], name)
+    hit = _templates.get(k)
+    if max_age and hit and time.time() - hit[0] < max_age:
+        return copy.deepcopy(hit[1])
+    who, found = parallel.run(       # [0.4.5] оба запроса — одновременно
+        lambda: call("GET", "users/current/"),
+        lambda: call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}))
+    me, ts = who.get("id"), found.get("templates", [])
     mine = [t for t in ts if t.get("creator_id") == me]
     if len(mine) > 1:
         raise VastgameError(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.",
                             key="vast.templates_many", name=name, count=len(mine))
-    return mine[0] if mine else None
+    tpl = mine[0] if mine else None
+    _templates[k] = (time.time(), tpl)
+    return copy.deepcopy(tpl)
 
 
 def list_instances():

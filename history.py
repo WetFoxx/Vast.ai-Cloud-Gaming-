@@ -6,13 +6,15 @@
 #  * своя запись сессий на этом компьютере (sessions.json в папке настроек): когда начата и закончена,
 #    видеокарта, страна, цена часа — подробности, которых нет в счетах.
 
+import hashlib
 import json
+import os
 import re
 import time
 from collections import defaultdict
 
 from settings import config_dir
-from vastapi import HOST, call
+from vastapi import HOST, call, read_key
 
 FILE = config_dir() / "sessions.json"
 HOURS = re.compile(r"([\d.]+)\s*hours")
@@ -78,35 +80,88 @@ def current(iid):
 
 # ------------------------------------------------------------------ реальные траты Vast ---
 
+SETTLED = 2 * 86400   # [0.4.5] сутки старше двух дней Vast уже не меняет — их счета берём из своей памяти
+
+
+def _fetch(gte, lte):
+    """Записи счетов Vast (по одной на машину за сутки UTC, start — начало суток) за дни gte..lte — все страницы."""
+    params = {"select_filters": json.dumps({"day": {"gte": gte, "lte": lte}}), "limit": 100, "format": "tree"}
+    rows = []
+    while True:
+        r = call("GET", "api/v0/charges/", params=params, base=HOST)
+        rows += [_slim(x) for x in r.get("results", [])]
+        if not r.get("next_token"):
+            return rows
+        params["after_token"] = r["next_token"]
+
+
+def _slim(x):
+    """Запись счёта — только то, что считает charges() (Vast кладёт в неё много лишнего: память была 365 КБ)."""
+    return {"type": x.get("type"), "source": x.get("source"), "start": x.get("start"), "amount": x.get("amount"),
+            "metadata": {"label": (x.get("metadata") or {}).get("label")},
+            "items": [{"type": y.get("type"), "amount": y.get("amount"),
+                       **({"description": y.get("description")} if y.get("type") == "gpu" else {})}
+                      for y in x.get("items") or []]}
+
+
+def _charges_file():
+    return FILE.with_name("charges.json")      # рядом с sessions.json (в тестах — во временной папке)
+
+
+def _account():
+    """Чей ключ Vast (отпечаток, не сам ключ): память счетов другого аккаунта не годится."""
+    return hashlib.sha256(read_key().encode()).hexdigest()[:16]
+
+
+def _raw(days):
+    """Записи счетов за days дней. [0.4.5] Окончательные сутки (старше SETTLED) — из своей памяти charges.json,
+    из Vast — только последние: «История» за 30 дней была 5 страниц по ~1.7 с подряд."""
+    now = int(time.time())
+    lo, cut = now - days * 86400, (now // 86400) * 86400 - SETTLED
+    acc = _account()
+    try:
+        c = json.loads(_charges_file().read_text())
+        ok = c["account"] == acc and c["from"] <= lo and isinstance(c["items"], list)
+    except (OSError, ValueError, KeyError, TypeError):
+        ok = False
+    if ok:
+        new = _fetch(c["to"], now)
+        rows = [x for x in c["items"] if x.get("start", 0) >= lo] + new
+        c = {**c, "to": max(c["to"], cut), "items": c["items"] + [x for x in new if x.get("start", 0) < cut]}
+    else:
+        rows = _fetch(lo, now)
+        c = {"account": acc, "from": lo, "to": cut, "items": [x for x in rows if x.get("start", 0) < cut]}
+    try:
+        tmp = _charges_file().with_suffix(".tmp")
+        tmp.write_text(json.dumps(c))
+        os.replace(tmp, _charges_file())
+    except OSError:
+        pass
+    return rows
+
+
 def charges(days):
     """Списания Vast по машинам за последние days дней:
     {iid: {"amount", "gpu", "disk", "traffic", "hours", "first", "last"}} (first/last — дни, unix)."""
-    now = int(time.time())
-    params = {"select_filters": json.dumps({"day": {"gte": now - days * 86400, "lte": now}}),
-              "limit": 100, "format": "tree"}
     out = defaultdict(lambda: {"amount": 0.0, "gpu": 0.0, "disk": 0.0, "traffic": 0.0, "hours": 0.0,
                                "first": None, "last": None, "label": None})
-    while True:
-        r = call("GET", "api/v0/charges/", params=params, base=HOST)
-        for x in r.get("results", []):
-            m = re.match(r"instance-(\d+)$", x.get("source") or "")
-            if x.get("type") != "instance" or not m:
-                continue
-            c = out[int(m.group(1))]
-            c["amount"] += x.get("amount") or 0
-            c["label"] = c["label"] or (x.get("metadata") or {}).get("label")
-            c["first"] = min(filter(None, [c["first"], x.get("start")]))
-            c["last"] = max(filter(None, [c["last"], x.get("start")]))
-            for y in x.get("items") or []:
-                kind = {"gpu": "gpu", "disk": "disk", "bwd": "traffic", "bwu": "traffic"}.get(y.get("type"))
-                if kind:
-                    c[kind] += y.get("amount") or 0
-                if y.get("type") == "gpu":
-                    h = HOURS.search(y.get("description") or "")
-                    c["hours"] += float(h.group(1)) if h else 0
-        if not r.get("next_token"):
-            return dict(out)
-        params["after_token"] = r["next_token"]
+    for x in _raw(days):
+        m = re.match(r"instance-(\d+)$", x.get("source") or "")
+        if x.get("type") != "instance" or not m:
+            continue
+        c = out[int(m.group(1))]
+        c["amount"] += x.get("amount") or 0
+        c["label"] = c["label"] or (x.get("metadata") or {}).get("label")
+        c["first"] = min(filter(None, [c["first"], x.get("start")]))
+        c["last"] = max(filter(None, [c["last"], x.get("start")]))
+        for y in x.get("items") or []:
+            kind = {"gpu": "gpu", "disk": "disk", "bwd": "traffic", "bwu": "traffic"}.get(y.get("type"))
+            if kind:
+                c[kind] += y.get("amount") or 0
+            if y.get("type") == "gpu":
+                h = HOURS.search(y.get("description") or "")
+                c["hours"] += float(h.group(1)) if h else 0
+    return dict(out)
 
 
 def summary(days=30, all_machines=False):

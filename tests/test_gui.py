@@ -70,7 +70,7 @@ class TestSnapshots(unittest.TestCase):
         gui.snapshot._file().unlink(missing_ok=True)
         row = dict(OFFER, country="Latvia, LV", _traffic=0.01, _total=0.21, reliability=0.99)
         for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
-                                 (gui.core, "template", lambda: {"recommended_disk_space": 100}),
+                                 (gui.core, "template", lambda *a, **k: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
                                  (gui.market, "search", lambda disk, docker=False, min_rel=None: [row]),
                                  (gui.market, "last_machine", lambda disk, docker=False: None)]:
@@ -126,7 +126,7 @@ class TestOffers(unittest.TestCase):
     def setUp(self):
         row = dict(OFFER, country="Latvia, LV", _traffic=0.01, _total=0.21, reliability=0.99)
         for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
-                                 (gui.core, "template", lambda: {"recommended_disk_space": 100}),
+                                 (gui.core, "template", lambda *a, **k: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
                                  (gui.market, "search", lambda disk, docker=False, min_rel=None: [row])]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
@@ -243,7 +243,7 @@ class TestReplaceCatalog(unittest.TestCase):
             raise VastgameError("есть машина", key="core.running", ids="42")
         launching = dict(OFFER, id=5, gpu_name="RTX 3090", dph_total=0.2, geolocation="Latvia, LV")
         for obj, name, value in [(gui.core, "require_no_machine", running),
-                                 (gui.core, "template", lambda: {"recommended_disk_space": 100}),
+                                 (gui.core, "template", lambda *a, **k: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
                                  (gui.market, "search", lambda disk, docker=False, min_rel=None: [row]),
                                  (gui.market, "last_machine", lambda disk, docker=False: None),

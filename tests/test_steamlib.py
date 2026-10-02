@@ -211,6 +211,24 @@ class TestLibrary(Base):
         self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "30", "40"})
         self.assertEqual(next(g for g in lib["games"] if g["appid"] == "20")["accounts"], [A, B])   # порядок прежний
 
+    def test_new_account_only(self):
+        # [0.4.5] После входа — из Steam только игры нового аккаунта, у остальных — прошлый список
+        steamlib.add_account(self.steam.login(A))
+        steamlib.library()
+        self.steam.owned[A] = [(10, "Ten", 100), (99, "Новая у Alex", 500)]   # у Alex появилась игра — пока не видна
+        steamlib.add_account(self.steam.login(B))
+        asked = []
+        owned = steamlib._owned
+        with mock.patch.object(steamlib, "_owned", lambda sid, tok: asked.append(sid) or owned(sid, tok)):
+            lib = steamlib.library(only=B)
+        self.assertEqual(asked, [B])
+        games = {g["appid"]: g for g in lib["games"]}
+        self.assertEqual(games["30"]["accounts"], [B])                    # игры Bob — уже в списке
+        self.assertEqual(games["20"]["accounts"], [A, B])
+        self.assertNotIn("99", games)                                     # Alex — прошлый список
+        self.assertEqual(lib["errors"], [])
+        self.assertEqual(steamlib.cached()["games"], lib["games"])        # и в кэше — окно покажет сразу
+
     def test_expired_account_keeps_previous_games(self):
         steamlib.add_account(self.steam.login(A))
         steamlib.add_account(self.steam.login(B))
@@ -283,6 +301,8 @@ class TestLoginWindow(Base):
         self.assertNotIn(tok, json.dumps(r))                             # пропуск в страницу не попадает
         self.assertTrue(win.destroyed)
         self.assertEqual(self.store, {f"STEAM_{A}": tok})
+        # [0.4.5] игры нового аккаунта — уже в библиотеке, окну не нужно ждать полного обновления
+        self.assertEqual({g["appid"] for g in steamlib.cached()["games"]}, {"10", "20", "40"})
 
     def test_closed_window_links_nothing(self):
         win = FakeWindow(close_after=2)

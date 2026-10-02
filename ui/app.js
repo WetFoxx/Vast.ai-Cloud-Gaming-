@@ -1746,7 +1746,7 @@ async function steamLogin(msgEl) {
   say(r.ok ? t("steam.login.done", { name: r.account.name }) : "");
   if (r.ok) {
     if (!$("screen-setup").hidden) renderSteamAccounts($("setup-steam"));
-    if (!$("screen-library").hidden) { libFilter = "all"; await loadLibrary(true); }
+    if (!$("screen-library").hidden) { libFilter = "all"; await loadLibrary(false); }   // игры нового аккаунта уже в списке (steam_login)
   }
 }
 

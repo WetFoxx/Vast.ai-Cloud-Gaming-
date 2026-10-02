@@ -68,9 +68,9 @@ def require_no_machine():
                             ids=", ".join(str(i["id"]) for i in running))
 
 
-def template():
-    """Шаблон vastgame (создаёт мастер) или VastgameError."""
-    tpl = my_template()
+def template(max_age=0):
+    """Шаблон vastgame (создаёт мастер) или VastgameError. max_age — см. vastapi.my_template (окну — запомненный)."""
+    tpl = my_template(max_age=max_age)
     if not tpl:
         raise VastgameError(f"Нет шаблона «{TEMPLATE_NAME}» — создай его: vastgame setup",
                             key="core.no_template", name=TEMPLATE_NAME)

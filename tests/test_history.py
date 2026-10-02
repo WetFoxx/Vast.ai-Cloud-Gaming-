@@ -2,6 +2,8 @@
 
 import sys
 import tempfile
+import time
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,6 +29,10 @@ class TestHistory(unittest.TestCase):
         p = mock.patch.object(history, "FILE", Path(tempfile.mkdtemp()) / "sessions.json")
         p.start()
         self.addCleanup(p.stop)
+        self.key = "ключ-1"
+        p = mock.patch.object(history, "read_key", lambda: self.key)     # настоящую Связку ключей не трогаем
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_last_machine(self):
         self.assertIsNone(history.last_machine())
@@ -45,6 +51,47 @@ class TestHistory(unittest.TestCase):
         history.reconcile(running_ids=set())          # машину удалили на сайте Vast
         self.assertIsNone(history.current(9))
         self.assertTrue(history._load()[-1]["closed_outside"])
+
+    def vast(self, days_back=40):
+        """Поддельный Vast: по записи на машину 5 за каждые сутки UTC, $1 в сутки; фильтр day — как у Vast."""
+        today = int(time.time()) // 86400 * 86400
+        recs = [{"type": "instance", "source": "instance-5", "start": today - d * 86400, "amount": 1.0,
+                 "metadata": {"label": "vastgame"}, "items": []} for d in range(days_back)]
+        asked = []
+
+        def call(method, path, params=None, base=None):
+            f = json.loads(params["select_filters"])["day"]
+            asked.append(f["gte"])
+            return {"results": [r for r in recs if f["gte"] <= r["start"] <= f["lte"]]}
+        return call, asked, recs
+
+    def test_settled_days_from_memory(self):
+        # [0.4.5] Второй раз из Vast — только последние сутки; итог тот же
+        call, asked, recs = self.vast()
+        with mock.patch.object(history, "call", call):
+            first = history.charges(30)[5]["amount"]
+            asked.clear()
+            recs[0]["amount"] = 5.0                      # сегодняшние сутки ещё меняются — их берём свежими
+            second = history.charges(30)[5]["amount"]
+        self.assertEqual(first, 30.0)
+        self.assertEqual(second, 34.0)
+        self.assertEqual(len(asked), 1)
+        self.assertGreaterEqual(asked[0], int(time.time()) // 86400 * 86400 - history.SETTLED)
+        with mock.patch.object(history, "call", call):
+            self.assertEqual(history.charges(7)[5]["amount"], 11.0)       # короче — тоже из памяти
+
+    def test_longer_period_or_other_account_refetched(self):
+        call, asked, recs = self.vast(100)
+        with mock.patch.object(history, "call", call):
+            history.charges(7)
+            asked.clear()
+            self.assertEqual(history.charges(30)[5]["amount"], 30.0)     # в памяти только 7 дней — целиком
+            self.assertLess(asked[0], int(time.time()) - 29 * 86400)
+            asked.clear()
+            self.key = "ключ-2"                                           # другой аккаунт Vast
+            history.charges(7)
+            self.assertLess(asked[0], int(time.time()) - 6 * 86400)
+        self.assertNotIn("ключ", history._charges_file().read_text())     # в памяти — отпечаток, не ключ
 
     def test_summary_merges_charges(self):
         history.started(7, {"gpu_name": "RTX 3090", "geolocation": "Latvia, LV", "dph_total": 0.2}, t0=900)
