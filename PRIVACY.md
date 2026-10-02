@@ -1,20 +1,21 @@
 # vastgame — Privacy Policy
 
-*Last updated: September 28, 2026*
+*Last updated: October 3, 2026*
 
-vastgame is an open-source desktop application that rents a cloud gaming PC on Vast.ai for you and keeps your game saves, Steam session and network settings in your own Google Drive, so they survive between rentals.
+vastgame is an open-source desktop application that rents a cloud gaming PC on Vast.ai for you and keeps your game saves, mods, Steam session and network settings in your own Google Drive, so they survive between rentals.
 
 ## The short version
 
 - vastgame runs **only on your computer**. There is no vastgame server, account, analytics or telemetry. The author receives no data from you.
 - vastgame can access **only the Google Drive files it creates itself** (the `vastai-cloud-games` folder). It cannot see any other file in your Drive.
 - Your keys are stored in your operating system's secure storage (macOS Keychain / Windows Credential Manager) and in your own Vast.ai account.
+- If you link Steam accounts, the Steam sign-in token stays in that secure storage on your computer and is sent only to Steam.
 
 ## Google user data
 
 **What vastgame accesses.** vastgame requests one Google scope: `https://www.googleapis.com/auth/drive.file` — "access to files created or opened by this app". It does not request access to your other Drive files, email, contacts or profile.
 
-**How it is used.** vastgame and the rented cloud PC use this access to create, read, update and delete archives inside the `vastai-cloud-games` folder: game saves, the Steam client session and settings, the cloud PC's network identity (Tailscale, Sunshine), and, if you turn it on, game files. vastgame also lists this folder to show you which games are stored and how much space they take.
+**How it is used.** vastgame and the rented cloud PC use this access to create, read, update and delete archives inside the `vastai-cloud-games` folder: game saves, mods of Steam games, the Steam client session and settings, the cloud PC's network identity (Tailscale, Sunshine), and games you choose to keep from the cloud PC's Games folder. Steam games themselves are downloaded by Steam from Steam's servers, not from your Drive. vastgame also lists this folder to show you which games are stored and how much space they take.
 
 **Where it goes.** Your Google Drive refresh token is stored:
 1. on your computer, in the operating system's secure storage;
@@ -33,8 +34,8 @@ vastgame sends requests directly from your computer to:
 
 - **Vast.ai** — to search, rent and delete cloud machines and manage your templates and environment variables, using your Vast.ai API key;
 - **Tailscale** (the Tailscale app on your computer) — to find your cloud PC in your private network;
-- **Steam Store** (`store.steampowered.com`) — to look up game titles by their Steam app ID; only the app ID is sent;
-- **GitHub** — the cloud PC downloads the open-source setup script from the project repository; vastgame checks the project's Releases for a newer version of itself (a plain download of a small file — GitHub sees your IP address, nothing else is sent) and, when you choose to update, downloads the new version from there.
+- **Steam** — only if you link Steam accounts in the Library. You sign in on Steam's own page shown inside vastgame (QR code or login and password; vastgame never sees your password). vastgame keeps the resulting long-lived Steam sign-in token in your system's secure storage and uses it only to ask Steam (`login.steampowered.com`, `steamcommunity.com`, `api.steampowered.com`) for the games you own and your Family Library. Game titles and artwork are looked up in the Steam Store by app ID. None of this is sent anywhere else;
+- **GitHub** — the cloud PC downloads the open-source setup script from the project repository (and, in Docker mode, the open-source desktop image from GitHub Container Registry, `ghcr.io`); vastgame checks the project's Releases for a newer version of itself (a plain download of a small file — GitHub sees your IP address, nothing else is sent) and, when you choose to update, downloads the new version from there.
 
 Each of these services has its own privacy policy.
 
@@ -42,7 +43,8 @@ Each of these services has its own privacy policy.
 
 - Revoke vastgame's access to Google Drive at any time: <https://myaccount.google.com/permissions>.
 - Delete the `vastai-cloud-games` folder in your Google Drive to delete everything vastgame stored there.
-- Remove the keys from your computer: delete the `vastgame` entries in Keychain Access (macOS) or Credential Manager (Windows).
+- Unlink Steam accounts in vastgame → Settings → Steam accounts (the Steam token is deleted from your computer).
+- Remove the keys from your computer: delete the `vastgame` entries in Keychain Access (macOS) or Credential Manager (Windows), or use vastgame → Settings → Reset vastgame on this Mac.
 - Remove `RCLONE_REFRESH_TOKEN`, `TAILSCALE_AUTHKEY` and other variables from your Vast.ai account settings.
 
 ## Contact
@@ -56,6 +58,7 @@ Questions and reports: <https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/issues>
 - vastgame работает **только на вашем компьютере**: своего сервера, учётной записи, аналитики и телеметрии нет; автор никаких данных не получает.
 - Доступ к Google Drive — **только к файлам, которые создал сам vastgame** (папка `vastai-cloud-games`), по scope `drive.file`. Остальные файлы на Drive ему не видны.
 - Токен Google Drive хранится в защищённом хранилище системы (Keychain / Диспетчер учётных данных), в переменных вашего аккаунта Vast.ai и на арендованной машине, пока она работает. Арендованная машина принадлежит стороннему хосту Vast.ai, у которого есть к ней административный доступ — для игр лучше отдельный аккаунт Google.
+- Если привязать аккаунты Steam («Библиотека»), вход идёт на странице самой Steam (пароль vastgame не видит), а пропуск Steam хранится в защищённом хранилище системы и отправляется только в Steam — чтобы узнать список ваших игр и игр семьи.
 - Данные Google никому не передаются и не продаются, не используются для рекламы и обучения ИИ. Использование соответствует Google API Services User Data Policy, включая требования Limited Use.
 - Отозвать доступ: <https://myaccount.google.com/permissions>. Удалить данные — удалить папку `vastai-cloud-games` на Drive.
 - Вопросы: <https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/issues>
