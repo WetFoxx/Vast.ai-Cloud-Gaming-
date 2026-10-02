@@ -1,0 +1,9 @@
+#!/bin/bash
+# /usr/bin/google-chrome-stable в vastgame-desktop: Chrome в контейнере Vast без особых прав.
+# --no-sandbox — песочница Chrome требует user namespaces / CAP_SYS_ADMIN, которых в контейнере нет (без флага
+#   Chrome не запускается). Chrome предупреждает об этом жёлтой полосой — так и задумано: сомнительные сайты
+#   на машине не открывать.
+# --disable-dev-shm-usage — /dev/shm контейнера маленький (64 МБ), вкладки падали бы.
+# --password-store=basic — без вопроса о «связке ключей» (её на машине нет).
+exec /opt/google/chrome/google-chrome --no-sandbox --disable-dev-shm-usage --password-store=basic \
+  --no-first-run --no-default-browser-check "$@"

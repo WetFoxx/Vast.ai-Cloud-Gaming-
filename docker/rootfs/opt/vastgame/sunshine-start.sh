@@ -94,6 +94,12 @@ elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
 else
   echo no > /run/vastgame/nvenc
   echo "sunshine: NVENC на этой машине не работает — захват X11, кодирование процессором (медленно)"
-  report err "NVENC не работает: $(grep -iE 'error|fatal' "$LOGF" 2>/dev/null | grep -iE 'nvenc|cuda|encoder' | tail -1 | sed 's/^\[[^]]*\]: *//' | cut -c1-120)"
+  # [0.4.4] У X-сервера нет ни одного выхода (хост не дал видеокарте экран, разбор 2026-10-02, Техас): Sunshine
+  # пишет «Found [0] outputs» / «Platform failed to initialize» — это не кодировщик, надпись должна говорить правду
+  if grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null; then
+    report err "нет выхода на монитор: хост не дал видеокарте экран (Sunshine: 0 выходов)"
+  else
+    report err "NVENC не работает: $(grep -iE 'error|fatal' "$LOGF" 2>/dev/null | grep -iE 'nvenc|cuda|encoder' | tail -1 | sed 's/^\[[^]]*\]: *//' | cut -c1-120)"
+  fi
   start x11 software
 fi

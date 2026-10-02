@@ -48,6 +48,55 @@ class TestScripts(unittest.TestCase):
             self.assertIn('runuser -u "$DU" -- env -i', text, name)
 
 
+class TestChrome(unittest.TestCase):
+    """[0.4.4] Google Chrome в образе: обёртка с флагами для контейнера на месте /usr/bin/google-chrome-stable."""
+
+    def test_wrapper_flags(self):
+        w = D / "rootfs/usr/bin/google-chrome-stable"
+        self.assertTrue(os.access(w, os.X_OK))
+        d = Path(tempfile.mkdtemp())
+        real = d / "chrome"
+        real.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        real.chmod(0o755)
+        text = w.read_text().replace("/opt/google/chrome/google-chrome", str(real))
+        (d / "w").write_text(text)
+        out = sh("bash", str(d / "w"), "https://example.com").stdout.split()
+        for flag in ("--no-sandbox", "--disable-dev-shm-usage", "--password-store=basic"):
+            self.assertIn(flag, out)
+        self.assertEqual(out[-1], "https://example.com")
+
+    def test_dockerfile(self):
+        df = (D / "Dockerfile").read_text()
+        # отвод настоящей ссылки — до COPY rootfs (иначе пакет и обёртка не поделят /usr/bin/google-chrome-stable)
+        self.assertLess(df.index("--divert /usr/bin/google-chrome-stable.real /usr/bin/google-chrome-stable"),
+                        df.index("COPY rootfs/ /"))
+        self.assertIn("signed-by=/usr/share/keyrings/google-chrome.gpg", df)
+        self.assertIn("/home/user/Desktop/google-chrome.desktop", df)
+
+
+class TestSunshineReport(unittest.TestCase):
+    """[0.4.4] Нет выхода на монитор — так и пишем, а не «NVENC не работает»."""
+
+    def run_block(self, log):
+        text = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
+        a = text.index('  if grep -qE "Found \\[0\\] outputs')
+        b = text.index("  fi\n", a) + 5
+        d = Path(tempfile.mkdtemp())
+        (d / "log").write_text(log)
+        script = f'LOGF={d}/log\nreport() {{ echo "$1|$2"; }}\n' + text[a:b]
+        return sh("bash", "-c", script).stdout.strip()
+
+    def test_no_outputs(self):
+        out = self.run_block("Info: Found [0] outputs\nFatal: Platform failed to initialize\n"
+                             "Fatal: Couldn't find any working encoder\n")
+        self.assertTrue(out.startswith("err|нет выхода на монитор"), out)
+
+    def test_real_nvenc_failure(self):
+        out = self.run_block("Error: NvEnc: OpenEncodeSessionEx failed: unsupported device\n"
+                             "Fatal: Couldn't find any working encoder\n")
+        self.assertTrue(out.startswith("err|NVENC не работает"), out)
+
+
 class TestWebhelperPatch(unittest.TestCase):
     def setUp(self):
         self.f = Path(tempfile.mkdtemp()) / "steamwebhelper.sh"
