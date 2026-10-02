@@ -13,6 +13,8 @@ Sunshine (NVENC + NvFBC), звук, Tailscale без /dev/net/tun, геймпа�
   (`display-setup.sh`, `wolf-res`), звук, геймпад (`vgpadd.py`), Sunshine (`sunshine-start.sh`), XFCE, Steam.
 - `rootfs/usr/bin/steam`, `steam-patch.sh` — Steam без user namespaces (заплатки ставятся сами).
 - `vgpad/` — виртуальный геймпад (LD_PRELOAD) и посредник.
+- `rootfs/usr/bin/google-chrome-stable` — Google Chrome (0.4.4) с флагами для контейнера: без песочницы
+  (в контейнере её не включить), без `/dev/shm`. Профиль браузера в облако не уезжает.
 - **Агент (v4.0):** с `WOLF_SCRIPT_URL` образ поднимает драйвер, экран, звук, геймпад и рабочий стол, а
   Tailscale, Sunshine, Steam и облако — `wolf-setup.sh` с `WOLF_MODE=docker`: тот же агент и те же архивы
   в Google Drive, что на KVM (`tailscaled-start.sh` — Tailscale без /dev/net/tun). Заплатки Steam условные

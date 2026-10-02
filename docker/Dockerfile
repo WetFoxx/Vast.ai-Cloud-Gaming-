@@ -81,19 +81,31 @@ RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg -o /us
     && curl -fsSL https://rclone.org/install.sh | bash \
     && rm -rf /var/lib/apt/lists/*
 
+# [0.4.4] Google Chrome — скачивать файлы и моды прямо на машине. Официальный репозиторий Google (ключ — его же).
+# /usr/bin/google-chrome-stable (его зовут меню и xdg-open) отводим — на его место обёртка с флагами для контейнера
+# (rootfs/usr/bin/google-chrome-stable). Профиль браузера в облако не уезжает — каждая машина с чистым Chrome.
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+       > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update -qq && apt-get install -yq --no-install-recommends google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/* \
+    && dpkg-divert --add --rename --divert /usr/bin/google-chrome-stable.real /usr/bin/google-chrome-stable \
+    && test -x /opt/google/chrome/google-chrome
+
 COPY --from=vgpad /out/x86_64/libvgpad.so /usr/lib/x86_64-linux-gnu/libvgpad.so
 COPY --from=vgpad /out/i386/libvgpad.so /usr/lib/i386-linux-gnu/libvgpad.so
 COPY vgpad/vgpadd.py /opt/vastgame/vgpadd.py
 COPY rootfs/ /
 
 # Настройки XFCE по умолчанию (без вопроса о панели при первом входе, без композитора — меньше задержка),
-# папка игр как на KVM (~/Downloads/Games), ярлык на неё на рабочем столе
-RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/bin/steam \
+# папка игр как на KVM (~/Downloads/Games), ярлыки на неё и на Chrome на рабочем столе
+RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/bin/steam /usr/bin/google-chrome-stable \
     && ln -sfn /usr/bin/steam /usr/games/steam \
     && mkdir -p /home/user/.config/xfce4/xfconf/xfce-perchannel-xml /home/user/Downloads/Games /home/user/Desktop \
     && cp /etc/xdg/xfce4/panel/default.xml /home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
     && cp /opt/vastgame/xfwm4.xml /home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
     && ln -sfn /home/user/Downloads/Games /home/user/Desktop/Games \
+    && install -m 755 /usr/share/applications/google-chrome.desktop /home/user/Desktop/google-chrome.desktop \
     && chown -R user:users /home/user
 
 ENTRYPOINT ["/opt/vastgame/entrypoint.sh"]
