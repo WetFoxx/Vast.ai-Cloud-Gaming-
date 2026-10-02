@@ -6,6 +6,7 @@ import json
 import re
 
 import history
+import parallel
 from settings import config_dir
 from vastapi import call
 
@@ -145,12 +146,17 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         "limit": 1000,
         **(where or {}),
     }
-    offers = call("POST", "bundles/", query).get("offers", [])
-    if docker and PAIRS:
-        # [0.3.1] Машины, которые сдаются только парой видеокарт (одной — нет): игра идёт на первой, вторая простаивает,
-        # цена — за обе (~130 машин, 2026-10-01). Только Docker: в KVM две карты в виртуальной машине не проверялись
+    # [0.3.1] Машины, которые сдаются только парой видеокарт (одной — нет): игра идёт на первой, вторая простаивает,
+    # цена — за обе (~130 машин, 2026-10-01). Только Docker: в KVM две карты в виртуальной машине не проверялись.
+    # [0.4.5] Оба поиска — одновременно
+    pairs = docker and PAIRS
+    found = parallel.run(lambda: call("POST", "bundles/", query).get("offers", []),
+                         *([lambda: call("POST", "bundles/", {**query, "num_gpus": {"eq": 2}}).get("offers", [])]
+                           if pairs else []))
+    offers = found[0]
+    if pairs:
         singles = {o.get("machine_id") for o in offers}
-        for o in call("POST", "bundles/", {**query, "num_gpus": {"eq": 2}}).get("offers", []):
+        for o in found[1]:
             if o.get("machine_id") not in singles:
                 o["_gpus"] = 2
                 offers.append(o)

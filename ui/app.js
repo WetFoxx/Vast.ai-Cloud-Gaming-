@@ -399,6 +399,7 @@ async function openOffers(disk, docker) {
   renderOffersGame();
   offersData = null; selected = null;
   $("rent").disabled = true;
+  $("offers-refresh").disabled = true;
   $("offers-summary").textContent = t("offers.loading");
   $("offers-table").querySelector("tbody").innerHTML = "";
   showError("offers-error", null);
@@ -406,6 +407,7 @@ async function openOffers(disk, docker) {
   showTabs();
   const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await api().offers(disk ?? null, offersDocker, replaceMode);
   if (my !== offersReq) return;
+  $("offers-refresh").disabled = false;
   if (data.error && replaceMode && data.error.key === "core.running") {   // пока открывали, машина стала готовой
     replaceBlocked = true; replaceMode = false; renderReplace();
   }
@@ -432,6 +434,8 @@ function showTabs() {
 // Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
 $("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offersData ? offersData.disk : null, false); });
 $("tab-docker").addEventListener("click", () => { if (!offersDocker) openOffers(offersData ? offersData.disk : null, true); });
+// «Обновить» — свежий список машин той же вкладки и диска (выбор игр не сбрасывается)
+$("offers-refresh").addEventListener("click", () => openOffers(offersData ? offersData.disk : Number($("disk").value), offersDocker));
 
 // Ползунок диска: число меняется сразу, список машин (цены зависят от диска) — когда отпустили
 $("disk").addEventListener("input", () => { $("disk-value").textContent = t("disk.value", { gb: $("disk").value }); });
@@ -2189,6 +2193,18 @@ $("progress-offers").addEventListener("click", () => { if (!DEMO) api().session_
 // Запуск идёт в фоновом процессе — можно уйти на главный (посмотреть баланс, другую машину); ход — там же кнопкой
 $("progress-home").addEventListener("click", () => { clearInterval(progTimer); show("main"); refresh(); });
 $("progress-back").addEventListener("click", () => { if (!DEMO) api().session_seen(); show("main"); refresh(); });
+
+// Логотип и надпись VastGame — на главный экран. Тем же путём, что кнопка «Назад» открытого экрана: она же
+// прибирает за собой (таймеры, «просмотрено»). Кнопка скрыта или неактивна (идёт аренда) — остаёмся.
+$("brand").addEventListener("click", () => {
+  if (!$("modal").hidden) return;
+  const cur = ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"].find((s) => !$("screen-" + s).hidden);
+  if (cur === "main" || cur === "wizard") { show("main"); refresh(); return; }
+  const back = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back",
+                 games: "games-back", progress: $("progress-home").hidden ? "progress-back" : "progress-home" }[cur];
+  const b = back && $(back);
+  if (b && !b.hidden && !b.disabled) b.click();
+});
 
 // ---------------------------------------------------------------- язык
 function fillLanguages() {

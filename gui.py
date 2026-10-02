@@ -36,6 +36,7 @@ import keystore
 import market
 import moonlight
 import pairing
+import parallel
 import wolfnode
 import notify
 import settings
@@ -111,8 +112,7 @@ class Api:
         if lang in settings.LANGUAGES and settings.get("ui_language") != lang:
             settings.set("ui_language", lang)
         try:
-            st = core.status()
-            credit = core.balance()
+            st, credit = parallel.run(core.status, core.balance)
         except VastgameError as e:   # подвид SystemExit — ловим явно, иначе поток тихо завершится
             return {"error": error_data(e)}
         price = st["machine"]["price"] if st["machine"] else None
@@ -173,20 +173,21 @@ class Api:
         replace — каталог во время запуска («Сменить машину»): машина уже есть — это та, что запускается;
         в ответе current — она (для сравнения цены и пинга), replace — идёт ли ещё запуск."""
         launching = self._launching() if replace else None
+        def last_machine():
+            try:
+                return market.last_machine(disk, docker)
+            except VastgameError:
+                return None      # не удалось проверить последнюю машину — список машин всё равно показать
+
         try:
-            if launching is None:
-                core.require_no_machine()
-            tpl = core.template()
+            *_, tpl, credit = parallel.run(*([core.require_no_machine] if launching is None else []),
+                                           core.template, core.balance)
             disk = self._disk(disk, tpl)
             docker = self._docker(docker)
-            rows = market.search(disk, min_rel=REL_FLOOR, docker=docker)    # порог надёжности — фильтром на странице
-            credit = core.balance()
+            rows, last = parallel.run(lambda: market.search(disk, min_rel=REL_FLOOR, docker=docker),  # порог надёжности —
+                                      last_machine)                                            # фильтром на странице
         except VastgameError as e:
             return {"error": error_data(e)}
-        try:
-            last = market.last_machine(disk, docker)
-        except VastgameError:
-            last = None          # не удалось проверить последнюю машину — список машин всё равно показать
         remembered, me = latency.known(), geo.home()
 
         def row(o):
@@ -217,8 +218,7 @@ class Api:
         """Свежие данные машины прямо перед подтверждением аренды."""
         try:
             disk = self._disk(disk, core.template())
-            o = core.offer_by_id(int(offer_id), disk, bool(docker))
-            credit = core.balance()
+            o, credit = parallel.run(lambda: core.offer_by_id(int(offer_id), disk, bool(docker)), core.balance)
         except VastgameError as e:
             return {"error": error_data(e)}
         return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o), "price": o["dph_total"],
@@ -251,12 +251,12 @@ class Api:
     def sync_list(self):
         """Игры в облаке для выбора синхронизации: одна строка на игру (файлы игры и её сохранения вместе, служебное
         Steam скрыто) и запомненный выбор. Прямо с Google Drive — машина не нужна."""
-        data = cloudgames.listing()
-        rows = cloudgames.rows(data, drive.games_index())
+        data, index = parallel.run(cloudgames.listing, drive.games_index)
+        rows = cloudgames.rows(data, index)
         unknown = [r["saves"] for r in rows if not r["title"] and r["saves"]]
-        names = steamnames.for_archives(unknown) if unknown else {}
         steam = [r["appid"] for r in rows if r["appid"] and r["appid"].isdigit() and int(r["appid"]) < SHORTCUT_APPID]
-        covers = steamnames.covers(steam) if steam else {}
+        names, covers = parallel.run(lambda: steamnames.for_archives(unknown) if unknown else {},
+                                     lambda: steamnames.covers(steam) if steam else {})
         # [v4.8] Игры Steam качает сам Steam — в выборе синхронизации от них остаются только сохранения
         rows = [r if r["kind"] != "steam" else {**r, "kind": "saves", "game": None, "game_bytes": 0}
                 for r in rows if r["kind"] != "steam" or r["saves"]]
@@ -732,8 +732,9 @@ class Api:
         [v5.0] mods — моды игр в облаке {номер: {name, bytes, mtime}} (свежие — с Drive); mods_save — тумблер «Моды»."""
         if not steamlib.accounts():
             return {"accounts": [], "games": [], "errors": []}
-        lib = (None if fresh else steamlib.cached()) or steamlib.library()
-        mods = cloudgames.mods() if fresh and drive.token() else None
+        # [0.4.5] список модов с Drive — одновременно с библиотекой из Steam
+        lib, mods = parallel.run(lambda: (None if fresh else steamlib.cached()) or steamlib.library(),
+                                 lambda: cloudgames.mods() if fresh and drive.token() else None)
         if mods is not None:
             settings.set("mods_known", mods)
         return {**lib, "mods": mods if mods is not None else settings.get("mods_known") or {},

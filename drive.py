@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import keystore
+import parallel
 import requests
 
 import paths
@@ -137,7 +138,10 @@ def check(tok, old=None, sizes=True):
     sizes=False — не считать файлы в папке (это второй долгий запрос; простой настройке нужен только вход)."""
     # Почту владельца Drive напрямую rclone не отдаёт («doesn't support UserInfo») — берём её
     # из метаданных папок в корне Drive: чаще всего встречающийся владелец и есть хозяин диска
-    root = rclone("lsjson", "-M", "--max-depth", "1", REMOTE, tok=tok, old=old, timeout=120)
+    # [0.4.5] Оба запроса — одновременно (по очереди ~4.5 с в «Настройке»)
+    root, size = parallel.run(lambda: rclone("lsjson", "-M", "--max-depth", "1", REMOTE, tok=tok, old=old, timeout=120),
+                              lambda: rclone("size", REMOTE + FOLDER, "--json", tok=tok, old=old, timeout=120)
+                              if sizes else None)
     if root.returncode != 0:
         return None
     owners = {}
@@ -149,7 +153,6 @@ def check(tok, old=None, sizes=True):
     email = max(owners, key=owners.get) if owners else "не определить (приложение ещё ничего не создало)"
     if not sizes:
         return email, None, 0
-    size = rclone("size", REMOTE + FOLDER, "--json", tok=tok, old=old, timeout=120)
     if size.returncode != 0:          # папки нет
         return email, None, 0
     d = json.loads(size.stdout)

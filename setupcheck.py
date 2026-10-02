@@ -9,6 +9,7 @@
 import datetime
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 import sys
 
 import keystore
@@ -141,6 +142,8 @@ def google(secrets, sizes=True):
     info = drive.check(tok, sizes=sizes)
     if info is None:
         return _step("google", "missing", "setup.google.bad")
+    if callable(secrets):          # [0.4.5] переменные аккаунта Vast ещё идут (status) — дождаться только здесь
+        secrets = secrets()
     if not {"RCLONE_REFRESH_TOKEN", "RCLONE_CLIENT_ID", "RCLONE_CLIENT_SECRET"} <= secrets:
         return _step("google", "warn", "setup.google.not_in_vast", email=info[0])
     return _step("google", "ok", "setup.google.ok", email=info[0],
@@ -189,16 +192,25 @@ def autostart_steps():
 
 
 def status():
-    """Все шаги по порядку и общий итог: ready — можно арендовать (нет ни одного missing)."""
-    steps = tools()
-    v = vast_key()
-    steps.append(v)
-    if v["state"] == "missing":
-        # Без ключа Vast остальное (переменные аккаунта, шаблон) не проверить
-        steps += [_step(i, "missing", f"setup.{i}.needs_vast") for i in ("sshkey", "google", "tailscale_key", "template")]
-    else:
-        secrets = _vast_secrets()
-        steps += [ssh_key(), google(secrets), tailscale_key(secrets), template()]
-    steps += autostart_steps()
+    """Все шаги по порядку и общий итог: ready — можно арендовать (нет ни одного missing).
+    [0.4.5] Проверки — одновременно (по очереди было ~10 с: Drive 4.5, шаблон Vast 2–7, остальное по ~1 с). Ключ
+    Vast в Связке ключей есть — проверки аккаунта начинаются сразу, не дожидаясь проверки самого ключа; ключ
+    оказался плохим — их итог отбрасывается."""
+    with ThreadPoolExecutor(6) as ex:
+        def account():
+            fs = ex.submit(_vast_secrets)
+            return [ex.submit(ssh_key), ex.submit(google, fs.result),
+                    ex.submit(lambda: tailscale_key(fs.result())), ex.submit(template)]
+        ft, fa, fv = ex.submit(tools), ex.submit(autostart_steps), ex.submit(vast_key)
+        rest = account() if keystore.get("VAST_API_KEY") else None
+        steps = ft.result()
+        v = fv.result()
+        steps.append(v)
+        if v["state"] == "missing":
+            # Без ключа Vast остальное (переменные аккаунта, шаблон) не проверить
+            steps += [_step(i, "missing", f"setup.{i}.needs_vast") for i in ("sshkey", "google", "tailscale_key", "template")]
+        else:
+            steps += [f.result() for f in (rest or account())]
+        steps += fa.result()
     return {"steps": steps, "ready": all(s["state"] != "missing" for s in steps),
             "brew": bool(paths.find("brew")), "platform": sys.platform}

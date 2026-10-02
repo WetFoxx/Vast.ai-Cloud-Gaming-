@@ -2,6 +2,7 @@
 # vastgame-desktop тем же скриптом, замена машины без NVENC. Без денег и сети — Vast и машина поддельные.
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -90,6 +91,17 @@ class TestSearch(unittest.TestCase):
             sent.clear()
             self.assertEqual(sorted(o["id"] for o in market.search(60, docker=False)), [1, 2])
             self.assertEqual(len(sent), 1)                              # KVM — без запроса пар
+
+    def test_pairs_searched_at_the_same_time(self):
+        # [0.4.5] Поиск одиночных и пар — одновременно (каждый запрос к Vast — секунды)
+        def call(method, path, body=None, **k):
+            time.sleep(0.4)
+            return {"offers": [dict(offer(7 if body["num_gpus"]["eq"] == 2 else 1))]}
+        with mock.patch.object(market, "call", call), mock.patch.object(market, "bad_hosts", lambda: {}):
+            t0 = time.time()
+            rows = market.search(60, docker=True)
+            self.assertLess(time.time() - t0, 0.75)
+        self.assertEqual(sorted((o["id"], o.get("_gpus", 1)) for o in rows), [(1, 1), (7, 2)])
 
     def test_gpu_models(self):
         # [0.3.1] профессиональные с кодировщиком и выходами на монитор — подходят; без них — нет

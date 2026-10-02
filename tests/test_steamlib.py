@@ -195,6 +195,22 @@ class TestLibrary(Base):
         steamlib.library()
         self.assertEqual(self.steam.finalize_calls, 2)
 
+    def test_accounts_fetched_at_once(self):
+        # [0.4.5] Аккаунты — одновременно: два аккаунта по 0.4 с — меньше 0.8
+        steamlib.add_account(self.steam.login(A))
+        steamlib.add_account(self.steam.login(B))
+        owned = steamlib._owned
+
+        def slow_owned(sid, token):
+            time.sleep(0.4)
+            return owned(sid, token)
+        with mock.patch.object(steamlib, "_owned", slow_owned):
+            t0 = time.time()
+            lib = steamlib.library()
+            self.assertLess(time.time() - t0, 0.75)
+        self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "30", "40"})
+        self.assertEqual(next(g for g in lib["games"] if g["appid"] == "20")["accounts"], [A, B])   # порядок прежний
+
     def test_expired_account_keeps_previous_games(self):
         steamlib.add_account(self.steam.login(A))
         steamlib.add_account(self.steam.login(B))

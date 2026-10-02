@@ -16,6 +16,7 @@ import base64
 import json
 import secrets
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.parse
 
@@ -278,12 +279,18 @@ def library():
             g["minutes"] = max(g["minutes"], minutes or 0)
             g["last"] = max(g["last"], last or 0)
 
-        for a in accounts():
+        def fetch(sid):
+            token = access(sid)
+            return _owned(sid, token), _family(sid, token)
+
+        # [0.4.5] Аккаунты — одновременно (по очереди: ~3 с на аккаунт); итог разбираем по порядку, как раньше
+        accs = accounts()
+        with ThreadPoolExecutor(max(1, min(8, len(accs)))) as ex:
+            futs = [ex.submit(fetch, a["id"]) for a in accs]
+        for a, f in zip(accs, futs):
             sid = a["id"]
             try:
-                token = access(sid)
-                own = _owned(sid, token)
-                fam = _family(sid, token)
+                own, fam = f.result()
                 _mark(sid, False)
             except SteamExpired:
                 _mark(sid, True)

@@ -73,6 +73,30 @@ class TestOffers(unittest.TestCase):
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
         self.row = row
 
+    def test_requests_at_the_same_time(self):
+        # [0.4.5] Запросы к Vast — одновременно: проверка «нет машины», шаблон и баланс, потом поиск и последняя машина
+        def slow(v):
+            def f(*a, **k):
+                time.sleep(0.3)
+                return v
+            return f
+        with mock.patch.object(gui.core, "require_no_machine", slow(None)), \
+             mock.patch.object(gui.core, "template", slow({"recommended_disk_space": 100})), \
+             mock.patch.object(gui.core, "balance", slow(3.0)), \
+             mock.patch.object(gui.market, "search", slow([self.row])), \
+             mock.patch.object(gui.market, "last_machine", slow(None)):
+            t0 = time.time()
+            d = gui.Api().offers()
+            self.assertLess(time.time() - t0, 0.9)      # по очереди — 1.5 с
+        self.assertEqual((d["balance"], d["offers"][0]["id"]), (3.0, 5))
+
+    def test_machine_exists_error_wins(self):
+        def busy():
+            raise gui.VastgameError("машина уже есть", key="core.machine_exists")
+        with mock.patch.object(gui.core, "require_no_machine", busy), \
+             mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
+            self.assertEqual(gui.Api().offers()["error"]["key"], "core.machine_exists")
+
     def test_search_reaches_down_to_90_percent(self):
         asked = []
         with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None: asked.append(min_rel) or [self.row]), \

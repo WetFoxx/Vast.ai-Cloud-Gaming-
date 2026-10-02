@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <div class="brand"><img class="brand-mark" src="logo-mark.png" alt=""><img class="brand-word" src="logo-word.png" alt="VastGame"><span class="version" id="app-version"></span></div>
+    <div class="brand" id="brand" data-i18n-title="app.home"><img class="brand-mark" src="logo-mark.png" alt=""><img class="brand-word" src="logo-word.png" alt="VastGame"><span class="version" id="app-version"></span></div>
     <!-- Разделы — значками справа (подписи — во всплывающих подсказках) -->
     <nav class="header-right icons">
       <button class="icon-btn labeled" id="open-library"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h4v16h-4zM16.5 4.5l3.8 1-4 15-3.8-1z"/></svg><span data-i18n="library.open"></span></button>
@@ -128,6 +128,7 @@
     <div class="tabs" role="tablist">
       <button id="tab-docker" role="tab" data-i18n="offers.mode.docker"></button>
       <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
+      <button class="tabs-refresh" id="offers-refresh" data-i18n="offers.refresh"></button>
     </div>
     <div class="note" id="offers-docker-note" data-i18n="offers.mode.docker_note" hidden></div>
     <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->

@@ -65,7 +65,7 @@ header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 18px 22px 8px;
 }
-.brand { display: flex; align-items: center; gap: 9px; }
+.brand { display: flex; align-items: center; gap: 9px; cursor: pointer; }   /* нажатие — на главный экран */
 .brand-mark { height: 30px; width: auto; filter: drop-shadow(0 3px 10px rgba(230, 20, 80, .35)); }
 .brand-word { height: 17px; width: auto; opacity: .92; }
 @media (prefers-color-scheme: dark) { .brand-word { filter: invert(1); } }
@@ -430,6 +430,7 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 /* Вкладки списка машин: KVM / Docker (экспериментально) */
 .tabs { display: flex; gap: 6px; margin: 12px 0 6px; }
 .tabs button { border-radius: 999px; }
+.tabs .tabs-refresh { margin-left: auto; }   /* «Обновить» список машин — справа от вкладок */
 .tabs button.active { background: var(--grad); border-color: transparent; color: var(--accent-text); }
 
 /* ==== Лаконичный вид (0.3.0): разделы — значками в шапке; машина и баланс — одна карточка; фильтры — ярлыками ==== */
