@@ -391,13 +391,22 @@ $("task-replace").addEventListener("click", openReplace);
 $("progress-replace").addEventListener("click", openReplace);
 
 let offersReq = 0;   // номер последнего запроса списка: ответ на устаревший (другой диск) не показывать
+let offersStale = false;   // [0.4.5] на экране прошлый список (свежий ещё идёт) — арендовать нельзя
+
+// [0.4.5] Прошлый ответ медленного экрана (snapshot.py) — показать сразу, пока идёт свежий; пометка «обновляю…»
+async function snapshotOf(name) {
+  if (DEMO) return null;
+  try { return await api().snapshot(name); } catch (e) { return null; }
+}
+function setStale(id, on) { $(id).classList.toggle("stale", !!on); }
 let offersDocker = null;   // вкладка: false — KVM, true — Docker (основная); null — как в прошлый раз
 async function openOffers(disk, docker) {
   const reload = disk != null;       // смена диска: тумблеры синхронизации не сбрасывать
   if (docker != null) offersDocker = docker;
   show("offers");
   renderOffersGame();
-  offersData = null; selected = null;
+  offersData = null; selected = null; offersStale = false;
+  setStale("screen-offers", false);
   $("rent").disabled = true;
   $("offers-refresh").disabled = true;
   $("offers-summary").textContent = t("offers.loading");
@@ -405,13 +414,35 @@ async function openOffers(disk, docker) {
   showError("offers-error", null);
   const my = ++offersReq;
   showTabs();
-  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await api().offers(disk ?? null, offersDocker, replaceMode);
+  if (!reload) loadSyncList();               // выбор игр — с Drive, от списка машин не зависит: сразу и параллельно
+  const fresh = DEMO ? null : api().offers(disk ?? null, offersDocker, replaceMode);
+  if (!replaceMode) {
+    const snap = await snapshotOf("offers:" + (offersDocker == null ? "auto" : offersDocker ? "docker" : "kvm"));
+    if (my === offersReq && !offersData && snap && Array.isArray(snap.offers) && (disk == null || snap.disk === disk)) {
+      offersData = snap; offersStale = true;
+      offersDocker = !!snap.docker;
+      showTabs();
+      setStale("screen-offers", true);
+      $("disk").min = snap.disk_min; $("disk").max = snap.disk_max; $("disk").value = snap.disk;
+      renderOffers();
+    }
+  }
+  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await fresh;
   if (my !== offersReq) return;
   $("offers-refresh").disabled = false;
+  offersStale = false;
+  setStale("screen-offers", false);
   if (data.error && replaceMode && data.error.key === "core.running") {   // пока открывали, машина стала готовой
     replaceBlocked = true; replaceMode = false; renderReplace();
   }
-  if (data.error) { showError("offers-error", data.error); return; }
+  if (data.error) {
+    offersData = null;                       // прошлый список не оставлять: по нему не арендовать
+    $("offers-table").querySelector("tbody").innerHTML = "";
+    $("offers-pager").hidden = true;
+    $("rent").disabled = true;
+    showError("offers-error", data.error);
+    return;
+  }
   offersData = data;
   if (replaceMode && !data.replace) replaceMode = false;       // запуск успел закончиться неудачно — обычная аренда
   renderReplace();
@@ -419,7 +450,6 @@ async function openOffers(disk, docker) {
   showTabs();
   const slider = $("disk");
   slider.min = data.disk_min; slider.max = data.disk_max; slider.value = data.disk;
-  if (!reload) loadSyncList();
   renderOffers();
 }
 
@@ -453,8 +483,17 @@ async function loadSyncList() {
   $("sync-cols").hidden = true;
   $("sync-toggle").hidden = true;
   $("sync-note").hidden = true;
-  const d = DEMO ? demoSync() : await api().sync_list();
+  setStale("sync-card", false);
+  const fresh = DEMO ? null : api().sync_list();
+  const snap = await snapshotOf("sync");
+  if (my === syncReq && !syncRows && snap && Array.isArray(snap.rows)) {
+    syncRows = snap.rows;
+    setStale("sync-card", true);             // прошлый список: тумблеры не нажимаются, пока не придёт свежий
+    renderSync();
+  }
+  const d = DEMO ? demoSync() : await fresh;
   if (my !== syncReq) return;
+  setStale("sync-card", false);
   if (d.error) {
     $("sync-summary").textContent = "";
     $("sync-note").hidden = false;
@@ -788,7 +827,7 @@ function renderOffers() {
     tr.addEventListener("click", () => { selected = o.id; renderOffers(); });
     body.appendChild(tr);
   }
-  $("rent").disabled = replaceBlocked;
+  $("rent").disabled = replaceBlocked || offersStale;
   rentLabel();
 }
 
@@ -1057,10 +1096,17 @@ async function loadSetup() {
 
 async function openSetup() {
   show("setup");
-  $("setup-summary").textContent = t("setup.loading");
-  $("setup-steps").innerHTML = "";
   showError("setup-error", null);
-  const d = await loadSetup();
+  const fresh = loadSetup();
+  if (!setupData) {
+    $("setup-summary").textContent = t("setup.loading");
+    $("setup-steps").innerHTML = "";
+    const snap = await snapshotOf("setup");
+    if (!setupData && snap && Array.isArray(snap.steps)) setupData = snap;
+  }
+  if (setupData) { setStale("screen-setup", true); renderSetup(); }    // прошлая проверка — сразу
+  const d = await fresh;
+  setStale("screen-setup", false);
   if (d.error) { $("setup-summary").textContent = ""; showError("setup-error", d.error); return; }
   renderSetup();
 }
@@ -1734,7 +1780,7 @@ async function renderSteamAccounts(box) {
 }
 
 // ---------------------------------------------------------------- история и траты
-let historyData = null, historyDays = 30, historyAll = false;
+let historyData = null, historyDays = 30, historyAll = false, historyReq = 0;
 $("open-history").addEventListener("click", () => openHistory(historyDays));
 $("history-back").addEventListener("click", () => { show("main"); refresh(); });
 $("history-other-toggle").addEventListener("click", (e) => { e.preventDefault(); historyAll = !historyAll; openHistory(historyDays); });
@@ -1756,9 +1802,25 @@ async function openHistory(days) {
   $("history-other").hidden = true;
   showError("history-error", null);
   const all = historyAll;
-  const d = DEMO ? demoHistory(days, all) : await api().history(days, all);
-  if (days !== historyDays || all !== historyAll) return;   // пока считали, выбрали другой период
-  if (d.error) { $("history-summary").hidden = true; showError("history-error", d.error); return; }
+  const my = ++historyReq;
+  setStale("screen-history", false);
+  const fresh = DEMO ? null : api().history(days, all);
+  const snap = await snapshotOf(`history:${days}:${all ? "all" : "game"}`);
+  if (my === historyReq && snap && snap.totals) {
+    historyData = snap;
+    setStale("screen-history", true);
+    renderHistory();
+  }
+  const d = DEMO ? demoHistory(days, all) : await fresh;
+  if (my !== historyReq) return;   // пока считали, выбрали другой период
+  setStale("screen-history", false);
+  if (d.error) {
+    $("history-summary").hidden = true;
+    $("history-stats").hidden = $("history-card").hidden = true;    // прошлые цифры не оставлять
+    $("history-other").hidden = true;
+    showError("history-error", d.error);
+    return;
+  }
   historyData = d;
   renderHistory();
 }
@@ -1799,7 +1861,7 @@ function renderHistory() {
 }
 
 // ---------------------------------------------------------------- игры в облаке
-let gamesData = null;
+let gamesData = null, gamesReq = 0;
 let gamesTimer = null;
 
 $("open-games").addEventListener("click", openGames);
@@ -1813,8 +1875,19 @@ async function openGames() {
   $("games-service").textContent = "";
   $("games-summary").textContent = t("games.loading");
   showError("games-error", null);
-  const d = DEMO ? demoGames() : await api().games();
-  if (d.error) { $("games-summary").textContent = ""; showError("games-error", d.error); return; }
+  const my = ++gamesReq;
+  setStale("screen-games", false);
+  const fresh = DEMO ? null : api().games();
+  const snap = await snapshotOf("games");
+  if (my === gamesReq && !gamesData && snap && Array.isArray(snap.games)) {
+    gamesData = snap;
+    setStale("screen-games", true);          // прошлый список: «Убрать» не нажимается, пока не придёт свежий
+    renderGames();
+  }
+  const d = DEMO ? demoGames() : await fresh;
+  if (my !== gamesReq) return;
+  setStale("screen-games", false);
+  if (d.error) { gamesData = null; $("games-card").hidden = true; $("games-summary").textContent = ""; showError("games-error", d.error); return; }
   gamesData = d;
   renderGames();
 }

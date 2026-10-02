@@ -123,6 +123,7 @@
   <!-- ===== Выбор машины ===== -->
   <main id="screen-offers" hidden>
     <h1 data-i18n="offers.title"></h1>
+    <div class="stale-note" data-i18n="app.updating"></div>
     <!-- Игра из библиотеки: её скачает и запустит Steam на машине; аккаунт — если игра есть на нескольких -->
     <section class="card offers-game" id="offers-game" hidden></section>
     <div class="tabs" role="tablist">
@@ -135,6 +136,7 @@
     <section class="card attention replace-card" id="offers-current" hidden></section>
     <!-- Что синхронизировать: одна строка на игру (её файлы и сохранения вместе), выбор запоминается -->
     <section class="card sync-card" id="sync-card">
+      <div class="stale-note" data-i18n="app.updating"></div>
       <div class="sync-head">
         <div class="sync-head-text">
           <div class="sync-title" data-i18n="sync.title"></div>
@@ -215,6 +217,7 @@
 
   <main id="screen-setup" hidden>
     <h1 data-i18n="setup.title"></h1>
+    <div class="stale-note" data-i18n="app.updating"></div>
     <div class="sub" id="setup-summary" data-i18n="setup.loading"></div>
     <section class="card">
       <ul class="setup-steps" id="setup-steps"></ul>
@@ -243,6 +246,7 @@
   <!-- ===== История и траты ===== -->
   <main id="screen-history" hidden>
     <h1 data-i18n="history.title"></h1>
+    <div class="stale-note" data-i18n="app.updating"></div>
     <div class="tabs" id="history-tabs"></div>
     <div class="sub" id="history-summary" data-i18n="history.loading"></div>
     <section class="card stats" id="history-stats" hidden>
@@ -291,6 +295,7 @@
   <!-- ===== Игры в облаке ===== -->
   <main id="screen-games" hidden>
     <h1 data-i18n="games.title"></h1>
+    <div class="stale-note" data-i18n="app.updating"></div>
     <div class="sub" id="games-summary" data-i18n="games.loading"></div>
     <section class="card attention" id="games-ts" hidden>
       <div class="title" data-i18n="tailscale.title"></div>

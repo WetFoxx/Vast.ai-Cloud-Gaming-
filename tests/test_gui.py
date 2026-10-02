@@ -63,6 +63,65 @@ def wait_done(api, timeout=5, session=False):
     raise AssertionError("операция не закончилась")
 
 
+class TestSnapshots(unittest.TestCase):
+    """[0.4.5] Прошлый удачный ответ медленного экрана — окно показывает его сразу, пока идёт свежий."""
+
+    def setUp(self):
+        gui.snapshot._file().unlink(missing_ok=True)
+        row = dict(OFFER, country="Latvia, LV", _traffic=0.01, _total=0.21, reliability=0.99)
+        for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
+                                 (gui.core, "template", lambda: {"recommended_disk_space": 100}),
+                                 (gui.core, "balance", lambda: 3.0),
+                                 (gui.market, "search", lambda disk, docker=False, min_rel=None: [row]),
+                                 (gui.market, "last_machine", lambda disk, docker=False: None)]:
+            p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
+
+    def test_file_next_to_settings(self):
+        # тесты пишут во временную папку вместе с settings.json — настоящий файл не трогается
+        self.assertEqual(gui.snapshot._file().parent, gui.settings.FILE.parent)
+
+    def test_offers_remembered_per_tab(self):
+        api = gui.Api()
+        self.assertIsNone(api.snapshot("offers:docker"))
+        api.offers(docker=True)
+        snap = api.snapshot("offers:docker")
+        self.assertEqual(snap["offers"][0]["id"], 5)
+        self.assertIsNone(api.snapshot("offers:kvm"))
+        self.assertEqual(api.snapshot("offers:auto")["offers"][0]["id"], 5)   # вкладка прошлого раза — Docker
+
+    def test_filters_are_current_not_old(self):
+        api = gui.Api()
+        api.offers(docker=True)
+        api.save_offer_filters({"sort": "ping", "dir": "asc"})
+        self.assertEqual(api.snapshot("offers:docker")["filters"]["sort"], "ping")
+
+    def test_error_and_replace_not_remembered(self):
+        api = gui.Api()
+        api.offers(docker=True)
+        def busy():
+            raise gui.VastgameError("машина уже есть", key="core.machine_exists")
+        with mock.patch.object(gui.core, "require_no_machine", busy):
+            self.assertIn("error", api.offers(docker=True))
+        self.assertEqual(api.snapshot("offers:docker")["offers"][0]["id"], 5)     # прежний не затёрт ошибкой
+        gui.snapshot.save("offers:docker", {"error": {"key": "x"}})
+        self.assertNotIn("error", api.snapshot("offers:docker"))
+
+    def test_unknown_names_refused(self):
+        gui.snapshot.save("../../etc", {"a": 1})
+        self.assertIsNone(gui.Api().snapshot("../../etc"))
+        self.assertIsNone(gui.Api().snapshot(None))
+
+    def test_history_and_setup(self):
+        api = gui.Api()
+        with mock.patch.object(gui.history, "summary", lambda days, all_m: {"totals": {"cost": 1.5}, "days": days}):
+            api.history(7, False)
+        self.assertEqual(api.snapshot("history:7:game")["totals"]["cost"], 1.5)
+        self.assertIsNone(api.snapshot("history:7:all"))
+        with mock.patch.object(gui.setupcheck, "status", lambda: {"steps": [], "ready": True}):
+            api.setup_status()
+        self.assertTrue(api.snapshot("setup")["ready"])
+
+
 class TestOffers(unittest.TestCase):
     def setUp(self):
         row = dict(OFFER, country="Latvia, LV", _traffic=0.01, _total=0.21, reliability=0.99)

@@ -43,6 +43,7 @@ import settings
 import paths
 import setup
 import setupcheck
+import snapshot
 import sshkey
 from vastapi import KEY_FILE
 import steamlib
@@ -207,12 +208,15 @@ class Api:
             o = launching
             current = o and {"gpu": o.get("gpu_name") or "?", "country": market.country(o), "price": o.get("dph_total"),
                              "ping": latency.for_offer(o, remembered, me), "machine_id": o.get("machine_id"), **_traffic(o)}
-        return {"replace": launching is not None, "current": current,
+        out = {"replace": launching is not None, "current": current,
                 "docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
                 "filters": self._offer_filters(),
                 "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
                                   "offer": last["offer"] and row(last["offer"])}}
+        if launching is None:                     # [0.4.5] обычный список — показать сразу в следующий раз
+            snapshot.save("offers:" + ("docker" if docker else "kvm"), out)
+        return out
 
     def check_offer(self, offer_id, disk=None, docker=False):
         """Свежие данные машины прямо перед подтверждением аренды."""
@@ -266,7 +270,26 @@ class Api:
             r["cover"] = covers.get(r["appid"] or "")
             r["sync_game"] = sel["games"].get(r["game"], False) if r["game"] else None
             r["sync_saves"] = sel["saves"].get(r["saves"], True) if r["saves"] else None
+        snapshot.save("sync", {"rows": rows})
         return {"rows": rows}
+
+    # ---- [0.4.5] Прошлый ответ медленного экрана — показать сразу, пока идёт свежий (snapshot.py)
+    def snapshot(self, name):
+        """Последний удачный ответ экрана name или None. То, что человек мог поменять с тех пор (фильтры, выбор
+        игр, тумблеры), — нынешнее, а не из прошлого ответа. "offers:auto" — вкладка, открытая в прошлый раз."""
+        if name == "offers:auto":
+            name = "offers:" + ("docker" if self._docker(None) else "kvm")
+        d = snapshot.get(name)
+        if not isinstance(d, dict):
+            return None
+        if name.startswith("offers:"):
+            d.update(filters=self._offer_filters(), sync=self._sync())
+        elif name == "sync":
+            sel = cloudgames.selection(d.get("rows") or [])
+            for r in d.get("rows") or []:
+                r["sync_game"] = sel["games"].get(r["game"], False) if r.get("game") else None
+                r["sync_saves"] = sel["saves"].get(r["saves"], True) if r.get("saves") else None
+        return d
 
     def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None, game=None):
         """Арендовать машину (человек уже ответил «да») — в фоновом процессе, который переживёт
@@ -416,9 +439,11 @@ class Api:
     def setup_status(self):
         """Состояние первой настройки: шаги (готово / нужно внимание / не настроено)."""
         try:
-            return setupcheck.status()
+            d = setupcheck.status()
         except VastgameError as e:
             return {"error": error_data(e)}
+        snapshot.save("setup", d)
+        return d
 
     # ---- Простая настройка: по одному шагу — программы → Vast → Google → Tailscale → остальное само
     def wizard_state(self):
@@ -677,9 +702,11 @@ class Api:
         """Сессии и траты за days дней: реальные списания Vast + своя запись сессий.
         all_machines — включить и неигровые машины аккаунта."""
         try:
-            return history.summary(int(days), bool(all_machines))
+            d = history.summary(int(days), bool(all_machines))
         except VastgameError as e:
             return {"error": error_data(e)}
+        snapshot.save(f"history:{int(days)}:{'all' if all_machines else 'game'}", d)
+        return d
 
     # ---- Игры в облаке
     def games(self):
@@ -690,6 +717,7 @@ class Api:
             return {"error": error_data(e)}
         for g in data["games"]:
             g.pop("files")                          # странице не нужны
+        snapshot.save("games", data)
         return data
 
     def games_remove(self, name):
