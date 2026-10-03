@@ -132,6 +132,29 @@ class TestPrograms(Base):
         self.assertEqual(ws.launch(self.w.root, str(self.w.pd), APP, "prog:WeMod/WeMod.exe"), "running")
         self.assertEqual(self.started, [])
 
+    def test_root_hands_over_to_game_user(self):
+        # [v5.5] в Docker root не читает окружение процесса игры — запуск передаётся пользователю игры (runuser)
+        self.w.game_running()
+        ran = []
+        class R:
+            stdout = "prog: ok\n"
+        with mock.patch.object(ws.os, "getuid", lambda: 0), \
+             mock.patch("subprocess.run", lambda cmd, **kw: ran.append(cmd) or R()):
+            r = ws.launch(self.w.root, str(self.w.pd), APP, "prog:WeMod/WeMod.exe", "user")
+        self.assertEqual(r, "ok")
+        self.assertEqual(ran[0][:4], ["runuser", "-u", "user", "--"])
+        self.assertEqual(ran[0][-6:], ["progs-run", str(self.w.root), str(self.w.pd), "user", APP, "prog:WeMod/WeMod.exe"])
+        self.assertEqual(self.started, [])                                # сам root ничего не запускал
+
+    def test_auto_does_not_need_game_environment(self):
+        ws.set_auto(str(self.w.sdir), APP, "prog:WeMod/WeMod.exe", True)
+        self.w.game_running()
+        (self.w.proc / "100" / "environ").chmod(0)                       # как в Docker: окружение не прочитать
+        with mock.patch.object(ws, "launch", lambda *a: self.started.append(a) or "ok"):
+            ws.tick(self.w.root, str(self.w.pd), str(self.w.sdir), "user", now=1000)
+            ws.tick(self.w.root, str(self.w.pd), str(self.w.sdir), "user", now=1000 + ws.AUTO_DELAY)
+        self.assertEqual(len(self.started), 1)                            # игру узнали по командной строке
+
     def test_not_proton_game(self):
         self.w.process(100, ["/x/reaper", "SteamLaunch", f"AppId={APP}", "--", "/games/native.sh"])
         self.assertEqual(ws.launch(self.w.root, str(self.w.pd), APP, "prog:WeMod/WeMod.exe"), "noproton")
