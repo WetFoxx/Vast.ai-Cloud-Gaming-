@@ -1053,7 +1053,7 @@ function renderPlay(play, game, streaming) {
 const progNotes = {};
 function renderProgs(progs) {
   const box = $("progs-box");
-  const games = Object.entries(progs || {}).filter(([, v]) => v.running || (v.progs || []).length);
+  const games = Object.entries(progs || {});          // игра на машине — блок виден всегда (пустой — с подсказкой)
   box.hidden = !games.length;
   box.innerHTML = "";
   for (const [appid, g] of games) {
