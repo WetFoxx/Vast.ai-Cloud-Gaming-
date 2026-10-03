@@ -16,7 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from test_game_select import TMP, Machine, heredoc  # noqa: E402
+from test_game_select import TMP, Machine, fn, heredoc  # noqa: E402
 from test_wolf_web import load_wolf_web  # noqa: E402
 
 PY = TMP / "wolf-steam-progs.py"
@@ -185,6 +185,19 @@ class TestWolf(unittest.TestCase):
         self.assertIn("prog--WeMod", out.split("\n"))                     # не спрашивая и без выбора
         auto = json.loads((m.d / "S/progs.auto").read_text())
         self.assertEqual(auto, {APP: ["prog:WeMod/WeMod.exe"]})            # мусор отброшен
+
+    def test_programs_folder_explains_itself(self):
+        m = Machine()
+        (m.d / "home/Desktop").mkdir()
+        pd = m.d / "home/Downloads/Programs"
+        m.run(fn("mkpd") + "\nmkpd; mkpd", env=f'PD="{pd}"')               # второй раз ничего не ломает
+        self.assertEqual(sorted(x.name for x in pd.iterdir()), ["README_en.txt", "README_es.txt", "README_ru.txt"])
+        self.assertIn("трейнеры", (pd / "README_ru.txt").read_text())
+        self.assertIn("trainers", (pd / "README_en.txt").read_text())
+        self.assertIn("trainers", (pd / "README_es.txt").read_text())
+        link = m.d / "home/Desktop/Programs"                               # ярлык — латиницей, рядом с Games
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(pd))
 
     def test_web_commands(self):
         ns = load_wolf_web("/bin/true")

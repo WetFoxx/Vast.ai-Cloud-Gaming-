@@ -409,12 +409,13 @@ ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null
 # при этом не страдает — выгружаются только папки, которые есть на диске.
 mkgd()  { [ -d "$GD" ] || { u mkdir -p "$GD" && log "папка для игр $GD создана"; }; }
 # [v5.4] Папка Programs (программы для игр): подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
-# README.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
+# README_ru/en/es.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
 mkpd() {
   local dk
   [ -n "${PD:-}" ] || return 0
   [ -d "$PD" ] || { u mkdir -p "$PD" && log "папка программ $PD создана"; }
-  [ -e "$PD/README.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README.txt" <<'TXT'
+  # три файла — на языках VastGame (кириллица только внутри файлов, не в путях)
+  [ -e "$PD/README_ru.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README_ru.txt" <<'TXT'
 Programs — программы для игр
 
 Сюда кладут программы, которые нужны играм или модам: трейнеры, Cheat Engine, загрузчики модов и т.п.
@@ -423,10 +424,26 @@ Programs — программы для игр
 
 Запускать — в VastGame, на главном экране, блок «Программы игры»: кнопкой «Запустить» или тумблером
 «Вместе с игрой». Программа откроется рядом с игрой, в том же Proton, — так трейнеры видят игру.
+TXT
+  [ -e "$PD/README_en.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README_en.txt" <<'TXT'
+Programs — programs for games
 
----
-Programs for games: trainers, Cheat Engine, mod loaders. One folder per program. Everything here is saved
-to the cloud. Start them from VastGame ("Game programs" on the main screen) — they run next to the game.
+Put programs that games or mods need here: trainers, Cheat Engine, mod loaders and so on.
+One folder per program, for example Programs/WeMod. Everything in this folder is saved to the cloud
+and will be there on your next machines.
+
+Start them in VastGame, on the main screen, in the "Game programs" block: with the "Start" button or the
+"With the game" switch. The program opens next to the game, in the same Proton — that's how trainers see the game.
+TXT
+  [ -e "$PD/README_es.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README_es.txt" <<'TXT'
+Programs — programas para juegos
+
+Aquí van los programas que necesitan los juegos o los mods: trainers, Cheat Engine, cargadores de mods, etc.
+Cada programa en su propia carpeta, por ejemplo Programs/WeMod. Todo lo que hay aquí se guarda en la nube
+y estará en tus próximas máquinas.
+
+Inícialos en VastGame, en la pantalla principal, en el bloque «Programas del juego»: con el botón «Iniciar»
+o el interruptor «Con el juego». El programa se abre junto al juego, en el mismo Proton: así los trainers ven el juego.
 TXT
   dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
   [ -d "$dk" ] && [ ! -e "$dk/Programs" ] && u ln -s "$PD" "$dk/Programs"

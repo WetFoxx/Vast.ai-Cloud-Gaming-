@@ -415,8 +415,8 @@
   путь — только внутри папки игры или папки программ (realpath, без ссылок наружу). Список (`programs`): .exe, которых
   нет в снимке чистой игры (`van/N.tsv`; нет снимка — из папки игры ничего), и все .exe подпапок папки Programs
   `PROGRAMS_DIR` = `~/Downloads/Programs` (без unins/setup/redist…); id `game:путь` / `prog:папка/путь`. Папка —
-  архивы `prog--ПАПКА` (как Games, но не в Steam, без вопросов, всегда качаются и выгружаются; `mkpd`: README.txt и
-  ярлык Programs на рабочем столе — имена латиницей, решение Алексея). «Вместе с игрой»: `progs-tick` из `watch_games` раз в 5 с
+  архивы `prog--ПАПКА` (как Games, но не в Steam, без вопросов, всегда качаются и выгружаются; `mkpd`: README_ru.txt,
+  README_en.txt, README_es.txt и ярлык Programs на рабочем столе — имена латиницей, решение Алексея). «Вместе с игрой»: `progs-tick` из `watch_games` раз в 5 с
   (запуск через `VG_PROG_DELAY`=15 с после появления процесса игры, один раз на запуск игры; `progs.state`), выбор —
   `$S/progs.auto` из VG_SYNC `progs` {номер: [id]} и `wolf prog auto`; запись `progs` на /json (JSON; кэш списка 30 с;
   не архив — `core.NOT_ARCHIVES`, finish-run пропускает). Команды страницы `prog-run`/`prog-auto`. Окно: блок
