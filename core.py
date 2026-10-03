@@ -45,7 +45,8 @@ RESTORE_MIN = 120        # восстановление: дольше — ост
 DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:284ab9ad8a637bb5cdc26f9e4b1e74bda2f85ba9"
 SUNSHINE = "sunshine"    # запись образа на странице wolf: заработал ли NVENC (не архив)
 PLAY = "play"            # [v4.8] запись wolf: игра из библиотеки — вход в Steam, скачивание, запуск (не архив)
-NOT_ARCHIVES = (SUNSHINE, PLAY)
+PROGS = "progs"          # [v5.4] запись wolf: программы игр (JSON: {номер: {running, auto, progs}}) — не архив
+NOT_ARCHIVES = (SUNSHINE, PLAY, PROGS)
 
 
 # ------------------------------------------------------------------ подготовка аренды ---
@@ -135,13 +136,31 @@ def asks_of(s):
     return sorted(out, key=lambda a: (a["ts"], a["archive"]))
 
 
-def vg_sync(games, saves_off, mods=None):
+def progs_of(s):
+    """[v5.4] Программы игр со страницы статуса машины: {номер: {"running", "auto": [id], "progs": [{id, name, where}]}}
+    или {} (скрипт старше v5.4, запись не разобрать)."""
+    rec = (s or {}).get(PROGS)
+    try:
+        d = json.loads(rec[2]) if rec else {}
+    except (TypeError, ValueError):
+        return {}
+    out = {}
+    for a, v in (d.items() if isinstance(d, dict) else []):
+        if str(a).isdigit() and isinstance(v, dict):
+            out[str(a)] = {"running": bool(v.get("running")),
+                           "auto": [x for x in v.get("auto") or [] if isinstance(x, str)],
+                           "progs": [p for p in v.get("progs") or [] if isinstance(p, dict) and isinstance(p.get("id"), str)]}
+    return out
+
+
+def vg_sync(games, saves_off, mods=None, progs=None):
     """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment.
     [v4.8] "steam": "store" — игры Steam качает сам Steam: машина не скачивает их из облака, не выгружает и не
     спрашивает о них (игры из папки Games — по выбору, как раньше)."""
     return base64.b64encode(json.dumps({"games": [g for g in games if not g.startswith("sgame--")],
                                         "saves_off": list(saves_off), "steam": "store",
-                                        "mods": mods or {"yes": [], "no": []}},
+                                        "mods": mods or {"yes": [], "no": []},
+                                        "progs": progs or {}},          # [v5.4] программы «вместе с игрой»
                                        ensure_ascii=False).encode()).decode()
 
 
@@ -186,7 +205,7 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False):
             env[var] = "1" if sync[k] else "0"
     sel = (sync or {}).get("select")
     if isinstance(sel, dict):
-        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"))
+        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"), sel.get("progs"))
     play = (sync or {}).get("play")
     if isinstance(play, dict) and play.get("appid") and play.get("account"):
         env["VG_PLAY"] = vg_play(play)
@@ -517,6 +536,7 @@ def status():
     asks = asks_of(s)                                                       # [v4.6] вопросы — не архивы
     s = {n: v for n, v in s.items() if not ASK.match(n)}
     out.update(asks=asks, progress={n: v.progress for n, v in s.items() if getattr(v, "progress", None)})
+    out["progs"] = progs_of(s)                                             # [v5.4] программы игр
     if PLAY in s:                                                          # [v4.8] ход игры из библиотеки
         v = s[PLAY]
         out["play"] = {"state": v[1], "text": v[2], "ts": v[0], "progress": getattr(v, "progress", None)}

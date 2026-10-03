@@ -65,6 +65,7 @@ TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 �
 OFFER_SORTS = ("price", "ping", "net", "traffic", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
+PROG_ID = re.compile(r"^(game|prog):[^\x00-\x1f]{1,400}$")   # [v5.4] программа игры (путь проверяет машина)
 SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
 REPLACE_WAIT = 180   # с: «Сменить машину» — сколько ждать, пока прежний запуск закончится и Vast уберёт машину
 REPLACE_POLL = 2
@@ -130,7 +131,7 @@ class Api:
         task = d and {"kind": d["kind"], "active": d["active"], "unseen": d["done"] and not d.get("seen")}
         notify.low_balance(credit, price, lang)
         return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session, "task": task,
-                "hours_left": credit / price if price else None, "status": st,
+                "hours_left": credit / price if price else None, "status": {**st, "progs": self._progs(st.get("progs"))},
                 "game_names": self._game_names(st["archives"]), "busy": self._busy(),
                 "play_now": settings.get("play_now") if st["machine"] or task else None}
 
@@ -316,6 +317,7 @@ class Api:
             chosen = cloudgames.remember(select)
             chosen["games"] = [a for a in chosen["games"] if not a.startswith("sgame--")]   # [v4.8] их качает Steam
             chosen["mods"] = cloudgames.mods_answers()                                     # [v5.0] «сохранять моды?»
+            chosen["progs"] = settings.get("progs_sel") or {}                              # [v5.4] «вместе с игрой»
             sync.update(steam_games=False,
                         other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
             settings.set("sync", sync)
@@ -752,7 +754,49 @@ class Api:
         play = p and {"state": p[1], "text": p[2], "progress": getattr(p, "progress", None)}
         return {"archives": arch, "asks": core.asks_of(s), "game_names": self._game_names(list(arch)),
                 "play": play, "play_game": settings.get("play_now") if play else None,
-                "streaming": moonlight.streaming() if play else None}
+                "streaming": moonlight.streaming() if play else None, "progs": self._progs(core.progs_of(s))}
+
+    # ---- [v5.4] Программы игр: трейнеры и программы для модов — рядом с игрой, в её Proton (wolf-setup.sh v5.4)
+    def _progs(self, progs):
+        """Программы игр с машины + названия игр (из библиотеки или игры, с которой арендована машина)."""
+        if not progs:
+            return {}
+        games = {g["appid"]: g.get("name") for g in (steamlib.cached() or {}).get("games") or []}
+        now = settings.get("play_now") or {}
+        for a, v in progs.items():
+            v["name"] = games.get(a) or (now.get("name") if str(now.get("appid")) == a else "") or ""
+        return progs
+
+    def prog_run(self, appid, ident):
+        """Запустить программу рядом с игрой. {"result": ok|running|nogame|noproton|nofile}."""
+        appid, ident = str(appid), str(ident)
+        if not (appid.isdigit() and PROG_ID.match(ident)):
+            return {"error": {"key": "progs.bad", "params": {}, "text": "bad program"}}
+        node = wolfnode.ts_node()
+        if not node:
+            return {"error": {"key": "ask.no_machine", "params": {}, "text": "no machine"}}
+        code, out = wolfnode.run(node[1], "prog-run", [appid, ident], timeout=60, on_notice=self._ssh_notice)
+        m = re.search(r"prog: (\w+)", out or "")
+        settings.applog(f"программа {ident} для {appid}: {m.group(1) if m else (out or '').strip()[-120:]}")
+        return {"result": m.group(1) if m else "failed"}
+
+    def prog_auto(self, appid, ident, on):
+        """Тумблер «Вместе с игрой»: запомнить (уйдёт машинам при аренде) и сразу передать работающей машине."""
+        appid, ident = str(appid), str(ident)
+        if not (appid.isdigit() and PROG_ID.match(ident)):
+            return {"error": {"key": "progs.bad", "params": {}, "text": "bad program"}}
+        sel = settings.get("progs_sel") or {}
+        cur = [x for x in sel.get(appid) or [] if x != ident] + ([ident] if on else [])
+        sel = {**sel, appid: cur} if cur else {k: v for k, v in sel.items() if k != appid}
+        settings.set("progs_sel", sel)
+        node = wolfnode.ts_node()
+        if node:
+            try:
+                wolfnode.run(node[1], "prog-auto", [appid, ident, "on" if on else "off"], timeout=30,
+                             on_notice=self._ssh_notice)
+            except VastgameError:
+                pass                         # запомнено — уйдёт следующей машине; эта узнает при перезапуске игры
+        return {"ok": True}
 
     # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
     def library(self, fresh=False):
@@ -765,7 +809,8 @@ class Api:
                                  lambda: cloudgames.mods() if fresh and drive.token() else None)
         if mods is not None:
             settings.set("mods_known", mods)
-        return {**lib, "mods": mods if mods is not None else settings.get("mods_known") or {},
+        return {**lib, "progs_sel": settings.get("progs_sel") or {},                # [v5.4] программы «вместе с игрой»
+                "mods": mods if mods is not None else settings.get("mods_known") or {},
                 "mods_save": settings.get("mods_sel") or {}}
 
     def set_mods_save(self, appid, on):

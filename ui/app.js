@@ -131,6 +131,7 @@ function render(data) {
   renderLive(liveFromStatus(st));
   renderAsks(st.asks || []);
   if (st.play) renderPlay(st.play, playNowGame(), null); else renderPlay(null);
+  renderProgs(st.progs);
   const playing = st.play && !["ok", "err"].includes(st.play.state);
   liveLoop(!!(task || playing || ["starting", "syncing"].includes(st.state)));
 
@@ -170,6 +171,7 @@ async function pollLive() {
   renderAsks(d.asks);
   if (d.play_game) playNow = d.play_game;
   renderPlay(d.play, playNowGame(), d.streaming);
+  renderProgs(d.progs);
 }
 let playNow = null;          // игра, с которой арендована машина (Python помнит её: окно могли закрыть)
 function playNowGame() { return playNow || (playGame && { ...playGame }); }
@@ -966,6 +968,10 @@ function renderOffersGame() {
     main.appendChild(seg);
   }
   main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; }));
+  // [v5.4] программы, которые запустятся вместе с игрой (выбраны раньше на главном)
+  const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
+  if (auto.length) main.appendChild(el("div", { className: "og-progs" },
+    t("progs.with_game", { list: auto.map((i) => i.split("/").pop()).join(", ") })));
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
   main.appendChild(none);
@@ -1040,6 +1046,49 @@ function renderPlay(play, game, streaming) {
   }
 }
 
+
+// [v5.4] Программы игры (запись progs машины): программы, добавленные в папку игры, и папка «Программы для игр».
+// «Запустить» — рядом с игрой, в её Proton (игра должна быть запущена); «Вместе с игрой» — сама при каждом старте игры,
+// на этой и следующих машинах (выбор запоминается). Ответ кнопки держим 20 с — блок перерисовывается при обновлении.
+const progNotes = {};
+function renderProgs(progs) {
+  const box = $("progs-box");
+  const games = Object.entries(progs || {}).filter(([, v]) => v.running || (v.progs || []).length);
+  box.hidden = !games.length;
+  box.innerHTML = "";
+  for (const [appid, g] of games) {
+    box.appendChild(el("div", { className: "pg-title" }, g.name ? t("progs.title.game", { name: g.name }) : t("progs.title")));
+    if (!(g.progs || []).length) box.appendChild(el("div", { className: "pg-hint" }, t("progs.empty")));
+    for (const p of g.progs || []) {
+      const row = el("div", { className: "pg-row" });
+      const nm = el("div", { className: "pg-name" });
+      nm.append(el("b", {}, p.name), el("span", { className: "sub" },
+        p.where === "game" ? t("progs.where.game") : t("progs.where.folder", { folder: p.where })));
+      const note = progNotes[appid + p.id];
+      if (note && Date.now() - note.at < 20000) nm.appendChild(el("span", { className: "pg-note" }, note.text));
+      const auto = el("label", { className: "pg-auto", title: t("progs.auto.hint") });
+      const cb = el("input", { type: "checkbox", checked: (g.auto || []).includes(p.id) });
+      cb.addEventListener("change", async () => {
+        g.auto = cb.checked ? [...(g.auto || []), p.id] : (g.auto || []).filter((x) => x !== p.id);
+        if (!DEMO) await api().prog_auto(appid, p.id, cb.checked);
+      });
+      auto.append(cb, t("progs.auto"));
+      const run = button(t("progs.run"), async () => {
+        run.disabled = true;
+        progNotes[appid + p.id] = { at: Date.now(), text: t("progs.starting") };
+        renderProgs(progs);
+        const r = DEMO ? { result: "ok" } : await api().prog_run(appid, p.id);
+        progNotes[appid + p.id] = { at: Date.now(), text: r.error ? errText(r.error) : t("progs.result." + (r.result || "failed")) };
+        renderProgs(progs);
+      }, true);
+      run.classList.add("small");
+      run.disabled = !g.running;
+      if (!g.running) run.title = t("progs.need_game");
+      row.append(nm, auto, run);
+      box.appendChild(row);
+    }
+  }
+}
 
 // ---------------------------------------------------------------- «Закончить» и аварийное удаление
 $("stop").addEventListener("click", async () => {
@@ -2313,7 +2362,10 @@ function demoState(kind) {
   const s = {
     none: { state: "none", kind: "none", machine: null, links: null, count: 0 },
     starting: { ...base, state: "starting", kind: "restore", stage: "restore", done: 3, busy: ["steam-client", "pfx--3751260"] },
-    ready: { ...base, state: "ready", kind: "ready" },
+    ready: { ...base, state: "ready", kind: "ready",
+             progs: { "3751260": { name: "The Blood of Dawnwalker", running: true, auto: ["game:Dawnwalker/Binaries/Win64/treiner.exe"],
+                                   progs: [{ id: "game:Dawnwalker/Binaries/Win64/treiner.exe", name: "treiner.exe", where: "game" },
+                                           { id: "prog:WeMod/WeMod.exe", name: "WeMod.exe", where: "WeMod" }] } } },
     syncing: { ...base, state: "syncing", kind: "syncing", busy: ["pfx--3751260", "sgame--Hades II"],
                archives: { "pfx--3751260": [0, "up", ""], "sgame--Hades II": [0, "up", ""], "steam-state": [0, "ok", ""] },
                progress: { "sgame--Hades II": { done: 4.1e9, total: 11.8e9, speed: 48e6 } },

@@ -1,5 +1,6 @@
 # Питоновская часть окна (gui.Api) с поддельным ядром: без денег, без сети, без окна.
 
+import json
 import sys
 import subprocess
 import tempfile
@@ -120,6 +121,53 @@ class TestSnapshots(unittest.TestCase):
         with mock.patch.object(gui.setupcheck, "status", lambda: {"steps": [], "ready": True}):
             api.setup_status()
         self.assertTrue(api.snapshot("setup")["ready"])
+
+
+class TestPrograms(unittest.TestCase):
+    """[v5.4] Программы игр: запуск рядом с игрой и «вместе с игрой» — через страницу машины."""
+
+    def setUp(self):
+        self.calls = []
+        def run(ip, cmd, args=(), **k):
+            self.calls.append((cmd, list(args)))
+            return 0, "prog: ok\n" if cmd == "prog-run" else "prog: auto on\n"
+        for obj, name, value in [(gui.wolfnode, "ts_node", lambda: (True, "100.1.2.3", "m.ts.net")),
+                                 (gui.wolfnode, "run", run)]:
+            p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
+        gui.settings.set("progs_sel", None)
+
+    def test_run(self):
+        r = gui.Api().prog_run("3751260", "game:Dawnwalker/Binaries/Win64/treiner.exe")
+        self.assertEqual(r, {"result": "ok"})
+        self.assertEqual(self.calls, [("prog-run", ["3751260", "game:Dawnwalker/Binaries/Win64/treiner.exe"])])
+
+    def test_bad_input_refused(self):
+        for a, i in (("x", "prog:a.exe"), ("1", "/bin/sh"), ("1", "prog:a\nb")):
+            self.assertIn("error", gui.Api().prog_run(a, i))
+        self.assertEqual(self.calls, [])
+
+    def test_auto_remembered_and_sent(self):
+        api = gui.Api()
+        api.prog_auto("1", "prog:WeMod/WeMod.exe", True)
+        api.prog_auto("1", "game:t.exe", True)
+        self.assertEqual(gui.settings.get("progs_sel"), {"1": ["prog:WeMod/WeMod.exe", "game:t.exe"]})
+        api.prog_auto("1", "prog:WeMod/WeMod.exe", False)
+        api.prog_auto("1", "game:t.exe", False)
+        self.assertEqual(gui.settings.get("progs_sel"), {})
+        self.assertEqual(self.calls[0], ("prog-auto", ["1", "prog:WeMod/WeMod.exe", "on"]))
+
+    def test_names_from_library(self):
+        with mock.patch.object(gui.steamlib, "cached", lambda: {"games": [{"appid": "1", "name": "Dawnwalker"}]}):
+            out = gui.Api()._progs({"1": {"running": True, "auto": [], "progs": []}, "2": {"running": False}})
+        self.assertEqual((out["1"]["name"], out["2"]["name"]), ("Dawnwalker", ""))
+
+    def test_status_record_parsed(self):
+        rec = (1, "ok", json.dumps({"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}, 5]},
+                                    "bad": {}}))
+        self.assertEqual(gui.core.progs_of({"progs": rec}),
+                         {"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}]}})
+        self.assertEqual(gui.core.progs_of({"progs": (1, "ok", "не json")}), {})
+        self.assertIn("progs", gui.core.NOT_ARCHIVES)                    # не архив: не мешает «Закончить»
 
 
 class TestOffers(unittest.TestCase):
@@ -519,7 +567,7 @@ class TestPlay(unittest.TestCase):
         env = self.body["env"]
         # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}})
+                         {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}, "progs": {}})
         self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
         # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
         self.wait_idle()
