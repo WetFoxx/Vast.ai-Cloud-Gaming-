@@ -15,7 +15,7 @@ import wolfnode
 from wolfnode import ssh_run, ts_node
 
 KINDS = ("sgame", "game", "pfx", "mod", "prog")   # игра Steam, не из Steam, сохранения (префикс Proton), моды (v5.0),
-                                             # [v5.4] программы для игр (папка «Программы для игр»)
+                                             # [v5.4] программы для игр (папка Programs)
 MOD = re.compile(r"^mod--(\d+)--(.*)$")      # моды игры Steam: mod--НОМЕР--Название
 
 

@@ -54,7 +54,7 @@ class World:
         (self.pd / "WeMod").mkdir(parents=True)
         (self.pd / "WeMod/WeMod.exe").write_text("x")
         (self.pd / "WeMod/Uninstall WeMod.exe").write_text("x")
-        (self.pd / "Что это за папка.txt").write_text("…")
+        (self.pd / "README.txt").write_text("…")
         self.proc = d / "proc"
         self.proc.mkdir()
 

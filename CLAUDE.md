@@ -413,10 +413,10 @@
   --verb=waitforexitandrun -- <proton> waitforexitandrun игра.exe`), глагол → run, игра → программа,
   `PROTON_USE_XALIA=0`, от имени пользователя (root сбрасывает права); ответы ok/running/nogame/noproton/nofile;
   путь — только внутри папки игры или папки программ (realpath, без ссылок наружу). Список (`programs`): .exe, которых
-  нет в снимке чистой игры (`van/N.tsv`; нет снимка — из папки игры ничего), и все .exe подпапок папки «Программы для
-  игр» `PROGRAMS_DIR` = `~/Downloads/Programs` (без unins/setup/redist…); id `game:путь` / `prog:папка/путь`. Папка —
-  архивы `prog--ПАПКА` (как Games, но не в Steam, без вопросов, всегда качаются и выгружаются; `mkpd`: «Что это за
-  папка.txt» и ярлык «Программы для игр» на рабочем столе). «Вместе с игрой»: `progs-tick` из `watch_games` раз в 5 с
+  нет в снимке чистой игры (`van/N.tsv`; нет снимка — из папки игры ничего), и все .exe подпапок папки Programs
+  `PROGRAMS_DIR` = `~/Downloads/Programs` (без unins/setup/redist…); id `game:путь` / `prog:папка/путь`. Папка —
+  архивы `prog--ПАПКА` (как Games, но не в Steam, без вопросов, всегда качаются и выгружаются; `mkpd`: README.txt и
+  ярлык Programs на рабочем столе — имена латиницей, решение Алексея). «Вместе с игрой»: `progs-tick` из `watch_games` раз в 5 с
   (запуск через `VG_PROG_DELAY`=15 с после появления процесса игры, один раз на запуск игры; `progs.state`), выбор —
   `$S/progs.auto` из VG_SYNC `progs` {номер: [id]} и `wolf prog auto`; запись `progs` на /json (JSON; кэш списка 30 с;
   не архив — `core.NOT_ARCHIVES`, finish-run пропускает). Команды страницы `prog-run`/`prog-auto`. Окно: блок

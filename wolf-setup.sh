@@ -119,7 +119,7 @@
 # [v5.4] ПРОГРАММЫ ИГР. Трейнеры и программы для модов запускаются рядом с игрой — её Proton, префикс и контейнер
 # Steam Linux Runtime (wolf-steam.py progs-*): кнопкой из приложения (wolf prog run НОМЕР ID) или сами «вместе с
 # игрой» (VG_SYNC "progs": {номер: [id]}, во время игры — wolf prog auto). Программы — .exe, добавленные в папку игры
-# (сохраняются с модами), и папка «Программы для игр» PROGRAMS_DIR (~/Downloads/Programs): подпапка = архив
+# (сохраняются с модами), и папка Programs (PROGRAMS_DIR = ~/Downloads/Programs, ярлык на рабочем столе): подпапка = архив
 # prog--ПАПКА (как игры из Games, но в Steam не добавляется, вопросов о ней нет). Список — запись progs на /json.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
@@ -408,14 +408,14 @@ ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null
 # GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
 # при этом не страдает — выгружаются только папки, которые есть на диске.
 mkgd()  { [ -d "$GD" ] || { u mkdir -p "$GD" && log "папка для игр $GD создана"; }; }
-# [v5.4] Папка «Программы для игр»: подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
-# «Что это за папка.txt», на рабочем столе — ярлык «Программы для игр»
+# [v5.4] Папка Programs (программы для игр): подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
+# README.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
 mkpd() {
   local dk
   [ -n "${PD:-}" ] || return 0
   [ -d "$PD" ] || { u mkdir -p "$PD" && log "папка программ $PD создана"; }
-  [ -e "$PD/Что это за папка.txt" ] || u sh -c 'cat > "$1"' _ "$PD/Что это за папка.txt" <<'TXT'
-Программы для игр
+  [ -e "$PD/README.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README.txt" <<'TXT'
+Programs — программы для игр
 
 Сюда кладут программы, которые нужны играм или модам: трейнеры, Cheat Engine, загрузчики модов и т.п.
 Каждую программу — в свою папку, например Programs/WeMod. Всё, что здесь лежит, сохраняется в облаке
@@ -429,7 +429,7 @@ Programs for games: trainers, Cheat Engine, mod loaders. One folder per program.
 to the cloud. Start them from VastGame ("Game programs" on the main screen) — they run next to the game.
 TXT
   dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
-  [ -d "$dk" ] && [ ! -e "$dk/Программы для игр" ] && u ln -s "$PD" "$dk/Программы для игр"
+  [ -d "$dk" ] && [ ! -e "$dk/Programs" ] && u ln -s "$PD" "$dk/Programs"
   return 0
 }
 sz()    { tr '\0' '\n' < "$1" | awk -F'\t' '{s+=$3} END{printf "%.0f", s}'; }
@@ -2584,7 +2584,7 @@ def logon(root, sid, since=0):
 # …/proton waitforexitandrun игра.exe»), меняем глагол на run и игру — на программу. PROTON_USE_XALIA=0: с помощником
 # окон Xalia трейнер умирал на старте (X Error BadMatch, X_GetDeviceButtonMapping).
 # Откуда программы: из папки игры — .exe, которых не было в чистой игре из Steam (снимок модов van/НОМЕР.tsv), id
-# «game:путь»; из папки «Программы для игр» (PD) — все .exe в её подпапках, id «prog:папка/путь».
+# «game:путь»; из папки Programs (PD) — все .exe в её подпапках, id «prog:папка/путь».
 PROG_SKIP = re.compile(r"unins|setup|install|redist|vc_?redist|dxsetup|dotnet|directx|crash|report|update", re.I)
 AUTO_DELAY = int(os.environ.get("VG_PROG_DELAY", "15"))   # с: после появления процесса игры — программы «вместе с игрой»
 PROC = "/proc"
