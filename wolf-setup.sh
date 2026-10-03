@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.4 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.5 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -121,6 +121,8 @@
 # игрой» (VG_SYNC "progs": {номер: [id]}, во время игры — wolf prog auto). Программы — .exe, добавленные в папку игры
 # (сохраняются с модами), и папка Programs (PROGRAMS_DIR = ~/Downloads/Programs, ярлык на рабочем столе): подпапка = архив
 # prog--ПАПКА (как игры из Games, но в Steam не добавляется, вопросов о ней нет). Список — запись progs на /json.
+# [v5.5] Программа запускается от имени пользователя игры: в Docker root не читает окружение её процесса (нет
+# CAP_SYS_PTRACE) — v5.4 отвечал «не через Proton» при запущенной игре.
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -2708,18 +2710,23 @@ def _running(path):
     return False
 
 
-def _as_user(user):
-    if os.getuid() != 0 or not user:
-        return None
-    import pwd
-    pw = pwd.getpwnam(user)
-    def drop():
-        os.setgid(pw.pw_gid); os.initgroups(user, pw.pw_gid); os.setuid(pw.pw_uid)
-    return drop
+def _game_path(pid):
+    """Путь игры из командной строки reaper (последний аргумент) — без окружения процесса."""
+    c = [x.decode(errors="replace") for x in _cmd(pid) if x]
+    return c[-1] if "--" in c else ""
 
 
 def launch(root, pd, appid, ident, user=None):
-    """Запустить программу рядом с игрой: «ok», «running» (уже запущена), «nogame», «noproton», «nofile»."""
+    """Запустить программу рядом с игрой: «ok», «running» (уже запущена), «nogame», «noproton», «nofile».
+    Запускает от имени пользователя игры: окружение её процесса (/proc/N/environ) в контейнере Docker даже root не
+    читает (нет CAP_SYS_PTRACE — живой случай 2026-10-04: ответ «noproton» при запущенной игре), а свои процессы
+    пользователь читать может. Вызван от root — передаёт себя пользователю (runuser) и отдаёт его ответ."""
+    if os.getuid() == 0 and user:
+        import subprocess
+        r = subprocess.run(["runuser", "-u", user, "--", sys.executable, os.path.abspath(__file__), "progs-run",
+                            str(root), str(pd), user, str(appid), ident], capture_output=True, text=True, timeout=60)
+        m = re.search(r"prog: (\w+)", r.stdout)
+        return m.group(1) if m else "failed"
     path = _resolve(root, pd, appid, ident)
     if not path:
         return "nofile"
@@ -2738,7 +2745,7 @@ def launch(root, pd, appid, ident, user=None):
         log.write(f"\n== {time.strftime('%F %T')} {appid} {ident}\n".encode())
         log.flush()
         subprocess.Popen(head + ["run", path], env=env, cwd=os.path.dirname(path), stdout=log, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True, preexec_fn=_as_user(user))
+                         stdin=subprocess.DEVNULL, start_new_session=True)
     return "ok"
 
 
@@ -2780,8 +2787,7 @@ def tick(root, pd, sdir, user=None, now=None):
         if not ids:
             continue
         rec = state.setdefault(pid, {"seen": 0, "done": []})
-        parts = _launch_parts(pid)
-        game = os.path.basename(parts[1]).lower().encode() if parts else b""
+        game = os.path.basename(_game_path(pid)).lower().encode()     # без окружения: root в Docker его не читает
         up = game and any(_cmd(d)[:1] and _cmd(d)[0].lower().replace(b"\\", b"/").endswith(game)
                           for d in os.listdir(PROC) if d.isdigit() and d != pid)
         if not up:
