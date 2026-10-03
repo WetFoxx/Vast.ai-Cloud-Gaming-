@@ -380,7 +380,7 @@ class TestScript(unittest.TestCase):
         boot = fn("boot")
         self.assertLess(boot.index("play_prepare"), boot.index("&& steam_go\n  [ -e \"$S/play.app\" ] && ( play_watch & )"))
         self.assertIn("play_init", boot)
-        self.assertRegex(WOLF, r"case \$n in boot\|finish\|play\|sunshine\) continue")
+        self.assertRegex(WOLF, r"case \$n in boot\|finish\|play\|sunshine\|progs\) continue")
         # [v5.3] список аккаунтов — после восстановления steam-state, до запуска Steam; при выключении — сразу после
         # закрытия Steam и до выгрузки state
         self.assertLess(boot.index("( unpack steam-state )"), boot.index("wolf-steam.py seen"))
