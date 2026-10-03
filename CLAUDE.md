@@ -391,6 +391,22 @@
   Гипотеза: игра держит экран в своём режиме, переключение wolf-res на разрешение клиента / захват NvFBC ломается.
   Базовое разрешение (1920×1200) не проверяли — Алексей сменил машину. Журнала Sunshine нет (аренда без канала
   отладки). Идея (предложена, не начата): при «нет видео» окно само пробует ещё раз в базовом разрешении машины.
+- **Трейнер рядом с игрой — как заработало вживую (2026-10-03, машина 54020554 Квебек RTX 3060 — рабочий стол KDE, т.е. KVM;
+  Dawnwalker 3751260, Proton Experimental 11.0-100, `Dawnwalker/Binaries/Win64/treiner.exe`, лежит в модах игры):**
+  игра идёт ВНУТРИ контейнера Steam Linux Runtime (`SteamLinuxRuntime_4/_v2-entry-point --verb=waitforexitandrun --
+  …/proton`; у процесса игры LD_LIBRARY_PATH/LD_PRELOAD pressure-vessel). Не работает: `PROTON_REMOTE_DEBUG_CMD`
+  (ничего), `proton run` снаружи контейнера («could not load ntdll.so … GLIBC_2.38» — и после этого игра упала),
+  `files/bin/wine` с окружением процесса игры снаружи (ntdll.so не по тому пути). **Работает:** окружение процесса
+  входа `_v2-entry-point` (предок игры, хост) → `<entry> --verb=run -- <тот же proton> run treiner.exe` с
+  **`PROTON_USE_XALIA=0`** (без него трейнер умирал на старте: X Error BadMatch XInputExtension
+  X_GetDeviceButtonMapping); общий /tmp → тот же wineserver, трейнер видит игру. Зависшие копии убирать (иначе Steam
+  считает игру запущенной). **Канал на машину без отладки:** приложение Sunshine с `detached`-командой
+  (`python3 -c exec(base64)` — без пробелов, boost не режет), запуск — `Moonlight quit` + `Moonlight stream <узел>
+  <приложение>` (игра не закрывается); результат — ключом `vgdiag` в `~/.config/sunshine/apps.json` (GET /api/apps
+  читает файл заново); в журнал Sunshine писать бесполезно — она пишет поверх. Помощник — `vg_sun.py` в scratchpad.
+  Вставка буфера Moonlight (Ctrl+Option+Shift+V) на Linux-Sunshine не работает (Steam её не принимает). В Sunshine на
+  машине оставлено приложение «Трейнер» (жёстко Dawnwalker/treiner.exe; уедет в identity). Идея Алексея: продумать
+  запуск модов/программ, которым нужна открытая сторонняя программа.
 - **Драйвер NVIDIA 610 — НЕ причина (разбор 2026-10-02; фильтр 610+ был в 0.4.1 по ошибке, убран в 0.4.2):** две
   машины с 610 не запустились по РАЗНЫМ причинам: RTX 5060 Ti Вьетнам — кодировщик отказал (`OpenEncodeSessionEx failed:
   unsupported device`, особенность хоста); RTX 3060 Техас — у X-сервера нет ни одного выхода (`xrandr` без connected,
