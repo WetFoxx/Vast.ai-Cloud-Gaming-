@@ -31,8 +31,11 @@ def path():
                 return p
         return None
     if os.name == "nt":
-        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("LOCALAPPDATA", "")):
-            p = os.path.join(base, "Moonlight Game Streaming", "Moonlight.exe")
+        local = os.environ.get("LOCALAPPDATA", "")
+        for p in (os.path.join(local, "Programs", "Moonlight", "Moonlight.exe"),   # ставит VastGame (переносная)
+                  os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Moonlight Game Streaming",
+                               "Moonlight.exe"),                                    # официальный установщик
+                  os.path.join(local, "Moonlight Game Streaming", "Moonlight.exe")):
             if os.path.exists(p):
                 return p
     return paths.find("moonlight")

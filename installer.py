@@ -7,11 +7,20 @@
 #  * Moonlight — образ .dmg с GitHub проекта (последний выпуск); приложение копируется в
 #    «Программы» (нет прав — в ~/Applications). Подпись: Developer ID разработчика Moonlight.
 # Идентификаторы разработчиков (Team ID) сверены 2026-09-24 по официальным файлам.
+#
+# Windows — те же источники, проверка подписи Authenticode (Get-AuthenticodeSignature: подпись действительна и
+# владелец — ровно Tailscale Inc. / Cameron Gutman, сверено 2026-10-08 по официальным файлам):
+#  * Tailscale — .msi с pkgs.tailscale.com под процессор (x64/ARM64); права администратора спрашивает сама Windows
+#    (окно UAC «Разрешить вносить изменения?»), приложение ничего не вводит. Отказ в окне — «отменено».
+#  * Moonlight — переносная версия (zip) с GitHub, в %LOCALAPPDATA%\Programs\Moonlight — без прав администратора,
+#    как на Mac. Проверяется подпись Moonlight.exe до того, как папка встанет на место.
 
 import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -24,6 +33,10 @@ TAILSCALE_PKG = "https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg"
 TAILSCALE_TEAM = "W5364U7YZB"                  # Tailscale Inc.
 MOONLIGHT_RELEASE = "https://api.github.com/repos/moonlight-stream/moonlight-qt/releases/latest"
 MOONLIGHT_TEAM = "45U78722YL"                  # разработчик Moonlight (moonlight-stream)
+TAILSCALE_MSI = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-{arch}.msi"
+TAILSCALE_SIGNER = "Tailscale Inc."             # O= в подписи Authenticode
+MOONLIGHT_SIGNER = "Cameron Gutman"             # автор Moonlight
+MOONLIGHT_WIN_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Moonlight"
 
 
 def _download(url, dest):
@@ -58,8 +71,81 @@ def _team_of_app(app):
     return m.group(1) if m else None
 
 
+def _arch():
+    """x64 или arm64 — по самому компьютеру (Python для x64 на ARM-Windows работает в эмуляции)."""
+    return "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"
+
+
+SIGNER_PS = (r"$s = Get-AuthenticodeSignature -LiteralPath $env:VG_FILE; "
+             r"if ($s.Status -eq 'Valid') { $s.SignerCertificate.Subject }")
+
+
+def _signer_win(path):
+    """Windows: владелец действительной подписи файла (O= из сертификата) или None. Путь — переменной окружения."""
+    r = paths.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SIGNER_PS], 120,
+                  env={**os.environ, "VG_FILE": str(path)})
+    m = re.search(r"(?:^|, )O=([^,]+)", r.stdout)
+    return m.group(1).strip().strip('"') if m else None
+
+
+# msiexec с правами администратора: окно UAC показывает сама Windows; «Нет» — исключение → код 1223 (отменено).
+# Путь к .msi — переменной окружения и в кавычках (в нём бывают пробелы).
+ELEVATE_PS = (r"""try { $p = Start-Process msiexec.exe -Verb RunAs -Wait -PassThru """
+              r"""-ArgumentList @('/i', ('"' + $env:VG_FILE + '"'), '/qn', '/norestart'); exit $p.ExitCode } """
+              r"""catch { exit 1223 }""")
+
+
+def _tailscale_windows():
+    with tempfile.TemporaryDirectory() as d:
+        msi = Path(d) / "tailscale-setup.msi"
+        _download(TAILSCALE_MSI.format(arch=_arch()), msi)
+        if _signer_win(msi) != TAILSCALE_SIGNER:
+            raise VastgameError("Подпись установщика Tailscale не совпала — не устанавливаю.",
+                                key="install.bad_signature", name="Tailscale")
+        r = paths.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ELEVATE_PS], 900,
+                      env={**os.environ, "VG_FILE": str(msi)})
+        if r.returncode in (1223, 1602):     # «Нет» в окне UAC / отмена в установщике
+            raise VastgameError("Установка отменена.", key="install.cancelled")
+        if r.returncode not in (0, 3010):    # 3010 — поставлено, Windows хочет перезагрузку (не обязательно сейчас)
+            raise VastgameError(f"Установщик Tailscale завершился с кодом {r.returncode}",
+                                key="install.failed", out=f"msiexec {r.returncode}")
+    return True
+
+
+def _moonlight_windows(rel):
+    arch = "arm64" if _arch() == "arm64" else "x64"
+    try:
+        url = next(a["browser_download_url"] for a in rel.get("assets", [])
+                   if re.fullmatch(rf"MoonlightPortable-{arch}-[\d.]+\.zip", a["name"]))
+    except (StopIteration, KeyError):
+        raise VastgameError("Не удалось узнать последний выпуск Moonlight на GitHub.", key="install.download_failed",
+                            error="GitHub")
+    MOONLIGHT_WIN_DIR.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=MOONLIGHT_WIN_DIR.parent) as d:     # тот же диск — переезд одним шагом
+        z, new = Path(d) / "moonlight.zip", Path(d) / "Moonlight"
+        _download(url, z)
+        try:
+            shutil.unpack_archive(str(z), str(new))
+        except (OSError, ValueError, shutil.ReadError) as e:
+            raise VastgameError("Не удалось распаковать Moonlight.", key="install.failed", out=str(e)[-300:])
+        exe = new / "Moonlight.exe"
+        if not exe.is_file() or _signer_win(exe) != MOONLIGHT_SIGNER:
+            raise VastgameError("Подпись Moonlight не совпала — не устанавливаю.",
+                                key="install.bad_signature", name="Moonlight")
+        old = Path(d) / "old"
+        if MOONLIGHT_WIN_DIR.exists():
+            try:
+                MOONLIGHT_WIN_DIR.rename(old)           # запущенный Moonlight держит файлы — тогда не выйдет
+            except OSError:
+                raise VastgameError("Закрой Moonlight и нажми «Установить» ещё раз.", key="install.close_moonlight")
+        new.rename(MOONLIGHT_WIN_DIR)
+    return True
+
+
 def tailscale():
-    """Скачать и поставить Tailscale. Пароль администратора спросит macOS. True — установлен."""
+    """Скачать и поставить Tailscale. Пароль администратора спросит macOS (Windows — окно UAC). True — установлен."""
+    if sys.platform == "win32":
+        return _tailscale_windows()
     with tempfile.TemporaryDirectory() as d:
         pkg = Path(d) / "Tailscale.pkg"
         _download(TAILSCALE_PKG, pkg)
@@ -85,6 +171,8 @@ def moonlight():
     """Скачать последний Moonlight с GitHub проекта и положить в «Программы». True — установлен."""
     try:
         rel = requests.get(MOONLIGHT_RELEASE, timeout=30).json()
+        if sys.platform == "win32":
+            return _moonlight_windows(rel)
         url = next(a["browser_download_url"] for a in rel.get("assets", []) if a["name"].endswith(".dmg"))
     except (requests.RequestException, ValueError, StopIteration, KeyError):
         raise VastgameError("Не удалось узнать последний выпуск Moonlight на GitHub.", key="install.download_failed",
