@@ -1291,7 +1291,8 @@ function setupActions(st, li) {
 
   const tsInstalled = key === "setup.tailscale_app.offline" || key === "setup.tailscale_app.no_answer";
   if (id in TOOL_NAME && st.state === "missing" && !tsInstalled) {
-    if (setupData.platform === "darwin" && (id !== "rclone" || setupData.brew)) {
+    if ((setupData.platform === "darwin" && (id !== "rclone" || setupData.brew)) ||
+        (setupData.platform === "win32" && id !== "rclone")) {
       box.appendChild(button(t("setup.act.install"), async () => {
         const name = TOOL_NAME[id];
         if (!(await ask({ title: t("setup.confirm.install.title", { name }), text: t("setup.confirm.install.text"),
@@ -1460,7 +1461,7 @@ function wizPrograms() {
   const list = el("ul", { className: "wiz-check" });
   for (const [name, ok] of [["Tailscale", s.programs.tailscale], ["Moonlight", s.programs.moonlight]])
     list.appendChild(el("li", { className: ok ? "done" : "" }, t("wizard.programs.item." + name.toLowerCase())));
-  if (s.platform !== "darwin") {            // пока только Mac умеет ставить сам — остальным ссылки
+  if (s.platform !== "darwin" && s.platform !== "win32") {   // сам ставит на Mac и Windows — остальным ссылки
     wizScreen({ title: t("wizard.programs.title"), text: t("wizard.programs.text_other"), body: [list,
       wizRow(button(t("setup.act.download") + " Tailscale", () => openUrl(DOWNLOAD.tailscale_app)),
              button(t("setup.act.download") + " Moonlight", () => openUrl(DOWNLOAD.moonlight)))],
@@ -2597,8 +2598,9 @@ async function start() {
   if (DEMO) {
     const q = new URLSearchParams(location.search);
     saved = q.get("lang");
+    PLATFORM = q.get("platform") || "";                         // ?platform=win32 — тексты для Windows
     if (q.get("updated")) notice = q.get("updated") === "failed" ? { failed: "0.2.1" } : { updated: { from: "0.2.0", to: q.get("updated") } };
-  } else ({ language: saved, version, update: notice } = await api().settings());
+  } else ({ language: saved, version, update: notice, platform: PLATFORM = "" } = await api().settings());
   // Окно открылось в конце обновления — сказать итог (минуту, потом надпись живёт как обычно)
   if (notice) { updateNotice = notice; setTimeout(() => { updateNotice = null; renderUpdate(updateInfo); }, 60 * 1000); }
   LANG = I18N[saved] ? saved : detectLanguage();

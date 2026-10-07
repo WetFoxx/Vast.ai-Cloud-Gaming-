@@ -102,7 +102,8 @@ class Api:
         """Сохранённые настройки окна (язык — только если его выбрали сами), номер версии приложения и, если окно
         открылось в конце обновления, что сказать («обновлено» / «не встало»). Страница спрашивает это первым —
         тут же новая версия ставит сторожу знак «я открылась» (updater.after_start)."""
-        return {"language": settings.get("language"), "version": updater.VERSION, "update": updater.after_start()}
+        return {"language": settings.get("language"), "version": updater.VERSION, "update": updater.after_start(),
+                "platform": sys.platform}
 
     def set_language(self, lang, remember=False):
         """Запомнить язык, выбранный человеком (иначе окно следует за языком системы)."""
@@ -475,14 +476,15 @@ class Api:
     def install_programs(self):
         """Поставить недостающие Tailscale и Moonlight (официальные файлы с проверкой подписи).
         Пароль Mac спросит сама macOS — один раз, для Tailscale; Moonlight ставится без пароля."""
-        if sys.platform != "darwin":
+        if sys.platform not in ("darwin", "win32"):
             return {"error": {"key": "wizard.install.not_mac", "params": {}, "text": "not mac"}}
+        mac = sys.platform == "darwin"
 
         def run(job):
             if not moonlight.path():
                 job.say("Устанавливаю Moonlight", key="wizard.install.moonlight")
                 installer.moonlight()
-            if not paths.tailscale_app():
+            if not (paths.tailscale_app() if mac else paths.find("tailscale")):
                 job.say("Устанавливаю Tailscale — macOS спросит пароль", key="wizard.install.tailscale")
                 installer.tailscale()
             return True
@@ -601,7 +603,7 @@ class Api:
         job.say("Скачиваю и устанавливаю Tailscale", key="setup.ts_install.installing")
         installer.tailscale()
         job.say("Tailscale установлен — разреши его в окнах macOS", key="setup.ts_install.approve")
-        subprocess.Popen(["open", "-a", "Tailscale"])
+        self.open_tailscale()
         state = setup.tailscale_wait_ready()
         if state is None:
             raise VastgameError("Tailscale не заработал за 10 минут", key="setup.err.ts_not_ready")
@@ -618,9 +620,16 @@ class Api:
         return self._background("tailscale", run, with_job=True)
 
     def open_tailscale(self):
-        """Открыть приложение Tailscale, чтобы войти в сеть."""
+        """Открыть приложение Tailscale, чтобы войти в сеть. Windows — tailscale-ipn.exe (значок возле часов)
+        рядом с tailscale.exe; уже запущен — второй экземпляр просто выходит."""
         if sys.platform == "darwin":
             subprocess.Popen(["open", "-a", "Tailscale"])
+        elif sys.platform == "win32":
+            exe = paths.find("tailscale")
+            ipn = os.path.join(os.path.dirname(exe), "tailscale-ipn.exe") if exe else None
+            if ipn and os.path.exists(ipn):
+                subprocess.Popen([ipn], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, **paths.detached())
 
     def save_vast_key(self, key):
         r = self._simple(setup.save_vast_key, key)

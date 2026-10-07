@@ -31,6 +31,17 @@ class TestI18n(unittest.TestCase):
                                  f"подстановки в {lang}/{key}")
                 self.assertTrue(texts[lang][key].strip(), f"пусто {lang}/{key}")
 
+    def test_windows_variants(self):
+        """«ключ@win» (текст для Windows) — только при обычном ключе и с теми же подстановками: страница подменяет
+        один другим, и пропавшая подстановка показала бы «{state}» буквально."""
+        for lang, texts in ui_texts().items():
+            for key, text in texts.items():
+                if key.endswith("@win"):
+                    base = key[:-4]
+                    self.assertIn(base, texts, f"{lang}/{key}: нет обычного ключа")
+                    self.assertEqual(set(PLACEHOLDER.findall(text)), set(PLACEHOLDER.findall(texts[base])),
+                                     f"подстановки {lang}/{key}")
+
     def test_python_keys_translated(self):
         """Каждый key="..." в core.py, vastapi.py, updater.py и steamlib.py есть в словаре, и подстановки совпадают по именам."""
         texts = ui_texts()["en"]
