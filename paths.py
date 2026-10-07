@@ -43,7 +43,8 @@ def self_cmd(*args):
     в собранном .app — его исполняемый файл, из папки проекта — Python с app_main.py."""
     if FROZEN:
         return [sys.executable, *args]
-    return [sys.executable, str(HERE / "app_main.py"), *args]
+    utf8 = ["-X", "utf8"] if sys.platform == "win32" else []     # см. app_main.py: Windows — режим UTF-8 сразу
+    return [sys.executable, *utf8, str(HERE / "app_main.py"), *args]
 
 
 def tailscale_app():

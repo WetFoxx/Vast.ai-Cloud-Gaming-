@@ -28,7 +28,7 @@ FILE = config_dir() / "settings.json"
 
 def load():
     try:
-        return json.loads(FILE.read_text())
+        return json.loads(FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -43,7 +43,10 @@ def set(name, value):   # noqa: A001 — «set» здесь понятнее в�
         data.pop(name, None)
     else:
         data[name] = value
-    FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    # Целиком или никак: сбой посередине записи (на Windows без режима UTF-8 — на кириллице, 2026-10-08) стирал файл
+    tmp = FILE.with_name(f"{FILE.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, FILE)
 
 
 def applog(text):

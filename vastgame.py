@@ -6,6 +6,12 @@ import runpy   # запустить другой .py-файл так, будто
 import sys
 from pathlib import Path
 
+# Windows: файлы и вывод программ — в UTF-8, как на Mac. Без режима UTF-8 Python пишет текст в cp1252 и падает на
+# кириллице (имя аккаунта Steam, названия игр), а вывод rclone читает искажённым. В собранном .exe режим задаёт сборка.
+if sys.platform == "win32" and not sys.flags.utf8_mode and not getattr(sys, "frozen", False):
+    import subprocess
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
+
 HERE = Path(__file__).resolve().parent
 
 COMMANDS = {
