@@ -15,7 +15,6 @@
 # Короткие операции окна (убрать игру из облака, установка программ, вход в Google) идут
 # потоком внутри окна — обычный Job.
 
-import fcntl
 import json
 import os
 import re
@@ -28,6 +27,7 @@ from pathlib import Path
 import keyring.errors
 
 import core
+import filelock
 import market
 import notify
 import paths
@@ -439,11 +439,9 @@ def running():
     except OSError:
         return False
     try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    else:
-        fcntl.flock(f, fcntl.LOCK_UN)
+        if not filelock.try_lock(f):
+            return True
+        filelock.unlock(f)
         return False
     finally:
         f.close()
@@ -602,9 +600,7 @@ def work(kind, args, log=lambda text: None):
     """Сама операция: взять блокировку (держим её до конца), выполнить, прислать уведомление.
     log — куда писать начало и конец (фоновый процесс пишет в job.log)."""
     with open(LOCK, "a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not filelock.try_lock(lock):
             return False                          # другая операция уже идёт — ничего не трогаем
         args = dict(args)
         carry = load() if args.pop("_resume", False) else None

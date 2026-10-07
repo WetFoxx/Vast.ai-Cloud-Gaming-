@@ -26,6 +26,7 @@ import asks
 import autostart
 import cloudgames
 import drive
+import filelock
 import geo
 import core
 import history
@@ -1276,10 +1277,9 @@ def main():
     autostart.refresh()      # служба стоит, но проект переехал — поправить пути (выключенную не трогаем)
     lock = open(asks.WINDOW_LOCK, "a")   # «окно открыто» — для службы: карточку вопроса покажет окно
     try:
-        import fcntl
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (ImportError, OSError):
-        pass                                 # второе окно или не Mac — служба просто не узнает
+        filelock.try_lock(lock)
+    except OSError:
+        pass                                 # второе окно — служба просто не узнает
     api = Api()
     window = webview.create_window("VastGame", str(HERE / "ui" / "index.html"), js_api=api,
                                    width=620, height=760, min_size=(520, 600))
@@ -1293,10 +1293,10 @@ def main():
 def card_main():
     """Карточка вопроса машины отдельным процессом («app_main.py ask» — запускают окно и служба автозапуска): одна
     карточка поверх всего, выход, когда её закроют. «Фоновое» приложение без значка в Dock. Уже открыта — ничего."""
-    import fcntl
     with open(asks.CARD_LOCK, "a") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not filelock.try_lock(lock):
+                return
         except OSError:
             return
         if sys.platform == "darwin":

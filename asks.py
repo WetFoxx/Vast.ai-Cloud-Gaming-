@@ -4,10 +4,9 @@
 # поверх всех окон, в том числе поверх Moonlight, — и отвечает машине командой answer.
 # Без ответа ничего не теряется: новая игра выгрузится при «Закончить», удалённая останется в облаке.
 
-import fcntl
-
 import cloudgames
 import core
+import filelock
 import notify
 import settings
 import wolfnode
@@ -85,9 +84,6 @@ def window_open():
     """Открыто ли окно приложения (оно держит WINDOW_LOCK всё время, пока работает)."""
     try:
         with open(WINDOW_LOCK, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)      # взяли — значит, окна нет (замок снимется при закрытии)
-            return False
-    except BlockingIOError:
-        return True
+            return not filelock.try_lock(f)          # взяли — значит, окна нет (замок снимется при закрытии)
     except OSError:
         return False
