@@ -31,6 +31,27 @@ class TestI18n(unittest.TestCase):
                                  f"подстановки в {lang}/{key}")
                 self.assertTrue(texts[lang][key].strip(), f"пусто {lang}/{key}")
 
+    def test_every_window_message_translated(self):
+        """Окно показывает текст без ключа как есть — а он по-русски (так в английской и испанской версиях
+        проскакивал русский). Поэтому во всех модулях окна: у каждого say(...) и VastgameError(...) есть key=,
+        и каждый такой ключ есть в словаре. Терминальные команды (печатают сами, окна у них нет) — не проверяем."""
+        import ast
+        texts = ui_texts()["en"]
+        terminal = {"setup.py", "release.py", "balance.py", "offers.py", "games.py", "info.py", "migrate.py",
+                    "play.py", "stop.py", "vastgame.py", "cliui.py"}
+        for f in sorted(ROOT.glob("*.py")):
+            for n in ast.walk(ast.parse(f.read_text())):
+                if not isinstance(n, ast.Call):
+                    continue
+                name = n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+                kws = {k.arg: k.value for k in n.keywords}
+                key = kws.get("key")
+                if isinstance(key, ast.Constant) and isinstance(key.value, str) and key.value:
+                    self.assertIn(key.value, texts, f"{f.name}:{n.lineno}: нет перевода для {key.value}")
+                passed_on = len(n.args) >= 3 or None in kws        # ключ дальше по цепочке: (text, level, key) / **kw
+                if name in ("say", "VastgameError") and f.name not in terminal and n.args and not passed_on:
+                    self.assertIn("key", kws, f"{f.name}:{n.lineno}: {name}(...) без key= — окно покажет русский текст")
+
     def test_windows_variants(self):
         """«ключ@win» (текст для Windows) — только при обычном ключе и с теми же подстановками: страница подменяет
         один другим, и пропавшая подстановка показала бы «{state}» буквально."""

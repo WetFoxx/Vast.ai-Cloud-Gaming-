@@ -70,12 +70,14 @@ def bad_hosts():
         return {}
 
 
-def mark_bad(machine_id, reason):
-    """Запомнить хост, который не смог запустить машину: в списке он будет с пометкой."""
+def mark_bad(machine_id, reason, key=None, **params):
+    """Запомнить хост, который не смог запустить машину: в списке он будет с пометкой. reason — по-русски (терминал),
+    key/params — та же причина для перевода в окне (без них подсказка в окне — общая фраза на языке окна)."""
     if not machine_id:
         return
     bad = bad_hosts()
-    bad[str(machine_id)] = {"reason": reason[:200], "date": datetime.date.today().isoformat()}
+    bad[str(machine_id)] = {"reason": reason[:200], "date": datetime.date.today().isoformat(),
+                            **({"key": key, "params": params} if key else {})}
     BAD_HOSTS.write_text(json.dumps(bad, ensure_ascii=False, indent=1))
 
 
@@ -181,7 +183,9 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
             continue
         if (o.get("cpu_ram") or MIN_RAM_GB * 1024) < MIN_RAM_GB * 1024:
             continue
-        o["_failed"] = (bad.get(str(o.get("machine_id"))) or {}).get("reason")   # раньше не запустилась
+        b = bad.get(str(o.get("machine_id"))) or {}
+        o["_failed"] = b.get("reason")                                     # раньше не запустилась
+        o["_failed_why"] = {"key": b["key"], "params": b.get("params") or {}} if b.get("key") else None
         o["_start_min"] = start_minutes(o.get("machine_id"), starts, docker)           # обычно запускается за N мин
         up = o.get("inet_up_cost") or 0       # $ за ГБ исходящего трафика (стрим идёт с машины к тебе)
         down = o.get("inet_down_cost") or 0   # $ за ГБ входящего (скачивание игр с Google Drive)

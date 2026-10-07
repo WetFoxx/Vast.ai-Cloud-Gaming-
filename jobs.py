@@ -175,7 +175,7 @@ class FileJob(Job):
     def confirm(self, question, key=None, **params):
         # Спросить некого (окно может быть закрыто). Вопросов у play/stop нет; если ядро всё же
         # спросит — безопасный ответ «нет», и это видно в ходе операции
-        self.say(f"(вопрос без ответа, считаю «нет»: {question})", "warn")
+        self.say(f"(вопрос без ответа, считаю «нет»: {question})", "warn", key="progress.auto_no")
         return False
 
     def _changed(self):
@@ -375,9 +375,13 @@ def _race(job, queue, tpl, size, sync, docker=False):
             broken = st in ("exited", "offline", "unknown") or r["errors"] >= 2
             slow = time.time() - r["t0"] > core.VAST_START_MIN * 60
             if broken or slow:
-                why = (f"Vast не запустил машину за {core.VAST_START_MIN} минут." if slow and not broken
-                       else f"Хост не смог запустить машину: {msg[:150] or st}")
-                market.mark_bad(r["offer"].get("machine_id"), why)
+                if slow and not broken:
+                    why, wkey, wp = (f"Vast не запустил машину за {core.VAST_START_MIN} минут.", "core.fail_timeout",
+                                     {"min": core.VAST_START_MIN})
+                else:
+                    why, wkey, wp = (f"Хост не смог запустить машину: {msg[:150] or st}", "core.fail_host",
+                                     {"msg": msg[:150] or st})
+                market.mark_bad(r["offer"].get("machine_id"), why, wkey, **wp)
                 tried.append(r["offer"].get("machine_id"))
                 if slow and not broken:
                     drop(r, "core.race_slow", min=core.VAST_START_MIN)

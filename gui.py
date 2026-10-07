@@ -199,7 +199,8 @@ class Api:
             return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o),
                     "cc": geo_.rsplit(",", 1)[-1].strip().upper() or "?",
                     "price": o["dph_total"], "traffic": o["_traffic"], "total": o["_total"],
-                    "reliability": o["reliability"], "failed": o.get("_failed"), "start_min": o.get("_start_min"),
+                    "reliability": o["reliability"], "failed": o.get("_failed"),
+                    "failed_why": o.get("_failed_why"), "start_min": o.get("_start_min"),
                     "net_down": round(o.get("inet_down") or 0), "net_up": round(o.get("inet_up") or 0),
                     # цена трафика, $ за ТБ (дороже из двух сторон) — фильтр «Трафик» во вкладке Docker
                     "traffic_tb": round(max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0) * 1000, 2),

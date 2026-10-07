@@ -31,7 +31,7 @@ function hm(sec) {
 }
 function duration(sec) {
   const m = Math.floor(sec / 60), s = sec % 60;
-  return LANG === "ru" ? `${m} мин ${s} с` : `${m} min ${s} s`;
+  return t("unit.min_sec", { m, s });
 }
 
 function show(screen) {
@@ -813,7 +813,8 @@ function renderOffers() {
     if (o.last) addTag("tag", t("offers.last.tag"));
     if (o.start_min && !o.failed) addTag("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
     if (o.reliability < 0.97) addTag("tag warn", t("offers.rel.tag", { rel: num(o.reliability * 100, 0) }), t("offers.rel.risk"));
-    if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed);   // раньше не запустилась — причина во всплывающей подсказке
+    // раньше не запустилась — причина во всплывающей подсказке, на языке окна (старые записи без ключа — общая фраза)
+    if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed_why ? errText(o.failed_why) : t("offers.failed.hint"));
     betterTags(o, addTag);
     c[2].textContent = o.country;
     c[2].title = t("offers.rel.hint", { rel: num(o.reliability * 100) });   // надёжность — подсказкой, колонки больше нет

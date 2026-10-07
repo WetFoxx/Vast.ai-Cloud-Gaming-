@@ -258,7 +258,7 @@ def _failed_start(iid, why, o, ui, bad_host, key, **params):
     why — причина по-русски (терминал и чёрный список), key/params — она же для перевода в окне."""
     ui.say(f"!!! {why}", "error", key=key, **params)
     if bad_host:
-        market.mark_bad(o.get("machine_id"), why)
+        market.mark_bad(o.get("machine_id"), why, key, **params)
         ui.say(f"Хост (machine {o.get('machine_id')}) помечен: в списке он будет с пометкой «может не запуститься».",
                "warn", key="core.marked", machine=o.get("machine_id"))
     # Удаляем без вопроса (решение 2026-09-24): машина не запустилась, на ней ничего не сохранялось,
@@ -366,8 +366,10 @@ def wait_ready(iid, t0, o, ui, docker=False):
             for k in sorted(inst):
                 if "onstart" in k or "template" in k:
                     v = inst[k]
-                    ui.say(f"  {k}: " + (f"{len(v)} символов" if isinstance(v, str) and len(v) > 40 else repr(v)),
-                           "detail")
+                    if isinstance(v, str) and len(v) > 40:
+                        ui.say(f"  {k}: {len(v)} символов", "detail", key="core.inst_field_len", name=k, n=len(v))
+                    else:
+                        ui.say(f"  {k}: {v!r}", "detail", key="core.inst_field", name=k, value=repr(v))
             ip_pub = inst.get("public_ipaddr") or "?"
             break
         # Из этих состояний машина уже не дойдёт до running (см. документацию Vast)
@@ -622,7 +624,8 @@ def stop(ui, dry_run=False):
     code, out = _on_machine(ip, "finish", timeout=60, on_notice=ui.tailscale)
     if _finish_started(ip, t0, out):
         return _follow_finish(ui, iid, ip, t0)
-    ui.say(f"Ответ машины на «wolf finish»: {out.strip()[-200:]}", "detail")
+    ui.say(f"Ответ машины на «wolf finish»: {out.strip()[-200:]}", "detail", key="core.finish_answer",
+           out=out.strip()[-200:])
     ui.say("На машине скрипт старше v3.11 (нет wolf finish) — выгружаю по SSH: не закрывай крышку и не "
            "выключай интернет, пока идёт выгрузка.", "warn", key="core.old_script")
     _shutdown_over_ssh(ui, iid, ip, t0)
