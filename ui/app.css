@@ -78,6 +78,9 @@ select {
   color: var(--text); background: var(--card);
   border: 1px solid var(--border); border-radius: 10px; padding: 4px 8px;
 }
+/* Варианты списка — цветами темы, а не кнопки: в Windows (Edge WebView2) список рисует страница, и у включённого
+   фильтра (белый текст на градиенте) варианты выходили белыми на белом. На Mac список рисует macOS — без разницы */
+option, optgroup { color: var(--text); background-color: var(--card); }
 main { padding: 8px 22px 26px; display: flex; flex-direction: column; gap: 14px; }
 
 .card {
