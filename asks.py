@@ -77,7 +77,7 @@ def show_card():
     import subprocess
     import paths
     subprocess.Popen(paths.self_cmd("ask"), cwd=paths.HERE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+                     stderr=subprocess.DEVNULL, **paths.detached())
 
 
 def window_open():

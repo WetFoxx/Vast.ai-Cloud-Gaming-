@@ -79,7 +79,7 @@ def stream(host, app, size=None, fps=None, bitrate=None):
     if bitrate:
         opts += ["--bitrate", str(int(bitrate) * 1000)]
     subprocess.Popen([exe, "stream", *opts, host, app], stdin=subprocess.DEVNULL, env=paths.tailscale_env(),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **paths.detached())
     return True
 
 

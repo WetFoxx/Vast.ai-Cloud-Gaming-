@@ -593,7 +593,7 @@ def _launch(kind, args):
     with open(LOG, "a") as log:
         subprocess.Popen(paths.self_cmd("job", kind, json.dumps(args)), cwd=HERE,
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         start_new_session=True)   # своя сессия: закрытие окна его не завершит
+                         **paths.detached())   # закрытие окна его не завершит
 
 
 def work(kind, args, log=lambda text: None):

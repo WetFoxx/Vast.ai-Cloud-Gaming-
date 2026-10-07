@@ -415,7 +415,7 @@ def tailscale_login(open_url, wait=600):
         raise VastgameError("Tailscale не установлен.", key="setup.tailscale_app.missing")
     with tempfile.NamedTemporaryFile("w+", suffix=".log") as log:
         p = subprocess.Popen([exe, "login"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                             env=paths.tailscale_env(), start_new_session=True)
+                             env=paths.tailscale_env(), **paths.detached())
         try:
             url, end = None, time.time() + 30
             while not url and time.time() < end and p.poll() is None:

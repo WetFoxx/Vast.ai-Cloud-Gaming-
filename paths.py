@@ -25,6 +25,19 @@ APP_BINARIES = {"tailscale": ["/Applications/Tailscale.app/Contents/MacOS/Tailsc
                               os.path.expanduser("~/Applications/Tailscale.app/Contents/MacOS/Tailscale")]}
 
 
+def no_window():
+    """Windows: консольная программа (tailscale, rclone, powershell) без мелькающего чёрного окна. Mac — ничего."""
+    return {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+
+
+def detached():
+    """Параметры Popen для процесса, который живёт отдельно от окна: его не завершат ни закрытие окна, ни его консоли.
+    Mac/Linux — своя сессия; Windows — без консоли и в своей группе процессов (Ctrl+C и закрытие консоли не доходят)."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def self_cmd(*args):
     """Команда, которой приложение запускает само себя с параметрами (фоновые операции, автозапуск):
     в собранном .app — его исполняемый файл, из папки проекта — Python с app_main.py."""
@@ -75,7 +88,7 @@ def run(cmd, timeout, env=None):
     ждём его. Не уложилась — завершаем её саму (не трогая то, что она запустила) и бросаем
     subprocess.TimeoutExpired. Возвращает CompletedProcess с текстом stdout/stderr."""
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env)
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, **no_window())
         try:
             p.wait(timeout)
         except subprocess.TimeoutExpired:

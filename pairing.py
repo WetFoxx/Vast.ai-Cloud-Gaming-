@@ -194,7 +194,7 @@ def _pair(exe, host, ip, on_notice):
     pin = f"{secrets.randbelow(10000):04d}"
     with tempfile.NamedTemporaryFile("w+", suffix=".log") as log:
         p = subprocess.Popen([exe, "pair", host, "--pin", pin], stdin=subprocess.DEVNULL, stdout=log,
-                             stderr=subprocess.STDOUT, env=paths.tailscale_env(), start_new_session=True)
+                             stderr=subprocess.STDOUT, env=paths.tailscale_env(), **paths.detached())
         try:
             end = time.time() + PAIR_WAIT
             while time.time() < end and p.poll() is None:
