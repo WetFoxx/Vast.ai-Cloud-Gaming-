@@ -60,6 +60,15 @@ def streaming():
     """Идёт ли трансляция Moonlight (запущен «Moonlight stream …»): второй запуск оборвал бы обе (Sunshine отвечает
     «приложение уже запущено»), поэтому окно открывает Moonlight само, только когда трансляции нет."""
     try:
+        if sys.platform == "win32":
+            # tasklist — доли секунды; PowerShell (командная строка процесса) — секунды, только если Moonlight запущен
+            r = paths.run(["tasklist", "/FI", "IMAGENAME eq Moonlight.exe", "/NH"], 15)
+            if "moonlight.exe" not in r.stdout.lower():
+                return False
+            r = paths.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                           "@(Get-CimInstance Win32_Process -Filter \"Name='Moonlight.exe'\" | "
+                           "Where-Object { $_.CommandLine -match ' stream ' }).Count"], 15)
+            return r.stdout.strip() not in ("", "0")
         return subprocess.run(["pgrep", "-f", "Moonlight.* stream "], capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False

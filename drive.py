@@ -74,7 +74,8 @@ def rclone_both(*args, capture=True, timeout=None):
     old_tok = keystore.get("RCLONE_REFRESH_TOKEN_OLD") if not is_old_token() else token()
     env = dict(os.environ, RCLONE_CONFIG=os.path.join(tempfile.gettempdir(), "vastgame-no-rclone.conf"),
                **_remote("vgold", old_tok, True), **_remote("vgdrive", token(), False))
-    return subprocess.run([paths.need("rclone"), *args], capture_output=capture, text=True, env=env, timeout=timeout)
+    return subprocess.run([paths.need("rclone"), *args], capture_output=capture, text=True, env=env, timeout=timeout,
+                          **paths.no_window())
 
 
 def rclone(*args, tok=None, old=None, timeout=300, env=None):
@@ -85,7 +86,8 @@ def rclone(*args, tok=None, old=None, timeout=300, env=None):
     env — готовое окружение из _env() (чтобы не читать Keychain на каждый вызов).
     """
     env = env or _env(tok, old)
-    return subprocess.run([paths.need("rclone"), *args], capture_output=True, text=True, env=env, timeout=timeout)
+    return subprocess.run([paths.need("rclone"), *args], capture_output=True, text=True, env=env, timeout=timeout,
+                          **paths.no_window())
 
 
 def _env(tok=None, old=None):

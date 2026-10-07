@@ -6,6 +6,7 @@
 # раз в несколько часов просит подтвердить вход в браузере. Машина со скриптом старее — по SSH.
 
 import json
+import os
 import shlex
 import subprocess
 
@@ -166,7 +167,7 @@ def ssh(ip, command, stdin_text=None):
     """
     proc = subprocess.Popen(
         [paths.need("ssh"), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-         "-o", "UserKnownHostsFile=/dev/null",
+         "-o", f"UserKnownHostsFile={os.devnull}",       # Mac — /dev/null, Windows — nul
          "-o", "ConnectTimeout=20",
          # машина пропала (удалили, упала) — ssh заметит за ~1 минуту, а не будет ждать вечно
          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",

@@ -89,7 +89,8 @@ def selftest():
     except (OSError, ValueError):
         cid = secret = None
     rclone = paths.find("rclone")
-    ver = subprocess.run([rclone, "version"], capture_output=True, text=True).stdout.split("\n")[0] if rclone else ""
+    ver = subprocess.run([rclone, "version"], capture_output=True, text=True,
+                         **paths.no_window()).stdout.split("\n")[0] if rclone else ""
     print(f"версия: {VERSION} | собрано: {paths.FROZEN} | хранилище ключей: {store}")
     print(f"OAuth-клиент Google: {'есть' if cid and secret else 'НЕТ'}")
     print(f"rclone: {rclone} ({ver})")

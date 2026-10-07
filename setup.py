@@ -540,7 +540,8 @@ def google_login():
                                         "scope": drive.SCOPE}).encode()).decode().rstrip("=")
     # stdout перехватываем (там токен), stderr — служебные сообщения rclone — на экран терминала как есть
     try:
-        out = subprocess.run([paths.need("rclone"), "authorize", "drive", blob], stdout=subprocess.PIPE, text=True, timeout=600)
+        out = subprocess.run([paths.need("rclone"), "authorize", "drive", blob], stdout=subprocess.PIPE, text=True, timeout=600,
+                             **paths.no_window())
     except FileNotFoundError:
         raise VastgameError("rclone не найден. Установи: brew install rclone", key="setup.err.no_rclone")
     except subprocess.TimeoutExpired:
