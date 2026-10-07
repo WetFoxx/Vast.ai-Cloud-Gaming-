@@ -234,7 +234,7 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=
             if m.get("iid"):
                 iid, t0, o = m["iid"], m["t0"], m["offer"]
             else:
-                iid, t0, o = _race(job, queue, tpl, size, sync, docker)
+                iid, t0, o = _race(job, queue, tpl, size, sync, docker, lang)
             try:
                 r = core.wait_ready(iid, t0, o, job, docker=docker)
                 break
@@ -272,7 +272,7 @@ def _traffic(o):
     return max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0)
 
 
-def _race(job, queue, tpl, size, sync, docker=False):
+def _race(job, queue, tpl, size, sync, docker=False, lang=None):
     """Запустить наперегонки до RACE машин из очереди (id предложений); вернуть (iid, t0, offer)
     первой дошедшей до running, остальные удалить. Зависшую дольше VAST_START_MIN или сломанную —
     удалить, пометить хост и поставить вместо неё следующую. Состояние забега — в meta: окно
@@ -319,7 +319,7 @@ def _race(job, queue, tpl, size, sync, docker=False):
                                or docker and _traffic(o) > limit["traffic"] + 1e-9):
                 continue
             try:
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker), o)
+                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang), o)
             except VastgameError as e:
                 if not chosen and e.key == "core.offer_gone":
                     continue                           # замену только что заняли — следующая

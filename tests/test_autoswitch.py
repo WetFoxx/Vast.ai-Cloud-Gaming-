@@ -50,7 +50,7 @@ class Race(unittest.TestCase):
             (jobs.core, "require_no_machine", lambda: None),
             (jobs.core, "offer_by_id", self.offer_by_id),
             (jobs.core, "rent", self.rent),
-            (jobs.core, "rental_body", lambda tpl, size, sync=None, docker=False: {}),
+            (jobs.core, "rental_body", lambda tpl, size, sync=None, docker=False, lang=None: {}),
             (jobs.core, "list_instances", self.list_instances),
             (jobs.core, "_delete_quietly", self.delete),
             (jobs.core, "wait_ready", self.wait_ready),
@@ -223,7 +223,7 @@ class Race(unittest.TestCase):
         self.run_after = {1: 30, 2: 60, 3: 90}
         seen, calls = [], []
         self.patch_many(("offer_by_id", lambda oid, size, docker=False: seen.append(docker) or self.offer_by_id(oid, size)),
-                        ("rental_body", lambda tpl, size, sync=None, docker=False: {"docker": docker}))
+                        ("rental_body", lambda tpl, size, sync=None, docker=False, lang=None: {"docker": docker}))
 
         def wait_ready(iid, t0, o, ui, docker=False):
             calls.append((iid, docker))

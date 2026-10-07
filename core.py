@@ -173,14 +173,31 @@ def vg_play(play):
 SYNC_DEFAULTS = {"steam_games": False, "other_games": True, "saves": True}
 
 
-def rental_body(tpl, disk, games=None, sync=None, docker=False):
+# Язык Steam на машине — по языку окна VastGame, если в шаблоне не выбран свой (STEAM_LANG пуст): человек с английским
+# VastGame получает английский Steam (решение 2026-10-08). Названия — как у параметра Steam -language.
+STEAM_LANGS = {"ru": "russian", "en": "english", "es": "spanish"}
+
+
+def steam_lang(tpl, lang):
+    """STEAM_LANG для аренды: свой из шаблона важнее; иначе по языку окна; иначе None (Steam берёт свои настройки)."""
+    import setup
+    return setup.env_value((tpl or {}).get("env"), "STEAM_LANG") or STEAM_LANGS.get(lang)
+
+
+def setup_env(tpl, name):
+    import setup
+    return setup.env_value((tpl or {}).get("env"), name)
+
+
+def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     """Тело запроса аренды. Переменные ниже перекрывают шаблон только для этой аренды:
     games — "1"/"0" для SYNC_STEAM_GAMES (терминал: --games/--no-games);
     sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне); с выбором игр (v4.6) —
     ещё "select": {"games": [архивы игр], "saves_off": [архивы сохранений]} → VG_SYNC (старые скрипты его не
     знают и смотрят на тумблеры — их окно выставляет по выбору).
     docker — образ vastgame-desktop вместо шаблона KVM: тот же wolf-setup.sh (образ скачивает его по
-    WOLF_SCRIPT_URL), настройки разрешения и языка Steam — из шаблона, порт Tailscale для прямой связи."""
+    WOLF_SCRIPT_URL), настройки разрешения и языка Steam — из шаблона, порт Tailscale для прямой связи.
+    lang — язык окна (ru/en/es): язык Steam на машине, если в шаблоне не задан свой (steam_lang)."""
     if docker:
         import setup      # адрес скрипта один для KVM и Docker (setup не импортирует core)
         env = {"WOLF_SCRIPT_URL": setup.SCRIPT_URL, "-p 41641:41641/udp": "1",
@@ -189,15 +206,18 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False):
         # debug_rc.py на порту 8788, только через Tailscale и только с этим одноразовым паролем
         if os.environ.get("VASTGAME_DEBUG_TOKEN"):
             env["VASTGAME_DEBUG_TOKEN"] = os.environ["VASTGAME_DEBUG_TOKEN"]
-        for name in ("RES", "STEAM_LANG"):
-            v = setup.env_value(tpl.get("env"), name)
-            if v:
-                env[name] = v
+        res = setup.env_value(tpl.get("env"), "RES")
+        if res:
+            env["RES"] = res
         body = {"client_id": "me", "image": DOCKER_IMAGE, "disk": disk, "label": "vastgame",
                 "runtype": "args", "args": ["start"], "env": env}
     else:
         body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
         env = {}
+    sl = steam_lang(tpl, lang)
+    # KVM: свой язык шаблона машина и так получает из шаблона; Docker шаблона не видит — передаём всегда
+    if sl and (docker or not setup_env(tpl, "STEAM_LANG")):
+        env["STEAM_LANG"] = sl
     if games is not None:
         env["SYNC_STEAM_GAMES"] = games
     for k, var in SYNC_VARS.items():

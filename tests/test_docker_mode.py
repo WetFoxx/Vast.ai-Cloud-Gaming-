@@ -44,6 +44,16 @@ class TestRentalBody(unittest.TestCase):
         self.assertEqual(b, {"client_id": "me", "template_hash_id": "abc", "disk": 100, "label": "vastgame",
                              "env": {"SYNC_SAVES": "0"}})
 
+    def test_steam_language_follows_window_unless_template_sets_it(self):
+        """Язык Steam на машине — язык окна VastGame (en → english), но свой язык шаблона главнее (2026-10-08)."""
+        bare = {"hash_id": "abc", "env": "-e RES=1920x1200"}
+        self.assertEqual(core.rental_body(bare, 100, lang="en")["env"]["STEAM_LANG"], "english")        # KVM
+        self.assertEqual(core.rental_body(bare, 100, lang="es", docker=True)["env"]["STEAM_LANG"], "spanish")
+        self.assertEqual(core.rental_body(TPL, 100, lang="en", docker=True)["env"]["STEAM_LANG"], "russian")
+        self.assertNotIn("STEAM_LANG", core.rental_body(TPL, 100, lang="en").get("env", {}))     # KVM: из шаблона
+        self.assertNotIn("env", core.rental_body(bare, 100))                                     # язык не известен
+        self.assertNotIn("STEAM_LANG", core.rental_body(bare, 100, lang="de").get("env", {}))
+
     def test_image_pinned_to_a_build(self):
         self.assertRegex(core.DOCKER_IMAGE, r"^ghcr\.io/wetfoxx/vastgame-desktop:[0-9a-f]{40}$")
 
