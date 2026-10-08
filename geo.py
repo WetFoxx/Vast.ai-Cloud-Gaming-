@@ -85,6 +85,13 @@ def _zone_name():
     tz = os.environ.get("TZ", "").lstrip(":")
     if "/" in tz:
         return tz
+    if sys.platform == "win32":
+        # Windows хранит пояс своим именем («North Asia Standard Time») — tzlocal переводит в «Asia/Krasnoyarsk»
+        try:
+            from tzlocal import get_localzone_name
+            return get_localzone_name() or None
+        except Exception:                              # noqa: BLE001 — нет библиотеки или реестр не ответил
+            return None
     try:
         link = os.readlink("/etc/localtime")          # macOS и Linux: ссылка на файл пояса
     except OSError:
@@ -93,14 +100,24 @@ def _zone_name():
     return m[1] if m else None
 
 
+def _tzdata_tabs():
+    try:
+        import tzdata
+    except ImportError:
+        return []
+    d = Path(tzdata.__file__).parent / "zoneinfo"
+    return [d / "zone1970.tab", d / "zone.tab"]
+
+
 def home():
-    """Примерные координаты компьютера по его часовому поясу или None (Windows, нет zone.tab)."""
+    """Примерные координаты компьютера по его часовому поясу или None. Таблица координат поясов — системная
+    (macOS, Linux) или из пакета tzdata (Windows: своей нет)."""
     zone = _zone_name()
-    if not zone or sys.platform == "win32":
+    if not zone:
         return None
-    for tab in (Path("/usr/share/zoneinfo/zone1970.tab"), Path("/usr/share/zoneinfo/zone.tab")):
+    for tab in (Path("/usr/share/zoneinfo/zone1970.tab"), Path("/usr/share/zoneinfo/zone.tab"), *_tzdata_tabs()):
         try:
-            for line in tab.read_text().splitlines():
+            for line in tab.read_text(encoding="utf-8").splitlines():
                 parts = line.split("\t")
                 if len(parts) >= 3 and not line.startswith("#") and parts[2] == zone:
                     return _parse_coord(parts[1])
