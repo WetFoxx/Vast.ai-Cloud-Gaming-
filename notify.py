@@ -20,7 +20,7 @@ LOW_BALANCE = 1.0   # $: ниже — уведомление «баланс за
 
 def texts(lang):
     """Словарь переводов нужного языка (JSON внутри ui/i18n.js — как в tests/test_i18n.py); запасной — en."""
-    src = (HERE / "ui" / "i18n.js").read_text()
+    src = (HERE / "ui" / "i18n.js").read_text(encoding="utf-8")
     all_ = json.loads(src.split("const I18N = ", 1)[1].split("\n};", 1)[0] + "\n}")
     return {**all_["en"], **all_.get(lang or "en", {})}
 
@@ -36,7 +36,9 @@ def t(tr, key, **params):
 # Windows: уведомление средствами самой Windows (WinRT) из PowerShell 5.1, который есть в любой Windows 10/11.
 # Тексты — переменными окружения: в скрипт не вставляются, кавычки и теги в них ничего не сломают (Escape).
 # Пока у приложения нет ярлыка в «Пуске» со своим AppUserModelID, уведомление подписано именем PowerShell.
-WIN_APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+# Установленная программа — своё имя (ярлык в «Пуске» с этим AppUserModelID ставит установщик, vastgame.iss)
+APP_ID = "VastGame.App"
+WIN_APP_ID = APP_ID if paths.FROZEN else r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
 WIN_TOAST = r"""
 $ErrorActionPreference = 'Stop'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null

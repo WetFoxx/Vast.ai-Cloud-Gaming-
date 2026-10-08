@@ -20,6 +20,13 @@ if sys.platform == "win32" and not sys.flags.utf8_mode and not getattr(sys, "fro
 
 def main(argv):
     cmd = argv[0] if argv else ""
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        # Окно на панели задач — того же приложения, что ярлык в «Пуске» (vastgame.iss): его значок и имя
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VastGame.App")
+        except (AttributeError, OSError):
+            pass
     if sys.stdout is None or sys.stderr is None:
         # Windows, .exe без консоли: вывода нет, и любой print падал бы. Самопроверка пишет в файл VASTGAME_OUT
         # (его читает сборка), остальное — в никуда (свои журналы у фоновых процессов — job.log, app.log)

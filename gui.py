@@ -85,6 +85,8 @@ class Api:
         self._names = {}          # {appid: название игры} — для сохранений pfx--<appid>
         self._window = None
         self._force_close = False
+        self._tray = None            # Windows: значок в трее (tray.py) — закрытие окна его прячет
+        self._quitting = False       # «Выйти» из трея / подтверждённое закрытие — закрыть по-настоящему
         self._ts_url = None       # ссылка входа Tailscale — только в памяти, чтобы открыть её ещё раз
         self._moonlight_lock = threading.Lock()   # «Запустить Moonlight» — не больше одного сразу
         self._opened = set()      # ссылки подтверждения Tailscale SSH, уже открытые в браузере
@@ -1166,14 +1168,53 @@ class Api:
 
     def force_close(self):
         """Человек подтвердил на странице: закрыть окно, хотя операция ещё идёт."""
-        self._force_close = True
+        self._force_close = self._quitting = True
+        if self._tray:
+            self._tray.stop()
         self._window.destroy()
+
+    # ---- Windows: трей
+    def _tray_open(self):
+        """Щелчок по значку в трее, «Открыть VastGame» или повторный запуск программы — показать окно."""
+        def go():
+            self._window.show()
+            self._window.restore()
+            try:
+                from System import Action
+                form = self._window.native
+                form.Invoke(Action(lambda: (form.Activate(), form.BringToFront())))
+            except Exception:                              # noqa: BLE001 — показано и так
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def _tray_quit(self):
+        """«Выйти» в трее: закрыть по-настоящему. Идёт короткая операция в окне — показать окно и спросить, как всегда."""
+        if self._local_busy():
+            self._tray_open()
+            threading.Thread(target=lambda: self._window.evaluate_js("askClose()"), daemon=True).start()
+            return
+        self._quitting = True
+        self._tray.stop()
+        threading.Thread(target=self._window.destroy, daemon=True).start()
+
+    def _watch_show(self):
+        """Повторный запуск VastGame, пока он в трее (Windows): второй процесс оставляет файл-просьбу и выходит."""
+        req = settings.config_dir() / "show.request"
+        while True:
+            if req.exists():
+                req.unlink(missing_ok=True)
+                self._tray_open()
+            time.sleep(1)
 
     def _on_closing(self):
         """Закрытие окна. «Играть»/«Закончить» идут в фоновом процессе — окно закрывается спокойно.
         Идёт короткая операция в самом окне (убрать игру, установка) — спросить на странице.
         Спрашиваем страницей, а не системным диалогом: этот обработчик работает в главном потоке,
         и системный диалог из него повесил бы окно."""
+        if self._tray and self._tray.icon is not None and not self._quitting:
+            # Windows: окно — в трей, программа продолжает работать (и короткие операции окна тоже)
+            threading.Thread(target=lambda: (self._window.hide(), self._tray.hidden()), daemon=True).start()
+            return False
         if self._local_busy() and not self._force_close:
             threading.Thread(target=lambda: self._window.evaluate_js("askClose()"), daemon=True).start()
             return False   # не закрывать
@@ -1319,14 +1360,29 @@ def main():
     autostart.refresh()      # служба стоит, но проект переехал — поправить пути (выключенную не трогаем)
     lock = open(asks.WINDOW_LOCK, "a")   # «окно открыто» — для службы: карточку вопроса покажет окно
     try:
-        filelock.try_lock(lock)
+        first = filelock.try_lock(lock)
     except OSError:
-        pass                                 # второе окно — служба просто не узнает
+        first = True                         # не понять — открыть окно, как раньше
+    if not first and sys.platform == "win32":
+        # VastGame уже работает (окно или трей) — показать его, а не открывать второе
+        (settings.config_dir() / "show.request").touch()
+        return
     api = Api()
     window = webview.create_window("VastGame", str(HERE / "ui" / "index.html"), js_api=api,
                                    width=620, height=760, min_size=(520, 600))
     api._window = window
     window.events.closing += api._on_closing
+    if sys.platform == "win32":
+        import tray
+        api._tray = tray.Tray(window, api._tray_open, api._tray_quit)
+        started = []
+
+        def put_tray():                      # «loaded» бывает и при перезагрузке страницы — значок ставим один раз
+            if not started:
+                started.append(True)
+                api._tray.start()
+        window.events.loaded += put_tray
+        threading.Thread(target=api._watch_show, daemon=True).start()
     # Свой поток, а не webview.start(func): поток pywebview не фоновый и не дал бы процессу выйти после окна
     threading.Thread(target=api._watch_asks, daemon=True).start()
     webview.start(debug=bool(os.environ.get("VASTGAME_DEBUG")))

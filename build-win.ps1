@@ -43,4 +43,15 @@ Remove-Item Env:VASTGAME_OUT
 Get-Content $out -Encoding UTF8
 if ($p.ExitCode) { throw "самопроверка не прошла (код $($p.ExitCode))" }
 $size = [math]::Round(((Get-ChildItem dist\VastGame -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB)
-"Готово: dist\VastGame\VastGame.exe ($size МБ)"
+"Собрано: dist\VastGame\VastGame.exe ($size МБ)"
+
+# ---- установщик (Inno Setup 6, для одного пользователя): dist\VastGame-Setup-<версия>.exe
+$Ver = [regex]::Match((Get-Content version.py -Raw -Encoding UTF8), '(?m)^VERSION = "(\d+\.\d+\.\d+)"').Groups[1].Value
+$Iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $Iscc) { throw 'Нет Inno Setup 6 (ISCC.exe) — поставить с jrsoftware.org' }
+Remove-Item "dist\VastGame-Setup-*.exe" -ErrorAction SilentlyContinue
+& $Iscc /Q "/DAppVersion=$Ver" vastgame.iss
+if ($LASTEXITCODE) { throw "Inno Setup завершился с кодом $LASTEXITCODE" }
+$setup = Get-Item "dist\VastGame-Setup-$Ver.exe"
+"Готово: $($setup.FullName) ($([math]::Round($setup.Length / 1MB)) МБ)"
