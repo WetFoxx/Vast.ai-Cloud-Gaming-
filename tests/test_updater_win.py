@@ -4,6 +4,7 @@
 
 import base64
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,16 +19,20 @@ import updater  # noqa: E402
 
 @unittest.skipUnless(sys.platform == "win32", "только Windows")
 class TestWatchWindows(unittest.TestCase):
-    def run_watch(self, code, old_pid=None):
+    def run_watch(self, code, old_pid=None, busy=False):
         d = Path(tempfile.mkdtemp())
         folder = d / "update"
         folder.mkdir()
         setup, exe = folder / "VastGame-Setup-9.9.9.exe.cmd", d / "VastGame.cmd"
         setup.write_text(f'@echo %* > "{d}\\setup-args"\n@exit /b {code}\n')
         exe.write_text(f'@echo opened > "{d}\\opened"\n')
+        stray = None
+        if busy:                                 # «другой VastGame» из папки программы, который сам не закроется
+            shutil.copy(Path(os.environ["WINDIR"]) / "System32" / "PING.EXE", d / "stray.exe")
+            stray = subprocess.Popen([str(d / "stray.exe"), "-n", "300", "127.0.0.1"], stdout=subprocess.DEVNULL)
         pid = old_pid or subprocess.run(["cmd", "/c", "exit"]).returncode or 999999    # прежнее окно уже закрыто
         env = dict(os.environ, VG_FOLDER=str(folder), VG_PID=str(pid), VG_SETUP=str(setup), VG_VERSION="9.9.9",
-                   VG_EXE=str(exe))
+                   VG_EXE=str(exe), VG_WAIT="2")
         t0 = time.time()
         # Ровно как запускает программа (updater._install_win): с теми же флагами — без консоли PowerShell молчал
         p = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -39,6 +44,12 @@ class TestWatchWindows(unittest.TestCase):
             if (d / "opened").exists():
                 break
             time.sleep(0.2)
+        if stray:
+            try:
+                self.stray = stray.wait(10)      # сторож его закрыл
+            except subprocess.TimeoutExpired:
+                stray.kill()
+                self.fail("сторож не закрыл другую копию из папки программы")
         return d, folder, setup, time.time() - t0
 
     def test_installed(self):
@@ -57,6 +68,14 @@ class TestWatchWindows(unittest.TestCase):
         self.assertEqual((folder / "failed").read_text(encoding="utf-8-sig").strip(), "9.9.9")
         self.assertTrue(setup.exists())
         self.assertIn("код 5", (folder / "update.log").read_text(encoding="utf-8-sig"))
+
+    def test_closes_other_copies_first(self):
+        d, folder, setup, _ = self.run_watch(0, busy=True)
+        self.assertIsNotNone(self.stray)
+        self.assertTrue((d / "opened").exists())
+        log = (folder / "update.log").read_text(encoding="utf-8-sig")
+        self.assertIn("закрываю stray.exe", log)
+        self.assertIn("поставлена 9.9.9", log)
 
     def test_waits_for_the_old_window(self):
         old = subprocess.Popen(["powershell.exe", "-NoProfile", "-Command", "Start-Sleep 3"])

@@ -376,13 +376,22 @@ def install(staged_app, version, target=None, pid=None, folder=None, opener="/us
 #
 # Файлы заменяет сам установщик (Inno Setup; сорвался — возвращает прежние), но пока окно открыто, они заняты.
 # Поэтому окно запускает сторожа (WATCH_WIN — PowerShell без окна, отдельно от программы) и сразу выходит. Сторож
-# ждёт, пока окно закроется, тихо запускает установщик, ждёт его конца и открывает VastGame: установщик закончил
-# с кодом 0 — уже новую, иначе прежнюю, с пометкой FAILED. Дальше, как на Mac, — after_start.
+# ждёт, пока окно закроется, и ещё до VG_WAIT (30) с — другие VastGame из папки программы (служба «продолжить» раз
+# в 5 мин, карточка вопроса); не закрылись — закрывает их сам: установщик закрыть их не может, если файл держит
+# ещё и служба Windows (так на Windows для ARM: эмуляция x64, XtaCache — проверено 2026-10-08). Потом тихо
+# запускает установщик, ждёт его конца и открывает VastGame: установщик закончил с кодом 0 — уже новую, иначе
+# прежнюю, с пометкой FAILED. Дальше, как на Mac, — after_start.
 
 WATCH_WIN = r'''
 $f = $env:VG_FOLDER
 function say($t) { Add-Content -LiteralPath "$f\update.log" -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + " $t") -Encoding UTF8 }
 try { Wait-Process -Id ([int]$env:VG_PID) -Timeout 60 -ErrorAction Stop } catch {}
+$dir = (Split-Path -Parent $env:VG_EXE) + '\'
+$wait = if ($env:VG_WAIT) { [int]$env:VG_WAIT } else { 30 }
+function mine { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) }) }
+for ($i = 0; $i -lt $wait -and (mine).Count; $i++) { Start-Sleep 1 }
+foreach ($x in (mine)) { say "закрываю $($x.Name) ($($x.ProcessId))"; Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep 1
 $code = -1
 try {
   $p = Start-Process -FilePath $env:VG_SETUP -PassThru -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$f\setup.log`"")
