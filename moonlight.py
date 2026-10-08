@@ -95,10 +95,42 @@ def stream(host, app, size=None, fps=None, bitrate=None):
     return True
 
 
+def _native_display_windows():
+    """Windows: текущий режим главного монитора (EnumDisplaySettingsW). Масштаб Windows («125%») число пикселей
+    режима не меняет — это и есть разрешение, в котором монитор показывает картинку."""
+    import ctypes
+    from ctypes import wintypes
+
+    class DEVMODEW(ctypes.Structure):
+        _fields_ = [("dmDeviceName", wintypes.WCHAR * 32), ("dmSpecVersion", wintypes.WORD),
+                    ("dmDriverVersion", wintypes.WORD), ("dmSize", wintypes.WORD), ("dmDriverExtra", wintypes.WORD),
+                    ("dmFields", wintypes.DWORD), ("dmPosition", ctypes.c_long * 2),
+                    ("dmDisplayOrientation", wintypes.DWORD), ("dmDisplayFixedOutput", wintypes.DWORD),
+                    ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short), ("dmYResolution", ctypes.c_short),
+                    ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short), ("dmFormName", wintypes.WCHAR * 32),
+                    ("dmLogPixels", wintypes.WORD), ("dmBitsPerPel", wintypes.DWORD), ("dmPelsWidth", wintypes.DWORD),
+                    ("dmPelsHeight", wintypes.DWORD), ("dmDisplayFlags", wintypes.DWORD),
+                    ("dmDisplayFrequency", wintypes.DWORD), ("_rest", wintypes.DWORD * 8)]
+
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW) - ctypes.sizeof(wintypes.DWORD * 8)     # 220 — размер без «хвоста»
+    if not ctypes.windll.user32.EnumDisplaySettingsW(None, -1, ctypes.byref(dm)):   # -1 = ENUM_CURRENT_SETTINGS
+        return None
+    if not (dm.dmPelsWidth and dm.dmPelsHeight):
+        return None
+    fps = dm.dmDisplayFrequency if dm.dmDisplayFrequency > 1 else 60               # 0/1 — «по умолчанию»
+    return {"w": int(dm.dmPelsWidth), "h": int(dm.dmPelsHeight), "fps": max(30, min(int(fps), 240))}
+
+
 def native_display():
     """Физическое разрешение и частота главного экрана: {"w", "h", "fps"} или None — не узнать."""
+    if sys.platform == "win32":
+        try:
+            return _native_display_windows()
+        except (OSError, AttributeError, ValueError):
+            return None
     if sys.platform != "darwin":
-        return None                     # Windows — позже
+        return None
     try:
         return parse_displays(json.loads(paths.run(["system_profiler", "SPDisplaysDataType", "-json"], 30).stdout))
     except (OSError, ValueError, subprocess.SubprocessError):
