@@ -83,7 +83,7 @@ class TestSunshineReport(unittest.TestCase):
         b = text.index("  fi\n", a) + 5
         d = Path(tempfile.mkdtemp())
         (d / "log").write_text(log)
-        script = f'LOGF={d}/log\nreport() {{ echo "$1|$2"; }}\n' + text[a:b]
+        script = f'LOGF={d}/log\nTRIES=3\nreport() {{ echo "$1|$2"; }}\n' + text[a:b]
         return sh("bash", "-c", script).stdout.strip()
 
     def test_no_outputs(self):
@@ -92,9 +92,35 @@ class TestSunshineReport(unittest.TestCase):
         self.assertTrue(out.startswith("err|нет выхода на монитор"), out)
 
     def test_real_nvenc_failure(self):
-        out = self.run_block("Error: NvEnc: OpenEncodeSessionEx failed: unsupported device\n"
-                             "Fatal: Couldn't find any working encoder\n")
-        self.assertTrue(out.startswith("err|NVENC не работает"), out)
+        out = self.run_block("[2026-10-08 00:07:14.054]: Error: NvEnc: OpenEncodeSessionEx failed: unsupported device\n"
+                             "[2026-10-08 00:07:14.060]: Info: // Testing for available encoders, this may generate errors. "
+                             "You can safely ignore those errors\n"
+                             "[2026-10-08 00:07:15.000]: Fatal: Couldn't find any working encoder\n")
+        self.assertTrue(out.startswith("err|NVENC не работает (3 попытки): Error: NvEnc: OpenEncodeSessionEx failed: "
+                                       "unsupported device"), out)          # настоящая причина, не служебная строка
+
+    def run_loop(self, attempts):
+        """Цикл попыток из sunshine-start.sh: start() по очереди «пишет» журналы attempts."""
+        text = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
+        a = text.index("TRIES=0\n")
+        b = text.index("done\n", a) + 5
+        d = Path(tempfile.mkdtemp())
+        for i, log in enumerate(attempts, 1):
+            (d / f"a{i}").write_text(log)
+        script = (f'LOGF={d}/log\nCAP=x11\nN=0\nstart() {{ N=$((N+1)); cp {d}/a$N $LOGF; }}\nsleep() {{ :; }}\n'
+                  + text[a:b] + 'echo "tries=$TRIES"')
+        return sh("bash", "-c", script).stdout.strip().splitlines()[-1]
+
+    def test_encoder_retried_then_found(self):
+        bad = "[t]: Fatal: Couldn't find any working encoder\n"
+        self.assertEqual(self.run_loop([bad, bad, "[t]: Info: Found H.264 encoder: h264_nvenc\n"]), "tries=3")
+
+    def test_no_retry_without_screen(self):
+        self.assertEqual(self.run_loop(["[t]: Info: Found [0] outputs\n[t]: Fatal: Couldn't find any working encoder\n"]),
+                         "tries=1")
+
+    def test_found_at_once(self):
+        self.assertEqual(self.run_loop(["[t]: Info: Found H.264 encoder: h264_nvenc\n"]), "tries=1")
 
 
 class TestWebhelperPatch(unittest.TestCase):
