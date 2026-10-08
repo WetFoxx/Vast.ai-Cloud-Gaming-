@@ -78,7 +78,19 @@ start() {  # $1 захват  $2 кодировщик
 # (identity), а задаёт его приложение (wolf sunshine-creds)
 [ -z "${WOLF_SCRIPT_URL:-}" ] && [ -n "${SUNSHINE_PASSWORD:-}" ] && u sunshine --creds vastgame "$SUNSHINE_PASSWORD" >/dev/null 2>&1
 
-if [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ]; then start nvfbc nvenc; else start x11 nvenc; fi
+CAP=x11; [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ] && CAP=nvfbc
+# [0.4.7] Кодировщик на части хостов не находится только иногда (хост 152580: 12 удачных сессий, 2026-10-08 — «не
+# работает»): прежде чем браковать машину, ещё две попытки. Не повторяем, если у видеокарты нет экрана (не лечится)
+# или проверка просто не закончилась
+TRIES=0
+for try in 1 2 3; do
+  TRIES=$try
+  start "$CAP" nvenc
+  grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null && break
+  grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null || break
+  grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null && break
+  [ "$try" -lt 3 ] && { echo "sunshine: NVENC не нашёлся (попытка $try) — пробую ещё раз через 10 с"; sleep 10; }
+done
 # Итог — и приложению: запись «sunshine» на странице wolf (есть только у агента; архивом не считается).
 # NVENC нет — приложение заменит машину на следующую из списка
 report() { [ -d /var/lib/wolf/st ] && echo "$(date +%s)|$1|$2" > /var/lib/wolf/st/sunshine; }
@@ -99,7 +111,14 @@ else
   if grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null; then
     report err "нет выхода на монитор: хост не дал видеокарте экран (Sunshine: 0 выходов)"
   else
-    report err "NVENC не работает: $(grep -iE 'error|fatal' "$LOGF" 2>/dev/null | grep -iE 'nvenc|cuda|encoder' | tail -1 | sed 's/^\[[^]]*\]: *//' | cut -c1-120)"
+    # Настоящая причина: строки «Error:»/«Fatal:», без служебной «Testing for available encoders, this may generate
+    # errors» (раньше в отчёт попадала она). Сначала — про NVENC/CUDA/кодирование, иначе последняя ошибка
+    errs=$(grep -E '\]: (Error|Fatal): ' "$LOGF" 2>/dev/null | grep -viE 'may generate errors')
+    real=$(printf '%s\n' "$errs" | grep -v "Couldn.t find any working encoder")     # итоговая — без причины
+    why=$(printf '%s\n' "$real" | grep -iE 'nvenc|cuda|encod' | tail -1)
+    [ -n "$why" ] || why=$(printf '%s\n' "$real" | grep . | tail -1)
+    [ -n "$why" ] || why=$(printf '%s\n' "$errs" | tail -1)
+    report err "NVENC не работает ($TRIES попытки): $(printf '%s' "${why:-нет строки ошибки в журнале}" | sed 's/^\[[^]]*\]: *//' | cut -c1-150)"
   fi
   start x11 software
 fi
