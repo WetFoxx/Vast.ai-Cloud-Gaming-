@@ -7,6 +7,7 @@
 # делается суточный (тот же finalizelogin → steamcommunity.com/login/settoken) — он живёт только в памяти.
 # Список игр — официальные методы Steam с этим пропуском: IPlayerService/GetOwnedGames (все игры, даже при закрытом
 # профиле) и IFamilyGroupsService (семейная библиотека). Проверено вживую 2026-10-01: 65 игр + 37 от семьи.
+# Бесплатные игры без единого запуска и демоверсии — из магазина (_extras: dynamicstore + GetItems), 2026-10-08.
 # Картинки — IStoreBrowseService/GetItems (публичный): у новых игр в адресе картинки хеш, по номеру его не построить.
 #
 # Пропуска не попадают ни в тексты ошибок, ни в журнал: ошибки сети пересоздаются без исходной (в ней адрес запроса
@@ -30,6 +31,7 @@ from vastapi import VastgameError
 LOGIN_URL = "https://steamcommunity.com/login/home/?goto="
 FINALIZE = "https://login.steampowered.com/jwt/finalizelogin"
 API = "https://api.steampowered.com/"
+STORE = "https://store.steampowered.com/"
 ART_BASE = "https://shared.cloudflare.steamstatic.com/store_item_assets/"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
 CACHE = config_dir() / "steam_library.json"   # последний список игр (без пропусков) — библиотека открывается сразу
@@ -52,6 +54,7 @@ HOOK = r"""(function(){ if (window.__vgHook) return 1; window.__vgHook = 1;
 TAKE = "(function(){ var n = sessionStorage.getItem('__vgNonce'); if (n) sessionStorage.removeItem('__vgNonce'); return n; })()"
 
 _access = {}               # {steamid: (суточный пропуск, годен до)} — только в памяти
+_stores = {}               # {steamid: requests.Session с cookie магазина Steam} — тоже только в памяти, вместе с _access
 _lock = threading.Lock()   # обновление библиотеки — по одному (окно спрашивает при открытии и при возврате в окно)
 
 
@@ -197,6 +200,16 @@ def _renew(sid, refresh):
     if not token or not exp:
         raise VastgameError("Steam не продлил вход", key="steam.renew_failed", code=0)
     _access[sid] = (token, exp)
+    # Тот же вход — и в магазин: только у него список всех приложений аккаунта (_extras). Не вышло — без дополнения
+    shop = next((t for t in j.get("transfer_info") or [] if str(t.get("url", "")).startswith(STORE)), None)
+    _stores.pop(sid, None)
+    if shop:
+        st = requests.Session()
+        try:
+            _post(shop["url"], session=st, data={**(shop.get("params") or {}), "steamID": j.get("steamID") or sid})
+            _stores[sid] = st
+        except VastgameError:
+            pass
     return token
 
 
@@ -234,6 +247,46 @@ def _family(sid, token):
     return [a for a in apps if a.get("appid") and not a.get("exclude_reason")]
 
 
+def _items(ids, request, language="english"):
+    """IStoreBrowseService/GetItems (публичный) пачками: ids — [{"appid": N}] или [{"packageid": N}]. Сбой — что успели."""
+    out = []
+    for i in range(0, len(ids), ART_BATCH):
+        q = {"ids": ids[i:i + ART_BATCH], "context": {"language": language, "country_code": "US"},
+             "data_request": request}
+        try:
+            r = _get(API + "IStoreBrowseService/GetItems/v1/", params={"input_json": json.dumps(q)})
+        except VastgameError:
+            break
+        if r.status_code != 200:
+            break
+        out += (_json(r).get("response") or {}).get("store_items") or []
+    return out
+
+
+def _extras(sid, have):
+    """Игры аккаунта, которых нет в GetOwnedGames, а Steam-клиент их показывает: бесплатные, в которые ещё не играли
+    (Counter-Strike 2, Lost Ark…), и демоверсии (пробная FINAL FANTASY XIV) — живой случай 2026-10-08. Список всех
+    приложений и пакетов аккаунта есть только у магазина (dynamicstore/userdata, демо там — лишь пакетом); пакеты
+    раскрывает в приложения и отделяет игры (тип 0) и демо (1) от DLC, музыки, программ GetItems.
+    [{"appid", "name", "demo"}]; не вышло — пусто: это дополнение к основному списку."""
+    st = _stores.get(sid)
+    if st is None:
+        return []
+    try:
+        r = st.get(STORE + "dynamicstore/userdata/", timeout=TIMEOUT, headers={"User-Agent": UA})
+    except requests.RequestException:
+        return []
+    u = _json(r) if r.status_code == 200 else {}
+    apps = {a for a in u.get("rgOwnedApps") or [] if isinstance(a, int)}
+    packages = [{"packageid": p} for p in u.get("rgOwnedPackages") or [] if isinstance(p, int)]
+    for it in _items(packages, {"include_included_items": True}):
+        apps.update(a for a in it.get("included_appids") or [] if isinstance(a, int))
+    todo = [{"appid": a} for a in sorted(apps) if str(a) not in have]
+    return [{"appid": it["appid"], "name": it.get("name") or "", "demo": it.get("type") == 1}
+            for it in _items(todo, {"include_basic_info": True})
+            if it.get("success") == 1 and it.get("appid") and it.get("type") in (0, 1)]
+
+
 def art(appids):
     """{appid: {"cap", "hero"}} — адреса картинок из магазина Steam (запоминаются; нет сети — что есть)."""
     known = _read(ART) or {}
@@ -263,7 +316,7 @@ def art(appids):
 
 def library(only=None):
     """Свежая библиотека всех аккаунтов: {"accounts": [...], "games": [{"appid", "name", "accounts": [steamid...],
-    "family": [steamid...], "minutes", "last", "cap", "hero", "header"}], "errors": [{"id", "key"}]}.
+    "family": [steamid...], "minutes", "last", "cap", "hero", "header", "demo"}], "errors": [{"id", "key"}]}.
     Аккаунт, вход которого истёк, помечается (expired) — его игры берутся из прошлого списка. Уже обновляет
     другой поток — прошлый список (он вот-вот обновится).
     [0.4.5] only — steamid только что добавленного аккаунта: из Steam — только его игры, у остальных — прошлый
@@ -274,18 +327,21 @@ def library(only=None):
         old = {g["appid"]: g for g in (cached() or {}).get("games", [])}
         games, errors = {}, []
 
-        def add(appid, name, sid, family=False, minutes=0, last=0):
+        def add(appid, name, sid, family=False, minutes=0, last=0, demo=False):
             g = games.setdefault(appid, {"appid": appid, "name": name, "accounts": [], "family": [], "minutes": 0, "last": 0})
             g["name"] = g["name"] or name
+            if demo:
+                g["demo"] = True
             (g["family"] if family else g["accounts"]).append(sid)
             g["minutes"] = max(g["minutes"], minutes or 0)
             g["last"] = max(g["last"], last or 0)
 
         def fetch(sid):
             if only and sid != only:
-                return None, None                    # не тот аккаунт — его прошлый список (ниже)
+                return None, None, None              # не тот аккаунт — его прошлый список (ниже)
             token = access(sid)
-            return _owned(sid, token), _family(sid, token)
+            own = _owned(sid, token)
+            return own, _family(sid, token), _extras(sid, {str(x["appid"]) for x in own})
 
         # [0.4.5] Аккаунты — одновременно (по очереди: ~3 с на аккаунт); итог разбираем по порядку, как раньше
         accs = accounts()
@@ -294,27 +350,29 @@ def library(only=None):
         for a, f in zip(accs, futs):
             sid = a["id"]
             try:
-                own, fam = f.result()
+                own, fam, extra = f.result()
                 if own is not None:
                     _mark(sid, False)
             except SteamExpired:
                 _mark(sid, True)
                 errors.append({"id": sid, "key": "steam.expired"})
-                own, fam = None, None
+                own, fam, extra = None, None, None
             except VastgameError as e:
                 errors.append({"id": sid, "key": e.key or "steam.net"})
-                own, fam = None, None
+                own, fam, extra = None, None, None
             if own is None:                                  # прошлый список этого аккаунта
                 for g in old.values():
                     for s in g.get("accounts", []):
                         if s == sid:
-                            add(g["appid"], g["name"], sid, False, g.get("minutes"), g.get("last"))
+                            add(g["appid"], g["name"], sid, False, g.get("minutes"), g.get("last"), g.get("demo"))
                     for s in g.get("family", []):
                         if s == sid:
                             add(g["appid"], g["name"], sid, True)
                 continue
             for x in own:
                 add(str(x["appid"]), x.get("name") or "", sid, False, x.get("playtime_forever"), x.get("rtime_last_played"))
+            for x in extra:                                  # бесплатные без игры и демо — как в Steam-клиенте
+                add(str(x["appid"]), x["name"], sid, False, 0, 0, x["demo"])
             for x in fam:
                 if str(x["appid"]) not in {str(o["appid"]) for o in own}:
                     add(str(x["appid"]), x.get("name") or "", sid, True, 0, x.get("rt_last_played"))

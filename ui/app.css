@@ -499,6 +499,7 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
   color: #fff; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .game-tile .badge.family { background: rgba(122, 92, 255, .85); }
 .game-tile .badge.mods { background: rgba(23, 178, 106, .9); }
+.game-tile .badge.demo { background: rgba(92, 126, 16, .9); }
 .game-tile .name { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 8px 7px; font-size: 12px; font-weight: 600;
   color: #fff; background: linear-gradient(transparent, rgba(0, 0, 0, .85)); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }

@@ -50,6 +50,12 @@ class FakeSteam:
         self.family = {A: [{"appid": 40, "name": "Forty", "rt_last_played": 400},
                            {"appid": 50, "name": "Excluded", "exclude_reason": 3}]}
         self.names = {A: "Alex", B: "Bob"}
+        # Магазин: приложения и пакеты аккаунта; 60 — бесплатная без игры, 70 — демо (только пакетом 700),
+        # 80 — DLC, 90 — нет в магазине, 10 — уже в основном списке
+        self.shop = {A: {"rgOwnedApps": [10, 60, 80, 90], "rgOwnedPackages": [700]}}
+        self.items = {10: (0, "Ten"), 60: (0, "Free Sixty"), 70: (1, "Seventy Demo"), 80: (4, "Ten Soundtrack")}
+        self.packages = {700: [70, 10]}
+        self.shop_down = False
         self.finalize_calls = 0
         self.fail_net = None             # текст ошибки сети (с пропуском в адресе)
 
@@ -68,6 +74,9 @@ class FakeSteam:
             return Resp(200, {"steamID": sid, "transfer_info": [
                 {"url": "https://store.steampowered.com/login/settoken", "params": {"nonce": "s", "auth": "x"}},
                 {"url": "https://steamcommunity.com/login/settoken", "params": {"nonce": "c", "auth": "y"}}]})
+        if url == "https://store.steampowered.com/login/settoken":
+            session.cookies.set("steamLoginSecure", "shop-" + data["steamID"], domain="store.steampowered.com")
+            return Resp(200, {})
         if url == "https://steamcommunity.com/login/settoken":
             sid = data["steamID"]
             acc = jwt(sid, int(time.time()) + 86400, ["web:community"])
@@ -84,7 +93,16 @@ class FakeSteam:
             sid = url.split("/")[4]
             return Resp(200, None, f"<profile><steamID><![CDATA[{self.names[sid]}]]></steamID></profile>")
         if "GetItems" in url:
-            ids = [i["appid"] for i in json.loads(p["input_json"])["ids"]]
+            q = json.loads(p["input_json"])
+            if q["data_request"].get("include_included_items"):
+                return Resp(200, {"response": {"store_items": [
+                    {"item_type": 1, "id": i["packageid"], "success": 1, "included_appids": self.packages[i["packageid"]]}
+                    for i in q["ids"] if i["packageid"] in self.packages]}})
+            if q["data_request"].get("include_basic_info"):
+                return Resp(200, {"response": {"store_items": [
+                    {"appid": i["appid"], "success": 1, "type": self.items[i["appid"]][0], "name": self.items[i["appid"]][1]}
+                    if i["appid"] in self.items else {"id": i["appid"], "success": 15} for i in q["ids"]]}})
+            ids = [i["appid"] for i in q["ids"]]
             return Resp(200, {"response": {"store_items": [
                 {"appid": i, "assets": {"asset_url_format": f"steam/apps/{i}/${{FILENAME}}?t=1",
                                         "library_capsule": f"h{i}/library_capsule.jpg", "header": "header.jpg"}}
@@ -110,6 +128,14 @@ class FakeSession:
     def post(self, url, **kw):
         return self.steam.post(url, session=self, **kw)
 
+    def get(self, url, **kw):
+        if url == "https://store.steampowered.com/dynamicstore/userdata/":
+            if self.steam.shop_down:
+                raise requests.ConnectionError("store")
+            who = (self.cookies.get("steamLoginSecure") or "").removeprefix("shop-")
+            return Resp(200, self.steam.shop.get(who, {"rgOwnedApps": [], "rgOwnedPackages": []}))
+        raise AssertionError(url)
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -123,6 +149,7 @@ class Base(unittest.TestCase):
                   mock.patch.object(steamlib, "ART", tmp / "art.json"),
                   mock.patch.object(steamlib, "keystore", ks),
                   mock.patch.object(steamlib, "_access", {}),
+                  mock.patch.object(steamlib, "_stores", {}),
                   mock.patch.object(steamlib.requests, "get", self.steam.get),
                   mock.patch.object(steamlib.requests, "post", lambda url, **kw: self.steam.post(url, **kw)),
                   mock.patch.object(steamlib.requests, "Session", lambda: FakeSession(self.steam))):
@@ -183,7 +210,7 @@ class TestLibrary(Base):
         steamlib.add_account(self.steam.login(B))
         lib = steamlib.library()
         games = {g["appid"]: g for g in lib["games"]}
-        self.assertEqual(set(games), {"10", "20", "30", "40"})          # исключённая семейная — нет
+        self.assertEqual(set(games), {"10", "20", "30", "40", "60", "70"})   # исключённая семейная — нет
         self.assertEqual(games["20"]["accounts"], [A, B])               # на двух аккаунтах — две метки
         self.assertEqual((games["40"]["accounts"], games["40"]["family"]), ([], [A]))
         self.assertEqual([g["appid"] for g in lib["games"]][:2], ["40", "20"])   # недавние — первыми
@@ -194,6 +221,25 @@ class TestLibrary(Base):
         self.assertEqual(self.steam.finalize_calls, 2)
         steamlib.library()
         self.assertEqual(self.steam.finalize_calls, 2)
+
+    def test_free_and_demo_games_from_store(self):
+        # Бесплатная без единого запуска и демо (только пакетом) — в библиотеке, как в Steam-клиенте;
+        # DLC и приложения, которых нет в магазине, — нет; игра из основного списка не дублируется
+        steamlib.add_account(self.steam.login(A))
+        games = {g["appid"]: g for g in steamlib.library()["games"]}
+        self.assertEqual((games["60"]["name"], games["60"]["accounts"], games["60"].get("demo")), ("Free Sixty", [A], None))
+        self.assertEqual((games["70"]["name"], games["70"]["demo"]), ("Seventy Demo", True))
+        self.assertNotIn("80", games)
+        self.assertNotIn("90", games)
+        self.assertEqual((games["10"]["accounts"], games["10"]["minutes"]), ([A], 60))
+        self.assertTrue({g["appid"]: g for g in steamlib.cached()["games"]}["70"]["demo"])   # и в кэше
+
+    def test_store_down_keeps_main_list(self):
+        steamlib.add_account(self.steam.login(A))
+        self.steam.shop_down = True
+        lib = steamlib.library()
+        self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "40"})
+        self.assertEqual(lib["errors"], [])                               # дополнение — без ошибки
 
     def test_accounts_fetched_at_once(self):
         # [0.4.5] Аккаунты — одновременно: два аккаунта по 0.4 с — меньше 0.8
@@ -208,7 +254,7 @@ class TestLibrary(Base):
             t0 = time.time()
             lib = steamlib.library()
             self.assertLess(time.time() - t0, 0.75)
-        self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "30", "40"})
+        self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "30", "40", "60", "70"})
         self.assertEqual(next(g for g in lib["games"] if g["appid"] == "20")["accounts"], [A, B])   # порядок прежний
 
     def test_new_account_only(self):
@@ -252,7 +298,7 @@ class TestLibrary(Base):
         self.steam.fail_net = f"HTTPSConnectionPool: /IPlayerService/GetOwnedGames/v1/?access_token={secret}"
         lib = steamlib.library()
         self.assertEqual(lib["errors"], [{"id": A, "key": "steam.net"}])
-        self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "40"})
+        self.assertEqual({g["appid"] for g in lib["games"]}, {"10", "20", "40", "60", "70"})   # прошлый список
         with self.assertRaises(VastgameError) as c:
             steamlib._owned(A, secret)
         self.assertNotIn(secret, "".join(traceback.format_exception(c.exception)))
@@ -312,7 +358,7 @@ class TestLoginWindow(Base):
         self.assertEqual(win.urls, [steamlib.LOGIN_URL])                  # после заглушки — страница Steam
         self.assertEqual(self.store, {f"STEAM_{A}": tok})
         # [0.4.5] игры нового аккаунта — уже в библиотеке, окну не нужно ждать полного обновления
-        self.assertEqual({g["appid"] for g in steamlib.cached()["games"]}, {"10", "20", "40"})
+        self.assertEqual({g["appid"] for g in steamlib.cached()["games"]}, {"10", "20", "40", "60", "70"})
 
     def test_closed_window_links_nothing(self):
         win = FakeWindow(close_after=2)

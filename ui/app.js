@@ -1750,6 +1750,7 @@ function gameTile(g) {
   for (const id of g.accounts) badges.appendChild(el("span", { className: "badge" }, accName(id)));
   if (!g.accounts.length && g.family.length) badges.appendChild(el("span", { className: "badge family" }, t("library.family")));
   if (libData && libData.mods && libData.mods[g.appid]) badges.appendChild(el("span", { className: "badge mods" }, t("library.mods")));
+  if (g.demo) badges.appendChild(el("span", { className: "badge demo" }, t("library.demo")));
   tile.appendChild(badges);
   tile.appendChild(el("div", { className: "name" }, g.name || "#" + g.appid));
   return tile;
