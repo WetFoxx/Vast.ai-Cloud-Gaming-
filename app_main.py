@@ -20,6 +20,13 @@ if sys.platform == "win32" and not sys.flags.utf8_mode and not getattr(sys, "fro
 
 def main(argv):
     cmd = argv[0] if argv else ""
+    if sys.stdout is None or sys.stderr is None:
+        # Windows, .exe без консоли: вывода нет, и любой print падал бы. Самопроверка пишет в файл VASTGAME_OUT
+        # (его читает сборка), остальное — в никуда (свои журналы у фоновых процессов — job.log, app.log)
+        import os
+        out = open(os.environ.get("VASTGAME_OUT") or os.devnull, "w", encoding="utf-8")
+        sys.stdout = sys.stdout or out
+        sys.stderr = sys.stderr or out
     if cmd == "job":
         import jobs
         return jobs.main(["job", *argv[1:]])
@@ -47,9 +54,11 @@ def selftest():
     import importlib
     import subprocess
     problems = []
+    own = (("webview.platforms.winforms", "clr", "tzlocal", "tzdata", "keyring.backends.Windows")
+           if sys.platform == "win32" else ("webview.platforms.cocoa", "Quartz"))
     for m in ("gui", "jobs", "core", "drive", "setup", "setupcheck", "autostart", "notify", "webview",
-              "webview.platforms.cocoa", "keystore", "keyring", "requests", "updater", "asks", "Quartz",
-              "cryptography.hazmat.primitives.asymmetric.ed25519"):
+              "keystore", "keyring", "requests", "updater", "asks", "geo", "filelock",
+              "cryptography.hazmat.primitives.asymmetric.ed25519", *own):
         try:
             importlib.import_module(m)
         except Exception as e:                   # noqa: BLE001 — показать любую причину
@@ -76,6 +85,9 @@ def selftest():
             plist_version = None
         if plist_version != VERSION:
             problems.append(f"версия в Info.plist ({plist_version}) ≠ version.py ({VERSION})")
+    # Windows: файлы и вывод программ — в UTF-8 (без этого — сбой на кириллице, 2026-10-08); в .exe задаёт сборка
+    if sys.platform == "win32" and not sys.flags.utf8_mode:
+        problems.append("режим UTF-8 выключен — сборка должна запускать Python с -X utf8")
     # Открытый ключ выпусков вшит: без него приложение не примет ни одного обновления
     import base64
     import updater
@@ -103,7 +115,9 @@ def selftest():
     print(f"запуск самого себя: {paths.self_cmd('resume')}")
     for p in problems:
         print("!!!", p)
-    return "самопроверка не прошла" if problems or not (cid and secret) or "bin/rclone" not in (rclone or "") else None
+    from pathlib import Path
+    bundled = bool(rclone) and Path(rclone).parent.name == "bin"     # своя копия, а не системная (и в Windows: bin\)
+    return "самопроверка не прошла" if problems or not (cid and secret) or not bundled else None
 
 
 if __name__ == "__main__":
