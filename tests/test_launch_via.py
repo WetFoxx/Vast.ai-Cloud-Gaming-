@@ -186,6 +186,14 @@ class TestWrapper(unittest.TestCase):
         self.assertEqual(out[-1], f"cwd={self.target.parent}")                             # папка программы
         self.assertTrue((self.launch / APP).exists())                                      # выбор — постоянный
 
+    def test_game_env_file(self):
+        # [v5.7] НОМЕР.env — окружение игры (FF14: без NVAPI), даже без выбора программы; мусорные строки — мимо
+        self.echo.write_text('#!/bin/sh\necho "nvapi=$PROTON_DISABLE_NVAPI bad=$lower"; for a in "$@"; do echo "$a"; done\n')
+        (self.launch / f"{APP}.env").write_text("PROTON_DISABLE_NVAPI=1\nlower=x\n")
+        out = self.run_wrap()
+        self.assertEqual(out[0], "nvapi=1 bad=")
+        self.assertIn("/games/FF/boot/ffxivboot.exe", out)                               # игра — как обычно
+
     def test_new_prefix_cmd_allowed(self):
         # [v5.6] рецепт создаёт «диск C:»: cmd.exe внутри префикса этой игры ещё нет — Proton создаст его до запуска
         cmd = f"/h/.steam/steamapps/compatdata/{APP}/pfx/drive_c/windows/system32/cmd.exe"
@@ -258,6 +266,12 @@ class TestSteamLaunchOptions(unittest.TestCase):
         self.assertEqual(self.opts(), 3)
         lo, _ = self.launch_options()
         self.assertEqual(lo, {"10": "PROTON_LOG=1 %command%", "20": "%command% -dx11", "30": None})   # без следа
+
+    def test_env_file_also_needs_wrapper(self):
+        # [v5.7] FF14: NVAPI выключен у самой игры (НОМЕР.env) — прокладка нужна и без выбора программы
+        (self.launch / "20.env").write_text("PROTON_DISABLE_NVAPI=1\n")
+        self.assertEqual(self.opts(), 3)
+        self.assertEqual(self.launch_options()[0]["20"], f"{self.wrap} %command% -dx11")
 
     def test_once_also_needs_wrapper(self):
         (self.launch / "20.once").write_text("x\n\nprog:x\n")

@@ -177,6 +177,8 @@ nvapi_check
         self.assertIn("PROTON_DISABLE_NVAPI=1", go)
         self.assertIn('[ -e "$S/nvapi.off" ]', go)
         boot = fn("launch_boot")
+        self.assertIn("for a in $NVAPI_OFF_APPS", boot)                 # [v5.7] и у самой игры (.env)
+        self.assertIn("PROTON_DISABLE_NVAPI=1 >", boot)
         for s in ("nvapi_check", "pfx-tweaks", 'ln -s "$DH/$SR/steamapps/common" "$DH/SteamGames"'):
             self.assertIn(s, boot)
 
