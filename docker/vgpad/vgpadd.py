@@ -8,6 +8,12 @@
 # Игра под Proton ищет геймпады только при запуске, а VastGame запускает её сам — часто до подключения Moonlight;
 # тогда игра геймпада не видела (до перезапуска игры). Теперь геймпад Sunshine подключается к этому же номеру 0,
 # а при отключении Moonlight геймпад у игры остаётся — только все кнопки и стики «отпускаются».
+#
+# Moonlight и Steam Link (2026-10-08). Steam Link геймпад создаёт сам Steam (через vgpad); игры берут первый геймпад —
+# поэтому место 0 у того, кто сейчас играет: новый геймпад присоединяется к нему, если подключённые к нему молчат
+# дольше IDLE секунд (переключился с Moonlight на Steam Link — и обратно — без перезапусков); иначе — второй игрок,
+# свой номер. Нажатия геймпада Steam (28de) самому Steam не отдаём: он читает все геймпады машины и принял бы свой
+# же геймпад за новый (vgpad помечает подключения Steam при открытии).
 import os
 import selectors
 import signal
@@ -20,13 +26,15 @@ SOCK = os.environ.get("VGPAD_SOCK", "/tmp/.vgpad/sock")
 DEV = os.environ.get("VGPAD_DEV", "/dev/input")      # папка устройств (тесты — временная)
 BASE, MAX = 200, 8
 PHANTOM = 0                                          # номер постоянного геймпада
+IDLE = float(os.environ.get("VGPAD_IDLE", "10"))     # с: столько молчит геймпад на месте 0 — новый занимает его
+STEAM_VENDOR = 0x28de
 T_CREATE, T_ASSIGNED, T_EVENTS, T_OPEN, T_DESC, T_ERROR = 1, 2, 3, 4, 5, 6
 HDR = struct.Struct("<IB")
 EV64 = struct.Struct("<qqHHi")      # как пишет Sunshine (64 бита)
 EV32 = struct.Struct("<iiHHi")
 
 sel = selectors.DefaultSelector()
-pads = {}   # номер → {"desc", "producer", "consumers", "name"}
+pads = {}   # номер → {"desc", "producer", "consumers", "name"}; у места 0 — ещё "producers": все присоединённые
 
 
 # Описание геймпада — struct vg_desc из vgpad.c (одинаково в 32 и 64 битах): magic, version, input_id, name[80],
@@ -76,6 +84,9 @@ def node(idx):
 class Conn:
     def __init__(self, sock):
         self.sock, self.buf, self.role, self.pad, self.evsize = sock, b"", None, None, 24
+        self.last = 0.0        # производитель: когда прислал события
+        self.steampad = False  # производитель: виртуальный геймпад Steam
+        self.steam = False     # читатель: это сам Steam
 
 
 def frame(t, data=b""):
@@ -98,10 +109,10 @@ def drop(c):
         pass
     c.sock.close()
     p = pads.get(c.pad)
-    if c.role == "producer" and p and p["producer"] is c and p.get("phantom"):
-        p["producer"] = None                    # постоянный: у игры остаётся, кнопки — отпустить
+    if c.role == "producer" and p and p.get("phantom") and c in p["producers"]:
+        p["producers"].discard(c)               # постоянный: у игры остаётся, кнопки — отпустить
         forward(p, neutral_events())
-        log("геймпад", c.pad, "отключён от Sunshine — у игр остаётся")
+        log("геймпад", c.pad, "отключён:", "Steam" if c.steampad else "Sunshine", "— у игр остаётся")
     elif c.role == "producer" and p and p["producer"] is c:
         del pads[c.pad]
         for cc in list(p["consumers"]):
@@ -115,14 +126,16 @@ def drop(c):
         p["consumers"].discard(c)
 
 
-def forward(p, data):
-    """События (в 64-битном виде) — всем играм, открывшим геймпад, каждой в её формате."""
+def forward(p, data, from_steam=False):
+    """События (в 64-битном виде) — всем играм, открывшим геймпад, каждой в её формате (от геймпада Steam — не Steam)."""
     if not p["consumers"]:
         return
     now = time.time()
     sec, usec = int(now), int((now % 1) * 1e6)
     evs = [EV64.unpack_from(data, i)[2:] for i in range(0, len(data) - len(data) % 24, 24)]
     for cc in list(p["consumers"]):
+        if from_steam and cc.steam:
+            continue
         fmt = EV64 if cc.evsize == 24 else EV32
         send(cc, b"".join(fmt.pack(sec, usec, *e) for e in evs))
 
@@ -136,12 +149,17 @@ def make_node(idx):
 
 def on_frame(c, t, data):
     ph = pads.get(PHANTOM)
-    if t == T_CREATE and c.role is None and ph and ph.get("phantom") and ph["producer"] is None:
-        # Геймпад Sunshine — в постоянный: игры, открывшие его раньше, начинают получать нажатия
+    if t == T_CREATE and c.role is None:
+        c.steampad = len(data) >= 12 and struct.unpack_from("<H", data, 10)[0] == STEAM_VENDOR
+    busy = ph and any(time.time() - x.last < IDLE for x in ph["producers"])
+    if t == T_CREATE and c.role is None and ph and ph.get("phantom") and not busy:
+        # Новый геймпад (Sunshine или Steam) — на место 0: игры, открывшие его раньше, получают его нажатия; прежний,
+        # если он ещё подключён и молчит, остаётся присоединённым — заговорит снова, и его нажатия тоже дойдут
         c.role, c.pad = "producer", PHANTOM
-        ph["producer"] = c
+        ph["producers"].add(c)
         name = data[16:96].split(b"\0")[0].decode(errors="replace")
-        log(f"геймпад {PHANTOM}: подключён Sunshine «{name}», читателей: {len(ph['consumers'])}")
+        log(f"геймпад {PHANTOM}: подключён {'Steam' if c.steampad else 'Sunshine'} «{name}», "
+            f"читателей: {len(ph['consumers'])}")
         send(c, frame(T_ASSIGNED, struct.pack("<I", PHANTOM)))
     elif t == T_CREATE and c.role is None:
         idx = next((i for i in range(MAX) if i not in pads), None)
@@ -157,10 +175,12 @@ def on_frame(c, t, data):
         send(c, frame(T_ASSIGNED, struct.pack("<I", idx)))
     elif t == T_EVENTS and c.role == "producer":
         p = pads.get(c.pad)
-        if p and p["producer"] is c:
-            forward(p, data)
+        c.last = time.time()
+        if p and (p["producer"] is c or c in p.get("producers", ())):
+            forward(p, data, c.steampad)
     elif t == T_OPEN and c.role is None:
         idx, evsize = struct.unpack("<II", data[:8])
+        c.steam = len(data) >= 12 and bool(struct.unpack_from("<I", data, 8)[0] & 1)   # читает сам Steam
         p = pads.get(idx)
         if not p or evsize not in (16, 24):
             send(c, frame(T_ERROR))
@@ -220,8 +240,8 @@ def main():
     srv.bind(SOCK)
     os.chmod(SOCK, 0o666)
     srv.listen(64)
-    pads[PHANTOM] = {"desc": x360_desc(), "producer": None, "consumers": set(), "name": "Microsoft X-Box 360 pad",
-                     "phantom": True}
+    pads[PHANTOM] = {"desc": x360_desc(), "producer": None, "producers": set(), "consumers": set(),
+                     "name": "Microsoft X-Box 360 pad", "phantom": True}
     make_node(PHANTOM)
     log(f"постоянный геймпад {PHANTOM} (Xbox 360) → {node(PHANTOM)}")
     srv.setblocking(False)

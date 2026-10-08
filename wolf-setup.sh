@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.5 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.6 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -123,6 +123,11 @@
 # prog--ПАПКА (как игры из Games, но в Steam не добавляется, вопросов о ней нет). Список — запись progs на /json.
 # [v5.5] Программа запускается от имени пользователя игры: в Docker root не читает окружение её процесса (нет
 # CAP_SYS_PTRACE) — v5.4 отвечал «не через Proton» при запущенной игре.
+# [v5.6] ЗАПУСК ИГРЫ ЧЕРЕЗ ПРОГРАММУ И УСТАНОВКА В ИГРУ. Загрузчики модов (XIVLauncher, SKSE…) запускаются вместо .exe
+# игры: в параметры запуска Steam ставится прокладка vg-launch (в домашней папке — видна и внутри Steam Linux Runtime),
+# она подменяет в команде Proton .exe игры на программу из ~/.local/share/vastgame/launch/НОМЕР (wolf prog launch;
+# VG_SYNC "launch") — только у игр с включённым тумблером «Моды» (sel.mods_on). Установщики («Установить в игру», wolf prog install) — так же, один раз (.once): ставятся в префикс
+# игры, а он едет в облако с сохранениями (pfx--); их .exe — в списке программ (id «pfx:путь в drive_c»).
 #
 # ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
 # уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
@@ -263,7 +268,10 @@ VI="${CONTAINER_ID:-}"                          # номер инстанса в
 umask 022
 
 # /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf, ключ Vast -> vastkey)
-declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD PD VI WM VGS VGP > /etc/wolf/env
+# [v5.6] SMIN/GMIN — периоды синхронизации для wolf supervise (Docker): без них в /etc/wolf/env цикл получал пустые
+# значения и запускал state и games каждые 20 с вместо 5 и 15 мин (с v4.0; заметили 2026-10-08 — сохранения FF14
+# выгружались по кругу)
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD PD VI WM VGS VGP SMIN GMIN > /etc/wolf/env
 chmod 600 /etc/wolf/env
 
 # Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
@@ -453,7 +461,7 @@ TXT
 }
 sz()    { tr '\0' '\n' < "$1" | awk -F'\t' '{s+=$3} END{printf "%.0f", s}'; }
 # Архив одной игры: его можно убрать из облака (wolf forget или вручную на Drive)
-gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*|prog--*) return 0 ;; esac; return 1; }
+gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*|prog--*|lgame--*) return 0 ;; esac; return 1; }
 # Перестать синхронизировать архив на этом инстансе: забыть версию, манифест и
 # отпечаток и поставить метку x/, чтобы таймеры и wolf-watch не выгрузили его снова
 drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1"; : > "$S/x/$1"; }
@@ -493,7 +501,7 @@ acf_unhide() {
 # Steam Linux Runtime, Steamworks Shared, настройки контроллера) синхронизируются всегда, в приложении их нет.
 sel_init() {
   local v=${VG_SYNC:-${VGS:-}}                    # [v4.8] на KVM — из /etc/wolf/env (службе systemd окружение аренды не видно)
-  rm -f "$S"/sel.* "$S/present" "$S"/progs.*
+  rm -f "$S"/sel.* "$S/present" "$S"/progs.* "$S/launch.sel"
   [ -n "$v" ] || return 0
   printf '%s' "$v" | base64 -d 2>/dev/null | S="$S" python3 -c '
 import json, os, sys
@@ -504,12 +512,30 @@ for key, f in (("games", "sel.games"), ("saves_off", "sel.saves_off")):
 mods = d.get("mods") if isinstance(d.get("mods"), dict) else {}
 for key in ("yes", "no"):                                        # [v5.0] прежние ответы «сохранять моды?» по номерам игр
     open(os.path.join(s, "sel.mods_" + key), "w").write("".join(str(n) + "\n" for n in mods.get(key) or [] if str(n).isdigit()))
+# [v5.6] тумблер «Моды» включён — от него зависит «запуск игры через программу» (sel.mods_yes — сохранять изменения;
+# сейчас то же самое, но сохранение может быть выключено отдельно)
+open(os.path.join(s, "sel.mods_on"), "w").write("".join(str(n) + "\n" for n in mods.get("yes") or [] if str(n).isdigit()))
+# [v5.6] «хранить игру в облаке»: номера игр, файлы которых (то, что качает их собственный лаунчер) — архивом lgame--
+open(os.path.join(s, "sel.gdata"), "w").write("".join(str(n) + "\n" for n in d.get("gdata") or [] if str(n).isdigit()))
 if d.get("steam") == "store":
     open(os.path.join(s, "sel.store"), "w").close()
+recipes = d.get("recipes") if isinstance(d.get("recipes"), dict) else {}  # [v5.6] рецепты: {номер: ["ff14-ru"]}
+by = {}
+for k, v in recipes.items():
+    for r in v if str(k).isdigit() and isinstance(v, list) else []:
+        if isinstance(r, str) and r in ("ff14-ru",):
+            by.setdefault(r, []).append(str(k))
+for r, ids in by.items():
+    open(os.path.join(s, "sel.recipe." + r), "w").write("".join(i + "\n" for i in ids))
 progs = d.get("progs") if isinstance(d.get("progs"), dict) else {}  # [v5.4] программы «вместе с игрой»: {номер: [id]}
-json.dump({str(k): [i for i in v if isinstance(i, str) and i[:5] in ("game:", "prog:") and "\0" not in i]
+json.dump({str(k): [i for i in v if isinstance(i, str) and i.split(":", 1)[0] in ("game", "prog", "pfx") and "\0" not in i]
            for k, v in progs.items() if str(k).isdigit() and isinstance(v, list)},
           open(os.path.join(s, "progs.auto"), "w"))
+launch = d.get("launch") if isinstance(d.get("launch"), dict) else {}   # [v5.6] «запускать игру через»: {номер: {id, args}}
+json.dump({str(k): {"id": v["id"], "args": str(v.get("args") or "")[:300]} for k, v in launch.items()
+           if str(k).isdigit() and isinstance(v, dict) and isinstance(v.get("id"), str)
+           and v["id"].split(":", 1)[0] in ("game", "prog", "pfx") and "\0" not in v["id"]},
+          open(os.path.join(s, "launch.sel"), "w"))
 open(os.path.join(s, "sel.on"), "w").close()' || log "VG_SYNC не разобран — синхронизация как раньше"
 }
 selon()  { [ -e "$S/sel.on" ]; }
@@ -539,7 +565,9 @@ askable() { if store; then ondisk | grep -v '^sgame--' || true; else ondisk; fi;
 # [v4.7] Игра Steam установлена целиком — только такую выгружаем. Недокачанную (или обновляющуюся) Steam сам докачает
 # из магазина, а в облако она уехала бы частями — раз в 15 минут, пока качается, и при выключении. Паспорт игры
 # (appmanifest) пишет состояние в StateFlags: 4 — установлена; рядом допустимы 2 (ждёт обновления, файлы целые),
-# 8, 16 и 64 (запущена). Любой другой бит — качается, обновляется, проверяется, файлы потеряны. Паспорта нет или
+# 8, 16, 64 (запущена) и [v5.6] 512 (обновление отложено планировщиком Steam — «не играли N минут»; файлы целые,
+# Steam докачает при запуске: так у пробной FF14 сразу после установки, 2026-10-09). Любой другой бит — качается,
+# обновляется, проверяется, файлы потеряны. Паспорта нет или
 # в нём нет StateFlags — не знаем, выгружаем как раньше. Не Steam (game--) — всегда да.
 steam_ready() {
   local d f s
@@ -548,7 +576,7 @@ steam_ready() {
     [ -e "$f" ] && [ "$(idirs "$f" | head -1)" = "$d" ] || continue
     s=$(sed -n 's/^[[:space:]]*"StateFlags"[[:space:]]*"\([0-9]*\)".*/\1/p' "$f" | head -1)
     [ -n "$s" ] || return 0
-    (( (s & 4) && !(s & ~(2 | 4 | 8 | 16 | 64)) ))
+    flags_ready "$s"
     return
   done
   return 0
@@ -656,11 +684,18 @@ play_prepare() {
   [ -n "$a" ] && [ -n "$acc" ] && [ ! -e "$S/play.done" ] && [ -n "$SR" ] || return 0
   pgrep -x steam >/dev/null && { steam_off || log "play: Steam не закрылся — аккаунт может быть не тот"; }
   log "play: $(u python3 /usr/local/bin/wolf-steam.py account "$DH/$SR" "$acc" 2>&1)"
-  log "play: $(u python3 /usr/local/bin/wolf-steam.py manifest "$DH/$SR" "$a" "$acc" "$(rd "$S/play.name")" 2>&1)"
+  # [v5.6] настоящая папка игры и её системы — из кэша Steam (appinfo.vdf); нет Linux-версии — включить Proton сразу
+  local info dir os
+  info=$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --appinfo "$a" 2>/dev/null)
+  dir=${info%%$'\t'*}; os=${info#*$'\t'}
+  log "play: $(u python3 /usr/local/bin/wolf-steam.py manifest "$DH/$SR" "$a" "$acc" "$(rd "$S/play.name")" "$dir" 2>&1)"
+  if [ -n "$info" ] && [ -n "$os" ] && [[ $os != *linux* ]]; then
+    log "play: $(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --proton-for "$a" 2>&1)"
+  fi
   st play wait "steam"
 }
 # StateFlags: игра установлена целиком (как steam_ready)
-flags_ready() { (( ($1 & 4) && !($1 & ~(2 | 4 | 8 | 16 | 64)) )); }
+flags_ready() { (( ($1 & 4) && !($1 & ~(2 | 4 | 8 | 16 | 64 | 512)) )); }
 # После запуска Steam (в фоне): ждать вход, следить за скачиванием, запустить игру
 play_watch() {
   local a acc fl d tot dir on now t0 last=-1 lt sp=0 seen="" mode="" moved
@@ -674,8 +709,10 @@ play_watch() {
     if flags_ready "${fl:-0}" && [ -n "$dir" ] && [ -d "$DH/$SR/steamapps/common/$dir" ]; then
       if store; then                               # [v5.0] чистая игра — запомнить; «с модами» — моды поверх
         [ -e "$S/van/$a.tsv" ] || mods_snap "$a" "$dir" "$(acf_get "$DH/$SR/steamapps/appmanifest_$a.acf" buildid)"
+        flock "$L/snap-$a.lock" true                  # [v5.6] снимок и архив игры мог делать проход наблюдения
         mods_apply "$a" "$dir"
       fi
+      recipe_play "$a" "$dir"                         # [v5.6] рецепт игры (перевод FF14…) — до запуска
       play_launch "$a"; return 0
     fi
     if [ "${d:-0}" -gt "$last" ] && [ "$last" -ge 0 ]; then
@@ -721,8 +758,39 @@ acf_get() { sed -n "s/^[[:space:]]*\"$2\"[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "
 # mods_snap НОМЕР ПАПКА СБОРКА
 mods_snap() {
   mkdir -p "$S/van"
+  exec 7> "$L/snap-$1.lock"; flock 7               # [v5.6] запуск из библиотеки ждёт, пока архив игры восстановится
+  [ -e "$S/van/$1.tsv" ] && { exec 7>&-; return 0; }
   python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/$2" "$S/van/$1.tsv" && echo "$3" > "$S/van/$1.build" \
-    && log "моды $1: чистая игра запомнена"
+    && log "моды $1: чистая игра запомнена" && lgame_restore "$1" "$2"
+  exec 7>&-
+}
+# [v5.6] Игра, которую докачивает её лаунчер, «в облаке» (sel.gdata): её файлы — архив lgame--НОМЕР--Название.
+# Восстановление — сразу после снимка чистой игры из Steam и до модов; восстановленное — слой игры (claim)
+lgame_restore() {
+  local a=$1 d=$2 n LS
+  inlist "$a" sel.gdata || return 0
+  LS=$T/ls.lgame-$a
+  rl > "$LS" 2>/dev/null || { log "игра $a: не удалось получить список облака — лаунчер скачает её сам"; return 0; }
+  n=$(sed -n -E "s/^(lgame--$a--[^\t]*)\.tar\.zst(\.parts)?\t.*/\1/p" "$LS" | head -1)
+  [ -n "$n" ] || { log "игра $a: её файлов в облаке ещё нет — лаунчер скачает сам, при выключении уедут в облако"; return 0; }
+  st play up "game"
+  if LS=$LS unpack "$n"; then
+    log "игра $a: файлы из облака на месте, лаунчеру осталось докачать новое ($(python3 /usr/local/bin/wolf-mods.py claim \
+      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv") файлов)"
+    spec "$n" && man "$n" > "$S/m/$n" && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+  else
+    log "игра $a: из облака не восстановилась — лаунчер скачает её сам"
+  fi
+}
+# Выключение: файлы игр «в облаке» — их архивами (только изменения, большие — частями)
+lgame_push() {
+  local a d n
+  for a in $(cat "$S/sel.gdata" 2>/dev/null); do
+    [[ $a =~ ^[0-9]+$ ]] && [ -s "$S/van/$a.game.tsv" ] || continue
+    d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
+    n=$(python3 /usr/local/bin/wolf-mods.py arch "$a" "$DH/$SR/steamapps/appmanifest_$a.acf" lgame) || continue
+    pack "$n"
+  done
 }
 # Раз в 30 с (wolf watch): игры, которые Steam только что поставил, — запомнить чистыми; обновил — пометить
 mods_scan() {
@@ -739,6 +807,20 @@ mods_scan() {
     elif [ "$(rd "$S/van/$a.build")" != "$b" ] && [ ! -e "$S/van/$a.upd" ]; then
       : > "$S/van/$a.upd"; log "моды $a: Steam обновил игру — моды в этот раз не выгружаю (обновление могло затереть их часть)"
     fi
+  done
+}
+# [v5.6] Раз в 30 с: что меняется в папках игр Steam, пока они запущены (их лаунчер качает), — wolf-mods.py track
+lgame_track() {
+  local f a d on keys
+  store && [ -n "$SR" ] || return 0
+  keys=$(running_keys)
+  for f in "$S/van"/*.tsv; do
+    a=${f##*/}; a=${a%.tsv}
+    [[ $a =~ ^[0-9]+$ ]] || continue
+    d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
+    on=0; grep -qx "app:$a" <<< "$keys" && on=1
+    [ $on = 1 ] || [ -e "$S/van/$a.seen.tsv" ] || continue
+    python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/$d" "$f" "$on" "$PD" >> /var/log/wolf.log 2>&1
   done
 }
 # После выхода из игры: тумблер «Сохранять моды» включён и моды изменились — выгрузить (в фоне)
@@ -815,6 +897,7 @@ spec() {
     game--*)      B=$GD Z=$ZG DB=1 A=${1#game--} ;;
     prog--*)      B=$PD Z=$ZG DB=1 A=${1#prog--} ;;         # [v5.4] программы для игр
     sgame--*)     Z=$ZG DB=1 A=${1#sgame--} ;;
+    lgame--*)     Z=$ZG DB=1 A=${1#lgame--}; A=${A%%--*} ;;   # [v5.6] файлы игры от её лаунчера (номер игры)
     *)            return 1 ;;
   esac
 }
@@ -841,11 +924,14 @@ ls_() {
       # синхронизация уже не могла вернуть игры (Steam их «не знал»)
       F "$s" -maxdepth 1 \( -name '*.acf' -o -name libraryfolders.vdf \)
       F "$s/$HID" -maxdepth 1 -name '*.acf'; : ;;
-    compatdata) F "$s/compatdata" ;;
-    pfx--*)     F "$s/compatdata/$A" ;;
+    # [v5.6] без временных папок Windows в префиксе: лаунчер Square Enix качает туда патчи FF14 и всё время их
+    # меняет — сохранения уходили в облако по кругу, по 2 ГБ каждые полминуты (живой случай 2026-10-08)
+    compatdata) F "$s/compatdata" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
+    pfx--*)     F "$s/compatdata/$A" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
     game--*)    F "$A" ;;
     prog--*)    F "$A" ;;
     sgame--*)   F "$s/common/$A" ;;
+    lgame--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" ;;
   esac
 }
 man() { [ -n "$SR" ] || sr; (cd "$B" && ls_ "$1") | LC_ALL=C sort -z; }
@@ -933,7 +1019,7 @@ pack() {
     echo "$fp" > "$S/h/$n"; rm -f "$S/p/$n"
     { rl > "$w/r" && rver "$n" "$w/r"; } > "$S/v/$n" || echo "?" > "$S/v/$n"
     st "$n" ok "выгружено $o за $((SECONDS - t)) с"
-    case $n in pfx--*|game--*|sgame--*) : > "$S/nt/$n" ;; esac   # сохранения — к уведомлению
+    case $n in pfx--*|game--*|sgame--*|lgame--*) : > "$S/nt/$n" ;; esac   # сохранения — к уведомлению
     rm -rf "$w"; return 0
   fi
   st "$n" err "ошибка выгрузки (tar/счётчик/zstd/rclone: ${s[*]})"
@@ -1021,9 +1107,9 @@ watch_games() {
     [ -e "$L/boot-done" ] || continue
     [ -n "$SR" ] || sr
     now=$(date +%s); cur=()
-    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; fi   # [v4.6] вопросы; [v5.0] чистые игры
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; lgame_track; fi   # [v4.6] вопросы; [v5.0] чистые игры
     # [v5.4] программы «вместе с игрой» и список программ для приложения
-    python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" >> /var/log/wolf.log 2>&1
+    python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
     while IFS= read -r k; do
       case $k in
         nm:*)  k=${k#nm:}
@@ -1372,8 +1458,13 @@ steam_go() {
   local a=()
   [ -n "${SL:-}" ] && a+=(-language "$SL")
   [ -n "$SR" ] && [ -f "$DH/$SR/steam.cfg" ] && a+=(-noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles)
-  u setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
-  log "Steam запущен${SL:+ (язык: $SL)}"
+  # [v5.6] NVAPI выключен на машинах, где он вредит (nvapi_check при загрузке): игры наследуют окружение Steam
+  if [ -e "$S/nvapi.off" ]; then
+    u env PROTON_DISABLE_NVAPI=1 setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
+  else
+    u setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
+  fi
+  log "Steam запущен${SL:+ (язык: $SL)}$([ -e "$S/nvapi.off" ] && echo ", NVAPI выключен")"
 }
 
 # [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за минуту
@@ -1477,6 +1568,7 @@ boot() {
     if [ "$SG" = 1 ] || selon; then acf_unhide; else acf_hide; fi     # [v4.2] до запуска Steam; [v4.6] выбор — ниже
     # [v4.3] Steam Input по умолчанию выключен (до запуска Steam; папка игр ещё не восстановлена — только это)
     log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --steam-input 2>&1)"
+    launch_boot                                    # [v5.6] «запускать игру через программу» — до запуска Steam
     if [ -e "$DH/$SR/steam.sh" ]; then
       if [ "$SF" = 1 ]; then
         printf 'BootStrapperInhibitAll=Enable\nBootStrapperForceSelfUpdate=Disable\n' > "$DH/$SR/steam.cfg"
@@ -1608,6 +1700,7 @@ bk() {
     shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
     "$0" state; "$0" games
     "$0" mods                                    # [v5.0] моды игр Steam
+    "$0" lgame                                   # [v5.6] файлы игр, которые качает их лаунчер («в облаке»)
     return 0
   fi
   rl > "$LS" || { log "$m: не удалось получить список облака"; return 1; }
@@ -1637,6 +1730,8 @@ bk() {
       shift; answer "$@"; return ;;
     mods)
       shift; mods_push "$@"; return 0 ;;
+    lgame)
+      shift; lgame_push; return 0 ;;
   esac
   [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
   [ "$m" = state ] && gindex
@@ -1761,13 +1856,172 @@ finish_run() {
 # как там, только после boot-done. Низкий приоритет — чтобы не мешать игре.
 low() { if ionice -c3 true 2>/dev/null; then ionice -c3 nice -n 19 "$@"; else nice -n 19 "$@"; fi; }
 # [v5.4] wolf prog run НОМЕР ID — запустить программу рядом с игрой; wolf prog auto НОМЕР ID on|off — «вместе с игрой»
+# [v5.6] wolf prog launch НОМЕР ID|- ПАРАМЕТРЫ — запускать игру через программу («-» — как обычно);
+#        wolf prog install НОМЕР ID — один раз запустить установщик в префиксе игры (игра закрыта)
 prog_cmd() {
+  local r
   [ -n "$SR" ] || sr
   case ${1:-}:$# in
     run:3)  python3 /usr/local/bin/wolf-steam.py progs-run "$DH/$SR" "$PD" "$DU" "$2" "$3" ;;
     auto:4) python3 /usr/local/bin/wolf-steam.py progs-auto "$S" "$2" "$3" "$4" && echo "prog: auto $4" ;;
-    *)      echo "использование: wolf prog run НОМЕР ID | wolf prog auto НОМЕР ID on|off"; return 2 ;;
+    launch:4)
+      r=$(python3 /usr/local/bin/wolf-steam.py launch-set "$DH/$SR" "$PD" "$DH" "$DU" "$2" "$3" "$4" "$S")
+      [ "$r" = "prog: ok" ] || { echo "$r"; return 3; }
+      [ "$3" = - ] && { echo "prog: ok"; return 0; }   # как обычно — прокладка без выбора ничего не меняет
+      launch_opts "$2" ;;
+    install:3)
+      r=$(python3 /usr/local/bin/wolf-steam.py install-set "$DH/$SR" "$PD" "$DH" "$DU" "$2" "$3" "$S")
+      [ "$r" = "prog: ok" ] || { echo "$r"; return 3; }
+      launch_opts "$2" || return 3
+      log "установка в игру $2: $3"
+      ( runtimes "$2"; u setsid -f /usr/games/steam -applaunch "$2" &>/dev/null ) &>/dev/null &
+      echo "prog: installing" ;;
+    *)      echo "использование: wolf prog run|auto|launch|install НОМЕР ID …"; return 2 ;;
   esac
+}
+# [v5.6] Библиотеки, которые нужны лаунчерам и модам (Dalamud, SKSE, ReShade…), — один раз в «диск C:» игры, до
+# первой установки в него: Visual C++ 2015–2022 (64 и 32 бита, с сайта Microsoft, тихо) и копии vcruntime140 под
+# именами *_clr0400 (их ищет XIVLauncher: на Windows их ставит .NET Framework, в Proton его нет — живой случай
+# 2026-10-08). Запуск — через Steam той же прокладкой (cmd.exe игры со своим списком команд); отметка
+# C:\.vastgame-runtimes едет в облако с «диском C:» — на других машинах не повторяется. Установщик человека ждёт.
+VCURL="https://aka.ms/vs/17/release"
+runtimes() {
+  local a=$1 c L="$DH/.local/share/vastgame/launch" i
+  c=$DH/$SR/steamapps/compatdata/$a/pfx/drive_c
+  [ -d "$c" ] && [ ! -e "$c/.vastgame-runtimes" ] && [ -e "$c/windows/system32/cmd.exe" ] || return 0
+  mkdir -p "$T/vcredist"
+  for i in x64 x86; do
+    [ -s "$T/vcredist/vc_redist.$i.exe" ] || curl -fsSL --max-time 300 -o "$T/vcredist/vc_redist.$i.exe" "$VCURL/vc_redist.$i.exe" \
+      || { log "библиотеки $a: не скачались — ставлю без них"; return 0; }
+  done
+  u mkdir -p "$c/vastgame" && u cp "$T/vcredist/vc_redist.x64.exe" "$T/vcredist/vc_redist.x86.exe" "$c/vastgame/"
+  u sh -c 'printf "%s\r\n" "$@" > "$0"' "$c/vastgame/runtimes.cmd" "@echo off" \
+    "start /wait C:\vastgame\vc_redist.x64.exe /install /quiet /norestart" \
+    "start /wait C:\vastgame\vc_redist.x86.exe /install /quiet /norestart" \
+    "if not exist C:\windows\system32\vcruntime140_clr0400.dll copy /y C:\windows\system32\vcruntime140.dll C:\windows\system32\vcruntime140_clr0400.dll" \
+    "if not exist C:\windows\system32\ucrtbase_clr0400.dll copy /y C:\windows\system32\vcruntime140.dll C:\windows\system32\ucrtbase_clr0400.dll" \
+    "echo ok> C:\.vastgame-runtimes"
+  [ -e "$L/$a.once" ] && u mv -f "$L/$a.once" "$L/$a.next"        # установщик человека — после библиотек
+  u sh -c 'printf "%s\n%s\n%s\n" "$1" "/c C:\vastgame\runtimes.cmd" "runtimes" > "$0"' "$L/$a.once" "$c/windows/system32/cmd.exe"
+  log "библиотеки $a: ставлю Visual C++ в «диск C:» игры"
+  launch_opts "$a" >/dev/null
+  u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+  for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done     # запустился
+  for i in $(seq 300); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done   # закончил
+  u rm -rf "$c/vastgame"
+  [ -e "$L/$a.next" ] && u mv -f "$L/$a.next" "$L/$a.once"
+  log "библиотеки $a: $([ -e "$c/.vastgame-runtimes" ] && echo поставлены || echo "не встали — продолжаю без них")"
+}
+# [v5.6] Один раз запустить через Steam (прокладкой, в «диске C:» игры) программу: once_run НОМЕР ПУТЬ ПАРАМЕТРЫ МЕТКА
+# [СЕКУНД]. Ждёт, пока игра Steam запустится и закончится (не дольше СЕКУНД; 0 — не ждать конца)
+once_run() {
+  local a=$1 L="$DH/.local/share/vastgame/launch" i
+  wrap_home
+  u sh -c 'printf "%s\n%s\n%s\n" "$1" "$2" "$3" > "$0"' "$L/$a.once" "$2" "$3" "$4"
+  launch_opts "$a" >/dev/null
+  u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+  for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done
+  [ "${5:-600}" = 0 ] && return 0
+  for i in $(seq $(( ${5:-600} / 2 ))); do python3 /usr/local/bin/wolf-steam.py running "$a" || return 0; sleep 2; done
+  return 1
+}
+# «Диск C:» игры ещё не создан (первая аренда, сохранения не в облаке) — Proton создаёт его при первом запуске:
+# запустить через прокладку cmd.exe /c exit (vg-launch пропускает путь, которого ещё нет, только внутри префикса)
+pfx_make() {
+  local c=$DH/$SR/steamapps/compatdata/$1/pfx/drive_c
+  [ -e "$c/windows/system32/cmd.exe" ] && return 0
+  log "игра $1: создаю «диск C:»"
+  once_run "$1" "$c/windows/system32/cmd.exe" "/c exit" "pfx" 300
+  [ -e "$c/windows/system32/cmd.exe" ]
+}
+# Рецепты игры (VG_SYNC "recipes", sel.recipe.ИМЯ): recipe_play НОМЕР ПАПКА — до запуска игры из библиотеки.
+# ff14-ru: Visual C++ → настройки XIVLauncher/Dalamud, Penumbra, перевод (wolf-recipes.py) → XIVLauncher, если его нет
+# (официальный установщик с GitHub, тихо; сам открывается после установки — закрываем) → запуск игры через него
+XIVL_SETUP="https://github.com/goatcorp/FFXIVQuickLauncher/releases/latest/download/XIVLauncher-win-Setup.exe"
+recipe_play() {
+  local a=$1 d=$2 c x f i L="$DH/.local/share/vastgame/launch"
+  inlist "$a" sel.recipe.ff14-ru || return 0
+  st play up "recipe"
+  c=$DH/$SR/steamapps/compatdata/$a/pfx/drive_c
+  x=$c/users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe
+  pfx_make "$a" || { log "перевод FF14: «диск C:» не создался — запускаю игру как обычно"; return 0; }
+  runtimes "$a"
+  u mkdir -p "$DH/.cache/vastgame"
+  log "перевод FF14: $(u python3 /usr/local/bin/wolf-recipes.py ff14-ru "$c" "$a" "$d" "$DH/.cache/vastgame" 2>&1)"
+  if [ ! -e "$x" ]; then
+    f=$DH/.cache/vastgame/XIVLauncher-win-Setup.exe
+    if u curl -fsSL --max-time 900 -o "$f.part" "$XIVL_SETUP" && u mv -f "$f.part" "$f"; then
+      log "перевод FF14: ставлю XIVLauncher"
+      once_run "$a" "$f" "--silent" "xivlauncher" 0
+      for i in $(seq 300); do [ -e "$x" ] && break; python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done
+      sleep 10                                       # установщик дописывает ярлыки и открывает XIVLauncher — закрыть
+      pkill -f 'current.XIVLauncher\.exe' 2>/dev/null; pkill -f 'XIVLauncher-win-Setup\.exe' 2>/dev/null
+      for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done
+      u rm -f "$f"
+    else
+      log "перевод FF14: XIVLauncher не скачался"
+    fi
+  fi
+  if [ -e "$x" ]; then
+    u python3 /usr/local/bin/wolf-recipes.py ff14-ru-mark "$c"
+    u sh -c 'printf "%s\n\n%s\n" "$1" "$2" > "$0"' "$L/$a" "$x" "pfx:users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe"
+    launch_opts "$a" >/dev/null
+    log "перевод FF14: игра запускается через XIVLauncher"
+  else
+    log "перевод FF14: XIVLauncher не встал — запускаю игру как обычно"
+  fi
+}
+# [v5.6] Прокладка vg-launch — в домашнюю папку (её видно и внутри контейнера Steam Linux Runtime)
+wrap_home() {
+  u mkdir -p "$DH/.local/share/vastgame/launch"
+  u cp /usr/local/bin/vg-launch "$DH/.local/share/vastgame/vg-launch"
+  u chmod 755 "$DH/.local/share/vastgame/vg-launch"
+}
+# Загрузка (Steam ещё не запущен): выбор из VG_SYNC → launch/НОМЕР, прокладка в параметрах запуска нужных игр;
+# у остальных наша прокладка (осталась в steam-state с прошлой аренды) убирается
+launch_boot() {
+  [ -n "$SR" ] || return 0
+  wrap_home
+  # [v5.6] окна выбора файлов Windows-программ (Wine) не показывают папки с точкой — .steam: обычная ссылка на игры
+  # Steam и «показывать скрытые» во всех «дисках C:» игр (живой случай 2026-10-08: установщик XIVLauncher)
+  [ -L "$DH/SteamGames" ] || [ -e "$DH/SteamGames" ] || u ln -s "$DH/$SR/steamapps/common" "$DH/SteamGames"
+  log "$(u python3 /usr/local/bin/wolf-steam.py pfx-tweaks "$DH/$SR" 2>&1)"
+  nvapi_check
+  [ -s "$S/launch.sel" ] && log "$(python3 /usr/local/bin/wolf-steam.py launch-boot "$DH/$SR" "$PD" "$DH" "$S/launch.sel" "$DU" 2>&1)"
+  log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+}
+# [v5.6] NVAPI (прослойка NVIDIA для DLSS/Reflex в Proton) выключить: (1) запускаем FINAL FANTASY XIV — она с NVAPI
+# зависает при запуске (чёрный экран, последнее в журнале Dalamud — загрузка nvapi64.dll; живые случаи 2026-10-08
+# на 2× GTX 1650 и 2026-10-09 на RTX 2070, с выключенным — работает); (2) на машине нет RTX — DLSS и так нет.
+# Выключается для всего Steam (игры наследуют его окружение) — заодно и у других игр этой аренды
+NVAPI_OFF_APPS="312060 39210"
+nvapi_check() {
+  local l a
+  a=$(rd "$S/play.app")
+  l=$(nvidia-smi -L 2>/dev/null) || l=""
+  if [ -n "$a" ] && [[ " $NVAPI_OFF_APPS " == *" $a "* ]]; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: игра $a с ним не запускается"
+  elif [ -n "$l" ] && ! grep -q 'RTX' <<< "$l"; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: нет RTX ($(sed -n 's/^GPU 0: \(.*\) (UUID.*/\1/p' <<< "$l"))"
+  else
+    rm -f "$S/nvapi.off"
+  fi
+}
+# Во время сессии: прокладка в параметрах запуска игры НОМЕР (Steam их перепишет при выходе — меняем при закрытом
+# Steam: закрыть, записать, открыть). Игра запущена — Steam не закрываем: «busy», выбор сработает со следующей машины
+launch_opts() {
+  wrap_home
+  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" --check >/dev/null 2>&1
+  [ $? -eq 3 ] || { echo "prog: ok"; return 0; }
+  if pgrep -x steam >/dev/null; then
+    if python3 /usr/local/bin/wolf-steam.py running; then echo "prog: busy"; return 1; fi
+    steam_off || { echo "prog: busy"; return 1; }
+    log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+    steam_go
+  else
+    log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+  fi
+  echo "prog: ok"
 }
 supervise() {
   local ns ng now
@@ -1790,7 +2044,7 @@ case ${1:-} in
   sunshine-creds)                            shift; sunshine_creds "$@" ;;
   prog)                                      shift; prog_cmd "$@" ;;
   finish-run)                                finish_run ;;
-  state|games|shutdown|restore|push|forget|answer|mods)  bk "$@" ;;
+  state|games|shutdown|restore|push|forget|answer|mods|lgame)  bk "$@" ;;
   watch)                                     watch_games ;;
   supervise)                                 supervise ;;
   firewall)                                  setup_sunshine_firewall ;;
@@ -1929,11 +2183,12 @@ def page():
 WOLF = '/usr/local/bin/wolf'
 # Имя архива игры: папки бывают с пробелами («sgame--The Blood of Dawnwalker»); без «/» и управляющих
 # символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
-ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog)--[^/\x00-\x1f]{1,200}$')
+ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame)--[^/\x00-\x1f]{1,200}$')
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
 MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
-PROG = re.compile(r'^(game|prog):[^\x00-\x1f]{1,400}$')   # [v5.4] программа игры (путь проверяет wolf-steam.py)
+PROG = re.compile(r'^(game|prog|pfx):[^\x00-\x1f]{1,400}$')   # [v5.4] программа игры (путь проверяет wolf-steam.py)
+ARGS = re.compile(r'^[^\x00-\x1f]{0,300}$')                     # [v5.6] параметры программы-загрузчика
 def command(c, a):
     """Закрытый список: (команда, в фоне?) или None — такой команды нет."""
     arg = a[0] if len(a) == 1 and isinstance(a[0], str) else ''
@@ -1950,7 +2205,13 @@ def command(c, a):
             'prog-run': ([WOLF, 'prog', 'run', *a], False) if len(a) == 2 and str(a[0]).isdigit() and len(str(a[0])) <= 10
                         and isinstance(a[1], str) and PROG.match(a[1]) else None,
             'prog-auto': ([WOLF, 'prog', 'auto', *a], False) if len(a) == 3 and str(a[0]).isdigit() and len(str(a[0])) <= 10
-                         and isinstance(a[1], str) and PROG.match(a[1]) and a[2] in ('on', 'off') else None}.get(c)
+                         and isinstance(a[1], str) and PROG.match(a[1]) and a[2] in ('on', 'off') else None,
+            # [v5.6] [номер, id|-, параметры] — запускать игру через программу; [номер, id] — установить в игру
+            'prog-launch': ([WOLF, 'prog', 'launch', *a], False) if len(a) == 3 and str(a[0]).isdigit()
+                           and len(str(a[0])) <= 10 and isinstance(a[1], str) and (a[1] == '-' or PROG.match(a[1]))
+                           and isinstance(a[2], str) and ARGS.match(a[2]) else None,
+            'prog-install': ([WOLF, 'prog', 'install', *a], False) if len(a) == 2 and str(a[0]).isdigit()
+                            and len(str(a[0])) <= 10 and isinstance(a[1], str) and PROG.match(a[1]) else None}.get(c)
 def tsjson(sub, *args):
     # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
     return json.loads(subprocess.run(['tailscale', sub, '--json', *args], capture_output=True, text=True,
@@ -2231,6 +2492,63 @@ def sync_proton(config_vdf, ids):
     return change
 
 
+# [v5.6] Сведения Steam об игре — appcache/appinfo.vdf (кэш Steam едет в облаке со steam-cache): настоящая папка
+# установки (у пробной FF14 — папка полной игры «FINAL FANTASY XIV Online»: паспорт с папкой «по названию» вёл к
+# «Не найден исполняемый файл», живой случай 2026-10-08) и для каких систем игра (нет Linux — включить ей Proton:
+# иначе Steam качает только общие файлы, без Windows-версии). Форматы 28 и 29 (с 29 ключи — номера в таблице строк).
+def _appinfo_kv(data, i, keys):
+    out = {}
+    while True:
+        t = data[i]; i += 1
+        if t == 0x08:
+            return out, i
+        if keys is None:
+            j = data.index(b"\0", i); key = data[i:j].decode("utf-8", "replace"); i = j + 1
+        else:
+            key = keys[struct.unpack_from("<I", data, i)[0]]; i += 4
+        if t == 0x00:
+            out[key], i = _appinfo_kv(data, i, keys)
+        elif t == 0x01:
+            j = data.index(b"\0", i); out[key] = data[i:j].decode("utf-8", "replace"); i = j + 1
+        elif t in (0x02, 0x03, 0x04, 0x06):
+            out[key] = struct.unpack_from("<i", data, i)[0]; i += 4
+        elif t in (0x07, 0x0A):
+            out[key] = struct.unpack_from("<q", data, i)[0]; i += 8
+        else:
+            raise ValueError(f"тип {t} в appinfo.vdf")
+
+
+def appinfo(steam_root, appid):
+    """{installdir, oslist} игры из кэша Steam или None — Steam её ещё не знает (новый человек, пустой кэш)."""
+    try:
+        with open(os.path.join(steam_root, "appcache", "appinfo.vdf"), "rb") as f:
+            data = f.read()
+        magic = struct.unpack_from("<I", data, 0)[0]
+        if magic == 0x07564429:
+            off = struct.unpack_from("<q", data, 8)[0]
+            n = struct.unpack_from("<I", data, off)[0]
+            keys, j = [], off + 4
+            for _ in range(n):
+                k = data.index(b"\0", j); keys.append(data[j:k].decode("utf-8", "replace")); j = k + 1
+            i = 16
+        elif magic == 0x07564428:
+            keys, i = None, 8
+        else:
+            return None
+        while i + 8 <= len(data):
+            aid, size = struct.unpack_from("<II", data, i)
+            if aid == 0:
+                return None
+            if aid == int(appid):
+                kv = _appinfo_kv(data, i + 8 + 60, keys)[0].get("appinfo", {})
+                return {"installdir": str((kv.get("config") or {}).get("installdir") or ""),
+                        "oslist": str((kv.get("common") or {}).get("oslist") or "")}
+            i += 8 + size
+    except (OSError, ValueError, IndexError, struct.error, KeyError):
+        return None
+    return None
+
+
 def steam_input_off(steam_root):
     """Steam Input «выключен» всем играм, у которых нет своего выбора. True — что-то изменилось."""
     sa = os.path.join(steam_root, "steamapps")
@@ -2277,7 +2595,91 @@ def steam_input_off(steam_root):
     return changed
 
 
+# [v5.6] Прокладка vg-launch в параметрах запуска игр, которые запускаются через программу (есть HOME/.local/share/
+# vastgame/launch/НОМЕР или НОМЕР.once); у остальных наша прокладка убирается. Параметры — в localconfig.vdf:
+# UserLocalConfigStore/Software/Valve/Steam/apps/НОМЕР/LaunchOptions. Свои параметры человека сохраняются: прокладка
+# встаёт перед его %command% (нет %command% — его параметры идут игре после него) и убирается без следа.
+def _wrap_add(opt, wrap):
+    if wrap in opt:
+        return opt
+    if "%command%" in opt:
+        return opt.replace("%command%", f"{wrap} %command%", 1)
+    return f"{wrap} %command% {opt}".strip()
+
+
+def _wrap_del(opt, wrap):
+    out = opt.replace(f"{wrap} ", "").replace(wrap, "").strip()
+    return "" if out == "%command%" else out
+
+
+def launch_opts(steam_root, home):
+    wrap = os.path.join(home, ".local/share/vastgame/vg-launch")
+    d = os.path.join(home, ".local/share/vastgame/launch")
+    want = set()
+    for f in os.listdir(d) if os.path.isdir(d) else []:
+        m = re.fullmatch(r"(\d+)(\.once)?", f)
+        if m:
+            want.add(m.group(1))
+    changed = False
+    users = os.path.join(steam_root, "userdata")
+    for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
+        path = os.path.join(users, u, "config", "localconfig.vdf")
+        if not (u.isdigit() and u != "0" and os.path.isfile(path)):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            items = tkv_parse(f.read())
+        store = tkv_get(items, "UserLocalConfigStore")
+        if store is None:
+            continue
+        apps = tkv_get(tkv_get(tkv_get(tkv_get(store, "Software", True), "Valve", True), "Steam", True), "apps", True)
+        change = False
+        for aid, block in apps:
+            if not isinstance(block, list) or aid in want:
+                continue
+            for n, (k, v) in enumerate(block):
+                if k.lower() == "launchoptions" and isinstance(v, str) and wrap in v:
+                    new = _wrap_del(v, wrap)
+                    if new:
+                        block[n] = [k, new]
+                    else:
+                        del block[n]
+                    change = True
+                    break
+        for aid in sorted(want):
+            block = tkv_get(apps, aid, True)
+            n = next((i for i, (k, v) in enumerate(block) if k.lower() == "launchoptions" and isinstance(v, str)), None)
+            old = block[n][1] if n is not None else ""
+            new = _wrap_add(old, wrap)
+            if new != old:
+                if n is None:
+                    block.append(["LaunchOptions", new])
+                else:
+                    block[n] = [block[n][0], new]
+                change = True
+        if change and not CHECK:
+            tmp = path + ".vastgame-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(tkv_dump(items))
+            os.replace(tmp, path)
+        changed |= change
+    return changed, want
+
+
 def main(games_dir, steam_root):
+    if "--appinfo" in sys.argv:                            # [v5.6] --appinfo НОМЕР → «папка<TAB>системы» (или пусто)
+        info = appinfo(steam_root, sys.argv[sys.argv.index("--appinfo") + 1]) or {}
+        print(f"{info.get('installdir', '')}\t{info.get('oslist', '')}")
+        return 0
+    if "--proton-for" in sys.argv:                         # [v5.6] --proton-for НОМЕР — включить игре Proton
+        changed = sync_proton(os.path.join(steam_root, "config", "config.vdf"), [sys.argv[sys.argv.index("--proton-for") + 1]])
+        print(f"Proton для игры: {'включён' if changed else 'уже был'}")
+        return 3 if changed else 0
+    if "--launch-opts" in sys.argv:                        # [v5.6] --launch-opts HOME [--check]
+        changed, want = launch_opts(steam_root, sys.argv[sys.argv.index("--launch-opts") + 1])
+        if not CHECK:
+            print(f"запуск через программу: {', '.join(sorted(want)) or 'нет'}, параметры Steam изменены: "
+                  f"{'да' if changed else 'нет'}")
+        return 3 if changed else 0
     if "--index" in sys.argv:                              # [v4.6] для списка игр приложения (wolf-games.py)
         for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
             folder = os.path.join(games_dir, d)
@@ -2388,6 +2790,40 @@ if __name__ == "__main__":
     else:
         sys.exit("wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] | get ИНДЕКС.json АРХИВ appid|name")
 GAMES
+
+# ================================ vg-launch ====================================
+# [v5.6] Прокладка в параметрах запуска Steam («…/vg-launch %command%»): подменяет .exe игры — аргумент после
+# «…/proton ГЛАГОЛ» — на программу из launch/НОМЕР (строки: путь, параметры, id; .once — один раз: установщик).
+# Нет выбора или файла программы — игра запускается как обычно. Параметры делятся по пробелам, без оболочки.
+w /usr/local/bin/vg-launch <<'VGLAUNCH'
+#!/bin/bash
+app=${SteamAppId:-${STEAM_COMPAT_APP_ID:-}}
+for x in "$@"; do case $x in AppId=*) app=${x#AppId=} ;; esac; done
+dir="$HOME/.local/share/vastgame/launch"
+conf=""
+if [ -n "$app" ] && [ -f "$dir/$app.once" ]; then
+  mv -f "$dir/$app.once" "$dir/$app.ran" && conf="$dir/$app.ran"
+elif [ -n "$app" ] && [ -f "$dir/$app" ]; then
+  conf="$dir/$app"
+fi
+args=("$@")
+if [ -n "$conf" ]; then
+  { IFS= read -r target; IFS= read -r extra; } < "$conf"
+  at=-1
+  for i in "${!args[@]}"; do case ${args[$i]} in */proton) at=$((i + 2)) ;; esac; done
+  ok=0; [ -f "$target" ] && ok=1
+  case $target in */steamapps/compatdata/"$app"/pfx/drive_c/windows/system32/*) ok=1 ;; esac   # префикс ещё создаётся
+  if [ "$ok" = 1 ] && [ "$at" -ge 0 ] && [ "$at" -lt "${#args[@]}" ]; then
+    read -r -a more <<< "$extra"
+    args=("${args[@]:0:$at}" "$target" "${more[@]}")
+    cd "$(dirname "$target")" || true
+    echo "$(date '+%F %T') $app: ${args[*]: -$((1 + ${#more[@]}))}" >> /tmp/vastgame-launch.log
+  else
+    echo "$(date '+%F %T') $app: не подменяю (файл ${target:-?}, proton ${at})" >> /tmp/vastgame-launch.log
+  fi
+fi
+exec "${args[@]}"
+VGLAUNCH
 
 # =============================== wolf-steam.py =================================
 w /usr/local/bin/wolf-steam.py <<'STEAMPY'
@@ -2511,7 +2947,7 @@ def folder(name, appid):
     return d or f"app{appid}"
 
 
-def manifest(root, appid, sid, name):
+def manifest(root, appid, sid, name, installdir=""):
     sa = root / "steamapps"
     acf, hid = sa / f"appmanifest_{appid}.acf", sa / ".vastgame-hidden" / f"appmanifest_{appid}.acf"
     if not acf.exists() and hid.exists():
@@ -2528,7 +2964,8 @@ def manifest(root, appid, sid, name):
     sa.mkdir(parents=True, exist_ok=True)
     acf.write_text('"AppState"\n{\n'
                    f'\t"appid"\t\t"{appid}"\n\t"Universe"\t\t"1"\n\t"name"\t\t"{name.replace(chr(34), "")}"\n'
-                   f'\t"StateFlags"\t\t"1026"\n\t"installdir"\t\t"{folder(name, appid)}"\n\t"LastOwner"\t\t"{sid}"\n}}\n')
+                   f'\t"StateFlags"\t\t"1026"\n\t"installdir"\t\t"{installdir or folder(name, appid)}"\n'
+                   f'\t"LastOwner"\t\t"{sid}"\n}}\n')
     print(f"{appid}: паспорт записан — Steam скачает игру сам")
     return 0
 
@@ -2605,6 +3042,20 @@ def logon(root, sid, since=0):
 # Откуда программы: из папки игры — .exe, которых не было в чистой игре из Steam (снимок модов van/НОМЕР.tsv), id
 # «game:путь»; из папки Programs (PD) — все .exe в её подпапках, id «prog:папка/путь».
 PROG_SKIP = re.compile(r"unins|setup|install|redist|vc_?redist|dxsetup|dotnet|directx|crash|report|update", re.I)
+# [v5.6] Установщики (setup/install) из папки Programs не прячутся — их ставят «в игру»; лишнее — всегда мимо
+ALWAYS_SKIP = re.compile(r"unins|crash|report|update", re.I)
+# установщики, в том числе библиотеки Microsoft (Visual C++, .NET, DirectX): их просят моды и лаунчеры (Dalamud/XIVLauncher —
+# живой случай 2026-10-08), ставятся «в игру»
+SETUP = re.compile(r"setup|install|redist|dotnet|directx|ndp\d|windowsdesktop-runtime", re.I)
+# [v5.6] Из «диска C:» — только главные программы установленных приложений: в каждой папке приложения (Program Files/
+# ПРИЛОЖЕНИЕ, AppData/Local/Programs|Local|Roaming/ПРИЛОЖЕНИЕ, C:/ПАПКА) — .exe ближе всего к её верху, а не внутренности
+# (у XIVLauncher — current/XIVLauncher.exe, а не patcher/…, aria2c, Dalamud.Injector: живой случай 2026-10-08)
+APP_DIR = re.compile(r"^(program files[^/]*/[^/]+|users/[^/]+/appdata/local/programs/[^/]+|"
+                     r"users/[^/]+/appdata/(local|roaming)/[^/]+|(?!users/|program files|windows/|programdata/)[^/]+)/", re.I)
+# В «диске C:» префикса игры (drive_c) — только то, что поставили туда сами: служебное Wine и Proton — мимо, и
+# Microsoft (Edge и WebView2: их ставит себе лаунчер FF14 — 38 файлов, живой случай 2026-10-08)
+PFX_SKIP = re.compile(r"^(windows|programdata|program files[^/]*/(common files|internet explorer|windows[^/]*|steam|microsoft[^/]*)|"
+                      r"users/[^/]+/(temp|appdata/local/temp|appdata/local/microsoft))(/|$)", re.I)
 AUTO_DELAY = int(os.environ.get("VG_PROG_DELAY", "15"))   # с: после появления процесса игры — программы «вместе с игрой»
 PROC = "/proc"
 PROG_LOG = "/tmp/vastgame-programs.log"                 # вывод программ — разобрать, если не запустилась
@@ -2664,13 +3115,24 @@ def _game_dir(root, appid):
     return d if d and d.is_dir() else None
 
 
-def _exes(base, depth):
+def _exes(base, depth, setups=False, skip_dirs=None):
+    """Относительные пути .exe; setups — и установщики (кроме служебного); skip_dirs — папки, куда не заходить."""
     for d, dirs, files in os.walk(base):
-        if os.path.relpath(d, base).count(os.sep) >= depth:
+        rel = os.path.relpath(d, base).replace(os.sep, "/")
+        if skip_dirs and rel != "." and skip_dirs.search(rel):
+            dirs[:] = []
+            continue
+        if rel.count("/") >= depth:
             dirs[:] = []
         for f in files:
-            if f.lower().endswith(".exe") and not PROG_SKIP.search(f):
+            if f.lower().endswith(".exe") and not (ALWAYS_SKIP if setups else PROG_SKIP).search(f):
                 yield os.path.relpath(os.path.join(d, f), base)
+
+
+def _pfx(root, appid):
+    """«Диск C:» префикса Proton игры (compatdata/НОМЕР/pfx/drive_c) — туда ставят «Установить в игру»."""
+    d = root / "steamapps" / "compatdata" / str(appid) / "pfx" / "drive_c"
+    return d if d.is_dir() else None
 
 
 def programs(root, pd, sdir, appid):
@@ -2680,25 +3142,86 @@ def programs(root, pd, sdir, appid):
     van = Path(sdir, "van", f"{appid}.tsv")
     if gd and van.exists():
         clean = {ln.split("\t", 1)[0] for ln in van.read_text(errors="replace").splitlines()}
+        game = Path(sdir, "van", f"{appid}.game.tsv")              # [v5.6] файлы игры от её лаунчера — не программы
+        if game.exists():
+            clean |= {ln.split("\t", 1)[0] for ln in game.read_text(errors="replace").splitlines()}
         for rel in sorted(_exes(gd, 6)):
             if rel not in clean:
                 out.append({"id": "game:" + rel, "name": os.path.basename(rel), "where": "game"})
     if os.path.isdir(pd):
         for top in sorted(os.listdir(pd)):
             if os.path.isdir(os.path.join(pd, top)):
-                for rel in sorted(_exes(os.path.join(pd, top), 3)):
-                    out.append({"id": f"prog:{top}/{rel}", "name": os.path.basename(rel), "where": top})
+                for rel in sorted(_exes(os.path.join(pd, top), 3, setups=True)):
+                    out.append({"id": f"prog:{top}/{rel}", "name": os.path.basename(rel), "where": top,
+                                "setup": bool(SETUP.search(os.path.basename(rel)))})
+    pfx = _pfx(root, appid)
+    if pfx:                                                     # [v5.6] поставленное «в игру» самим человеком
+        for rel in sorted(_mine(pfx)):
+            if os.path.isfile(pfx / rel):
+                out.append({"id": "pfx:" + rel, "name": os.path.basename(rel), "where": "pfx"})
     return out
 
 
-def _resolve(root, pd, appid, ident):
-    """Путь к программе по id — только внутри папки игры или папки программ (ни «..», ни ссылок наружу)."""
+# [v5.6] В список из «диска C:» — только поставленное человеком через «Установить в игру», а не то, что поставила сама
+# игра или её лаунчер (Edge, лаунчеры Rockstar/EA/Ubisoft…). Перед установкой запоминаем главные программы «диска C:»,
+# после неё (Steam закрыл установщик) новые — «свои»; список — в самом «диске C:» (едет в облако с сохранениями)
+MINE = ".vastgame-installed.json"
+
+
+def _main_exes(pfx):
+    apps = {}
+    for r in _exes(pfx, 7, skip_dirs=PFX_SKIP):
+        r = r.replace(os.sep, "/")
+        m = APP_DIR.match(r)
+        if m:
+            apps.setdefault(m.group(1).lower(), []).append((r.count("/"), r))
+    return {r for items in apps.values() for d, r in items if d == min(x for x, _ in items)}
+
+
+def _mine(pfx):
+    try:
+        d = json.loads((pfx / MINE).read_text())
+        return {x for x in d.get("exes") or [] if isinstance(x, str) and "\0" not in x and ".." not in x.split("/")}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def install_done(root, sdir, appid, user=None, running=None):
+    """Установщик закончил (игра Steam больше не запущена): новые главные программы «диска C:» — «свои»."""
+    before_f = Path(sdir, "van", f"{appid}.pfx.before")
+    if not before_f.exists():
+        return
+    if (running if running is not None else games_running()).get(str(appid)) or time.time() - before_f.stat().st_mtime < 10:
+        return
+    pfx = _pfx(root, appid)
+    if pfx:
+        before = set(before_f.read_text().splitlines())
+        new = _main_exes(pfx) - before
+        if new:
+            f = pfx / MINE
+            f.write_text(json.dumps({"exes": sorted(_mine(pfx) | new)}, ensure_ascii=False))
+            _owner(f, user)
+            print(f"установлено в игру {appid}: " + ", ".join(sorted(os.path.basename(x) for x in new)))
+    before_f.unlink()
+
+
+def _resolve(root, pd, appid, ident, must_exist=True):
+    """Путь к программе по id — только внутри папки игры, папки программ или «диска C:» игры (ни «..», ни ссылок
+    наружу). must_exist=False — при загрузке: игру Steam ещё не скачал, префикс ещё не создан — путь всё равно тот."""
     kind, _, rel = str(ident).partition(":")
-    base = _game_dir(root, appid) if kind == "game" else Path(pd) if kind == "prog" else None
+    if kind == "game":
+        base = _game_dir(root, appid)
+    elif kind == "prog":
+        base = Path(pd)
+    elif kind == "pfx":
+        base = _pfx(root, appid) or (None if must_exist else root / "steamapps" / "compatdata" / str(appid) / "pfx" / "drive_c")
+    else:
+        base = None
     if not base or not rel or "\0" in rel:
         return None
     p = os.path.realpath(os.path.join(base, rel))
-    return p if p.startswith(os.path.realpath(base) + os.sep) and os.path.isfile(p) else None
+    inside = p.startswith(os.path.realpath(base) + os.sep)
+    return p if inside and (os.path.isfile(p) or not must_exist) else None
 
 
 def _running(path):
@@ -2774,11 +3297,13 @@ def set_auto(sdir, appid, ident, on):
     return 0
 
 
-def tick(root, pd, sdir, user=None, now=None):
+def tick(root, pd, sdir, user=None, now=None, home=None):
     """Раз в 5 с (wolf watch): программы «вместе с игрой» — запустить, когда процесс игры прожил AUTO_DELAY с; список
     программ запущенных игр (и игры из библиотеки) — в запись progs страницы статуса (меняется — переписать)."""
     now = now or time.time()
     running = games_running()
+    for f in Path(sdir, "van").glob("*.pfx.before") if Path(sdir, "van").is_dir() else []:   # [v5.6] установки «в игру»
+        install_done(root, sdir, f.name.split(".")[0], user, running)
     auto = _jload(Path(sdir, "progs.auto"), {})
     stf = Path(sdir, "progs.state")
     state = {k: v for k, v in _jload(stf, {}).items() if k in running.values()}
@@ -2804,18 +3329,135 @@ def tick(root, pd, sdir, user=None, now=None):
     play = (Path(sdir, "play.app").read_text().strip() if Path(sdir, "play.app").exists() else "")
     if play.isdigit():
         show.setdefault(play)
+    for a in _jload(Path(sdir, "launch.sel"), {}):                # [v5.6] игры, которые запускаются через программу
+        if str(a).isdigit():
+            show.setdefault(str(a))
     cache = _jload(Path(sdir, "progs.cache"), {})              # папка игры большая — обходить не чаще раза в 30 с
     for a in show:
         if now - (cache.get(a) or {}).get("t", 0) > 30:
             cache[a] = {"t": now, "list": programs(root, pd, sdir, a)}
     _jsave(Path(sdir, "progs.cache"), {a: v for a, v in cache.items() if a in show})
-    report = {a: {"running": a in running, "auto": auto.get(a) or [], "progs": cache[a]["list"]} for a in show}
+    report = {a: {"running": a in running, "auto": auto.get(a) or [], "progs": cache[a]["list"],
+                  "installed": bool(_game_dir(root, a)), "launch": launch_choice(home, a) if home else None}
+              for a in show}
     text = json.dumps(report, ensure_ascii=False, sort_keys=True)
     st = Path(sdir, "st", "progs")
     old = st.read_text().split("|", 2)[2].strip() if st.exists() else ""
     if text != old:
         st.write_text(f"{int(now)}|ok|{text}\n")
     return 0
+
+
+# ------------------------------------------------- [v5.6] запуск игры через программу, установка в игру
+LAUNCH_REL = ".local/share/vastgame/launch"
+
+
+def _owner(path, user):
+    """Файлы выбора — пользователю: прокладка (его процесс) переименовывает .once после запуска."""
+    if user and os.getuid() == 0:
+        import pwd
+        pw = pwd.getpwnam(user)
+        os.chown(path, pw.pw_uid, pw.pw_gid)
+
+
+def _write_conf(home, user, appid, name, path, args, ident):
+    d = Path(home, LAUNCH_REL)
+    d.mkdir(parents=True, exist_ok=True)
+    _owner(d, user)
+    f = d / name
+    f.write_text(f"{path}\n{args}\n{ident}\n")
+    _owner(f, user)
+
+
+def mods_on(sdir, appid):
+    """Тумблер «Моды» у игры включён (VG_SYNC → sel.mods_on): только тогда игра запускается через программу —
+    «игра с модами, как я её настроил»; выключен — как обычно (решение Алексея 2026-10-08)."""
+    try:
+        return str(appid) in Path(sdir, "sel.mods_on").read_text().split()
+    except OSError:
+        return False
+
+
+def launch_set(root, pd, home, user, appid, ident, args, sdir=None):
+    """Запускать игру через программу ident («-» — как обычно). «ok» | «nofile» | «modsoff» (у игры выключены
+    «Моды» — выбор запомнит окно, сработает при включённых)."""
+    f = Path(home, LAUNCH_REL, str(appid))
+    if ident == "-":
+        f.unlink(missing_ok=True)
+        return "ok"
+    path = _resolve(root, pd, appid, ident)
+    if not path:
+        return "nofile"
+    if sdir and not mods_on(sdir, appid):
+        f.unlink(missing_ok=True)
+        return "modsoff"
+    _write_conf(home, user, appid, str(appid), path, re.sub(r"[\x00-\x1f]", " ", args or "")[:300], ident)
+    return "ok"
+
+
+def install_set(root, pd, home, user, appid, ident, sdir=None):
+    """Один раз запустить установщик ident в префиксе игры: «ok» | «running» (игра запущена) | «notinstalled» (Steam
+    её ещё не установил — запускать нечем) | «nofile»."""
+    if str(appid) in games_running():
+        return "running"
+    if not _game_dir(root, appid):
+        return "notinstalled"
+    path = _resolve(root, pd, appid, ident)
+    if not path:
+        return "nofile"
+    _write_conf(home, user, appid, f"{appid}.once", path, "", ident)
+    pfx = _pfx(root, appid)                                    # что было в «диске C:» до установки
+    Path(sdir or Path(home), "van").mkdir(parents=True, exist_ok=True)
+    Path(sdir or Path(home), "van", f"{appid}.pfx.before").write_text("\n".join(sorted(_main_exes(pfx))) if pfx else "")
+    return "ok"
+
+
+def launch_boot(root, pd, home, sel_path, user=None):
+    """Загрузка: выбор из VG_SYNC (launch.sel) → launch/НОМЕР (путь — даже если игры и префикса ещё нет)."""
+    sel = _jload(Path(sel_path), {})
+    done = []
+    for appid, v in sel.items():
+        if not mods_on(os.path.dirname(sel_path), appid):
+            done.append(f"{appid} как обычно (выключены «Моды»)")
+            continue
+        path = _resolve(root, pd, appid, v.get("id", ""), must_exist=False) if str(appid).isdigit() else None
+        if path:
+            _write_conf(home, user, appid, str(appid), path, re.sub(r"[\x00-\x1f]", " ", v.get("args") or "")[:300], v["id"])
+            done.append(f"{appid} через {os.path.basename(path)}")
+    print("запуск через программу: " + (", ".join(done) or "нет"))
+    return 0
+
+
+def pfx_tweaks(root):
+    """«Показывать скрытые» (ShowDotFiles) в реестре каждого «диска C:» игр (user.reg; Steam закрыт — Wine не запущен)."""
+    done = 0
+    for reg in sorted(Path(root, "steamapps", "compatdata").glob("*/pfx/user.reg")):
+        try:
+            text = reg.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            continue
+        if '"ShowDotFiles"' in text:
+            continue
+        m = re.search(r"^\[Software\\\\Wine\] \d+\n(#time=[0-9a-f]+\n)?", text, re.M)
+        if m:
+            text = text[:m.end()] + '"ShowDotFiles"="Y"\n' + text[m.end():]
+        else:
+            text = text.rstrip("\n") + f'\n\n[Software\\\\Wine] {int(time.time())}\n"ShowDotFiles"="Y"\n'
+        tmp = reg.with_suffix(".reg.tmp")
+        tmp.write_text(text, encoding="utf-8", errors="surrogateescape")
+        os.replace(tmp, reg)
+        done += 1
+    print(f"скрытые папки в окнах выбора: включено в {done}")
+    return 0
+
+
+def launch_choice(home, appid):
+    """{id, args} — через что запускается игра (для страницы статуса) или None."""
+    try:
+        path, args, ident = (Path(home, LAUNCH_REL, str(appid)).read_text().split("\n") + ["", "", ""])[:3]
+    except OSError:
+        return None
+    return {"id": ident, "args": args} if ident else None
 
 
 def vgplay(sdir):
@@ -2843,14 +3485,31 @@ if __name__ == "__main__":
             sys.exit(vgplay(a[1]))
         if a[:1] == ["account"] and len(a) == 3:
             sys.exit(account(Path(a[1]), a[2]))
-        if a[:1] == ["manifest"] and len(a) == 5 and a[2].isdigit():
-            sys.exit(manifest(Path(a[1]), a[2], a[3], a[4]))
+        if a[:1] == ["manifest"] and len(a) in (5, 6) and a[2].isdigit():
+            d = a[5] if len(a) == 6 else ""                    # [v5.6] настоящая папка из сведений Steam
+            ok = re.fullmatch(r'[^/\\\x00-\x1f"]{1,200}', d) and d not in (".", "..")
+            sys.exit(manifest(Path(a[1]), a[2], a[3], a[4], d if ok else ""))
         if a[:1] == ["state"] and len(a) == 3 and a[2].isdigit():
             sys.exit(state(Path(a[1]), a[2]))
         # [v5.4] программы игр: progs-tick STEAM PD S ПОЛЬЗОВАТЕЛЬ; progs-run STEAM PD ПОЛЬЗОВАТЕЛЬ НОМЕР ID;
         # progs-auto S НОМЕР ID on|off
-        if a[:1] == ["progs-tick"] and len(a) == 5:
-            sys.exit(tick(Path(a[1]), a[2], a[3], a[4]))
+        if a[:1] == ["progs-tick"] and len(a) in (5, 6):
+            sys.exit(tick(Path(a[1]), a[2], a[3], a[4], home=a[5] if len(a) == 6 else None))
+        # [v5.6] launch-set STEAM PD HOME ПОЛЬЗОВАТЕЛЬ НОМЕР ID|- ПАРАМЕТРЫ [S]; install-set STEAM PD HOME ПОЛЬЗОВАТЕЛЬ НОМЕР ID;
+        # launch-boot STEAM PD HOME launch.sel ПОЛЬЗОВАТЕЛЬ; running [НОМЕР] — код 0, если игра (любая) запущена
+        if a[:1] == ["launch-set"] and len(a) in (8, 9) and a[5].isdigit():
+            print(f"prog: {launch_set(Path(a[1]), a[2], a[3], a[4], a[5], a[6], a[7], a[8] if len(a) == 9 else None)}")
+            sys.exit(0)
+        if a[:1] == ["install-set"] and len(a) in (7, 8) and a[5].isdigit():
+            print(f"prog: {install_set(Path(a[1]), a[2], a[3], a[4], a[5], a[6], a[7] if len(a) == 8 else None)}")
+            sys.exit(0)
+        if a[:1] == ["launch-boot"] and len(a) == 6:
+            sys.exit(launch_boot(Path(a[1]), a[2], a[3], a[4], a[5]))
+        if a[:1] == ["pfx-tweaks"] and len(a) == 2:
+            sys.exit(pfx_tweaks(Path(a[1])))
+        if a[:1] == ["running"] and len(a) in (1, 2):
+            r = games_running()
+            sys.exit(0 if (a[1] in r if len(a) == 2 else r) else 1)
         if a[:1] == ["progs-run"] and len(a) == 6 and a[4].isdigit():
             r = launch(Path(a[1]), a[2], a[4], a[5], a[3])
             print(f"prog: {r}")
@@ -2864,7 +3523,8 @@ if __name__ == "__main__":
     except (OSError, ValueError) as e:
         print(f"wolf-steam: ошибка {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
-    sys.exit("wolf-steam.py vgplay|account|manifest|state|seen|gone|logon|progs-tick|progs-run|progs-auto …")
+    sys.exit("wolf-steam.py vgplay|account|manifest|state|seen|gone|logon|progs-tick|progs-run|progs-auto|"
+             "launch-set|install-set|launch-boot|running …")
 STEAMPY
 
 # ================================ wolf-mods.py =================================
@@ -2879,7 +3539,14 @@ w /usr/local/bin/wolf-mods.py <<'MODS'
 #                                       дампы и кэши (не повод спрашивать человека)
 #   pack ПАПКА СНИМОК АРХИВ НОМЕР СБОРКА  упаковать моды (zstd) → «сколько отпечаток»; 0 — модов нет, архив не создан
 #   apply ПАПКА                         stdin — распакованный tar модов: наложить поверх игры, удалить удалённое → «сколько отпечаток»
-#   arch НОМЕР ПАСПОРТ                  имя архива: mod--НОМЕР--Название (из паспорта Steam)
+#   arch НОМЕР ПАСПОРТ [ВИД]            имя архива: mod--НОМЕР--Название (из паспорта Steam); ВИД lgame — архив игры
+# [v5.6] Игры, которые докачивает их собственный лаунчер (FF14, MMO…): файлы лаунчера — слой «игра» (СНИМОК.game.tsv),
+# моды считаются поверх «чистая игра из Steam + слой игры». Слой копится наблюдением (track, раз в 30 с): пока игра
+# запущена из Steam и не работает программа из папки Programs, изменения в папке игры — её файлы; но только у игры,
+# в которой так появилось больше LAUNCHER_BYTES (иначе — обычная игра: у неё и сохранения бывают в папке, они — моды).
+#   track ПАПКА СНИМОК ИГРА_ЗАПУЩЕНА PROGRAMS   шаг наблюдения (ИГРА_ЗАПУЩЕНА 1/0)
+#   claim ПАПКА СНИМОК                  всё, что сейчас поверх чистой игры, — файлы игры (после восстановления архива игры)
+#   man ПАПКА СНИМОК                    список файлов слоя игры для архива lgame-- (формат find wolf: путь, тип, размер, время)
 import hashlib, io, json, os, re, stat, subprocess, sys, tarfile
 
 META = ".vastgame-mod.json"
@@ -2921,13 +3588,135 @@ def load(path):
     return base
 
 
+# ------------------------------------------------------- [v5.6] слой «игра» (файлы лаунчера)
+LAUNCHER_BYTES = int(os.environ.get("WOLF_LAUNCHER_BYTES", 1 << 30))   # столько появилось при запущенной игре — лаунчерная
+
+
+def side(snapf, ext):
+    return snapf[:-4] + ext if snapf.endswith(".tsv") else snapf + ext
+
+
+def load_opt(path):
+    try:
+        return load(path)
+    except (OSError, ValueError):
+        return {}
+
+
+def save(path, d):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for rel, (size, mt) in sorted(d.items()):
+            if "\t" not in rel and "\n" not in rel:
+                f.write(f"{rel}\t{size}\t{mt}\n")
+    os.replace(tmp, path)
+
+
+def baseline(snapf):
+    """Чистая игра из Steam с наложенным слоем игры (размер -1 — лаунчер удалил файл Steam)."""
+    base = load(snapf)
+    for rel, v in load_opt(side(snapf, ".game.tsv")).items():
+        if v[0] < 0:
+            base.pop(rel, None)
+        else:
+            base[rel] = v
+    return base
+
+
+def _programs_running(pd):
+    """Работает ли программа из папки Programs (менеджер модов и т.п.): её изменения — моды, а не файлы игры."""
+    roots = {x.lower().rstrip("/") + "/" for x in (pd, os.path.realpath(pd)) if x.strip("/")}
+    for d in os.listdir("/proc") if roots else []:
+        if not d.isdigit():
+            continue
+        try:
+            arg0 = open(f"/proc/{d}/cmdline", "rb").read().split(b"\0")[0].decode(errors="replace")
+        except OSError:
+            continue
+        a = arg0.replace("\\", "/").lower()
+        if a[1:3] == ":/":                                       # путь Windows: Z:\home\… — диск Z: это корень Linux
+            a = a[2:]
+        if any(a.startswith(r) for r in roots):
+            return True
+    return False
+
+
+def track(root, snapf, running, pd):
+    """Шаг наблюдения: изменения с прошлого шага при запущенной игре — в слой игры (или в «пока неясно»)."""
+    seen_f = side(snapf, ".seen.tsv")
+    if not os.path.exists(seen_f) and not running:
+        return 0
+    now = walk(root)
+    if not os.path.exists(seen_f):
+        save(seen_f, now)                                          # игру только что запустили — точка отсчёта
+        return 0
+    seen = load_opt(seen_f)
+    changed = {r: v for r, v in now.items() if seen.get(r) != v and r != META}
+    gone = [r for r in seen if r not in now]
+    if running:
+        save(seen_f, now)
+    else:
+        os.remove(seen_f)                                          # последний отрезок — и наблюдение до следующего запуска
+    if not changed and not gone or _programs_running(pd):
+        return 0
+    van = load(snapf)
+    game_f, pend_f, mark = side(snapf, ".game.tsv"), side(snapf, ".pend.tsv"), side(snapf, ".ltype")
+    known = os.path.exists(mark)
+    layer = load_opt(game_f if known else pend_f)
+    layer.update(changed)
+    for r in gone:
+        if r in van:
+            layer[r] = (-1, 0)
+        else:
+            layer.pop(r, None)
+    if not known and sum(v[0] for v in layer.values() if v[0] > 0) > LAUNCHER_BYTES:
+        open(mark, "w").close()                                    # игра докачивает себя сама
+        game = load_opt(game_f)
+        game.update(layer)
+        save(game_f, game)
+        if os.path.exists(pend_f):
+            os.remove(pend_f)
+        print(f"игра докачивает себя сама: её файлы — отдельно от модов ({len(game)})")
+        return 0
+    save(game_f if known else pend_f, layer)
+    return 0
+
+
+def claim(root, snapf):
+    """Всё, что сейчас поверх чистой игры, — файлы игры (восстановили архив игры, модов ещё не накладывали)."""
+    van, now = load(snapf), walk(root)
+    game = {r: v for r, v in now.items() if van.get(r) != v and r != META}
+    game.update({r: (-1, 0) for r in van if r not in now})
+    save(side(snapf, ".game.tsv"), game)
+    open(side(snapf, ".ltype"), "w").close()
+    print(len(game))
+    return 0
+
+
+def man(root, snapf):
+    """Файлы слоя игры, которые есть на диске, — для архива lgame-- (как F в wolf: путь\tтип\tразмер\tвремя\tссылка)."""
+    out = sys.stdout.buffer
+    for rel, v in sorted(load_opt(side(snapf, ".game.tsv")).items()):
+        if v[0] < 0:
+            continue
+        p = os.path.join(root, rel)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        link = os.readlink(p) if stat.S_ISLNK(st.st_mode) else ""
+        kind = "l" if link else "f"
+        out.write(f"{p}\t{kind}\t{st.st_size}\t{st.st_mtime:.10f}\t{link}\0".encode())
+    return 0
+
+
 def junk(rel):
     parts = rel.lower().split("/")
     return parts[-1].endswith(JUNK_EXT) or parts[-1].startswith("crash") or any(p in JUNK_DIRS for p in parts[:-1])
 
 
 def changes(root, snapf):
-    base, now = load(snapf), walk(root)
+    base, now = baseline(snapf), walk(root)                        # [v5.6] файлы лаунчера — не моды
     files = sorted(r for r, v in now.items() if base.get(r) != v and r != META)
     deleted = sorted(r for r in base if r not in now)
     h = hashlib.sha1()
@@ -3003,7 +3792,7 @@ def apply(root):
     return 0
 
 
-def arch(appid, acf):
+def arch(appid, acf, kind="mod"):
     name = ""
     try:
         m = re.search(r'"name"\s*"([^"]*)"', open(acf, errors="replace").read())
@@ -3011,7 +3800,7 @@ def arch(appid, acf):
     except OSError:
         pass
     name = re.sub(r"[^\w .()&'+-]", "", name, flags=re.U).strip(" .")[:80] or f"app{appid}"
-    print(f"mod--{appid}--{name}")
+    print(f"{kind}--{appid}--{name}")
     return 0
 
 
@@ -3026,13 +3815,296 @@ if __name__ == "__main__":
             sys.exit(pack(a[1], a[2], a[3], a[4], a[5]))
         if a[:1] == ["apply"] and len(a) == 2:
             sys.exit(apply(a[1]))
-        if a[:1] == ["arch"] and len(a) == 3 and a[1].isdigit():
-            sys.exit(arch(a[1], a[2]))
+        if a[:1] == ["arch"] and len(a) in (3, 4) and a[1].isdigit() and (len(a) == 3 or a[3] in ("mod", "lgame")):
+            sys.exit(arch(*a[1:]))
+        if a[:1] == ["track"] and len(a) == 5 and a[3] in ("0", "1"):
+            sys.exit(track(a[1], a[2], a[3] == "1", a[4]))
+        if a[:1] == ["claim"] and len(a) == 3:
+            sys.exit(claim(a[1], a[2]))
+        if a[:1] == ["man"] and len(a) == 3:
+            sys.exit(man(a[1], a[2]))
     except (OSError, ValueError, tarfile.TarError) as e:
         print(f"wolf-mods: ошибка {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
-    sys.exit("wolf-mods.py snap|diff|pack|apply|arch …")
+    sys.exit("wolf-mods.py snap|diff|pack|apply|arch|track|claim|man …")
 MODS
+
+# ============================== wolf-recipes.py ================================
+w /usr/local/bin/wolf-recipes.py <<'RECIPES'
+#!/usr/bin/env python3
+# [v5.6] «Рецепты» — готовые наборы модов для конкретных игр, которые человек включает одним переключателем в окне
+# (VG_SYNC "recipes": {номер: [рецепт]}). Всё ставится в «диск C:» игры — едет в облако с её сохранениями (pfx--),
+# так что на следующих машинах рецепт только проверяет обновления. Рецепт сам — без запуска игры: настройки,
+# плагины и переводы — файлами; программы-установщики запускает wolf (recipe_play) через Steam той же прокладкой.
+#
+# ff14-ru — русский перевод FINAL FANTASY XIV от xivrus.ru (пробная 312060 и полная 39210): XIVLauncher (лаунчер
+# сообщества) + Dalamud (плагины) + Penumbra (подмена файлов игры на лету) + пакет перевода. Как у Алексея после
+# ручной установки 2026-10-08 (сверено по его архиву): настройки XIVLauncher (путь к игре, пробная/полная, язык игры
+# английский — перевод заменяет английские файлы, Dalamud включён), список плагинов SeaOfStars в Dalamud,
+# «ждать плагины при запуске», Penumbra с папкой модов C:\FFXIVMods, мод «XIV Rus» включён с настройками по умолчанию.
+# Перевод — релиз GitHub xivrus/xiv_ru_weblate (release.pmp — zip папки мода); новая версия — старая папка удаляется
+# целиком (так требует xivrus). XIVLauncher, Dalamud и Penumbra потом обновляются сами.
+#   wolf-recipes.py ff14-ru DRIVE_C НОМЕР ПАПКА_ИГРЫ КЭШ   — настройки, Penumbra, перевод (игра и Steam-лаунчер закрыты)
+#   wolf-recipes.py ff14-ru-mark DRIVE_C                   — XIVLauncher в список «своих» программ игры
+import json
+import os
+import re
+import shutil
+import sys
+import time
+import urllib.request
+import uuid
+import zipfile
+from pathlib import Path
+
+ROAM = "users/steamuser/AppData/Roaming/XIVLauncher"
+XIVL_EXE = "users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe"
+MODDIR, MODDIR_WIN = "FFXIVMods", "C:\\FFXIVMods"
+SEA = "https://raw.githubusercontent.com/Ottermandias/SeaOfStars/main/repo.json"
+XIVRUS = "https://api.github.com/repos/xivrus/xiv_ru_weblate/releases/latest"
+FT = {"312060": True, "39210": False}              # пробная / полная
+UA = {"User-Agent": "vastgame"}
+
+
+def fetch(url, dest=None, timeout=60):
+    """Ответ по url (bytes) или, с dest, — в файл. Подменяется в тестах."""
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        if dest is None:
+            return r.read()
+        tmp = Path(str(dest) + ".part")
+        with open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        os.replace(tmp, dest)
+        return dest
+
+
+def _load(p, default):
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return default
+
+
+def _save(p, data, indent=2):
+    p = Path(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".vgtmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+# --- XIVLauncher: launcherConfigV3.json (все значения — строки). Главное — всегда; остальное — если не задано
+def launcher_config(c, appid, installdir):
+    p = Path(c, ROAM, "launcherConfigV3.json")
+    d = _load(p, {})
+    d.update({"GamePath": "Z:\\home\\user\\SteamGames\\" + installdir, "IsFt": "true" if FT[appid] else "false",
+              "Language": "English", "InGameAddonEnabled": "true"})
+    for k, v in {"InGameAddonLoadMethod": "EntryPoint", "LauncherLanguage": "English", "AddonList": "[]",
+                 "EncryptArguments": "true", "AskBeforePatchInstall": "true", "DpiAwareness": "Unaware",
+                 "ExitLauncherAfterGameExit": "true", "AutoStartSteam": "false", "VersionUpgradeLevel": "2",
+                 "HasShownAutoLaunchDisclaimer": "true", "HasComplainedAboutAdmin": "true", "KeepPatches": "false",
+                 "PatchPath": "C:\\users\\steamuser\\AppData\\Roaming\\XIVLauncher\\patches"}.items():
+        d.setdefault(k, v)
+    _save(p, d)
+    return "настройки XIVLauncher"
+
+
+# --- Dalamud: dalamudConfig.json (Newtonsoft с $type — как пишет сам Dalamud)
+T_REPOS = "System.Collections.Generic.List`1[[Dalamud.Configuration.ThirdPartyRepoSettings, Dalamud]], System.Private.CoreLib"
+T_REPO = "Dalamud.Configuration.ThirdPartyRepoSettings, Dalamud"
+T_PROFILE = "Dalamud.Plugin.Internal.Profiles.ProfileModelV1, Dalamud"
+T_PCHARS = ("System.Collections.Generic.List`1[[Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Character, "
+            "Dalamud]], System.Private.CoreLib")
+T_PLUGINS = ("System.Collections.Generic.List`1[[Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Plugin, "
+             "Dalamud]], System.Private.CoreLib")
+T_PLUGIN = "Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Plugin, Dalamud"
+
+
+def dalamud_config(c, plugin_id):
+    p = Path(c, ROAM, "dalamudConfig.json")
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        d = {"$type": "Dalamud.Configuration.Internal.DalamudConfiguration, Dalamud"}
+    repos = d.get("ThirdRepoList")
+    if not isinstance(repos, dict) or not isinstance(repos.get("$values"), list):
+        repos = d["ThirdRepoList"] = {"$type": T_REPOS, "$values": []}
+    mine = next((r for r in repos["$values"] if isinstance(r, dict) and r.get("Url") == SEA), None)
+    if mine:
+        mine["IsEnabled"] = True
+    else:
+        repos["$values"].append({"$type": T_REPO, "Url": SEA, "IsEnabled": True})
+    d["ThirdRepoSpeedbumpDismissed"] = True        # «я понимаю риск сторонних плагинов» — человек включил перевод
+    d["IsResumeGameAfterPluginLoad"] = True        # игра ждёт плагины: иначе часть интерфейса без перевода
+    prof = d.get("DefaultProfile")
+    if not isinstance(prof, dict) or not isinstance((prof.get("Plugins") or {}).get("$values"), list):
+        prof = d["DefaultProfile"] = {"$type": T_PROFILE, "p": None, "e4c": False,
+                                      "pc": {"$type": T_PCHARS, "$values": []}, "e": True, "c": 0,
+                                      "Plugins": {"$type": T_PLUGINS, "$values": []},
+                                      "id": "00000000-0000-0000-0000-000000000000", "n": "DEFAULT"}
+    plugins = prof["Plugins"]["$values"]
+    have = next((x for x in plugins if isinstance(x, dict) and x.get("InternalName") == "Penumbra"), None)
+    if have is None:
+        plugins.append({"$type": T_PLUGIN, "InternalName": "Penumbra", "WorkingPluginId": plugin_id, "IsEnabled": True})
+    _save(p, d)
+    return "настройки Dalamud"
+
+
+# --- Penumbra: плагин из списка SeaOfStars (как ставит сам Dalamud: zip в installedPlugins/Имя/версия + манифест)
+def penumbra_plugin(c, cache):
+    base = Path(c, ROAM, "installedPlugins", "Penumbra")
+    for m in sorted(base.glob("*/Penumbra.json")):
+        if (m.parent / "Penumbra.dll").exists():
+            return _load(m, {}).get("WorkingPluginId") or str(uuid.uuid4()), "Penumbra уже стоит"
+    repo = json.loads(fetch(SEA))
+    e = next(x for x in repo if isinstance(x, dict) and x.get("InternalName") == "Penumbra")
+    ver = str(e["AssemblyVersion"])
+    if not re.fullmatch(r"[0-9.]{1,20}", ver):
+        raise ValueError(f"версия Penumbra {ver!r}")
+    z = fetch(e["DownloadLinkInstall"], Path(cache, "Penumbra.zip"), timeout=300)
+    dest = base / ver
+    _unzip(z, dest)
+    pid = str(uuid.uuid4())
+    man = {"Disabled": False, "Testing": False, "ScheduledForDeletion": False, "InstalledFromUrl": SEA,
+           "WorkingPluginId": pid, "IsThirdParty": True}
+    man.update({k: v for k, v in e.items() if k not in ("DownloadCount", "LastUpdate", "IsHide", "IsTestingExclusive")})
+    man.update({"IsHide": False, "IsTestingExclusive": False, "DownloadLinkInstall": None, "DownloadLinkUpdate": None,
+                "DownloadLinkTesting": None})
+    _save(dest / "Penumbra.json", man)
+    os.unlink(z)
+    return pid, f"Penumbra {ver} поставлена"
+
+
+def penumbra_config(c):
+    p = Path(c, ROAM, "pluginConfigs", "Penumbra", "config", "penumbra.json")
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        d = {"Version": 100, "Timestamp": int(time.time() * 1000)}
+    if not d.get("ModDirectory"):
+        d["ModDirectory"] = MODDIR_WIN
+        _save(p, d, indent="\t")
+    return d["ModDirectory"]
+
+
+def _unzip(z, dest):
+    """Распаковать zip в dest — только внутрь (ни абсолютных путей, ни «..»)."""
+    dest = Path(dest)
+    with zipfile.ZipFile(z) as zf:
+        for n in zf.namelist():
+            parts = n.replace("\\", "/").split("/")
+            if n.startswith(("/", "\\")) or ".." in parts or re.match(r"^[A-Za-z]:", n):
+                raise ValueError(f"путь {n!r} в архиве")
+        tmp = dest.with_name(dest.name + ".vgtmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        zf.extractall(tmp)
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+
+
+def _mod_dir(c, moddir):
+    """Папка мода перевода в папке модов Penumbra (C:\\FFXIVMods → Linux-путь) — по сайту xivrus в meta.json."""
+    root = Path(c, *moddir[3:].split("\\")) if moddir.upper().startswith("C:\\") else Path(c, MODDIR)
+    for m in sorted(root.glob("*/meta.json")):
+        meta = _load(m, {})
+        if "xivrus" in str(meta.get("Website") or "") or meta.get("Name") == "XIV Rus":
+            return root, m.parent, str(meta.get("Version") or "")
+    return root, None, ""
+
+
+def _defaults(mod):
+    """Настройки мода по умолчанию — из его групп (как выставляет Penumbra при включении)."""
+    out = {}
+    for g in sorted(mod.glob("group_*.json")):
+        d = _load(g, {})
+        if d.get("Name"):
+            out[d["Name"]] = int(d.get("DefaultSettings") or 0)
+    return out
+
+
+def penumbra_enable(c, name, settings):
+    """Мод включён в коллекции по умолчанию (её нет — создать, как Penumbra при первом запуске)."""
+    pc = Path(c, ROAM, "pluginConfigs", "Penumbra")
+    act = _load(pc / "active_collections.json", None)
+    cid = act.get("Default") if isinstance(act, dict) else None
+    f = pc / "collections" / f"{cid}.json" if cid else None
+    col = _load(f, None) if f else None
+    if not isinstance(col, dict):
+        cid = cid or str(uuid.uuid4())
+        f = pc / "collections" / f"{cid}.json"
+        col = {"Version": 2, "Id": cid, "Name": "Default", "Settings": {}, "Inheritance": []}
+    if not isinstance(act, dict):
+        act = {"Version": 2, "Default": cid, "Interface": cid, "Current": cid, "Individuals": []}
+        _save(pc / "active_collections.json", act, indent="\t")
+    st = col.setdefault("Settings", {})
+    if name in st and isinstance(st[name], dict):
+        return False                                 # уже есть — выбор человека не трогаем
+    st[name] = {"Settings": settings, "Priority": 0, "Enabled": True}
+    _save(f, col, indent=1)
+    return True
+
+
+def translation(c, cache, moddir):
+    rel = json.loads(fetch(XIVRUS))
+    ver = str(rel.get("tag_name") or "").lstrip("v")
+    asset = next((a for a in rel.get("assets") or [] if str(a.get("name", "")).endswith(".pmp")), None)
+    if not ver or not asset:
+        raise ValueError("в релизе xivrus нет .pmp")
+    root, old, have = _mod_dir(c, moddir)
+    if old and have == ver:
+        return f"перевод {ver} — последний"
+    pmp = fetch(asset["browser_download_url"], Path(cache, "xivrus.pmp"), timeout=1800)
+    with zipfile.ZipFile(pmp) as zf:
+        meta = json.loads(zf.read("meta.json").decode("utf-8-sig"))
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(meta.get("Name") or "XIV Rus")).strip(" .") or "XIV Rus"
+    if old:
+        shutil.rmtree(old)                             # «перед установкой новой версии удалить старую» (xivrus)
+    root.mkdir(parents=True, exist_ok=True)
+    _unzip(pmp, root / name)
+    os.unlink(pmp)
+    on = penumbra_enable(c, name, _defaults(root / name))
+    return f"перевод {have + ' → ' if have else ''}{ver}{', включён' if on else ''}"
+
+
+def ff14_ru(c, appid, installdir, cache):
+    if appid not in FT:
+        print(f"ff14-ru: {appid} — не FINAL FANTASY XIV")
+        return 2
+    Path(cache).mkdir(parents=True, exist_ok=True)
+    done = [launcher_config(c, appid, installdir)]
+    pid, msg = penumbra_plugin(c, cache)
+    done += [dalamud_config(c, pid), msg]
+    moddir = penumbra_config(c)
+    try:
+        done.append(translation(c, cache, moddir))
+    except Exception as e:                             # нет связи с GitHub — перевод остаётся прежним
+        done.append(f"перевод не обновлён ({type(e).__name__}: {str(e)[:120]})")
+    print("; ".join(done))
+    return 0
+
+
+def mark(c):
+    """XIVLauncher — в «свои» программы игры (C:/.vastgame-installed.json, как после «Установить в игру»)."""
+    if not Path(c, XIVL_EXE).exists():
+        return 1
+    p = Path(c, ".vastgame-installed.json")
+    d = _load(p, {})
+    exes = sorted(set(x for x in d.get("exes") or [] if isinstance(x, str)) | {XIVL_EXE})
+    _save(p, {"exes": exes}, indent=None)
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["ff14-ru"] and len(a) == 5 and a[2].isdigit() and "/" not in a[3] and a[3] not in ("", ".", ".."):
+            sys.exit(ff14_ru(a[1], a[2], a[3], a[4]))
+        if a[:1] == ["ff14-ru-mark"] and len(a) == 2:
+            sys.exit(mark(a[1]))
+    except Exception as e:
+        print(f"wolf-recipes: ошибка {type(e).__name__}: {str(e)[:300]}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-recipes.py ff14-ru DRIVE_C НОМЕР ПАПКА КЭШ | ff14-ru-mark DRIVE_C")
+RECIPES
 
 w /usr/local/bin/wolf-parts.py <<'PARTS'
 #!/usr/bin/env python3
