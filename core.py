@@ -205,7 +205,9 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     lang — язык окна (ru/en/es): язык Steam на машине, если в шаблоне не задан свой (steam_lang)."""
     if docker:
         import setup      # адрес скрипта один для KVM и Docker (setup не импортирует core)
-        env = {"WOLF_SCRIPT_URL": setup.SCRIPT_URL, "-p 41641:41641/udp": "1",
+        # VASTGAME_SCRIPT_URL — проверка скрипта до публикации (только запуск из папки проекта; у людей её нет):
+        # «drive:ПАПКА/wolf-setup.sh» — образ берёт скрипт с Google Drive этого аккаунта
+        env = {"WOLF_SCRIPT_URL": os.environ.get("VASTGAME_SCRIPT_URL") or setup.SCRIPT_URL, "-p 41641:41641/udp": "1",
                "SYNC_STEAM_GAMES": template_games(tpl)}
         # Отладка образа (только при запуске из папки проекта с этой переменной; у людей её нет): канал команд
         # debug_rc.py на порту 8788, только через Tailscale и только с этим одноразовым паролем

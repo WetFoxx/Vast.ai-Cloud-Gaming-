@@ -376,7 +376,12 @@ class TestSignOut(unittest.TestCase):
 class TestScript(unittest.TestCase):
     def test_env_file_and_boot_wiring(self):
         src = (Path(__file__).resolve().parent.parent / "wolf-setup.sh").read_text()
-        self.assertIn("VGS VGP > /etc/wolf/env", src)
+        saved = re.search(r"^declare -p (.*) > /etc/wolf/env$", src, re.M).group(1).split()
+        self.assertIn("VGS", saved)
+        self.assertIn("VGP", saved)
+        # [v5.6] периоды синхронизации — тоже: без них wolf supervise (Docker) гонял state и games каждые 20 с
+        self.assertIn("SMIN", saved)
+        self.assertIn("GMIN", saved)
         boot = fn("boot")
         self.assertLess(boot.index("play_prepare"), boot.index("&& steam_go\n  [ -e \"$S/play.app\" ] && ( play_watch & )"))
         self.assertIn("play_init", boot)

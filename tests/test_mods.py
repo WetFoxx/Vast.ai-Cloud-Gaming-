@@ -202,7 +202,7 @@ class TestScript(unittest.TestCase):
     def test_wiring(self):
         src = (Path(__file__).resolve().parent.parent / "wolf-setup.sh").read_text()
         self.assertIn("MOD = re.compile(r'^mod--\\d{1,10}$')", src)
-        self.assertIn("(game|sgame|pfx|mod|prog)--", src)
+        self.assertIn("(game|sgame|pfx|mod|prog|lgame)--", src)   # [v5.6] lgame — файлы игры от её лаунчера
         self.assertIn('"$0" mods                                    # [v5.0]', WOLF)
         watch = fn("play_watch")
         self.assertLess(watch.index("mods_snap"), watch.index("mods_apply"))

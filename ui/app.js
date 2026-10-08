@@ -968,15 +968,20 @@ function renderOffersGame() {
     }
     main.appendChild(seg);
   }
-  main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; }));
+  main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; viaText(); }));
   // [v5.4] программы, которые запустятся вместе с игрой (выбраны раньше на главном)
   const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
   if (auto.length) main.appendChild(el("div", { className: "og-progs" },
     t("progs.with_game", { list: auto.map((i) => i.split("/").pop()).join(", ") })));
   // [v5.6] игра запускается через программу (выбрано раньше на главном) — видно и можно вернуть обычный запуск
   const via = ((libData && libData.launch_sel) || {})[playGame.appid];
+  const viaLabel = el("span", {});
+  // через программу — только с включёнными «Моды» («игра с модами, как я её настроил»)
+  const viaText = () => { if (via && via.id) viaLabel.textContent = t(playGame.mods ? "progs.launch_via" : "progs.launch_via.off",
+    { name: via.id.split("/").pop() }) + " · "; };
   if (via && via.id) {
-    const line = el("div", { className: "og-progs" }, t("progs.launch_via", { name: via.id.split("/").pop() }) + " · ");
+    viaText();
+    const line = el("div", { className: "og-progs" }, viaLabel);
     const reset = el("button", { className: "link" }, t("progs.launch_via.reset"));
     reset.addEventListener("click", async () => {
       if (!DEMO) await api().prog_launch(playGame.appid, "-", "");

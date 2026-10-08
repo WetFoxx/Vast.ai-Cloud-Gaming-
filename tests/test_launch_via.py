@@ -31,10 +31,20 @@ class World(Base):
         self.home = self.w.d / "home"
         (self.w.pd / "XIVLauncher").mkdir()
         (self.w.pd / "XIVLauncher/Setup.exe").write_text("setup")
+        (self.w.pd / "VCRedist").mkdir()
+        (self.w.pd / "VCRedist/vc_redist.x64.exe").write_text("setup")
         c = self.w.root / "steamapps/compatdata" / APP / "pfx/drive_c"
         for rel in ("windows/system32/notepad.exe", "Program Files (x86)/Steam/steam.exe",
                     "Program Files/Common Files/x.exe", XIV, "users/steamuser/AppData/Local/XIVLauncher/Update.exe",
-                    "users/steamuser/AppData/Local/Temp/is-ABC/helper.exe"):
+                    "users/steamuser/AppData/Local/Temp/is-ABC/helper.exe",
+                    "Program Files (x86)/Microsoft/EdgeWebView/Application/1/msedgewebview2.exe",
+                    "Program Files (x86)/Microsoft/EdgeUpdate/MicrosoftEdgeUpdate.exe",
+                    "users/steamuser/AppData/Local/XIVLauncher/app-7.0.20/aria2c-xl.exe",
+                    "users/steamuser/AppData/Local/XIVLauncher/app-7.0.20/XIVLauncher.exe",
+                    "users/steamuser/AppData/Roaming/XIVLauncher/addon/Hooks/9.0.1/Dalamud.Injector.exe",
+                    "Program Files/Mod Organizer 2/ModOrganizer.exe",
+                    "Program Files/Mod Organizer 2/plugins/helper.exe",
+                    "Games/Tool/tool.exe"):
             (c / rel).parent.mkdir(parents=True, exist_ok=True)
             (c / rel).write_text("x")
         self.pfx = c
@@ -47,11 +57,42 @@ class TestPrograms(World):
     def test_setups_and_installed_into_game(self):
         progs = {p["id"]: p for p in ws.programs(self.w.root, str(self.w.pd), str(self.w.sdir), APP)}
         self.assertTrue(progs["prog:XIVLauncher/Setup.exe"]["setup"])           # установщик виден — его ставят в игру
+        self.assertTrue(progs["prog:VCRedist/vc_redist.x64.exe"]["setup"])     # библиотека Microsoft — тоже «в игру»
         self.assertFalse(progs["prog:WeMod/WeMod.exe"]["setup"])
         self.assertNotIn("prog:WeMod/Uninstall WeMod.exe", progs)             # удаление — по-прежнему мимо
-        self.assertEqual(progs["pfx:" + XIV]["where"], "pfx")                    # поставленное в «диск C:» игры
-        pfx = [i for i in progs if i.startswith("pfx:")]
-        self.assertEqual(pfx, ["pfx:" + XIV])                                  # служебное Wine/Proton и Update — мимо
+        # из «диска C:» — ничего, пока человек сам ничего не ставил (там то, что поставили игра и её лаунчер)
+        self.assertEqual([i for i in progs if i.startswith("pfx:")], [])
+
+    def test_installed_by_user_only(self):
+        # «Установить в игру»: до установки в «диске C:» уже были программы игры; новые после — «свои», только главные
+        install = ws.install_set(self.w.root, str(self.w.pd), str(self.home), None, APP, "prog:XIVLauncher/Setup.exe",
+                                 str(self.w.sdir))
+        self.assertEqual(install, "ok")
+        before = self.w.sdir / "van" / f"{APP}.pfx.before"
+        self.assertIn(XIV, before.read_text().split("\n"))                     # XIV уже был (из setUp) — не «свой»
+        for rel in ("users/steamuser/AppData/Local/Vortex/Vortex.exe", "users/steamuser/AppData/Local/Vortex/deep/x/helper.exe",
+                    "users/steamuser/AppData/Local/XIVLauncher2/current/XIVLauncher.exe",       # как ставит Velopack
+                    "users/steamuser/AppData/Local/XIVLauncher2/current/patcher/XIVLauncher.PatchInstaller.exe"):
+            (self.pfx / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.pfx / rel).write_text("x")
+        os.utime(before, (0, 0))                                              # установщик шёл дольше 10 с
+        ws.install_done(self.w.root, str(self.w.sdir), APP, None, {APP: "1"})  # ещё идёт — ждём
+        self.assertTrue(before.exists())
+        ws.install_done(self.w.root, str(self.w.sdir), APP, None, {})           # Steam закрыл установщик
+        self.assertFalse(before.exists())
+        pfx = [p["id"] for p in ws.programs(self.w.root, str(self.w.pd), str(self.w.sdir), APP) if p["where"] == "pfx"]
+        self.assertEqual(pfx, ["pfx:users/steamuser/AppData/Local/Vortex/Vortex.exe",
+                               "pfx:users/steamuser/AppData/Local/XIVLauncher2/current/XIVLauncher.exe"])
+        self.assertTrue((self.pfx / ".vastgame-installed.json").exists())      # список — в «диске C:», едет в облако
+
+    def test_game_files_from_its_launcher_are_not_programs(self):
+        game = self.w.game / "game/ffxiv_dx11.exe"
+        game.parent.mkdir(parents=True)
+        game.write_text("x")
+        ids = lambda: [p["id"] for p in ws.programs(self.w.root, str(self.w.pd), str(self.w.sdir), APP)]
+        self.assertIn("game:game/ffxiv_dx11.exe", ids())                       # без слоя игры — «добавлено»
+        (self.w.sdir / "van" / f"{APP}.game.tsv").write_text("game/ffxiv_dx11.exe\t1\t1\n")
+        self.assertNotIn("game:game/ffxiv_dx11.exe", ids())                    # файл игры от лаунчера — не программа
 
 
 class TestChoice(World):
@@ -82,10 +123,23 @@ class TestChoice(World):
 
     def test_boot_from_vg_sync_before_prefix_exists(self):
         sel = self.w.d / "launch.sel"
-        sel.write_text(json.dumps({"39210": {"id": "pfx:" + XIV, "args": ""}, APP: {"id": "pfx:../../x", "args": ""}}))
+        sel.write_text(json.dumps({"39210": {"id": "pfx:" + XIV, "args": ""}, APP: {"id": "pfx:../../x", "args": ""},
+                                   "777": {"id": "pfx:" + XIV, "args": ""}}))
+        (self.w.d / "sel.mods_on").write_text(f"39210\n{APP}\n")               # у 777 «Моды» выключены
         ws.launch_boot(self.w.root, str(self.w.pd), str(self.home), str(sel))
         self.assertTrue(self.conf("39210")[0].endswith("compatdata/39210/pfx/drive_c/" + XIV))   # префикса ещё нет
         self.assertFalse((self.home / ".local/share/vastgame/launch" / APP).exists())           # наружу — нет
+        self.assertFalse((self.home / ".local/share/vastgame/launch/777").exists())             # без «Модов» — как обычно
+
+    def test_launch_only_with_mods_on(self):
+        # «Моды» выключены — игра как обычно, выбор не применяется (окно его запомнит); включены — через программу
+        sdir = str(self.w.sdir)
+        r = ws.launch_set(self.w.root, str(self.w.pd), str(self.home), None, APP, "pfx:" + XIV, "", sdir)
+        self.assertEqual(r, "modsoff")
+        self.assertIsNone(ws.launch_choice(str(self.home), APP))
+        (self.w.sdir / "sel.mods_on").write_text(APP + "\n")
+        self.assertEqual(ws.launch_set(self.w.root, str(self.w.pd), str(self.home), None, APP, "pfx:" + XIV, "", sdir), "ok")
+        self.assertEqual(ws.launch_choice(str(self.home), APP)["id"], "pfx:" + XIV)
 
     def test_report_shows_choice_and_installed(self):
         (self.w.sdir / "launch.sel").write_text(json.dumps({APP: {"id": "pfx:" + XIV, "args": ""}}))
@@ -208,6 +262,12 @@ class TestWolfSide(unittest.TestCase):
             "1": "garbage"}}).encode()).decode()
         m.run("sel_init", env=f'VG_SYNC="{vg}"')
         self.assertEqual(json.loads((m.d / "S/launch.sel").read_text()), {APP: {"id": "pfx:" + XIV, "args": "--x"}})
+
+    def test_vg_sync_mods_toggle(self):
+        m = Machine()
+        vg = base64.b64encode(json.dumps({"games": [], "steam": "store", "mods": {"yes": [APP, "x"], "no": ["5"]}}).encode()).decode()
+        m.run("sel_init", env=f'VG_SYNC="{vg}"')
+        self.assertEqual((m.d / "S/sel.mods_on").read_text(), APP + "\n")             # тумблер «Моды» включён
 
     def test_web_commands(self):
         c = load_wolf_web("/bin/true")["command"]
