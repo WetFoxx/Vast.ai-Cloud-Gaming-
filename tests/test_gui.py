@@ -130,7 +130,7 @@ class TestPrograms(unittest.TestCase):
         self.calls = []
         def run(ip, cmd, args=(), **k):
             self.calls.append((cmd, list(args)))
-            return 0, "prog: ok\n" if cmd == "prog-run" else "prog: auto on\n"
+            return 0, "prog: auto on\n" if cmd == "prog-auto" else "prog: ok\n"
         for obj, name, value in [(gui.wolfnode, "ts_node", lambda: (True, "100.1.2.3", "m.ts.net")),
                                  (gui.wolfnode, "run", run)]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
@@ -156,6 +156,30 @@ class TestPrograms(unittest.TestCase):
         self.assertEqual(gui.settings.get("progs_sel"), {})
         self.assertEqual(self.calls[0], ("prog-auto", ["1", "prog:WeMod/WeMod.exe", "on"]))
 
+    def test_launch_choice_remembered_and_sent(self):
+        # [v5.6] «Запуск игры через программу»: запомнить (уйдёт машинам при аренде) и передать этой машине
+        api = gui.Api()
+        self.addCleanup(gui.settings.set, "launch_sel", None)
+        self.assertEqual(api.prog_launch("1", "pfx:users/x/XIVLauncher.exe", "--a 1"), {"result": "ok"})
+        self.assertEqual(gui.settings.get("launch_sel"), {"1": {"id": "pfx:users/x/XIVLauncher.exe", "args": "--a 1"}})
+        self.assertEqual(self.calls[-1], ("prog-launch", ["1", "pfx:users/x/XIVLauncher.exe", "--a 1"]))
+        api.prog_launch("1", "-", "")
+        self.assertEqual(gui.settings.get("launch_sel"), {})
+        self.assertEqual(self.calls[-1], ("prog-launch", ["1", "-", ""]))
+        with mock.patch.object(gui.wolfnode, "ts_node", lambda: None):          # машины нет — только запомнить
+            self.assertEqual(api.prog_launch("2", "prog:a/b.exe"), {"result": "saved"})
+        self.assertEqual(gui.settings.get("launch_sel"), {"2": {"id": "prog:a/b.exe", "args": ""}})
+        for bad in (("x", "prog:a"), ("1", "/bin/sh"), ("1", "prog:a", "x\ny")):
+            self.assertIn("error", api.prog_launch(*bad))
+
+    def test_install_into_game(self):
+        api = gui.Api()
+        with mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args=(), **k: (self.calls.append((cmd, list(args)))
+                                                                                     or (0, "prog: installing\n"))):
+            self.assertEqual(api.prog_install("1", "prog:XIVLauncher/Setup.exe"), {"result": "installing"})
+        self.assertEqual(self.calls[-1], ("prog-install", ["1", "prog:XIVLauncher/Setup.exe"]))
+        self.assertIn("error", api.prog_install("1", "-"))
+
     def test_names_from_library(self):
         with mock.patch.object(gui.steamlib, "cached", lambda: {"games": [{"appid": "1", "name": "Dawnwalker"}]}):
             out = gui.Api()._progs({"1": {"running": True, "auto": [], "progs": []}, "2": {"running": False}})
@@ -163,9 +187,14 @@ class TestPrograms(unittest.TestCase):
 
     def test_status_record_parsed(self):
         rec = (1, "ok", json.dumps({"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}, 5]},
-                                    "bad": {}}))
+                                    "2": {"installed": True, "launch": {"id": "pfx:a.exe", "args": "-x"}},
+                                    "3": {"launch": "мусор"}, "bad": {}}))
         self.assertEqual(gui.core.progs_of({"progs": rec}),
-                         {"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}]}})
+                         {"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}], "installed": False,
+                                "launch": None},
+                          "2": {"running": False, "auto": [], "progs": [], "installed": True,           # [v5.6]
+                                "launch": {"id": "pfx:a.exe", "args": "-x"}},
+                          "3": {"running": False, "auto": [], "progs": [], "installed": False, "launch": None}})
         self.assertEqual(gui.core.progs_of({"progs": (1, "ok", "не json")}), {})
         self.assertIn("progs", gui.core.NOT_ARCHIVES)                    # не архив: не мешает «Закончить»
 
@@ -560,6 +589,8 @@ class TestPlay(unittest.TestCase):
         # [v4.6] выбор игр со страницы → VG_SYNC (base64 JSON) и тумблеры для прежних скриптов; запоминается
         import base64, json
         gui.settings.set("sync_sel", None)
+        gui.settings.set("launch_sel", {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}})   # [v5.6]
+        self.addCleanup(gui.settings.set, "launch_sel", None)
         self.gate.set()
         self.api.play(5, None, None, "ru", None, False,
                       {"games": {"sgame--The Blood of Dawnwalker": True, "game--B": False}, "saves": {"pfx--1": False}})
@@ -567,7 +598,8 @@ class TestPlay(unittest.TestCase):
         env = self.body["env"]
         # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}, "progs": {}})
+                         {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}, "progs": {},
+                          "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}}})
         self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
         # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
         self.wait_idle()

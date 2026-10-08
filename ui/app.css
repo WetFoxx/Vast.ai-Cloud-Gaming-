@@ -648,3 +648,14 @@ main > :nth-child(n+7) { animation-delay: .24s; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0s !important;
     animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* [v5.6] «Запуск игры» в блоке «Программы игры» */
+.pg-launch { margin: 6px 0 10px; }
+.pg-launch-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pg-launch-label { font-weight: 600; cursor: help; }
+.pg-launch select { max-width: 100%; min-width: 0; flex: 1 1 180px; }
+.pg-launch input[type=text] {
+  flex: 1 1 160px; min-width: 0; font: inherit; font-size: 13px; color: var(--text); background: var(--card);
+  border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px;
+}
+.pg-launch select { font-size: 13px; padding: 6px 8px; }

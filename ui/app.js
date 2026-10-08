@@ -973,6 +973,19 @@ function renderOffersGame() {
   const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
   if (auto.length) main.appendChild(el("div", { className: "og-progs" },
     t("progs.with_game", { list: auto.map((i) => i.split("/").pop()).join(", ") })));
+  // [v5.6] игра запускается через программу (выбрано раньше на главном) — видно и можно вернуть обычный запуск
+  const via = ((libData && libData.launch_sel) || {})[playGame.appid];
+  if (via && via.id) {
+    const line = el("div", { className: "og-progs" }, t("progs.launch_via", { name: via.id.split("/").pop() }) + " · ");
+    const reset = el("button", { className: "link" }, t("progs.launch_via.reset"));
+    reset.addEventListener("click", async () => {
+      if (!DEMO) await api().prog_launch(playGame.appid, "-", "");
+      delete libData.launch_sel[playGame.appid];
+      renderOffersGame();
+    });
+    line.appendChild(reset);
+    main.appendChild(line);
+  }
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
   main.appendChild(none);
@@ -1060,13 +1073,30 @@ function renderProgs(progs) {
   for (const [appid, g] of games) {
     box.appendChild(el("div", { className: "pg-title" }, g.name ? t("progs.title.game", { name: g.name }) : t("progs.title")));
     if (!(g.progs || []).length) box.appendChild(el("div", { className: "pg-hint" }, t("progs.empty")));
+    box.appendChild(launchRow(appid, g, progs));
     for (const p of g.progs || []) {
       const row = el("div", { className: "pg-row" });
       const nm = el("div", { className: "pg-name" });
-      nm.append(el("b", {}, p.name), el("span", { className: "sub" },
-        p.where === "game" ? t("progs.where.game") : t("progs.where.folder", { folder: p.where })));
+      nm.append(el("b", { title: p.name }, p.name), p.where === "pfx"     // [v5.6] коротко; подробности — подсказкой
+        ? el("span", { className: "sub", title: progWhere(p) }, t("progs.where.pfx_short")) : el("span", { className: "sub" }, progWhere(p)));
       const note = progNotes[appid + p.id];
       if (note && Date.now() - note.at < 20000) nm.appendChild(el("span", { className: "pg-note" }, note.text));
+      if (p.setup) {                                       // [v5.6] установщик — «Установить в игру», один раз
+        const inst = button(t("progs.install"), async () => {
+          inst.disabled = true;
+          progNotes[appid + p.id] = { at: Date.now(), text: t("progs.install.starting") };
+          renderProgs(progs);
+          const r = DEMO ? { result: "installing" } : await api().prog_install(appid, p.id);
+          progNotes[appid + p.id] = { at: Date.now() + 40000, text: r.error ? errText(r.error) : t("progs.result." + (r.result || "failed")) };
+          renderProgs(progs);
+        }, true);
+        inst.classList.add("small");
+        inst.disabled = g.running || !g.installed;
+        inst.title = g.running ? t("progs.install.need_closed") : !g.installed ? t("progs.install.need_installed") : t("progs.install.hint");
+        row.append(nm, inst);
+        box.appendChild(row);
+        continue;
+      }
       const auto = el("label", { className: "pg-auto", title: t("progs.auto.hint") });
       const cb = el("input", { type: "checkbox", checked: (g.auto || []).includes(p.id) });
       cb.addEventListener("change", async () => {
@@ -1089,6 +1119,48 @@ function renderProgs(progs) {
       box.appendChild(row);
     }
   }
+}
+
+function progWhere(p) {
+  return p.where === "game" ? t("progs.where.game") : p.where === "pfx" ? t("progs.where.pfx") : t("progs.where.folder", { folder: p.where });
+}
+
+// [v5.6] «Запуск игры»: как обычно или через программу (загрузчик модов, лаунчер) — Steam запускает её вместо .exe игры
+// тем же Proton. Выбор запоминается (уходит машинам при аренде) и сразу передаётся этой машине.
+function launchRow(appid, g, progs) {
+  const wrap = el("div", { className: "pg-launch" });
+  const cur = (g.launch && g.launch.id) || "-";
+  const sel = el("select", {});
+  sel.appendChild(el("option", { value: "-" }, t("progs.launch.normal")));
+  const choices = (g.progs || []).filter((p) => !p.setup);
+  if (cur !== "-" && !choices.some((p) => p.id === cur)) choices.push({ id: cur, name: cur.split("/").pop(), where: "" });
+  const short = (p) => p.where === "pfx" ? t("progs.where.pfx_short") : p.where === "game" ? t("progs.where.game_short")
+    : t("progs.where.folder", { folder: p.where });
+  for (const p of choices) sel.appendChild(el("option", { value: p.id }, p.where ? `${p.name} (${short(p)})` : p.name));
+  sel.value = cur;
+  const args = el("input", { type: "text", placeholder: t("progs.launch.args"), value: (g.launch && g.launch.args) || "" });
+  const save = button(t("progs.launch.save"), async () => {
+    save.disabled = true;
+    progNotes[appid + ":launch"] = { at: Date.now() + 60000, text: t("progs.launch.saving") };
+    renderProgs(progs);
+    const id = sel.value, a = id === "-" ? "" : args.value.trim();
+    const r = DEMO ? { result: "ok" } : await api().prog_launch(appid, id, a);
+    if (!r.error) g.launch = id === "-" ? null : { id, args: a };
+    progNotes[appid + ":launch"] = { at: Date.now(), text: r.error ? errText(r.error) : t("progs.launch.result." + (r.result || "failed")) };
+    renderProgs(progs);
+  }, true);
+  save.classList.add("small");
+  const sync = () => { args.hidden = sel.value === "-"; save.disabled = sel.value === cur && (args.value.trim() === ((g.launch && g.launch.args) || "")); };
+  sel.addEventListener("change", sync);
+  args.addEventListener("input", sync);
+  sync();
+  const line = el("div", { className: "pg-launch-line" });
+  line.append(el("span", { className: "pg-launch-label", title: t("progs.launch.hint") }, t("progs.launch")), sel, args, save);
+  wrap.appendChild(line);
+  const note = progNotes[appid + ":launch"];
+  if (note && Date.now() - note.at < 20000) wrap.appendChild(el("div", { className: "pg-note" }, note.text));
+  else wrap.appendChild(el("div", { className: "pg-hint" }, t("progs.launch.hint")));
+  return wrap;
 }
 
 // ---------------------------------------------------------------- «Закончить» и аварийное удаление
@@ -2369,6 +2441,13 @@ function demoState(kind) {
              progs: { "3751260": { name: "The Blood of Dawnwalker", running: true, auto: ["game:Dawnwalker/Binaries/Win64/treiner.exe"],
                                    progs: [{ id: "game:Dawnwalker/Binaries/Win64/treiner.exe", name: "treiner.exe", where: "game" },
                                            { id: "prog:WeMod/WeMod.exe", name: "WeMod.exe", where: "WeMod" }] } } },
+    // [v5.6] ?demo=launch — FF14 закрыта: установщик XIVLauncher в Programs, установленный лаунчер выбран для запуска
+    launch: { ...base, state: "ready", kind: "ready",
+              progs: { "312060": { name: "FINAL FANTASY XIV Online Free Trial", running: false, installed: true, auto: [],
+                                   launch: { id: "pfx:users/steamuser/AppData/Local/XIVLauncher/XIVLauncher.exe", args: "" },
+                                   progs: [{ id: "prog:XIVLauncher/Setup.exe", name: "Setup.exe", where: "XIVLauncher", setup: true },
+                                           { id: "pfx:users/steamuser/AppData/Local/XIVLauncher/XIVLauncher.exe",
+                                             name: "XIVLauncher.exe", where: "pfx" }] } } },
     syncing: { ...base, state: "syncing", kind: "syncing", busy: ["pfx--3751260", "sgame--Hades II"],
                archives: { "pfx--3751260": [0, "up", ""], "sgame--Hades II": [0, "up", ""], "steam-state": [0, "ok", ""] },
                progress: { "sgame--Hades II": { done: 4.1e9, total: 11.8e9, speed: 48e6 } },

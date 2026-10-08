@@ -66,7 +66,8 @@ TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 �
 OFFER_SORTS = ("price", "ping", "net", "traffic", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
-PROG_ID = re.compile(r"^(game|prog):[^\x00-\x1f]{1,400}$")   # [v5.4] программа игры (путь проверяет машина)
+PROG_ID = re.compile(r"^(game|prog|pfx):[^\x00-\x1f]{1,400}$")   # [v5.4] программа игры (путь проверяет машина)
+PROG_ARGS = re.compile(r"^[^\x00-\x1f]{0,300}$")                  # [v5.6] параметры программы-загрузчика
 SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
 REPLACE_WAIT = 180   # с: «Сменить машину» — сколько ждать, пока прежний запуск закончится и Vast уберёт машину
 REPLACE_POLL = 2
@@ -332,6 +333,7 @@ class Api:
             chosen["games"] = [a for a in chosen["games"] if not a.startswith("sgame--")]   # [v4.8] их качает Steam
             chosen["mods"] = cloudgames.mods_answers()                                     # [v5.0] «сохранять моды?»
             chosen["progs"] = settings.get("progs_sel") or {}                              # [v5.4] «вместе с игрой»
+            chosen["launch"] = settings.get("launch_sel") or {}                            # [v5.6] «запускать через»
             sync.update(steam_games=False,
                         other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
             settings.set("sync", sync)
@@ -820,6 +822,42 @@ class Api:
                 pass                         # запомнено — уйдёт следующей машине; эта узнает при перезапуске игры
         return {"ok": True}
 
+    def _prog_cmd(self, cmd, args, timeout):
+        node = wolfnode.ts_node()
+        if not node:
+            return {"error": {"key": "ask.no_machine", "params": {}, "text": "no machine"}}
+        try:
+            code, out = wolfnode.run(node[1], cmd, args, timeout=timeout, on_notice=self._ssh_notice)
+        except VastgameError as e:
+            return {"error": error_data(e)}
+        m = re.search(r"prog: (\w+)", out or "")
+        settings.applog(f"{cmd} {' '.join(args[:2])}: {m.group(1) if m else (out or '').strip()[-120:]}")
+        return {"result": m.group(1) if m else "failed"}
+
+    def prog_launch(self, appid, ident, args=""):
+        """[v5.6] Запускать игру через программу ident («-» — как обычно), с параметрами: запомнить (уйдёт машинам при
+        аренде) и передать работающей машине. {"result": ok|busy|nofile|failed} — busy: игра запущена, Steam не
+        перезапустить — выбор сработает на следующей машине; нет машины — {"result": "saved"}."""
+        appid, ident, args = str(appid), str(ident), str(args or "")
+        if not (appid.isdigit() and (ident == "-" or PROG_ID.match(ident)) and PROG_ARGS.match(args)):
+            return {"error": {"key": "progs.bad", "params": {}, "text": "bad program"}}
+        sel = settings.get("launch_sel") or {}
+        sel = {k: v for k, v in sel.items() if k != appid}
+        if ident != "-":
+            sel[appid] = {"id": ident, "args": args}
+        settings.set("launch_sel", sel)
+        if not wolfnode.ts_node():
+            return {"result": "saved"}
+        return self._prog_cmd("prog-launch", [appid, ident, args], 120)    # перезапуск Steam — до минуты с лишним
+
+    def prog_install(self, appid, ident):
+        """[v5.6] «Установить в игру»: один раз запустить установщик в префиксе игры (игра закрыта). Окно установщика —
+        в Moonlight. {"result": installing|running|notinstalled|nofile|busy|failed}."""
+        appid, ident = str(appid), str(ident)
+        if not (appid.isdigit() and PROG_ID.match(ident)):
+            return {"error": {"key": "progs.bad", "params": {}, "text": "bad program"}}
+        return self._prog_cmd("prog-install", [appid, ident], 120)
+
     # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
     def library(self, fresh=False):
         """Библиотека: fresh=False — прошлый список (сразу), True — свежий из Steam (секунды). Без аккаунтов — пусто.
@@ -832,6 +870,7 @@ class Api:
         if mods is not None:
             settings.set("mods_known", mods)
         return {**lib, "progs_sel": settings.get("progs_sel") or {},                # [v5.4] программы «вместе с игрой»
+                "launch_sel": settings.get("launch_sel") or {},              # [v5.6] «запускать игру через»
                 "mods": mods if mods is not None else settings.get("mods_known") or {},
                 "mods_save": settings.get("mods_sel") or {}}
 

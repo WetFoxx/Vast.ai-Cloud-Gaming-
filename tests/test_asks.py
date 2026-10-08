@@ -174,7 +174,7 @@ class TestRental(unittest.TestCase):
         # [v4.8] игры Steam качает Steam: в выборе их нет, машине сказано "steam": "store"
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
                          {"games": ["game--The Blood of Dawnwalker"], "saves_off": ["pfx--1"], "steam": "store",
-                          "mods": {"yes": [], "no": []}, "progs": {}})
+                          "mods": {"yes": [], "no": []}, "progs": {}, "launch": {}})
         self.assertNotIn("VG_PLAY", env)
 
     def test_library_game_goes_to_machine(self):

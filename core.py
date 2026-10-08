@@ -137,8 +137,9 @@ def asks_of(s):
 
 
 def progs_of(s):
-    """[v5.4] Программы игр со страницы статуса машины: {номер: {"running", "auto": [id], "progs": [{id, name, where}]}}
-    или {} (скрипт старше v5.4, запись не разобрать)."""
+    """[v5.4] Программы игр со страницы статуса машины: {номер: {"running", "auto": [id], "progs": [{id, name, where,
+    setup}], "installed", "launch": {id, args} | None}} или {} (скрипт старше v5.4, запись не разобрать).
+    [v5.6] installed — игра поставлена в Steam (можно «Установить в игру»), launch — через что запускается игра."""
     rec = (s or {}).get(PROGS)
     try:
         d = json.loads(rec[2]) if rec else {}
@@ -149,18 +150,22 @@ def progs_of(s):
         if str(a).isdigit() and isinstance(v, dict):
             out[str(a)] = {"running": bool(v.get("running")),
                            "auto": [x for x in v.get("auto") or [] if isinstance(x, str)],
-                           "progs": [p for p in v.get("progs") or [] if isinstance(p, dict) and isinstance(p.get("id"), str)]}
+                           "progs": [p for p in v.get("progs") or [] if isinstance(p, dict) and isinstance(p.get("id"), str)],
+                           "installed": bool(v.get("installed")),
+                           "launch": v["launch"] if isinstance(v.get("launch"), dict)
+                           and isinstance(v["launch"].get("id"), str) else None}
     return out
 
 
-def vg_sync(games, saves_off, mods=None, progs=None):
+def vg_sync(games, saves_off, mods=None, progs=None, launch=None):
     """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment.
     [v4.8] "steam": "store" — игры Steam качает сам Steam: машина не скачивает их из облака, не выгружает и не
     спрашивает о них (игры из папки Games — по выбору, как раньше)."""
     return base64.b64encode(json.dumps({"games": [g for g in games if not g.startswith("sgame--")],
                                         "saves_off": list(saves_off), "steam": "store",
                                         "mods": mods or {"yes": [], "no": []},
-                                        "progs": progs or {}},          # [v5.4] программы «вместе с игрой»
+                                        "progs": progs or {},           # [v5.4] программы «вместе с игрой»
+                                        "launch": launch or {}},        # [v5.6] «запускать игру через программу»
                                        ensure_ascii=False).encode()).decode()
 
 
@@ -225,7 +230,8 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
             env[var] = "1" if sync[k] else "0"
     sel = (sync or {}).get("select")
     if isinstance(sel, dict):
-        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"), sel.get("progs"))
+        env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"), sel.get("progs"),
+                                 sel.get("launch"))
     play = (sync or {}).get("play")
     if isinstance(play, dict) and play.get("appid") and play.get("account"):
         env["VG_PLAY"] = vg_play(play)
