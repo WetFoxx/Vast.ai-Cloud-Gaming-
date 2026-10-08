@@ -35,7 +35,7 @@ SHORT_PY = TMP / "wolf-shortcuts.py"
 SHORT_PY.write_text(heredoc("wolf-shortcuts.py", "SHORTCUTS"))
 FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "store", "tool", "inlist", "addline", "rmline", "want", "wants",
                                    "ondisk", "askable", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
-                                   "gsync", "idirs", "steam_ready"))
+                                   "gsync", "idirs", "flags_ready", "steam_ready"))
 FUNCS += "\n" + re.search(r"^HID=.*$", WOLF, re.M).group(0)
 
 
@@ -144,14 +144,15 @@ class TestSteamReady(unittest.TestCase):
         # проходе, ни при выключении; установлена (4), ждёт обновления (6), запущена (68), паспорт без флагов — да
         m = Machine()
         games = {"Done": 4, "Downloading": 1026, "Updating": 1030, "Missing": 36, "Pending": 6, "Old": None,
-                 "Queued": 2}                                          # в очереди на установку: файлов ещё нет
+                 "Queued": 2,                                          # в очереди на установку: файлов ещё нет
+                 "Paused": 516}                                        # [v5.6] обновление отложено Steam — файлы целы
         for i, (folder, flags) in enumerate(games.items()):
             m.steam_game(100 + i, folder, flags=flags)
         (m.d / "home/Games/Folder").mkdir()
         env = f'VG_SYNC="{vg_sync(["sgame--" + g for g in games] + ["game--Folder"])}"'
         for now in ("", "; NOW=1"):
             out = m.run("sel_init; gsync", env=env + now)
-            self.assertEqual(sorted(out.split("\n")[:-1]), ["game--Folder", "sgame--Done", "sgame--Old", "sgame--Pending"])
+            self.assertEqual(sorted(out.split("\n")[:-1]), ["game--Folder", "sgame--Done", "sgame--Old", "sgame--Paused", "sgame--Pending"])
         out = m.run('for f in Done Downloading; do steam_ready "sgame--$f" && echo "READY $f"; done; true', env=env)
         self.assertEqual(out.split(), ["READY", "Done"])
         # по выходу из игры — та же проверка (запущенная игра установлена, но бывает и обновление поверх)
