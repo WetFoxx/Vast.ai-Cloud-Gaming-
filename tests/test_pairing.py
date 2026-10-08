@@ -243,3 +243,27 @@ class TestPairFreshSunshine(TestPairNewSunshine):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCreds(unittest.TestCase):
+    """Пароль кабинета — из ключа Vast: один и тот же на всех компьютерах человека (Mac и Windows)."""
+
+    def creds_with(self, store):
+        puts = []
+        with mock.patch.object(pairing.keystore, "get", lambda name: store.get(name)), \
+                mock.patch.object(pairing.keystore, "put", lambda name, value: puts.append(name)):
+            return pairing.creds(), puts
+
+    def test_same_vast_key_same_password_everywhere(self):
+        a, puts = self.creds_with({"VAST_API_KEY": "key-1", "SUNSHINE_PASSWORD": "old-mac"})
+        b, _ = self.creds_with({"VAST_API_KEY": "key-1"})                  # другой компьютер, своего пароля нет
+        self.assertEqual(a, b)
+        self.assertEqual((a[0], len(a[1])), ("vastgame", 24))
+        self.assertNotIn("key-1", a[1])
+        self.assertEqual(puts, [])                                         # ничего не сохраняем
+        self.assertNotEqual(self.creds_with({"VAST_API_KEY": "key-2"})[0], a)
+
+    def test_without_vast_key_random_and_saved(self):
+        (user, pw), puts = self.creds_with({})
+        self.assertEqual((user, puts), ("vastgame", ["SUNSHINE_PASSWORD"]))
+        self.assertGreaterEqual(len(pw), 20)

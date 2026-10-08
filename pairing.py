@@ -14,6 +14,9 @@
 # или машина его не принимает (кабинет настраивали вручную, другой компьютер) — приложение задаёт
 # свой на машине: wolf sunshine-creds (wolf-setup.sh v3.13), пароль — во вход команды, не в её текст.
 
+import base64
+import hashlib
+import hmac
 import secrets
 import subprocess
 import tempfile
@@ -43,7 +46,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def creds():
-    """(логин, пароль) кабинета Sunshine из Связки ключей; нет — придумать и сохранить."""
+    """(логин, пароль) кабинета Sunshine. Пароль — из ключа Vast (HMAC-SHA256, необратимо): у всех компьютеров
+    человека он один и тот же (раньше у Mac и Windows были свои случайные — каждый «чужой» перезаписывал логин на
+    машине, и Sunshine лишний раз перезапускалась, 2026-10-08). Ключа Vast нет — случайный, в Связке ключей."""
+    vast = keystore.get("VAST_API_KEY")
+    if vast:
+        mac = hmac.new(vast.encode(), b"vastgame-sunshine-login-v1", hashlib.sha256).digest()
+        return USER, base64.urlsafe_b64encode(mac).decode()[:24]
     pw = keystore.get("SUNSHINE_PASSWORD")
     if not pw:
         pw = secrets.token_urlsafe(18)
