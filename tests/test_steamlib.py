@@ -269,9 +269,18 @@ class FakeWindow:
             self.handlers.append(fn)
             return self
 
+    class Loaded(Event):
+        def __iadd__(self, fn):                  # заглушка «открываю…» уже показана
+            fn()
+            return self
+
     def __init__(self, token=None, close_after=None):
         self.token, self.close_after, self.polls, self.destroyed = token, close_after, 0, False
-        self.events = mock.Mock(closed=self.Event())
+        self.events = mock.Mock(closed=self.Event(), loaded=self.Loaded())
+        self.urls = []
+
+    def load_url(self, url):
+        self.urls.append(url)
 
     def evaluate_js(self, code):
         if code == steamlib.TAKE:
@@ -300,6 +309,7 @@ class TestLoginWindow(Base):
         self.assertEqual(r, {"ok": True, "account": {"id": A, "name": "Alex"}})
         self.assertNotIn(tok, json.dumps(r))                             # пропуск в страницу не попадает
         self.assertTrue(win.destroyed)
+        self.assertEqual(win.urls, [steamlib.LOGIN_URL])                  # после заглушки — страница Steam
         self.assertEqual(self.store, {f"STEAM_{A}": tok})
         # [0.4.5] игры нового аккаунта — уже в библиотеке, окну не нужно ждать полного обновления
         self.assertEqual({g["appid"] for g in steamlib.cached()["games"]}, {"10", "20", "40"})
