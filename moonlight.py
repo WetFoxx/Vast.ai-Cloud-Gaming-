@@ -11,6 +11,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 
 import paths
 
@@ -90,8 +92,21 @@ def stream(host, app, size=None, fps=None, bitrate=None):
         opts += ["--fps", str(fps)]
     if bitrate:
         opts += ["--bitrate", str(int(bitrate) * 1000)]
-    subprocess.Popen([exe, "stream", *opts, host, app], stdin=subprocess.DEVNULL, env=paths.tailscale_env(),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **paths.detached())
+    out = subprocess.DEVNULL
+    if sys.platform == "win32":
+        # Windows: Moonlight пишет журнал в свой вывод, если он куда-то направлен, — а при DEVNULL журнал пропадал.
+        # Файл — по тем же правилам, что на Mac (/tmp/Moonlight-<время>.log): его читает log_tail
+        try:
+            out = open(os.path.join(tempfile.gettempdir(), f"Moonlight-{int(time.time())}.log"), "ab")
+        except OSError:
+            out = subprocess.DEVNULL
+    try:
+        subprocess.Popen([exe, "stream", *opts, host, app], stdin=subprocess.DEVNULL, env=paths.tailscale_env(),
+                         stdout=out, stderr=subprocess.STDOUT if out is not subprocess.DEVNULL else subprocess.DEVNULL,
+                         **paths.detached())
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()                   # у Moonlight своя копия файла
     return True
 
 
@@ -166,7 +181,8 @@ def log_tail(n=12):
     """Последние предупреждения и ошибки из свежего журнала Moonlight (/tmp/Moonlight-<время>.log) — для app.log,
     когда связка «не видна». Строки со словом PIN не берём: одноразовый, но всё же код."""
     import glob
-    logs = sorted(glob.glob("/tmp/Moonlight-*.log"), key=os.path.getmtime)
+    where = tempfile.gettempdir() if sys.platform == "win32" else "/tmp"      # Windows: файл пишет stream()
+    logs = sorted(glob.glob(os.path.join(where, "Moonlight-*.log")), key=os.path.getmtime)
     if not logs:
         return ""
     try:
