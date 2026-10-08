@@ -147,6 +147,26 @@ def extras():
     return out
 
 
+# [v5.6] Рецепты — готовые наборы модов для конкретных игр (машина: wolf-recipes.py); у игры — один переключатель
+RECIPES = {"ff14-ru": ("312060", "39210")}       # русский перевод xivrus.ru: FINAL FANTASY XIV пробная и полная
+
+
+def recipe_for(appid):
+    """Рецепт, который есть у этой игры, или None."""
+    return next((r for r, ids in RECIPES.items() if str(appid) in ids), None)
+
+
+def remember_recipe(appid, on):
+    sel = dict(settings.get("recipe_sel") or {})
+    sel[str(appid)] = bool(on)
+    settings.set("recipe_sel", sel)
+
+
+def recipes_list():
+    """{номер: [рецепт]} — включённые, машине (VG_SYNC "recipes")."""
+    return {a: [recipe_for(a)] for a, v in sorted((settings.get("recipe_sel") or {}).items()) if v and recipe_for(a)}
+
+
 def remember_gdata(appid, on):
     """[v5.6] Тумблер «Хранить игру в облаке» (игры, которые докачивает их лаунчер) — для следующих машин."""
     sel = dict(settings.get("gdata_sel") or {})

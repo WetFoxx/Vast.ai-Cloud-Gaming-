@@ -593,6 +593,8 @@ class TestPlay(unittest.TestCase):
         self.addCleanup(gui.settings.set, "launch_sel", None)
         gui.settings.set("gdata_sel", {"312060": True, "20": False})                              # [v5.6]
         self.addCleanup(gui.settings.set, "gdata_sel", None)
+        gui.settings.set("recipe_sel", {"312060": True, "39210": False, "570": True})             # [v5.6] рецепты
+        self.addCleanup(gui.settings.set, "recipe_sel", None)
         self.gate.set()
         self.api.play(5, None, None, "ru", None, False,
                       {"games": {"sgame--The Blood of Dawnwalker": True, "game--B": False}, "saves": {"pfx--1": False}})
@@ -601,7 +603,8 @@ class TestPlay(unittest.TestCase):
         # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
                          {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}, "progs": {},
-                          "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}}, "gdata": ["312060"]})
+                          "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}}, "gdata": ["312060"],
+                          "recipes": {"312060": ["ff14-ru"]}})
         self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
         # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
         self.wait_idle()
@@ -887,6 +890,22 @@ class TestModsSave(unittest.TestCase):
         self.assertEqual(api.set_mods_save("10", False), {"ok": True})
         self.assertEqual(gui.cloudgames.mods_answers(), {"yes": [], "no": []})
         self.assertIn("error", api.set_mods_save("10; rm", True))
+
+    def test_recipe_toggle(self):
+        # [v5.6] «Русский перевод» — только у FF14 (пробной и полной); машине — {номер: [рецепт]}
+        api = gui.Api()
+        gui.settings.set("recipe_sel", None)
+        self.addCleanup(gui.settings.set, "recipe_sel", None)
+        self.assertEqual(api.set_recipe("39210", True), {"ok": True})
+        self.assertIn("error", api.set_recipe("570", True))
+        self.assertEqual(gui.cloudgames.recipes_list(), {"39210": ["ff14-ru"]})
+        lib = {"games": [{"appid": "312060", "name": "FF", "accounts": ["7"], "family": []},
+                         {"appid": "20", "name": "G", "accounts": ["7"], "family": []}]}
+        with mock.patch.object(gui.steamlib, "cached", lambda: lib), \
+             mock.patch.object(gui.steamlib, "accounts", lambda: [{"id": "7"}]):
+            self.assertTrue(api._library_game({"appid": "312060", "account": "7", "recipe": True})["recipe"])
+            self.assertFalse(api._library_game({"appid": "20", "account": "7", "recipe": True})["recipe"])
+        self.assertEqual(gui.cloudgames.recipes_list(), {"312060": ["ff14-ru"], "39210": ["ff14-ru"]})
 
     def test_game_in_cloud_toggle(self):
         # [v5.6] «Хранить игру в облаке» — с карточки игры и при аренде с игрой; машине — номера включённых

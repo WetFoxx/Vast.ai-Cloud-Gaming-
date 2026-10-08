@@ -913,7 +913,7 @@ $("rent").addEventListener("click", async () => {
     return;
   }
   const game = playGame ? { appid: playGame.appid, account: playGame.account, mods: !!playGame.mods,
-                            gdata: !!playGame.gdata } : null;
+                            gdata: !!playGame.gdata, recipe: !!playGame.recipe } : null;
   const r = await api().play(o.id, null, disk, LANG, spare, docker, select, game);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   playNow = playGame ? { ...playGame } : null;
@@ -941,7 +941,8 @@ function startGame(g) {
   const mods = (libData && libData.mods && libData.mods[g.appid]) || null;
   playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
                header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: modsSaveOn(g.appid),
-               gdataInfo: (libData && libData.lgame && libData.lgame[g.appid]) || null, gdata: gdataOn(g.appid) };
+               gdataInfo: (libData && libData.lgame && libData.lgame[g.appid]) || null, gdata: gdataOn(g.appid),
+               recipe: recipeOn(g.appid) };
   replaceMode = false; replaceBlocked = false;
   openOffers();
 }
@@ -972,6 +973,7 @@ function renderOffersGame() {
   }
   main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; viaText(); }));
   main.appendChild(gdataBlock(playGame.appid, playGame.gdataInfo, (on) => { playGame.gdata = on; }));
+  if (recipeOf(playGame.appid)) main.appendChild(recipeBlock(playGame.appid, (on) => { playGame.recipe = on; }));
   // [v5.4] программы, которые запустятся вместе с игрой (выбраны раньше на главном)
   const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
   if (auto.length) main.appendChild(el("div", { className: "og-progs" },
@@ -1049,6 +1051,30 @@ function gdataBlock(appid, info, onChange, locked = false, state = null) {
   return box;
 }
 
+// [v5.6] Рецепт игры — готовый набор модов одним переключателем (у FF14 — русский перевод xivrus.ru: XIVLauncher,
+// Dalamud, Penumbra и перевод ставит машина сама, на следующих машинах — только обновляет перевод). Вид — как у «Моды».
+function recipeOf(appid) { return (libData && libData.recipe_apps && libData.recipe_apps[appid]) || null; }
+function recipeOn(appid) { return !!(recipeOf(appid) && libData.recipes && libData.recipes[appid]); }
+function recipeBlock(appid, onChange, locked = false, state = null) {
+  const r = recipeOf(appid) || "ff14-ru";
+  const on = state === null ? recipeOn(appid) : state;
+  const box = el("label", { className: "mods-save" + (on ? " on" : "") + (locked ? " locked" : "") });
+  const cb = el("input", { type: "checkbox", checked: on, disabled: locked });
+  const txt = el("div");
+  txt.append(el("b", {}, t(`recipe.${r}.toggle`)),
+             el("span", { className: "sub" }, t(on ? `recipe.${r}.on` : `recipe.${r}.off`) + (locked ? " " + t("mods.locked") : "")));
+  box.append(txt, cb);
+  if (locked) return box;
+  cb.addEventListener("change", async () => {
+    if (libData) libData.recipes = { ...(libData.recipes || {}), [appid]: cb.checked };
+    box.classList.toggle("on", cb.checked);
+    txt.lastChild.textContent = t(cb.checked ? `recipe.${r}.on` : `recipe.${r}.off`);
+    if (onChange) onChange(cb.checked);
+    if (!DEMO) await api().set_recipe(appid, cb.checked);
+  });
+  return box;
+}
+
 // Ход игры на главном (из status.play или live().play)
 function renderPlay(play, game, streaming, progs) {
   const box = $("play-box");
@@ -1057,7 +1083,7 @@ function renderPlay(play, game, streaming, progs) {
   const name = (game && game.name) || "";
   let key = play.state === "wait" ? (play.text === "login" ? "login" : play.text === "other" ? "other" : "steam")
     : play.state === "down" ? "download"
-    : play.state === "up" ? (play.text === "mods" ? "mods" : play.text === "game" ? "game" : "launch")
+    : play.state === "up" ? (["mods", "game", "recipe"].includes(play.text) ? play.text : "launch")
     : play.state === "ok" ? "running" : "err";
   // запись машины «running» остаётся после выхода из игры — закрыта ли она, видно по списку программ (v5.4)
   const pr = game && progs && progs[game.appid];
@@ -1085,6 +1111,7 @@ function renderPlay(play, game, streaming, progs) {
   }
   if (game && game.appid) main.appendChild(modsSaveBlock(game.appid, null, null, true, !!game.mods));
   if (game && game.appid && game.gdata) main.appendChild(gdataBlock(game.appid, null, null, true, true));
+  if (game && game.appid && game.recipe) main.appendChild(recipeBlock(game.appid, null, true, true));
   if (["login", "other", "err", "running", "closed"].includes(key) && current && current.status.links) {
     main.appendChild(button(t("play.open"), () => startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop"), key !== "running"));
   }
@@ -2578,9 +2605,12 @@ function demoLibrary() {
       [{ id: A, name: "Alex", until: 1809000000, expired: false }, { id: B, name: "Bob", until: 1790000000, expired: new URLSearchParams(location.search).get("lib") === "expired" }],
     games: [g(1245620, "ELDEN RING", [A, B], [], 9), g(1091500, "Cyberpunk 2077", [A], [], 8), g(1145350, "Hades II", [A], [], 7),
       g(1086940, "Baldur's Gate 3", [B], [], 6), g(1174180, "Red Dead Redemption 2", [], [A]), g(292030, "The Witcher 3", [A]),
-      g(570, "Dota 2", [A, B]), g(2050650, "Resident Evil 4", [B]), g(9999999, "Неизвестная игра", [A])],
+      g(570, "Dota 2", [A, B]), g(2050650, "Resident Evil 4", [B]), g(312060, "FINAL FANTASY XIV Online Free Trial", [A], [], 5),
+      g(9999999, "Неизвестная игра", [A])],
     errors: [], at: Math.floor(Date.now() / 1000),
-    mods: { "1245620": { name: "mod--1245620--ELDEN RING", bytes: 340e6, mtime: "2026-09-28" } }, mods_save: { "1245620": true } };
+    mods: { "1245620": { name: "mod--1245620--ELDEN RING", bytes: 340e6, mtime: "2026-09-28" } }, mods_save: { "1245620": true },
+    lgame: { "312060": { name: "lgame--312060--FINAL FANTASY XIV Online Free Trial", bytes: 86.5e9, mtime: "2026-10-08" } },
+    gdata: { "312060": true }, recipes: { "312060": true }, recipe_apps: { "312060": "ff14-ru", "39210": "ff14-ru" } };
 }
 
 function demoGames() {

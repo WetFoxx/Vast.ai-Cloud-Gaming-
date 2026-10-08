@@ -186,6 +186,17 @@ class TestWrapper(unittest.TestCase):
         self.assertEqual(out[-1], f"cwd={self.target.parent}")                             # папка программы
         self.assertTrue((self.launch / APP).exists())                                      # выбор — постоянный
 
+    def test_new_prefix_cmd_allowed(self):
+        # [v5.6] рецепт создаёт «диск C:»: cmd.exe внутри префикса этой игры ещё нет — Proton создаст его до запуска
+        cmd = f"/h/.steam/steamapps/compatdata/{APP}/pfx/drive_c/windows/system32/cmd.exe"
+        (self.launch / f"{APP}.once").write_text(f"{cmd}\n/c exit\npfx\n")
+        out = self.run_wrap()
+        self.assertEqual(out[8:11], [cmd, "/c", "exit"])
+        # чужой путь, которого нет, — нет (и не в префиксе другой игры)
+        for bad in ("/h/nowhere/x.exe", "/h/.steam/steamapps/compatdata/1/pfx/drive_c/windows/system32/cmd.exe"):
+            (self.launch / f"{APP}.once").write_text(f"{bad}\n\nx\n")
+            self.assertNotIn(bad, self.run_wrap())
+
     def test_installer_once(self):
         (self.launch / f"{APP}.once").write_text(f"{self.target}\n\nprog:x\n")
         self.assertIn(str(self.target), self.run_wrap())

@@ -519,6 +519,14 @@ open(os.path.join(s, "sel.mods_on"), "w").write("".join(str(n) + "\n" for n in m
 open(os.path.join(s, "sel.gdata"), "w").write("".join(str(n) + "\n" for n in d.get("gdata") or [] if str(n).isdigit()))
 if d.get("steam") == "store":
     open(os.path.join(s, "sel.store"), "w").close()
+recipes = d.get("recipes") if isinstance(d.get("recipes"), dict) else {}  # [v5.6] рецепты: {номер: ["ff14-ru"]}
+by = {}
+for k, v in recipes.items():
+    for r in v if str(k).isdigit() and isinstance(v, list) else []:
+        if isinstance(r, str) and r in ("ff14-ru",):
+            by.setdefault(r, []).append(str(k))
+for r, ids in by.items():
+    open(os.path.join(s, "sel.recipe." + r), "w").write("".join(i + "\n" for i in ids))
 progs = d.get("progs") if isinstance(d.get("progs"), dict) else {}  # [v5.4] программы «вместе с игрой»: {номер: [id]}
 json.dump({str(k): [i for i in v if isinstance(i, str) and i.split(":", 1)[0] in ("game", "prog", "pfx") and "\0" not in i]
            for k, v in progs.items() if str(k).isdigit() and isinstance(v, list)},
@@ -702,6 +710,7 @@ play_watch() {
         flock "$L/snap-$a.lock" true                  # [v5.6] снимок и архив игры мог делать проход наблюдения
         mods_apply "$a" "$dir"
       fi
+      recipe_play "$a" "$dir"                         # [v5.6] рецепт игры (перевод FF14…) — до запуска
       play_launch "$a"; return 0
     fi
     if [ "${d:-0}" -gt "$last" ] && [ "$last" -ge 0 ]; then
@@ -1893,12 +1902,72 @@ runtimes() {
   [ -e "$L/$a.once" ] && u mv -f "$L/$a.once" "$L/$a.next"        # установщик человека — после библиотек
   u sh -c 'printf "%s\n%s\n%s\n" "$1" "/c C:\vastgame\runtimes.cmd" "runtimes" > "$0"' "$L/$a.once" "$c/windows/system32/cmd.exe"
   log "библиотеки $a: ставлю Visual C++ в «диск C:» игры"
+  launch_opts "$a" >/dev/null
   u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
   for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done     # запустился
   for i in $(seq 300); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done   # закончил
   u rm -rf "$c/vastgame"
   [ -e "$L/$a.next" ] && u mv -f "$L/$a.next" "$L/$a.once"
   log "библиотеки $a: $([ -e "$c/.vastgame-runtimes" ] && echo поставлены || echo "не встали — продолжаю без них")"
+}
+# [v5.6] Один раз запустить через Steam (прокладкой, в «диске C:» игры) программу: once_run НОМЕР ПУТЬ ПАРАМЕТРЫ МЕТКА
+# [СЕКУНД]. Ждёт, пока игра Steam запустится и закончится (не дольше СЕКУНД; 0 — не ждать конца)
+once_run() {
+  local a=$1 L="$DH/.local/share/vastgame/launch" i
+  wrap_home
+  u sh -c 'printf "%s\n%s\n%s\n" "$1" "$2" "$3" > "$0"' "$L/$a.once" "$2" "$3" "$4"
+  launch_opts "$a" >/dev/null
+  u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+  for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done
+  [ "${5:-600}" = 0 ] && return 0
+  for i in $(seq $(( ${5:-600} / 2 ))); do python3 /usr/local/bin/wolf-steam.py running "$a" || return 0; sleep 2; done
+  return 1
+}
+# «Диск C:» игры ещё не создан (первая аренда, сохранения не в облаке) — Proton создаёт его при первом запуске:
+# запустить через прокладку cmd.exe /c exit (vg-launch пропускает путь, которого ещё нет, только внутри префикса)
+pfx_make() {
+  local c=$DH/$SR/steamapps/compatdata/$1/pfx/drive_c
+  [ -e "$c/windows/system32/cmd.exe" ] && return 0
+  log "игра $1: создаю «диск C:»"
+  once_run "$1" "$c/windows/system32/cmd.exe" "/c exit" "pfx" 300
+  [ -e "$c/windows/system32/cmd.exe" ]
+}
+# Рецепты игры (VG_SYNC "recipes", sel.recipe.ИМЯ): recipe_play НОМЕР ПАПКА — до запуска игры из библиотеки.
+# ff14-ru: Visual C++ → настройки XIVLauncher/Dalamud, Penumbra, перевод (wolf-recipes.py) → XIVLauncher, если его нет
+# (официальный установщик с GitHub, тихо; сам открывается после установки — закрываем) → запуск игры через него
+XIVL_SETUP="https://github.com/goatcorp/FFXIVQuickLauncher/releases/latest/download/XIVLauncher-win-Setup.exe"
+recipe_play() {
+  local a=$1 d=$2 c x f i L="$DH/.local/share/vastgame/launch"
+  inlist "$a" sel.recipe.ff14-ru || return 0
+  st play up "recipe"
+  c=$DH/$SR/steamapps/compatdata/$a/pfx/drive_c
+  x=$c/users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe
+  pfx_make "$a" || { log "перевод FF14: «диск C:» не создался — запускаю игру как обычно"; return 0; }
+  runtimes "$a"
+  u mkdir -p "$DH/.cache/vastgame"
+  log "перевод FF14: $(u python3 /usr/local/bin/wolf-recipes.py ff14-ru "$c" "$a" "$d" "$DH/.cache/vastgame" 2>&1)"
+  if [ ! -e "$x" ]; then
+    f=$DH/.cache/vastgame/XIVLauncher-win-Setup.exe
+    if u curl -fsSL --max-time 900 -o "$f.part" "$XIVL_SETUP" && u mv -f "$f.part" "$f"; then
+      log "перевод FF14: ставлю XIVLauncher"
+      once_run "$a" "$f" "--silent" "xivlauncher" 0
+      for i in $(seq 300); do [ -e "$x" ] && break; python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done
+      sleep 10                                       # установщик дописывает ярлыки и открывает XIVLauncher — закрыть
+      pkill -f 'current.XIVLauncher\.exe' 2>/dev/null; pkill -f 'XIVLauncher-win-Setup\.exe' 2>/dev/null
+      for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done
+      u rm -f "$f"
+    else
+      log "перевод FF14: XIVLauncher не скачался"
+    fi
+  fi
+  if [ -e "$x" ]; then
+    u python3 /usr/local/bin/wolf-recipes.py ff14-ru-mark "$c"
+    u sh -c 'printf "%s\n\n%s\n" "$1" "$2" > "$0"' "$L/$a" "$x" "pfx:users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe"
+    launch_opts "$a" >/dev/null
+    log "перевод FF14: игра запускается через XIVLauncher"
+  else
+    log "перевод FF14: XIVLauncher не встал — запускаю игру как обычно"
+  fi
 }
 # [v5.6] Прокладка vg-launch — в домашнюю папку (её видно и внутри контейнера Steam Linux Runtime)
 wrap_home() {
@@ -2735,7 +2804,9 @@ if [ -n "$conf" ]; then
   { IFS= read -r target; IFS= read -r extra; } < "$conf"
   at=-1
   for i in "${!args[@]}"; do case ${args[$i]} in */proton) at=$((i + 2)) ;; esac; done
-  if [ -f "$target" ] && [ "$at" -ge 0 ] && [ "$at" -lt "${#args[@]}" ]; then
+  ok=0; [ -f "$target" ] && ok=1
+  case $target in */steamapps/compatdata/"$app"/pfx/drive_c/windows/system32/*) ok=1 ;; esac   # префикс ещё создаётся
+  if [ "$ok" = 1 ] && [ "$at" -ge 0 ] && [ "$at" -lt "${#args[@]}" ]; then
     read -r -a more <<< "$extra"
     args=("${args[@]:0:$at}" "$target" "${more[@]}")
     cd "$(dirname "$target")" || true
@@ -3750,6 +3821,283 @@ if __name__ == "__main__":
         sys.exit(1)
     sys.exit("wolf-mods.py snap|diff|pack|apply|arch|track|claim|man …")
 MODS
+
+# ============================== wolf-recipes.py ================================
+w /usr/local/bin/wolf-recipes.py <<'RECIPES'
+#!/usr/bin/env python3
+# [v5.6] «Рецепты» — готовые наборы модов для конкретных игр, которые человек включает одним переключателем в окне
+# (VG_SYNC "recipes": {номер: [рецепт]}). Всё ставится в «диск C:» игры — едет в облако с её сохранениями (pfx--),
+# так что на следующих машинах рецепт только проверяет обновления. Рецепт сам — без запуска игры: настройки,
+# плагины и переводы — файлами; программы-установщики запускает wolf (recipe_play) через Steam той же прокладкой.
+#
+# ff14-ru — русский перевод FINAL FANTASY XIV от xivrus.ru (пробная 312060 и полная 39210): XIVLauncher (лаунчер
+# сообщества) + Dalamud (плагины) + Penumbra (подмена файлов игры на лету) + пакет перевода. Как у Алексея после
+# ручной установки 2026-10-08 (сверено по его архиву): настройки XIVLauncher (путь к игре, пробная/полная, язык игры
+# английский — перевод заменяет английские файлы, Dalamud включён), список плагинов SeaOfStars в Dalamud,
+# «ждать плагины при запуске», Penumbra с папкой модов C:\FFXIVMods, мод «XIV Rus» включён с настройками по умолчанию.
+# Перевод — релиз GitHub xivrus/xiv_ru_weblate (release.pmp — zip папки мода); новая версия — старая папка удаляется
+# целиком (так требует xivrus). XIVLauncher, Dalamud и Penumbra потом обновляются сами.
+#   wolf-recipes.py ff14-ru DRIVE_C НОМЕР ПАПКА_ИГРЫ КЭШ   — настройки, Penumbra, перевод (игра и Steam-лаунчер закрыты)
+#   wolf-recipes.py ff14-ru-mark DRIVE_C                   — XIVLauncher в список «своих» программ игры
+import json
+import os
+import re
+import shutil
+import sys
+import time
+import urllib.request
+import uuid
+import zipfile
+from pathlib import Path
+
+ROAM = "users/steamuser/AppData/Roaming/XIVLauncher"
+XIVL_EXE = "users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe"
+MODDIR, MODDIR_WIN = "FFXIVMods", "C:\\FFXIVMods"
+SEA = "https://raw.githubusercontent.com/Ottermandias/SeaOfStars/main/repo.json"
+XIVRUS = "https://api.github.com/repos/xivrus/xiv_ru_weblate/releases/latest"
+FT = {"312060": True, "39210": False}              # пробная / полная
+UA = {"User-Agent": "vastgame"}
+
+
+def fetch(url, dest=None, timeout=60):
+    """Ответ по url (bytes) или, с dest, — в файл. Подменяется в тестах."""
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        if dest is None:
+            return r.read()
+        tmp = Path(str(dest) + ".part")
+        with open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        os.replace(tmp, dest)
+        return dest
+
+
+def _load(p, default):
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return default
+
+
+def _save(p, data, indent=2):
+    p = Path(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".vgtmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+# --- XIVLauncher: launcherConfigV3.json (все значения — строки). Главное — всегда; остальное — если не задано
+def launcher_config(c, appid, installdir):
+    p = Path(c, ROAM, "launcherConfigV3.json")
+    d = _load(p, {})
+    d.update({"GamePath": "Z:\\home\\user\\SteamGames\\" + installdir, "IsFt": "true" if FT[appid] else "false",
+              "Language": "English", "InGameAddonEnabled": "true"})
+    for k, v in {"InGameAddonLoadMethod": "EntryPoint", "LauncherLanguage": "English", "AddonList": "[]",
+                 "EncryptArguments": "true", "AskBeforePatchInstall": "true", "DpiAwareness": "Unaware",
+                 "ExitLauncherAfterGameExit": "true", "AutoStartSteam": "false", "VersionUpgradeLevel": "2",
+                 "HasShownAutoLaunchDisclaimer": "true", "HasComplainedAboutAdmin": "true", "KeepPatches": "false",
+                 "PatchPath": "C:\\users\\steamuser\\AppData\\Roaming\\XIVLauncher\\patches"}.items():
+        d.setdefault(k, v)
+    _save(p, d)
+    return "настройки XIVLauncher"
+
+
+# --- Dalamud: dalamudConfig.json (Newtonsoft с $type — как пишет сам Dalamud)
+T_REPOS = "System.Collections.Generic.List`1[[Dalamud.Configuration.ThirdPartyRepoSettings, Dalamud]], System.Private.CoreLib"
+T_REPO = "Dalamud.Configuration.ThirdPartyRepoSettings, Dalamud"
+T_PROFILE = "Dalamud.Plugin.Internal.Profiles.ProfileModelV1, Dalamud"
+T_PCHARS = ("System.Collections.Generic.List`1[[Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Character, "
+            "Dalamud]], System.Private.CoreLib")
+T_PLUGINS = ("System.Collections.Generic.List`1[[Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Plugin, "
+             "Dalamud]], System.Private.CoreLib")
+T_PLUGIN = "Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Plugin, Dalamud"
+
+
+def dalamud_config(c, plugin_id):
+    p = Path(c, ROAM, "dalamudConfig.json")
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        d = {"$type": "Dalamud.Configuration.Internal.DalamudConfiguration, Dalamud"}
+    repos = d.get("ThirdRepoList")
+    if not isinstance(repos, dict) or not isinstance(repos.get("$values"), list):
+        repos = d["ThirdRepoList"] = {"$type": T_REPOS, "$values": []}
+    mine = next((r for r in repos["$values"] if isinstance(r, dict) and r.get("Url") == SEA), None)
+    if mine:
+        mine["IsEnabled"] = True
+    else:
+        repos["$values"].append({"$type": T_REPO, "Url": SEA, "IsEnabled": True})
+    d["ThirdRepoSpeedbumpDismissed"] = True        # «я понимаю риск сторонних плагинов» — человек включил перевод
+    d["IsResumeGameAfterPluginLoad"] = True        # игра ждёт плагины: иначе часть интерфейса без перевода
+    prof = d.get("DefaultProfile")
+    if not isinstance(prof, dict) or not isinstance((prof.get("Plugins") or {}).get("$values"), list):
+        prof = d["DefaultProfile"] = {"$type": T_PROFILE, "p": None, "e4c": False,
+                                      "pc": {"$type": T_PCHARS, "$values": []}, "e": True, "c": 0,
+                                      "Plugins": {"$type": T_PLUGINS, "$values": []},
+                                      "id": "00000000-0000-0000-0000-000000000000", "n": "DEFAULT"}
+    plugins = prof["Plugins"]["$values"]
+    have = next((x for x in plugins if isinstance(x, dict) and x.get("InternalName") == "Penumbra"), None)
+    if have is None:
+        plugins.append({"$type": T_PLUGIN, "InternalName": "Penumbra", "WorkingPluginId": plugin_id, "IsEnabled": True})
+    _save(p, d)
+    return "настройки Dalamud"
+
+
+# --- Penumbra: плагин из списка SeaOfStars (как ставит сам Dalamud: zip в installedPlugins/Имя/версия + манифест)
+def penumbra_plugin(c, cache):
+    base = Path(c, ROAM, "installedPlugins", "Penumbra")
+    for m in sorted(base.glob("*/Penumbra.json")):
+        if (m.parent / "Penumbra.dll").exists():
+            return _load(m, {}).get("WorkingPluginId") or str(uuid.uuid4()), "Penumbra уже стоит"
+    repo = json.loads(fetch(SEA))
+    e = next(x for x in repo if isinstance(x, dict) and x.get("InternalName") == "Penumbra")
+    ver = str(e["AssemblyVersion"])
+    if not re.fullmatch(r"[0-9.]{1,20}", ver):
+        raise ValueError(f"версия Penumbra {ver!r}")
+    z = fetch(e["DownloadLinkInstall"], Path(cache, "Penumbra.zip"), timeout=300)
+    dest = base / ver
+    _unzip(z, dest)
+    pid = str(uuid.uuid4())
+    man = {"Disabled": False, "Testing": False, "ScheduledForDeletion": False, "InstalledFromUrl": SEA,
+           "WorkingPluginId": pid, "IsThirdParty": True}
+    man.update({k: v for k, v in e.items() if k not in ("DownloadCount", "LastUpdate", "IsHide", "IsTestingExclusive")})
+    man.update({"IsHide": False, "IsTestingExclusive": False, "DownloadLinkInstall": None, "DownloadLinkUpdate": None,
+                "DownloadLinkTesting": None})
+    _save(dest / "Penumbra.json", man)
+    os.unlink(z)
+    return pid, f"Penumbra {ver} поставлена"
+
+
+def penumbra_config(c):
+    p = Path(c, ROAM, "pluginConfigs", "Penumbra", "config", "penumbra.json")
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        d = {"Version": 100, "Timestamp": int(time.time() * 1000)}
+    if not d.get("ModDirectory"):
+        d["ModDirectory"] = MODDIR_WIN
+        _save(p, d, indent="\t")
+    return d["ModDirectory"]
+
+
+def _unzip(z, dest):
+    """Распаковать zip в dest — только внутрь (ни абсолютных путей, ни «..»)."""
+    dest = Path(dest)
+    with zipfile.ZipFile(z) as zf:
+        for n in zf.namelist():
+            parts = n.replace("\\", "/").split("/")
+            if n.startswith(("/", "\\")) or ".." in parts or re.match(r"^[A-Za-z]:", n):
+                raise ValueError(f"путь {n!r} в архиве")
+        tmp = dest.with_name(dest.name + ".vgtmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        zf.extractall(tmp)
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+
+
+def _mod_dir(c, moddir):
+    """Папка мода перевода в папке модов Penumbra (C:\\FFXIVMods → Linux-путь) — по сайту xivrus в meta.json."""
+    root = Path(c, *moddir[3:].split("\\")) if moddir.upper().startswith("C:\\") else Path(c, MODDIR)
+    for m in sorted(root.glob("*/meta.json")):
+        meta = _load(m, {})
+        if "xivrus" in str(meta.get("Website") or "") or meta.get("Name") == "XIV Rus":
+            return root, m.parent, str(meta.get("Version") or "")
+    return root, None, ""
+
+
+def _defaults(mod):
+    """Настройки мода по умолчанию — из его групп (как выставляет Penumbra при включении)."""
+    out = {}
+    for g in sorted(mod.glob("group_*.json")):
+        d = _load(g, {})
+        if d.get("Name"):
+            out[d["Name"]] = int(d.get("DefaultSettings") or 0)
+    return out
+
+
+def penumbra_enable(c, name, settings):
+    """Мод включён в коллекции по умолчанию (её нет — создать, как Penumbra при первом запуске)."""
+    pc = Path(c, ROAM, "pluginConfigs", "Penumbra")
+    act = _load(pc / "active_collections.json", None)
+    cid = act.get("Default") if isinstance(act, dict) else None
+    f = pc / "collections" / f"{cid}.json" if cid else None
+    col = _load(f, None) if f else None
+    if not isinstance(col, dict):
+        cid = cid or str(uuid.uuid4())
+        f = pc / "collections" / f"{cid}.json"
+        col = {"Version": 2, "Id": cid, "Name": "Default", "Settings": {}, "Inheritance": []}
+    if not isinstance(act, dict):
+        act = {"Version": 2, "Default": cid, "Interface": cid, "Current": cid, "Individuals": []}
+        _save(pc / "active_collections.json", act, indent="\t")
+    st = col.setdefault("Settings", {})
+    if name in st and isinstance(st[name], dict):
+        return False                                 # уже есть — выбор человека не трогаем
+    st[name] = {"Settings": settings, "Priority": 0, "Enabled": True}
+    _save(f, col, indent=1)
+    return True
+
+
+def translation(c, cache, moddir):
+    rel = json.loads(fetch(XIVRUS))
+    ver = str(rel.get("tag_name") or "").lstrip("v")
+    asset = next((a for a in rel.get("assets") or [] if str(a.get("name", "")).endswith(".pmp")), None)
+    if not ver or not asset:
+        raise ValueError("в релизе xivrus нет .pmp")
+    root, old, have = _mod_dir(c, moddir)
+    if old and have == ver:
+        return f"перевод {ver} — последний"
+    pmp = fetch(asset["browser_download_url"], Path(cache, "xivrus.pmp"), timeout=1800)
+    with zipfile.ZipFile(pmp) as zf:
+        meta = json.loads(zf.read("meta.json").decode("utf-8-sig"))
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(meta.get("Name") or "XIV Rus")).strip(" .") or "XIV Rus"
+    if old:
+        shutil.rmtree(old)                             # «перед установкой новой версии удалить старую» (xivrus)
+    root.mkdir(parents=True, exist_ok=True)
+    _unzip(pmp, root / name)
+    os.unlink(pmp)
+    on = penumbra_enable(c, name, _defaults(root / name))
+    return f"перевод {have + ' → ' if have else ''}{ver}{', включён' if on else ''}"
+
+
+def ff14_ru(c, appid, installdir, cache):
+    if appid not in FT:
+        print(f"ff14-ru: {appid} — не FINAL FANTASY XIV")
+        return 2
+    Path(cache).mkdir(parents=True, exist_ok=True)
+    done = [launcher_config(c, appid, installdir)]
+    pid, msg = penumbra_plugin(c, cache)
+    done += [dalamud_config(c, pid), msg]
+    moddir = penumbra_config(c)
+    try:
+        done.append(translation(c, cache, moddir))
+    except Exception as e:                             # нет связи с GitHub — перевод остаётся прежним
+        done.append(f"перевод не обновлён ({type(e).__name__}: {str(e)[:120]})")
+    print("; ".join(done))
+    return 0
+
+
+def mark(c):
+    """XIVLauncher — в «свои» программы игры (C:/.vastgame-installed.json, как после «Установить в игру»)."""
+    if not Path(c, XIVL_EXE).exists():
+        return 1
+    p = Path(c, ".vastgame-installed.json")
+    d = _load(p, {})
+    exes = sorted(set(x for x in d.get("exes") or [] if isinstance(x, str)) | {XIVL_EXE})
+    _save(p, {"exes": exes}, indent=None)
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["ff14-ru"] and len(a) == 5 and a[2].isdigit() and "/" not in a[3] and a[3] not in ("", ".", ".."):
+            sys.exit(ff14_ru(a[1], a[2], a[3], a[4]))
+        if a[:1] == ["ff14-ru-mark"] and len(a) == 2:
+            sys.exit(mark(a[1]))
+    except Exception as e:
+        print(f"wolf-recipes: ошибка {type(e).__name__}: {str(e)[:300]}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-recipes.py ff14-ru DRIVE_C НОМЕР ПАПКА КЭШ | ff14-ru-mark DRIVE_C")
+RECIPES
 
 w /usr/local/bin/wolf-parts.py <<'PARTS'
 #!/usr/bin/env python3

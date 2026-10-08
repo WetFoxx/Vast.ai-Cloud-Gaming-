@@ -335,6 +335,7 @@ class Api:
             chosen["progs"] = settings.get("progs_sel") or {}                              # [v5.4] «вместе с игрой»
             chosen["launch"] = settings.get("launch_sel") or {}                            # [v5.6] «запускать через»
             chosen["gdata"] = cloudgames.gdata_list()                                      # [v5.6] «игру в облаке»
+            chosen["recipes"] = cloudgames.recipes_list()                                  # [v5.6] перевод FF14…
             sync.update(steam_games=False,
                         other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
             settings.set("sync", sync)
@@ -879,7 +880,9 @@ class Api:
                 "mods": mods if mods is not None else settings.get("mods_known") or {},
                 "mods_save": settings.get("mods_sel") or {},
                 "lgame": lgame if lgame is not None else settings.get("lgame_known") or {},
-                "gdata": settings.get("gdata_sel") or {}}
+                "gdata": settings.get("gdata_sel") or {},
+                "recipes": settings.get("recipe_sel") or {},
+                "recipe_apps": {a: r for r, ids in cloudgames.RECIPES.items() for a in ids}}
 
     def set_mods_save(self, appid, on):
         """[v5.1] Тумблер «Моды» у игры на карточке перед арендой — запомнить (уходит машине при аренде: накладывать и
@@ -898,6 +901,14 @@ class Api:
         cloudgames.remember_gdata(appid, bool(on))
         return {"ok": True}
 
+    def set_recipe(self, appid, on):
+        """[v5.6] Переключатель рецепта у игры (у FF14 — «Русский перевод») — запомнить (машине — при аренде)."""
+        appid = str(appid)
+        if not cloudgames.recipe_for(appid):
+            return {"error": {"key": "library.bad_game", "params": {}, "text": "no recipe"}}
+        cloudgames.remember_recipe(appid, bool(on))
+        return {"ok": True}
+
     def _library_game(self, game):
         """Игра из библиотеки, которую можно запустить этим аккаунтом: {"appid", "account", "name", "cap"} или None.
         Аккаунт — тот, у кого игра своя, или член семьи, которому её дали (Steam сам запишет настоящего владельца)."""
@@ -914,9 +925,11 @@ class Api:
         cloudgames.remember_mods(appid, mods)
         if "gdata" in game:                      # [v5.6] «Хранить игру в облаке» — с карточки игры перед арендой
             cloudgames.remember_gdata(appid, bool(game.get("gdata")))
+        if "recipe" in game and cloudgames.recipe_for(appid):
+            cloudgames.remember_recipe(appid, bool(game.get("recipe")))
         return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or "",
                 "hero": g.get("hero") or "", "header": g.get("header") or "", "mods": mods,
-                "gdata": appid in cloudgames.gdata_list()}
+                "gdata": appid in cloudgames.gdata_list(), "recipe": appid in cloudgames.recipes_list()}
 
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}
