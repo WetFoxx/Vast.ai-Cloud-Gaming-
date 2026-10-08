@@ -1052,6 +1052,19 @@ class TestMoonlight(unittest.TestCase):
             self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
         self.assertEqual(steps, [("pair", "h", "100.1.1.1"), ("stream", "h", "Desktop")])
 
+    def test_tailscale_hiccup_is_retried(self):
+        # Живой случай 2026-10-08 (Windows): Tailscale на мгновение не отдал машину — не сдаваться с первого раза
+        steps, seen, nodes = [], iter([None]), iter([None, (True, "100.1.1.1", "h")])
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: next(nodes)), \
+             mock.patch.object(gui.time, "sleep", lambda s: None), \
+             mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append(("pair", ip)) or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: steps.append(("stream", h)) or True), \
+             mock.patch.object(gui.settings, "set", lambda k, v: None):
+            self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
+        self.assertEqual(steps, [("pair", "100.1.1.1"), ("stream", "h")])
+
     def test_pairing_not_seen_is_repeated(self):
         # Живой случай 2026-09-27: связка прошла, а Moonlight машину «не видел» — повторить связку за человека
         steps, seen = [], iter([None, None, None, None])            # до связки и три проверки после неё

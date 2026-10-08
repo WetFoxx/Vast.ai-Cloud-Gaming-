@@ -1001,6 +1001,11 @@ class Api:
         if moonlight.apps(host) is None:
             # Moonlight ещё не связан с этой машиной — связать самим, без ручного PIN
             node = wolfnode.ts_node()
+            for _ in range(2):                  # разовая заминка Tailscale (Windows, 2026-10-08) — ещё два раза
+                if node:
+                    break
+                time.sleep(2)
+                node = wolfnode.ts_node()
             if not node:
                 settings.applog(f"moonlight: {host} — машины нет в Tailscale")
                 return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
