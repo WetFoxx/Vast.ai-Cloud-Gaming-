@@ -139,14 +139,18 @@ class TestShowDotFiles(unittest.TestCase):
 
 
 class TestNvapi(unittest.TestCase):
-    def run_check(self, smi):
+    def run_check(self, smi, app=""):
         d = Path(tempfile.mkdtemp(dir=TMP))
         (d / "S").mkdir()
         (d / "S/nvapi.off").touch()
+        if app:
+            (d / "S/play.app").write_text(app + "\n")
         script = f'''
 S="{d}/S"
 log() {{ echo "LOG $*"; }}
+rd() {{ cat "$1" 2>/dev/null | head -1; }}
 nvidia-smi() {{ printf '%b' {smi!r}; }}
+NVAPI_OFF_APPS="312060 39210"
 {fn("nvapi_check")}
 nvapi_check
 '''
@@ -154,16 +158,19 @@ nvapi_check
         return (d / "S/nvapi.off").exists(), out
 
     def test_cases(self):
-        one_rtx = "GPU 0: NVIDIA GeForce RTX 3060 (UUID: GPU-1)\n"
-        two = "GPU 0: NVIDIA GeForce GTX 1650 (UUID: GPU-1)\nGPU 1: NVIDIA GeForce GTX 1650 (UUID: GPU-2)\n"
+        one_rtx = "GPU 0: NVIDIA GeForce RTX 2070 (UUID: GPU-1)\n"
         two_rtx = "GPU 0: NVIDIA GeForce RTX 3060 (UUID: GPU-1)\nGPU 1: NVIDIA GeForce RTX 3060 (UUID: GPU-2)\n"
-        gtx = "GPU 0: NVIDIA GeForce GTX 1070 (UUID: GPU-1)\n"
-        self.assertEqual(self.run_check(one_rtx)[0], False)
-        off, out = self.run_check(two)
+        gtx = "GPU 0: NVIDIA GeForce GTX 1650 (UUID: GPU-1)\nGPU 1: NVIDIA GeForce GTX 1650 (UUID: GPU-2)\n"
+        self.assertFalse(self.run_check(one_rtx)[0])                       # RTX — NVAPI нужен для DLSS
+        self.assertFalse(self.run_check(two_rtx)[0])                       # пара RTX — тоже (было: выключали — зря)
+        self.assertFalse(self.run_check(one_rtx, "1245620")[0])            # другая игра
+        off, out = self.run_check(one_rtx, "312060")                       # FF14 зависает с NVAPI и на RTX
         self.assertTrue(off)
-        self.assertIn("2 × NVIDIA GeForce GTX 1650", out)
-        self.assertTrue(self.run_check(two_rtx)[0])
-        self.assertTrue(self.run_check(gtx)[0])
+        self.assertIn("игра 312060", out)
+        self.assertTrue(self.run_check(one_rtx, "39210")[0])
+        off, out = self.run_check(gtx)
+        self.assertTrue(off)
+        self.assertIn("нет RTX (NVIDIA GeForce GTX 1650)", out)
 
     def test_steam_started_without_nvapi(self):
         go = fn("steam_go")

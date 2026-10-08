@@ -1990,14 +1990,19 @@ launch_boot() {
   [ -s "$S/launch.sel" ] && log "$(python3 /usr/local/bin/wolf-steam.py launch-boot "$DH/$SR" "$PD" "$DH" "$S/launch.sel" "$DU" 2>&1)"
   log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
 }
-# [v5.6] NVAPI (прослойка NVIDIA для DLSS/Reflex в Proton) выключить, если видеокарт несколько или среди них нет RTX:
-# FF14 на 2× GTX 1650 уходила в бесконечный запрос сведений о видеокарте (NtGdiDdDDIQueryAdapterInfo) и падала —
-# чёрный экран (живой случай 2026-10-08); без RTX DLSS и так нет
+# [v5.6] NVAPI (прослойка NVIDIA для DLSS/Reflex в Proton) выключить: (1) запускаем FINAL FANTASY XIV — она с NVAPI
+# зависает при запуске (чёрный экран, последнее в журнале Dalamud — загрузка nvapi64.dll; живые случаи 2026-10-08
+# на 2× GTX 1650 и 2026-10-09 на RTX 2070, с выключенным — работает); (2) на машине нет RTX — DLSS и так нет.
+# Выключается для всего Steam (игры наследуют его окружение) — заодно и у других игр этой аренды
+NVAPI_OFF_APPS="312060 39210"
 nvapi_check() {
-  local l
-  l=$(nvidia-smi -L 2>/dev/null) || return 0
-  if [ "$(grep -c '^GPU' <<< "$l")" -gt 1 ] || ! grep -q 'RTX' <<< "$l"; then
-    : > "$S/nvapi.off"; log "NVAPI выключен: $(grep -c '^GPU' <<< "$l") × $(sed -n 's/^GPU 0: \(.*\) (UUID.*/\1/p' <<< "$l")"
+  local l a
+  a=$(rd "$S/play.app")
+  l=$(nvidia-smi -L 2>/dev/null) || l=""
+  if [ -n "$a" ] && [[ " $NVAPI_OFF_APPS " == *" $a "* ]]; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: игра $a с ним не запускается"
+  elif [ -n "$l" ] && ! grep -q 'RTX' <<< "$l"; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: нет RTX ($(sed -n 's/^GPU 0: \(.*\) (UUID.*/\1/p' <<< "$l"))"
   else
     rm -f "$S/nvapi.off"
   fi
