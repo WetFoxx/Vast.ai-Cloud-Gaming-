@@ -2,8 +2,11 @@
 #
 #   .venv/bin/python release.py keygen            создать ключ подписи выпусков (один раз и навсегда)
 #   .venv/bin/python release.py restore ФАЙЛ      вернуть ключ из резервной копии (например, на новом Mac)
-#   .venv/bin/python release.py manifest ZIP      подписать файл-описание vastgame-update.json для архива
+#   .venv/bin/python release.py manifest ФАЙЛ     подписать описание для архива Mac или установщика Windows
 #   .venv/bin/python release.py publish --notes "Что нового"   выпустить версию из version.py (см. publish)
+#
+# Windows собирается в Windows (build-win.ps1); установщик VastGame-Setup-<версия>.exe кладётся в dist.noindex/
+# на этом Mac — тогда publish выпускает и его (подпись — тем же ключом здесь). Нет — выпуск только для Mac.
 #
 # Ключ подписи — пара Ed25519. Открытый вшит в приложение (updater.PUBLIC_KEY): обновление с другой подписью
 # приложение не поставит. Закрытый — только в Связке ключей этого Mac, запись «vastgame-release», которую без
@@ -40,7 +43,9 @@ DIST = ROOT / "dist.noindex"      # вывод build.sh (поиск macOS эту
 POST_TRIES = 20                                      # × 15 с: сколько ждать, пока GitHub покажет новый выпуск
 GH_USER = "WetFoxx"                                  # выпускает только этот аккаунт GitHub
 DMG = "vastgame-mac.dmg"                             # образ для ручной установки: постоянное имя, ссылка на последний
-LATEST = f"https://github.com/{updater.REPO}/releases/latest/download/{updater.MANIFEST}"   # всегда настоящий GitHub
+WIN_SETUP = "VastGame-Setup.exe"                     # то же для Windows: установщик последней версии
+LATEST = f"https://github.com/{updater.REPO}/releases/latest/download/{updater.MAC_MANIFEST}"   # всегда настоящий GitHub
+LATEST_WIN = f"https://github.com/{updater.REPO}/releases/latest/download/{updater.WIN_MANIFEST}"
 BACKUP = Path.home() / "Desktop" / "vastgame-release-key.pem"
 PUBLIC_FILE = Path(__file__).resolve().parent / "release-public-key.txt"   # открытый ключ показывать можно
 MIN_PASSPHRASE = 12
@@ -207,18 +212,38 @@ def _check_zip(zip_path, version):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _post_check(version, zip_path):
+def _check_setup(exe):
+    """Установщик Windows для выпуска: нет — None (выпуск только для Mac); есть — программа Windows разумного
+    размера, собранная после последнего коммита (не остаток прежней сборки), иначе — отказ."""
+    if not exe.exists():
+        return None
+    with open(exe, "rb") as f:
+        head = f.read(2)
+    if head != b"MZ" or not 1024 ** 2 < exe.stat().st_size <= updater.MAX_SIZE:
+        sys.exit(f"{exe.name} не похож на установщик Windows — пересобери (build-win.ps1).")
+    committed = int(_run(["git", "log", "-1", "--format=%ct"]).stdout.strip() or 0)
+    if exe.stat().st_mtime < committed:
+        sys.exit(f"{exe.name} старше последнего коммита — пересобери в Windows (build-win.ps1) и положи заново.")
+    return exe
+
+
+def _post_check(version, zip_path, exe=None):
     """После публикации — глазами приложения: «последний выпуск» на GitHub — эта версия с верной подписью,
-    архив по ссылке выпуска отдаётся нужного размера. Ссылку «последний выпуск» GitHub несколько минут отдаёт из кэша
-    по-разному (живой случай 2026-09-28: 30 секунд не хватило) — ждём до ~5 минут."""
-    url = f"https://github.com/{updater.REPO}/releases/download/vastgame-v{version}/{zip_path.name}"
+    архив (и установщик Windows, если выпущен) по ссылке выпуска отдаётся нужного размера. Ссылку «последний
+    выпуск» GitHub несколько минут отдаёт из кэша по-разному (живой случай 2026-09-28: 30 секунд не хватило) —
+    ждём до ~5 минут."""
+    checks = [(LATEST, updater.MAC_FILE, zip_path)] + ([(LATEST_WIN, updater.WIN_FILE, exe)] if exe else [])
     for attempt in range(POST_TRIES):
         try:
-            m = updater.fetch(LATEST)
-            # GET без чтения тела: подписанные ссылки GitHub на файлы выпуска не обязаны отвечать на HEAD
-            with requests.get(url, stream=True, allow_redirects=True, timeout=30) as r:
-                size = int(r.headers.get("Content-Length", -1))
-            if m["version"] == version and r.status_code == 200 and size == zip_path.stat().st_size:
+            ok = True
+            for latest, file, path in checks:
+                m = updater.fetch(latest, file=file)
+                url = f"https://github.com/{updater.REPO}/releases/download/vastgame-v{version}/{path.name}"
+                # GET без чтения тела: подписанные ссылки GitHub на файлы выпуска не обязаны отвечать на HEAD
+                with requests.get(url, stream=True, allow_redirects=True, timeout=30) as r:
+                    size = int(r.headers.get("Content-Length", -1))
+                ok = ok and m["version"] == version and r.status_code == 200 and size == path.stat().st_size
+            if ok:
                 return True
         except (updater.VastgameError, requests.RequestException, ValueError):
             pass
@@ -250,7 +275,7 @@ def publish(notes):
     _step("Собираю приложение (build.sh)")
     if _run(["./build.sh"]).returncode != 0:
         sys.exit("Сборка не удалась — подробности: ./build.sh")
-    zip_path = DIST / updater.FILE.format(version=version)
+    zip_path = DIST / updater.MAC_FILE.format(version=version)
     zip_path.unlink(missing_ok=True)
     if _run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(DIST / "vastgame.app"),
              str(zip_path)]).returncode != 0:
@@ -261,17 +286,33 @@ def publish(notes):
     _check_zip(zip_path, version)
     print("  приложение то, версия та, подпись кода цела, самопроверка прошла")
 
-    _step("Подписываю описание")
-    data = sign_manifest(load_key(), zip_path, version)
-    updater.verify(data)
-    manifest_path = DIST / updater.MANIFEST
+    exe = _check_setup(DIST / updater.WIN_FILE.format(version=version))
+
+    _step("Подписываю описание" + (" для Mac и Windows" if exe else ""))
+    key = load_key()
+    data = sign_manifest(key, zip_path, version)
+    updater.verify(data, file=updater.MAC_FILE)
+    manifest_path = DIST / updater.MAC_MANIFEST
     manifest_path.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+    files = [zip_path, manifest_path, DIST / DMG]
+    if exe:
+        wdata = sign_manifest(key, exe, version)
+        updater.verify(wdata, file=updater.WIN_FILE)
+        (DIST / updater.WIN_MANIFEST).write_text(json.dumps(wdata, indent=1, ensure_ascii=False) + "\n")
+        shutil.copyfile(exe, DIST / WIN_SETUP)
+        files += [exe, DIST / updater.WIN_MANIFEST, DIST / WIN_SETUP]
+        windows = (f"{exe.name}, {exe.stat().st_size / 1e6:.1f} МБ, собран "
+                   f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(exe.stat().st_mtime))}; {WIN_SETUP} — для "
+                   f"ручной установки; описание {updater.WIN_MANIFEST}, подписано")
+    else:
+        windows = f"нет — выпуск только для Mac (нет dist.noindex/{updater.WIN_FILE.format(version=version)})"
 
     _step("Сводка")
     print(f"""  выпуск:   {tag} → github.com/{updater.REPO}/releases (станет «последним»)
   архив:    {zip_path.name}, {zip_path.stat().st_size / 1e6:.1f} МБ, SHA-256 {data['sha256'][:16]}…
   образ:    {DMG}, {(DIST / DMG).stat().st_size / 1e6:.1f} МБ — для ручной установки
-  описание: {updater.MANIFEST}, подписано
+  описание: {updater.MAC_MANIFEST}, подписано
+  Windows:  {windows}
   что нового: {notes}""")
     if _ask("Опубликовать?") != "да":
         sys.exit("Не опубликовано. Собранное лежит в dist.noindex/.")
@@ -279,7 +320,7 @@ def publish(notes):
     _step("Публикую на GitHub")
     notes_file = DIST / "release-notes.md"
     notes_file.write_text(notes + "\n")
-    r = _run(["gh", "release", "create", tag, str(zip_path), str(manifest_path), str(DIST / DMG),
+    r = _run(["gh", "release", "create", tag, *map(str, files),
               "--repo", updater.REPO, "--title", f"vastgame {version}", "--notes-file", str(notes_file), "--latest"])
     if r.returncode != 0:
         sys.exit(f"gh не опубликовал выпуск: {r.stderr.strip()[:300]}")
@@ -287,7 +328,7 @@ def publish(notes):
     _run(["git", "tag", tag])                  # выпуск уже есть — метка в git проекта в любом случае
 
     _step("Проверяю глазами приложения (GitHub показывает новый выпуск не сразу — до 5 минут)")
-    if _post_check(version, zip_path):
+    if _post_check(version, zip_path, exe):
         print(f"  приложения увидят {version} в течение 6 часов (или при следующем открытии окна).")
     else:
         print(f"  ! GitHub пока отдаёт прежний выпуск по ссылке «последний» — приложения увидят {version} позже.\n"

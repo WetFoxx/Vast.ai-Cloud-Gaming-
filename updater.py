@@ -110,8 +110,9 @@ def verify(data, public_key=None, file=None):
     return m
 
 
-def fetch(url=None):
-    """Проверенное описание последней версии (verify) — или VastgameError: не скачалось или не то."""
+def fetch(url=None, file=None):
+    """Проверенное описание последней версии (verify; file — вид имени файла, по умолчанию своей системы) — или
+    VastgameError: не скачалось или не то."""
     try:
         with requests.get(url or URL, timeout=TIMEOUT, stream=True, headers={"User-Agent": "vastgame"}) as r:
             if r.status_code != 200:
@@ -129,7 +130,7 @@ def fetch(url=None):
         raise VastgameError("Обновление отклонено: описание версии не того вида.", key="update.err.manifest") from None
     if not isinstance(data, dict):
         raise VastgameError("Обновление отклонено: описание версии не того вида.", key="update.err.manifest")
-    return verify(data)
+    return verify(data, file=file)
 
 
 def latest(url=None):

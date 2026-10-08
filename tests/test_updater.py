@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -722,8 +723,9 @@ class TestRelease(unittest.TestCase):
 class FakeTools:
     """git, gh, build.sh и ditto для publish: что спросили — запоминаем, отвечаем как настоящие."""
 
-    def __init__(self, dist, dirty=False, login="WetFoxx", tag_exists=False, build_ok=True):
+    def __init__(self, dist, dirty=False, login="WetFoxx", tag_exists=False, build_ok=True, committed=0):
         self.dist, self.dirty, self.login, self.tag_exists, self.build_ok = dist, dirty, login, tag_exists, build_ok
+        self.committed = committed               # время последнего коммита (unix)
         self.cmds = []
 
     def run(self, cmd, **kw):
@@ -731,6 +733,8 @@ class FakeTools:
         out, rc = "", 0
         if cmd[:2] == ["git", "status"]:
             out = " M core.py\n" if self.dirty else ""
+        elif cmd[:2] == ["git", "log"]:
+            out = f"{self.committed}\n"
         elif cmd[:3] == ["gh", "api", "user"]:
             out = self.login + "\n"
         elif cmd[:3] == ["gh", "release", "view"]:
@@ -748,16 +752,20 @@ class FakeTools:
 
 
 class TestPublish(unittest.TestCase):
-    def publish(self, notes="Исправлена связка Moonlight", published="0.1.9", answer="да", **tools):
+    def publish(self, notes="Исправлена связка Moonlight", published="0.1.9", answer="да", setup=None, **tools):
         dist = Path(tempfile.mkdtemp(dir=TMP))
         self.tools, self.checked, self.dist = FakeTools(dist, **tools), [], dist
+        if setup is not None:                    # установщик Windows, принесённый из сборки в Windows
+            (dist / f"VastGame-Setup-{updater.VERSION}.exe").write_bytes(setup)
         with mock.patch.object(release, "_run", self.tools.run), mock.patch.object(release, "DIST", dist), \
              mock.patch.object(release, "_published", lambda: published), \
              mock.patch.object(release, "_check_zip", lambda z, v: self.checked.append((z.name, v))), \
              mock.patch.object(release, "load_key", lambda: KEY), mock.patch.object(release, "_ask", lambda q: answer), \
-             mock.patch.object(release, "_post_check", lambda v, z: True), \
-             contextlib.redirect_stdout(io.StringIO()):
+             mock.patch.object(release, "_post_check", lambda *a: self.posted.append(a) or True), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.posted = []
             release.publish(notes)
+        self.out = out.getvalue()
 
     def refused(self, **kw):
         with self.assertRaises(SystemExit):
@@ -783,9 +791,39 @@ class TestPublish(unittest.TestCase):
         self.assertEqual((m["version"], m["size"]), (v, 300))
         self.assertEqual((self.dist / "release-notes.md").read_text().strip(), "Исправлена связка Moonlight")
 
+    def test_mac_only_says_so(self):
+        self.publish()
+        self.assertIn("выпуск только для Mac", self.out)
+        self.assertFalse((self.dist / "vastgame-update-win.json").exists())
+        self.assertIsNone(self.posted[0][2])                          # Windows после публикации не проверяется
+
+    def test_release_with_windows(self):
+        v = updater.VERSION
+        setup = b"MZ" + os.urandom(2 * 1024 ** 2)
+        self.publish(setup=setup)
+        exe = self.dist / f"VastGame-Setup-{v}.exe"
+        create = next(c for c in self.tools.cmds if c[:3] == ["gh", "release", "create"])
+        self.assertEqual(create[4:10], [str(self.dist / f"vastgame-{v}-mac-arm64.zip"),
+                                        str(self.dist / "vastgame-update.json"), str(self.dist / "vastgame-mac.dmg"),
+                                        str(exe), str(self.dist / "vastgame-update-win.json"),
+                                        str(self.dist / "VastGame-Setup.exe")])
+        w = updater.verify(json.loads((self.dist / "vastgame-update-win.json").read_text()), file=updater.WIN_FILE)
+        self.assertEqual((w["version"], w["file"], w["size"]), (v, exe.name, len(setup)))
+        self.assertEqual((self.dist / "VastGame-Setup.exe").read_bytes(), setup)    # постоянное имя — тот же файл
+        m = updater.verify(json.loads((self.dist / "vastgame-update.json").read_text()), file=updater.MAC_FILE)
+        self.assertEqual(m["file"], f"vastgame-{v}-mac-arm64.zip")
+        self.assertEqual(self.posted[0][2], exe)                      # после публикации проверяется и Windows
+        self.assertIn("Windows:  " + exe.name, self.out)
+
+    def test_windows_refusals(self):
+        self.refused(setup=b"<html>" + os.urandom(2 * 1024 ** 2))     # не программа Windows
+        self.refused(setup=b"MZ" + os.urandom(100))                   # слишком мал для установщика
+        names = self.refused(setup=b"MZ" + os.urandom(2 * 1024 ** 2), committed=int(time.time()) + 3600)
+        self.assertEqual(names[-1], "git log -1")                     # собран до последнего коммита — отказ
+
     def test_tag_even_if_github_is_slow(self):
         # Выпуск опубликован, а «последний» у GitHub ещё прежний (кэш): метка ставится, команда не падает
-        with mock.patch.object(release, "_post_check", lambda v, z: False):
+        with mock.patch.object(release, "_post_check", lambda *a: False):
             dist = Path(tempfile.mkdtemp(dir=TMP))
             tools = FakeTools(dist)
             with mock.patch.object(release, "_run", tools.run), mock.patch.object(release, "DIST", dist), \
