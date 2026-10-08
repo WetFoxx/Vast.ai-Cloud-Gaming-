@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.6 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.7 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -1987,6 +1987,9 @@ launch_boot() {
   [ -L "$DH/SteamGames" ] || [ -e "$DH/SteamGames" ] || u ln -s "$DH/$SR/steamapps/common" "$DH/SteamGames"
   log "$(u python3 /usr/local/bin/wolf-steam.py pfx-tweaks "$DH/$SR" 2>&1)"
   nvapi_check
+  for a in $NVAPI_OFF_APPS; do                   # [v5.7] у самой игры: Steam могут перезапустить руками
+    u sh -c 'echo PROTON_DISABLE_NVAPI=1 > "$0"' "$DH/.local/share/vastgame/launch/$a.env"
+  done
   [ -s "$S/launch.sel" ] && log "$(python3 /usr/local/bin/wolf-steam.py launch-boot "$DH/$SR" "$PD" "$DH" "$S/launch.sel" "$DU" 2>&1)"
   log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
 }
@@ -2617,7 +2620,7 @@ def launch_opts(steam_root, home):
     d = os.path.join(home, ".local/share/vastgame/launch")
     want = set()
     for f in os.listdir(d) if os.path.isdir(d) else []:
-        m = re.fullmatch(r"(\d+)(\.once)?", f)
+        m = re.fullmatch(r"(\d+)(\.once|\.env)?", f)
         if m:
             want.add(m.group(1))
     changed = False
@@ -2805,6 +2808,10 @@ if [ -n "$app" ] && [ -f "$dir/$app.once" ]; then
   mv -f "$dir/$app.once" "$dir/$app.ran" && conf="$dir/$app.ran"
 elif [ -n "$app" ] && [ -f "$dir/$app" ]; then
   conf="$dir/$app"
+fi
+# [v5.7] своё окружение игры (НОМЕР.env, KEY=VALUE) — не зависит от того, кто и как запустил Steam
+if [ -n "$app" ] && [ -f "$dir/$app.env" ]; then
+  while IFS='=' read -r k v; do [[ $k =~ ^[A-Z_][A-Z0-9_]*$ ]] && export "$k=$v"; done < "$dir/$app.env"
 fi
 args=("$@")
 if [ -n "$conf" ]; then
