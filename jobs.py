@@ -284,7 +284,11 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
     limit = m.get("limit")                             # цена выбранной машины: замены не дороже
     used = set(tried) | {r["offer"].get("machine_id") for r in racers} | set(m.get("used") or [])
     first = limit is None                             # ещё ни одной аренды — эта будет выбранной
-    job.stage("vast", "Vast запускает машину")
+    # Замена: этап «Vast» — только перед настоящей арендой. Иначе при «замен нет» ошибка вставала на первый этап,
+    # хотя машина сломалась позже (экран хода Windows, 2026-10-08)
+    announced = first or bool(racers)
+    if announced:
+        job.stage("vast", "Vast запускает машину")
 
     def save():
         _set_meta(job, race=racers, tried=tried, rents=rents, used=sorted(x for x in used if x is not None),
@@ -302,7 +306,7 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
         """Добрать машин до RACE из очереди. Первая — выбранная человеком: её и арендуем (даже если хост помечен —
         он видел пометку и подтвердил; заняли — сказать ему, а не подсовывать другую). Дальше — замены: свежие цена
         и наличие, другие хосты, не помеченные и не дороже выбранной (цена в час, в Docker — и трафик)."""
-        nonlocal rents, limit
+        nonlocal rents, limit, announced
         bad = set(market.bad_hosts())
         added = []
         while len(racers) < RACE and rents < MAX_RENTS and queue:
@@ -318,6 +322,9 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
                                or o.get("dph_total", 0) > limit["price"] + 1e-6
                                or docker and _traffic(o) > limit["traffic"] + 1e-9):
                 continue
+            if not announced:
+                job.stage("vast", "Vast запускает машину")
+                announced = True
             try:
                 iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang), o)
             except VastgameError as e:

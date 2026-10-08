@@ -184,6 +184,8 @@ class Race(unittest.TestCase):
         job = self.play(spare=(2,))
         self.assertEqual(job.error["key"], "core.no_spare")
         self.assertEqual((self.rented, self.alive), ([1], {}))
+        # Этап «Vast» — один раз (первая аренда): замены нет, и экран не должен «вернуться» на первый этап
+        self.assertEqual([e["key"] for e in job.events if e["key"] == "stage.vast"], ["stage.vast"])
 
     def test_replacement_taken_while_renting_skips_to_next(self):
         self.rent_gone, self.run_after = {2}, {3: 30}
