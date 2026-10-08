@@ -557,6 +557,28 @@ class TestFinish(Base):
         self.assertEqual(self.deleted, [42])
         self.assertNotIn("core.old_script", ui.keys)
 
+    def big_upload(self, done):
+        r = core.wolfnode.Rec((T0 + 5, "up", "выгрузка lgame--1"))
+        r.progress = {"done": done, "total": 10**11, "speed": 10**8}
+        return {"finish": (T0 + 3, "up", "выгрузка"), "lgame--1": r}
+
+    def test_long_upload_is_waited_while_it_moves(self):
+        # Игра своего лаунчера (100 ГБ) выгружается час: пока проценты растут, слежение не бросаем
+        pages = [self.big_upload(n * 10**10) for n in range(1, 8)]
+        done = {"finish": (T0 + 4000, "ok", "app: всё выгружено"), "lgame--1": (T0 + 3900, "ok", "выгружено")}
+        ui = self.setup_machine(pages + [done])
+        self.patch(core.time, "time", iter(range(0, 10**7, 600)).__next__)   # каждый опрос — через 10 мин
+        core.stop(ui)
+        self.assertEqual(self.deleted, [42])
+
+    def test_stuck_upload_times_out(self):
+        ui = self.setup_machine([self.big_upload(10**10)] * 8)
+        self.patch(core.time, "time", iter(range(0, 10**7, 600)).__next__)
+        with self.assertRaises(VastgameError) as e:
+            core.stop(ui)
+        self.assertEqual(e.exception.key, "core.finish_timeout")
+        self.assertEqual(self.deleted, [])
+
     def test_old_finish_result_is_ignored(self):
         # Итог прошлого finish (до t0) не считается — ждём новый
         old = {"finish": (T0 - 100, "ok", "self: старое")}

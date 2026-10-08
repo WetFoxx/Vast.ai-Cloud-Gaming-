@@ -591,6 +591,8 @@ class TestPlay(unittest.TestCase):
         gui.settings.set("sync_sel", None)
         gui.settings.set("launch_sel", {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}})   # [v5.6]
         self.addCleanup(gui.settings.set, "launch_sel", None)
+        gui.settings.set("gdata_sel", {"312060": True, "20": False})                              # [v5.6]
+        self.addCleanup(gui.settings.set, "gdata_sel", None)
         self.gate.set()
         self.api.play(5, None, None, "ru", None, False,
                       {"games": {"sgame--The Blood of Dawnwalker": True, "game--B": False}, "saves": {"pfx--1": False}})
@@ -599,7 +601,7 @@ class TestPlay(unittest.TestCase):
         # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
                          {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}, "progs": {},
-                          "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}}})
+                          "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}}, "gdata": ["312060"]})
         self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
         # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
         self.wait_idle()
@@ -885,6 +887,22 @@ class TestModsSave(unittest.TestCase):
         self.assertEqual(api.set_mods_save("10", False), {"ok": True})
         self.assertEqual(gui.cloudgames.mods_answers(), {"yes": [], "no": []})
         self.assertIn("error", api.set_mods_save("10; rm", True))
+
+    def test_game_in_cloud_toggle(self):
+        # [v5.6] «Хранить игру в облаке» — с карточки игры и при аренде с игрой; машине — номера включённых
+        api = gui.Api()
+        gui.settings.set("gdata_sel", None)
+        self.addCleanup(gui.settings.set, "gdata_sel", None)
+        self.assertEqual(api.set_gdata("312060", True), {"ok": True})
+        self.assertEqual(api.set_gdata("20", False), {"ok": True})
+        self.assertEqual(gui.cloudgames.gdata_list(), ["312060"])
+        self.assertIn("error", api.set_gdata("1; rm", True))
+        lib = {"games": [{"appid": "20", "name": "G", "accounts": ["7"], "family": []}]}
+        with mock.patch.object(gui.steamlib, "cached", lambda: lib), \
+             mock.patch.object(gui.steamlib, "accounts", lambda: [{"id": "7"}]):
+            self.assertTrue(api._library_game({"appid": "20", "account": "7", "gdata": True})["gdata"])
+            self.assertEqual(gui.cloudgames.gdata_list(), ["20", "312060"])
+            self.assertTrue(api._library_game({"appid": "20", "account": "7"})["gdata"])   # не прислали — как было
 
 
 class TestReset(unittest.TestCase):

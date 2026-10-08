@@ -35,7 +35,7 @@ VAST_START_MIN = 10      # сколько ждать, пока Vast запуст
                          # в Create/Loading (у KVM на Vast такое бывает часто): удалить, взять следующую
 TAILSCALE_WARN_MIN = 10  # после стольких минут без узла — подсказать, где искать причину
 TAILSCALE_MIN = 20       # сколько всего ждать узел в Tailscale
-SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown
+SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown (wolf finish — сколько ждать, пока выгрузка не двигается)
 SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина удалит себя сама (wolf finish ждёт 30 с перед удалением)
 GONE_CHECK_SEC = 60      # пока ждём машину — раз в столько секунд спрашивать Vast, есть ли она ещё
 RESTORE_QUIET_MIN = 10   # восстановление: /json молчит столько минут — машина перестала отвечать
@@ -157,7 +157,7 @@ def progs_of(s):
     return out
 
 
-def vg_sync(games, saves_off, mods=None, progs=None, launch=None):
+def vg_sync(games, saves_off, mods=None, progs=None, launch=None, gdata=None):
     """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment.
     [v4.8] "steam": "store" — игры Steam качает сам Steam: машина не скачивает их из облака, не выгружает и не
     спрашивает о них (игры из папки Games — по выбору, как раньше)."""
@@ -165,7 +165,8 @@ def vg_sync(games, saves_off, mods=None, progs=None, launch=None):
                                         "saves_off": list(saves_off), "steam": "store",
                                         "mods": mods or {"yes": [], "no": []},
                                         "progs": progs or {},           # [v5.4] программы «вместе с игрой»
-                                        "launch": launch or {}},        # [v5.6] «запускать игру через программу»
+                                        "launch": launch or {},         # [v5.6] «запускать игру через программу»
+                                        "gdata": list(gdata or [])},    # [v5.6] «хранить игру в облаке»
                                        ensure_ascii=False).encode()).decode()
 
 
@@ -233,7 +234,7 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     sel = (sync or {}).get("select")
     if isinstance(sel, dict):
         env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"), sel.get("progs"),
-                                 sel.get("launch"))
+                                 sel.get("launch"), sel.get("gdata"))
     play = (sync or {}).get("play")
     if isinstance(play, dict) and play.get("appid") and play.get("account"):
         env["VG_PLAY"] = vg_play(play)
@@ -695,10 +696,16 @@ def _alive(iid):
 def _follow_finish(ui, iid, ip, t0):
     """Следить за wolf finish на машине по /json, перепроверить итог и убедиться, что машина удалена.
     Машина удаляет себя сама («ok self:»); если не может («ok app:») или не удалила — удаляем отсюда."""
+    # Срок — от последнего движения, а не от начала: игра своего лаунчера (lgame--, 100 ГБ) выгружается дольше
+    # получаса, и бросать слежение, пока проценты растут, незачем (живой случай 2026-10-09, FF14 98 ГБ)
     deadline = time.time() + SHUTDOWN_MIN * 60
-    seen, last_check, fin, s = {}, time.time(), None, {}
+    seen, last_check, fin, s, moved = {}, time.time(), None, {}, {}
     while True:
         s = wolf_status(ip)
+        now = {n: (tuple(r), (getattr(r, "progress", None) or {}).get("done")) for n, r in (s or {}).items()}
+        if s and now != moved:
+            moved = now
+            deadline = time.time() + SHUTDOWN_MIN * 60
         if s is None and _alive(iid) is False:
             # Машины нет, а итог мы не видели — связи не было, пока она заканчивала. wolf finish уже
             # был запущен (ответил «запущено»), а удаляет себя машина ТОЛЬКО после подтверждённой
@@ -728,7 +735,7 @@ def _follow_finish(ui, iid, ip, t0):
                                     "Что успело выгрузиться — выше; остальное не дошло до Drive.",
                                     key="core.deleted_during", id=iid)
         if time.time() > deadline:
-            raise VastgameError(f"!!! Выгрузка на машине не закончилась за {SHUTDOWN_MIN} минут. Машина "
+            raise VastgameError(f"!!! Выгрузка на машине {SHUTDOWN_MIN} минут не двигается. Машина "
                                 "продолжает сама и удалит себя, если выгрузка подтвердится. Посмотри /var/log/wolf.log.",
                                 key="core.finish_timeout", min=SHUTDOWN_MIN)
         time.sleep(5)

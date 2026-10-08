@@ -334,6 +334,7 @@ class Api:
             chosen["mods"] = cloudgames.mods_answers()                                     # [v5.0] «сохранять моды?»
             chosen["progs"] = settings.get("progs_sel") or {}                              # [v5.4] «вместе с игрой»
             chosen["launch"] = settings.get("launch_sel") or {}                            # [v5.6] «запускать через»
+            chosen["gdata"] = cloudgames.gdata_list()                                      # [v5.6] «игру в облаке»
             sync.update(steam_games=False,
                         other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
             settings.set("sync", sync)
@@ -861,18 +862,24 @@ class Api:
     # ---- Библиотека Steam (steamlib.py): аккаунты и их игры — прямо из Steam, машина не нужна
     def library(self, fresh=False):
         """Библиотека: fresh=False — прошлый список (сразу), True — свежий из Steam (секунды). Без аккаунтов — пусто.
-        [v5.0] mods — моды игр в облаке {номер: {name, bytes, mtime}} (свежие — с Drive); mods_save — тумблер «Моды»."""
+        [v5.0] mods — моды игр в облаке {номер: {name, bytes, mtime}} (свежие — с Drive); mods_save — тумблер «Моды».
+        [v5.6] lgame — файлы игр их лаунчеров в облаке (так же), gdata — тумблер «Хранить игру в облаке»."""
         if not steamlib.accounts():
             return {"accounts": [], "games": [], "errors": []}
         # [0.4.5] список модов с Drive — одновременно с библиотекой из Steam
-        lib, mods = parallel.run(lambda: (None if fresh else steamlib.cached()) or steamlib.library(),
-                                 lambda: cloudgames.mods() if fresh and drive.token() else None)
-        if mods is not None:
+        lib, ext = parallel.run(lambda: (None if fresh else steamlib.cached()) or steamlib.library(),
+                                lambda: cloudgames.extras() if fresh and drive.token() else None)
+        mods = lgame = None
+        if ext is not None:
+            mods, lgame = ext["mods"], ext["lgame"]
             settings.set("mods_known", mods)
+            settings.set("lgame_known", lgame)
         return {**lib, "progs_sel": settings.get("progs_sel") or {},                # [v5.4] программы «вместе с игрой»
                 "launch_sel": settings.get("launch_sel") or {},              # [v5.6] «запускать игру через»
                 "mods": mods if mods is not None else settings.get("mods_known") or {},
-                "mods_save": settings.get("mods_sel") or {}}
+                "mods_save": settings.get("mods_sel") or {},
+                "lgame": lgame if lgame is not None else settings.get("lgame_known") or {},
+                "gdata": settings.get("gdata_sel") or {}}
 
     def set_mods_save(self, appid, on):
         """[v5.1] Тумблер «Моды» у игры на карточке перед арендой — запомнить (уходит машине при аренде: накладывать и
@@ -881,6 +888,14 @@ class Api:
         if not appid.isdigit():
             return {"error": {"key": "library.bad_game", "params": {}, "text": "bad appid"}}
         cloudgames.remember_mods(appid, bool(on))
+        return {"ok": True}
+
+    def set_gdata(self, appid, on):
+        """[v5.6] Тумблер «Хранить игру в облаке» у игры на карточке перед арендой — запомнить (машине — при аренде)."""
+        appid = str(appid)
+        if not appid.isdigit():
+            return {"error": {"key": "library.bad_game", "params": {}, "text": "bad appid"}}
+        cloudgames.remember_gdata(appid, bool(on))
         return {"ok": True}
 
     def _library_game(self, game):
@@ -897,8 +912,11 @@ class Api:
             return None
         mods = bool(game.get("mods"))            # [v5.1] тумблер «Моды»: накладывать и сохранять — одно и то же
         cloudgames.remember_mods(appid, mods)
+        if "gdata" in game:                      # [v5.6] «Хранить игру в облаке» — с карточки игры перед арендой
+            cloudgames.remember_gdata(appid, bool(game.get("gdata")))
         return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or "",
-                "hero": g.get("hero") or "", "header": g.get("header") or "", "mods": mods}
+                "hero": g.get("hero") or "", "header": g.get("header") or "", "mods": mods,
+                "gdata": appid in cloudgames.gdata_list()}
 
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}

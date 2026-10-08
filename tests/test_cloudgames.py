@@ -56,6 +56,18 @@ class TestRemove(unittest.TestCase):
         self.assertEqual([g["name"] for g in d["games"]], ["pfx--1"])
         self.assertEqual(d["service"]["names"], ["identity"])
 
+    def test_launcher_game_files_kind(self):
+        # [v5.6] файлы игры её лаунчера — своим видом, с номером и названием; в extras — отдельно от модов
+        self.cloud["lgame--312060--FINAL FANTASY XIV Online Free Trial"] = {"size": 98 * 10**9, "mtime": "2026-10-09", "files": 40}
+        self.cloud["mod--312060--FINAL FANTASY XIV Online Free Trial"] = {"size": 10**6, "mtime": "2026-10-09", "files": 1}
+        g = {x["name"]: x for x in cloudgames.listing()["games"]}
+        lg = g["lgame--312060--FINAL FANTASY XIV Online Free Trial"]
+        self.assertEqual((lg["kind"], lg["appid"], lg["title"]), ("lgame", "312060", "FINAL FANTASY XIV Online Free Trial"))
+        x = cloudgames.extras()
+        self.assertEqual((list(x["lgame"]), x["lgame"]["312060"]["bytes"]), (["312060"], 98 * 10**9))
+        self.assertEqual(list(x["mods"]), ["312060"])
+        self.assertEqual(cloudgames.mods(), x["mods"])
+
     def test_first_run_creates_folder(self):
         made = []
         state = {"arch": None}                        # папки на Drive ещё нет — rclone не может её открыть

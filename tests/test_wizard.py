@@ -53,6 +53,10 @@ class TestTailscalePhase(unittest.TestCase):
 class TestWizardApi(unittest.TestCase):
     def setUp(self):
         self.api = gui.Api()
+        # настоящая фоновая операция на этом Mac («Закончить» в открытом окне) не должна делать тесты «занятыми»
+        p = mock.patch.object(gui.jobs, "state", lambda: None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_state_collects_everything(self):
         with mock.patch.object(gui.sys, "platform", "darwin"), \

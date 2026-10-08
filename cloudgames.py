@@ -14,9 +14,10 @@ from vastapi import VastgameError, list_instances
 import wolfnode
 from wolfnode import ssh_run, ts_node
 
-KINDS = ("sgame", "game", "pfx", "mod", "prog")   # игра Steam, не из Steam, сохранения (префикс Proton), моды (v5.0),
-                                             # [v5.4] программы для игр (папка Programs)
+KINDS = ("sgame", "game", "lgame", "pfx", "mod", "prog")   # игра Steam, не из Steam, [v5.6] файлы игры её лаунчера,
+                                             # сохранения (префикс Proton), моды (v5.0), [v5.4] программы (папка Programs)
 MOD = re.compile(r"^mod--(\d+)--(.*)$")      # моды игры Steam: mod--НОМЕР--Название
+LGAME = re.compile(r"^lgame--(\d+)--(.*)$")  # [v5.6] файлы игры, которые докачал её лаунчер: lgame--НОМЕР--Название
 
 
 def listing():
@@ -40,8 +41,8 @@ def listing():
             service.append((base, info["size"]))
             continue
         rest = base.split("--", 1)[1]
-        mod = MOD.match(base)
-        if kind == "mod" and not mod:
+        mod = MOD.match(base) or LGAME.match(base)
+        if kind in ("mod", "lgame") and not mod:
             service.append((base, info["size"]))
             continue
         games.append({"name": base, "kind": kind, "appid": rest if kind == "pfx" else mod[1] if mod else None,
@@ -127,15 +128,35 @@ def remember(choice):
 
 def mods():
     """{номер игры: {"name", "bytes", "mtime"}} — моды в облаке (v5.0); Drive не открылся — None."""
+    x = extras()
+    return None if x is None else x["mods"]
+
+
+def extras():
+    """Одним списком Drive: {"mods": {номер: {name, bytes, mtime}}, "lgame": {то же для файлов игры лаунчера}} или
+    None — Drive не открылся."""
     arch = drive.archives()
     if arch is None:
         return None
-    out = {}
+    out = {"mods": {}, "lgame": {}}
     for base, info in arch.items():
-        m = MOD.match(base)
-        if m:
-            out[m[1]] = {"name": base, "bytes": info["size"], "mtime": info["mtime"]}
+        for key, rx in (("mods", MOD), ("lgame", LGAME)):
+            m = rx.match(base)
+            if m:
+                out[key][m[1]] = {"name": base, "bytes": info["size"], "mtime": info["mtime"]}
     return out
+
+
+def remember_gdata(appid, on):
+    """[v5.6] Тумблер «Хранить игру в облаке» (игры, которые докачивает их лаунчер) — для следующих машин."""
+    sel = dict(settings.get("gdata_sel") or {})
+    sel[str(appid)] = bool(on)
+    settings.set("gdata_sel", sel)
+
+
+def gdata_list():
+    """Номера игр с включённым «Хранить игру в облаке» — машине (VG_SYNC "gdata")."""
+    return sorted(a for a, v in (settings.get("gdata_sel") or {}).items() if v and str(a).isdigit())
 
 
 def remember_mods(appid, yes):

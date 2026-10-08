@@ -674,7 +674,14 @@ play_prepare() {
   [ -n "$a" ] && [ -n "$acc" ] && [ ! -e "$S/play.done" ] && [ -n "$SR" ] || return 0
   pgrep -x steam >/dev/null && { steam_off || log "play: Steam не закрылся — аккаунт может быть не тот"; }
   log "play: $(u python3 /usr/local/bin/wolf-steam.py account "$DH/$SR" "$acc" 2>&1)"
-  log "play: $(u python3 /usr/local/bin/wolf-steam.py manifest "$DH/$SR" "$a" "$acc" "$(rd "$S/play.name")" 2>&1)"
+  # [v5.6] настоящая папка игры и её системы — из кэша Steam (appinfo.vdf); нет Linux-версии — включить Proton сразу
+  local info dir os
+  info=$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --appinfo "$a" 2>/dev/null)
+  dir=${info%%$'\t'*}; os=${info#*$'\t'}
+  log "play: $(u python3 /usr/local/bin/wolf-steam.py manifest "$DH/$SR" "$a" "$acc" "$(rd "$S/play.name")" "$dir" 2>&1)"
+  if [ -n "$info" ] && [ -n "$os" ] && [[ $os != *linux* ]]; then
+    log "play: $(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --proton-for "$a" 2>&1)"
+  fi
   st play wait "steam"
 }
 # StateFlags: игра установлена целиком (как steam_ready)
@@ -1440,8 +1447,13 @@ steam_go() {
   local a=()
   [ -n "${SL:-}" ] && a+=(-language "$SL")
   [ -n "$SR" ] && [ -f "$DH/$SR/steam.cfg" ] && a+=(-noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles)
-  u setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
-  log "Steam запущен${SL:+ (язык: $SL)}"
+  # [v5.6] NVAPI выключен на машинах, где он вредит (nvapi_check при загрузке): игры наследуют окружение Steam
+  if [ -e "$S/nvapi.off" ]; then
+    u env PROTON_DISABLE_NVAPI=1 setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
+  else
+    u setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
+  fi
+  log "Steam запущен${SL:+ (язык: $SL)}$([ -e "$S/nvapi.off" ] && echo ", NVAPI выключен")"
 }
 
 # [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за минуту
@@ -1850,11 +1862,43 @@ prog_cmd() {
       r=$(python3 /usr/local/bin/wolf-steam.py install-set "$DH/$SR" "$PD" "$DH" "$DU" "$2" "$3" "$S")
       [ "$r" = "prog: ok" ] || { echo "$r"; return 3; }
       launch_opts "$2" || return 3
-      u setsid -f /usr/games/steam -applaunch "$2" &>/dev/null
       log "установка в игру $2: $3"
+      ( runtimes "$2"; u setsid -f /usr/games/steam -applaunch "$2" &>/dev/null ) &>/dev/null &
       echo "prog: installing" ;;
     *)      echo "использование: wolf prog run|auto|launch|install НОМЕР ID …"; return 2 ;;
   esac
+}
+# [v5.6] Библиотеки, которые нужны лаунчерам и модам (Dalamud, SKSE, ReShade…), — один раз в «диск C:» игры, до
+# первой установки в него: Visual C++ 2015–2022 (64 и 32 бита, с сайта Microsoft, тихо) и копии vcruntime140 под
+# именами *_clr0400 (их ищет XIVLauncher: на Windows их ставит .NET Framework, в Proton его нет — живой случай
+# 2026-10-08). Запуск — через Steam той же прокладкой (cmd.exe игры со своим списком команд); отметка
+# C:\.vastgame-runtimes едет в облако с «диском C:» — на других машинах не повторяется. Установщик человека ждёт.
+VCURL="https://aka.ms/vs/17/release"
+runtimes() {
+  local a=$1 c L="$DH/.local/share/vastgame/launch" i
+  c=$DH/$SR/steamapps/compatdata/$a/pfx/drive_c
+  [ -d "$c" ] && [ ! -e "$c/.vastgame-runtimes" ] && [ -e "$c/windows/system32/cmd.exe" ] || return 0
+  mkdir -p "$T/vcredist"
+  for i in x64 x86; do
+    [ -s "$T/vcredist/vc_redist.$i.exe" ] || curl -fsSL --max-time 300 -o "$T/vcredist/vc_redist.$i.exe" "$VCURL/vc_redist.$i.exe" \
+      || { log "библиотеки $a: не скачались — ставлю без них"; return 0; }
+  done
+  u mkdir -p "$c/vastgame" && u cp "$T/vcredist/vc_redist.x64.exe" "$T/vcredist/vc_redist.x86.exe" "$c/vastgame/"
+  u sh -c 'printf "%s\r\n" "$@" > "$0"' "$c/vastgame/runtimes.cmd" "@echo off" \
+    "start /wait C:\vastgame\vc_redist.x64.exe /install /quiet /norestart" \
+    "start /wait C:\vastgame\vc_redist.x86.exe /install /quiet /norestart" \
+    "if not exist C:\windows\system32\vcruntime140_clr0400.dll copy /y C:\windows\system32\vcruntime140.dll C:\windows\system32\vcruntime140_clr0400.dll" \
+    "if not exist C:\windows\system32\ucrtbase_clr0400.dll copy /y C:\windows\system32\vcruntime140.dll C:\windows\system32\ucrtbase_clr0400.dll" \
+    "echo ok> C:\.vastgame-runtimes"
+  [ -e "$L/$a.once" ] && u mv -f "$L/$a.once" "$L/$a.next"        # установщик человека — после библиотек
+  u sh -c 'printf "%s\n%s\n%s\n" "$1" "/c C:\vastgame\runtimes.cmd" "runtimes" > "$0"' "$L/$a.once" "$c/windows/system32/cmd.exe"
+  log "библиотеки $a: ставлю Visual C++ в «диск C:» игры"
+  u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+  for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done     # запустился
+  for i in $(seq 300); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done   # закончил
+  u rm -rf "$c/vastgame"
+  [ -e "$L/$a.next" ] && u mv -f "$L/$a.next" "$L/$a.once"
+  log "библиотеки $a: $([ -e "$c/.vastgame-runtimes" ] && echo поставлены || echo "не встали — продолжаю без них")"
 }
 # [v5.6] Прокладка vg-launch — в домашнюю папку (её видно и внутри контейнера Steam Linux Runtime)
 wrap_home() {
@@ -1867,8 +1911,25 @@ wrap_home() {
 launch_boot() {
   [ -n "$SR" ] || return 0
   wrap_home
+  # [v5.6] окна выбора файлов Windows-программ (Wine) не показывают папки с точкой — .steam: обычная ссылка на игры
+  # Steam и «показывать скрытые» во всех «дисках C:» игр (живой случай 2026-10-08: установщик XIVLauncher)
+  [ -L "$DH/SteamGames" ] || [ -e "$DH/SteamGames" ] || u ln -s "$DH/$SR/steamapps/common" "$DH/SteamGames"
+  log "$(u python3 /usr/local/bin/wolf-steam.py pfx-tweaks "$DH/$SR" 2>&1)"
+  nvapi_check
   [ -s "$S/launch.sel" ] && log "$(python3 /usr/local/bin/wolf-steam.py launch-boot "$DH/$SR" "$PD" "$DH" "$S/launch.sel" "$DU" 2>&1)"
   log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+}
+# [v5.6] NVAPI (прослойка NVIDIA для DLSS/Reflex в Proton) выключить, если видеокарт несколько или среди них нет RTX:
+# FF14 на 2× GTX 1650 уходила в бесконечный запрос сведений о видеокарте (NtGdiDdDDIQueryAdapterInfo) и падала —
+# чёрный экран (живой случай 2026-10-08); без RTX DLSS и так нет
+nvapi_check() {
+  local l
+  l=$(nvidia-smi -L 2>/dev/null) || return 0
+  if [ "$(grep -c '^GPU' <<< "$l")" -gt 1 ] || ! grep -q 'RTX' <<< "$l"; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: $(grep -c '^GPU' <<< "$l") × $(sed -n 's/^GPU 0: \(.*\) (UUID.*/\1/p' <<< "$l")"
+  else
+    rm -f "$S/nvapi.off"
+  fi
 }
 # Во время сессии: прокладка в параметрах запуска игры НОМЕР (Steam их перепишет при выходе — меняем при закрытом
 # Steam: закрыть, записать, открыть). Игра запущена — Steam не закрываем: «busy», выбор сработает со следующей машины
@@ -2355,6 +2416,63 @@ def sync_proton(config_vdf, ids):
     return change
 
 
+# [v5.6] Сведения Steam об игре — appcache/appinfo.vdf (кэш Steam едет в облаке со steam-cache): настоящая папка
+# установки (у пробной FF14 — папка полной игры «FINAL FANTASY XIV Online»: паспорт с папкой «по названию» вёл к
+# «Не найден исполняемый файл», живой случай 2026-10-08) и для каких систем игра (нет Linux — включить ей Proton:
+# иначе Steam качает только общие файлы, без Windows-версии). Форматы 28 и 29 (с 29 ключи — номера в таблице строк).
+def _appinfo_kv(data, i, keys):
+    out = {}
+    while True:
+        t = data[i]; i += 1
+        if t == 0x08:
+            return out, i
+        if keys is None:
+            j = data.index(b"\0", i); key = data[i:j].decode("utf-8", "replace"); i = j + 1
+        else:
+            key = keys[struct.unpack_from("<I", data, i)[0]]; i += 4
+        if t == 0x00:
+            out[key], i = _appinfo_kv(data, i, keys)
+        elif t == 0x01:
+            j = data.index(b"\0", i); out[key] = data[i:j].decode("utf-8", "replace"); i = j + 1
+        elif t in (0x02, 0x03, 0x04, 0x06):
+            out[key] = struct.unpack_from("<i", data, i)[0]; i += 4
+        elif t in (0x07, 0x0A):
+            out[key] = struct.unpack_from("<q", data, i)[0]; i += 8
+        else:
+            raise ValueError(f"тип {t} в appinfo.vdf")
+
+
+def appinfo(steam_root, appid):
+    """{installdir, oslist} игры из кэша Steam или None — Steam её ещё не знает (новый человек, пустой кэш)."""
+    try:
+        with open(os.path.join(steam_root, "appcache", "appinfo.vdf"), "rb") as f:
+            data = f.read()
+        magic = struct.unpack_from("<I", data, 0)[0]
+        if magic == 0x07564429:
+            off = struct.unpack_from("<q", data, 8)[0]
+            n = struct.unpack_from("<I", data, off)[0]
+            keys, j = [], off + 4
+            for _ in range(n):
+                k = data.index(b"\0", j); keys.append(data[j:k].decode("utf-8", "replace")); j = k + 1
+            i = 16
+        elif magic == 0x07564428:
+            keys, i = None, 8
+        else:
+            return None
+        while i + 8 <= len(data):
+            aid, size = struct.unpack_from("<II", data, i)
+            if aid == 0:
+                return None
+            if aid == int(appid):
+                kv = _appinfo_kv(data, i + 8 + 60, keys)[0].get("appinfo", {})
+                return {"installdir": str((kv.get("config") or {}).get("installdir") or ""),
+                        "oslist": str((kv.get("common") or {}).get("oslist") or "")}
+            i += 8 + size
+    except (OSError, ValueError, IndexError, struct.error, KeyError):
+        return None
+    return None
+
+
 def steam_input_off(steam_root):
     """Steam Input «выключен» всем играм, у которых нет своего выбора. True — что-то изменилось."""
     sa = os.path.join(steam_root, "steamapps")
@@ -2472,6 +2590,14 @@ def launch_opts(steam_root, home):
 
 
 def main(games_dir, steam_root):
+    if "--appinfo" in sys.argv:                            # [v5.6] --appinfo НОМЕР → «папка<TAB>системы» (или пусто)
+        info = appinfo(steam_root, sys.argv[sys.argv.index("--appinfo") + 1]) or {}
+        print(f"{info.get('installdir', '')}\t{info.get('oslist', '')}")
+        return 0
+    if "--proton-for" in sys.argv:                         # [v5.6] --proton-for НОМЕР — включить игре Proton
+        changed = sync_proton(os.path.join(steam_root, "config", "config.vdf"), [sys.argv[sys.argv.index("--proton-for") + 1]])
+        print(f"Proton для игры: {'включён' if changed else 'уже был'}")
+        return 3 if changed else 0
     if "--launch-opts" in sys.argv:                        # [v5.6] --launch-opts HOME [--check]
         changed, want = launch_opts(steam_root, sys.argv[sys.argv.index("--launch-opts") + 1])
         if not CHECK:
@@ -2743,7 +2869,7 @@ def folder(name, appid):
     return d or f"app{appid}"
 
 
-def manifest(root, appid, sid, name):
+def manifest(root, appid, sid, name, installdir=""):
     sa = root / "steamapps"
     acf, hid = sa / f"appmanifest_{appid}.acf", sa / ".vastgame-hidden" / f"appmanifest_{appid}.acf"
     if not acf.exists() and hid.exists():
@@ -2760,7 +2886,8 @@ def manifest(root, appid, sid, name):
     sa.mkdir(parents=True, exist_ok=True)
     acf.write_text('"AppState"\n{\n'
                    f'\t"appid"\t\t"{appid}"\n\t"Universe"\t\t"1"\n\t"name"\t\t"{name.replace(chr(34), "")}"\n'
-                   f'\t"StateFlags"\t\t"1026"\n\t"installdir"\t\t"{folder(name, appid)}"\n\t"LastOwner"\t\t"{sid}"\n}}\n')
+                   f'\t"StateFlags"\t\t"1026"\n\t"installdir"\t\t"{installdir or folder(name, appid)}"\n'
+                   f'\t"LastOwner"\t\t"{sid}"\n}}\n')
     print(f"{appid}: паспорт записан — Steam скачает игру сам")
     return 0
 
@@ -3223,6 +3350,29 @@ def launch_boot(root, pd, home, sel_path, user=None):
     return 0
 
 
+def pfx_tweaks(root):
+    """«Показывать скрытые» (ShowDotFiles) в реестре каждого «диска C:» игр (user.reg; Steam закрыт — Wine не запущен)."""
+    done = 0
+    for reg in sorted(Path(root, "steamapps", "compatdata").glob("*/pfx/user.reg")):
+        try:
+            text = reg.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            continue
+        if '"ShowDotFiles"' in text:
+            continue
+        m = re.search(r"^\[Software\\\\Wine\] \d+\n(#time=[0-9a-f]+\n)?", text, re.M)
+        if m:
+            text = text[:m.end()] + '"ShowDotFiles"="Y"\n' + text[m.end():]
+        else:
+            text = text.rstrip("\n") + f'\n\n[Software\\\\Wine] {int(time.time())}\n"ShowDotFiles"="Y"\n'
+        tmp = reg.with_suffix(".reg.tmp")
+        tmp.write_text(text, encoding="utf-8", errors="surrogateescape")
+        os.replace(tmp, reg)
+        done += 1
+    print(f"скрытые папки в окнах выбора: включено в {done}")
+    return 0
+
+
 def launch_choice(home, appid):
     """{id, args} — через что запускается игра (для страницы статуса) или None."""
     try:
@@ -3257,8 +3407,10 @@ if __name__ == "__main__":
             sys.exit(vgplay(a[1]))
         if a[:1] == ["account"] and len(a) == 3:
             sys.exit(account(Path(a[1]), a[2]))
-        if a[:1] == ["manifest"] and len(a) == 5 and a[2].isdigit():
-            sys.exit(manifest(Path(a[1]), a[2], a[3], a[4]))
+        if a[:1] == ["manifest"] and len(a) in (5, 6) and a[2].isdigit():
+            d = a[5] if len(a) == 6 else ""                    # [v5.6] настоящая папка из сведений Steam
+            ok = re.fullmatch(r'[^/\\\x00-\x1f"]{1,200}', d) and d not in (".", "..")
+            sys.exit(manifest(Path(a[1]), a[2], a[3], a[4], d if ok else ""))
         if a[:1] == ["state"] and len(a) == 3 and a[2].isdigit():
             sys.exit(state(Path(a[1]), a[2]))
         # [v5.4] программы игр: progs-tick STEAM PD S ПОЛЬЗОВАТЕЛЬ; progs-run STEAM PD ПОЛЬЗОВАТЕЛЬ НОМЕР ID;
@@ -3275,6 +3427,8 @@ if __name__ == "__main__":
             sys.exit(0)
         if a[:1] == ["launch-boot"] and len(a) == 6:
             sys.exit(launch_boot(Path(a[1]), a[2], a[3], a[4], a[5]))
+        if a[:1] == ["pfx-tweaks"] and len(a) == 2:
+            sys.exit(pfx_tweaks(Path(a[1])))
         if a[:1] == ["running"] and len(a) in (1, 2):
             r = games_running()
             sys.exit(0 if (a[1] in r if len(a) == 2 else r) else 1)

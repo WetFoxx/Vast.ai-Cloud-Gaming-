@@ -130,7 +130,7 @@ function render(data) {
   if (task) $("task-text").textContent = t("task." + task.kind) + (st.stage ? " · " + t("stage." + st.stage) : "");
   renderLive(liveFromStatus(st));
   renderAsks(st.asks || []);
-  if (st.play) renderPlay(st.play, playNowGame(), null); else renderPlay(null);
+  if (st.play) renderPlay(st.play, playNowGame(), null, st.progs); else renderPlay(null);
   renderProgs(st.progs);
   const playing = st.play && !["ok", "err"].includes(st.play.state);
   liveLoop(!!(task || playing || ["starting", "syncing"].includes(st.state)));
@@ -170,7 +170,7 @@ async function pollLive() {
   renderLive(d.archives);
   renderAsks(d.asks);
   if (d.play_game) playNow = d.play_game;
-  renderPlay(d.play, playNowGame(), d.streaming);
+  renderPlay(d.play, playNowGame(), d.streaming, d.progs);
   renderProgs(d.progs);
 }
 let playNow = null;          // игра, с которой арендована машина (Python помнит её: окно могли закрыть)
@@ -912,7 +912,8 @@ $("rent").addEventListener("click", async () => {
     startProgress();
     return;
   }
-  const game = playGame ? { appid: playGame.appid, account: playGame.account, mods: !!playGame.mods } : null;
+  const game = playGame ? { appid: playGame.appid, account: playGame.account, mods: !!playGame.mods,
+                            gdata: !!playGame.gdata } : null;
   const r = await api().play(o.id, null, disk, LANG, spare, docker, select, game);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   playNow = playGame ? { ...playGame } : null;
@@ -939,7 +940,8 @@ function startGame(g) {
   if (!choices.length) { steamLogin(null); return; }
   const mods = (libData && libData.mods && libData.mods[g.appid]) || null;
   playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
-               header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: modsSaveOn(g.appid) };
+               header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: modsSaveOn(g.appid),
+               gdataInfo: (libData && libData.lgame && libData.lgame[g.appid]) || null, gdata: gdataOn(g.appid) };
   replaceMode = false; replaceBlocked = false;
   openOffers();
 }
@@ -969,6 +971,7 @@ function renderOffersGame() {
     main.appendChild(seg);
   }
   main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; viaText(); }));
+  main.appendChild(gdataBlock(playGame.appid, playGame.gdataInfo, (on) => { playGame.gdata = on; }));
   // [v5.4] программы, которые запустятся вместе с игрой (выбраны раньше на главном)
   const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
   if (auto.length) main.appendChild(el("div", { className: "og-progs" },
@@ -1022,15 +1025,43 @@ function modsSaveBlock(appid, info, onChange, locked = false, state = null) {
   return box;
 }
 
+// [v5.6] «Хранить игру в облаке» — для игр, которые после Steam докачивает их собственный лаунчер (FF14, MMO): его
+// загрузка медленнее Drive, поэтому файлы игры (без модов) сохраняются архивом lgame-- и на следующей машине
+// восстанавливаются; лаунчеру остаётся докачать новое. Обычной игре Steam ничего не меняет. Вид — как у «Моды».
+function gdataOn(appid) { return !!(libData && libData.gdata && libData.gdata[appid]); }
+function gdataBlock(appid, info, onChange, locked = false, state = null) {
+  const on = state === null ? gdataOn(appid) : state;
+  const box = el("label", { className: "mods-save" + (on ? " on" : "") + (locked ? " locked" : "") });
+  const cb = el("input", { type: "checkbox", checked: on, disabled: locked });
+  const txt = el("div");
+  const head = el("b", {}, t("gdata.toggle"));
+  if (info) head.appendChild(el("span", { className: "mods-cloud" }, " · " + t("mods.cloud", { size: size(info.bytes), date: info.mtime || "" })));
+  txt.append(head, el("span", { className: "sub" }, t(on ? "gdata.on" : "gdata.off") + (locked ? " " + t("mods.locked") : "")));
+  box.append(txt, cb);
+  if (locked) return box;
+  cb.addEventListener("change", async () => {
+    if (libData) libData.gdata = { ...(libData.gdata || {}), [appid]: cb.checked };
+    box.classList.toggle("on", cb.checked);
+    txt.lastChild.textContent = t(cb.checked ? "gdata.on" : "gdata.off");
+    if (onChange) onChange(cb.checked);
+    if (!DEMO) await api().set_gdata(appid, cb.checked);
+  });
+  return box;
+}
+
 // Ход игры на главном (из status.play или live().play)
-function renderPlay(play, game, streaming) {
+function renderPlay(play, game, streaming, progs) {
   const box = $("play-box");
   box.hidden = !play;
   if (!play) return;
   const name = (game && game.name) || "";
-  const key = play.state === "wait" ? (play.text === "login" ? "login" : play.text === "other" ? "other" : "steam")
-    : play.state === "down" ? "download" : play.state === "up" ? (play.text === "mods" ? "mods" : "launch")
+  let key = play.state === "wait" ? (play.text === "login" ? "login" : play.text === "other" ? "other" : "steam")
+    : play.state === "down" ? "download"
+    : play.state === "up" ? (play.text === "mods" ? "mods" : play.text === "game" ? "game" : "launch")
     : play.state === "ok" ? "running" : "err";
+  // запись машины «running» остаётся после выхода из игры — закрыта ли она, видно по списку программ (v5.4)
+  const pr = game && progs && progs[game.appid];
+  if (key === "running" && pr && pr.running === false) key = "closed";
   box.innerHTML = "";
   box.classList.toggle("warn", key === "err" || key === "other");
   if (game && game.cap) {
@@ -1053,7 +1084,8 @@ function renderPlay(play, game, streaming) {
       + (sp ? " · " + t("arch.speed", { speed: size(sp) }) + (sp > 0 ? " · " + leftText((pg.total - pg.done) / sp) : "") : "")));
   }
   if (game && game.appid) main.appendChild(modsSaveBlock(game.appid, null, null, true, !!game.mods));
-  if (["login", "other", "err", "running"].includes(key) && current && current.status.links) {
+  if (game && game.appid && game.gdata) main.appendChild(gdataBlock(game.appid, null, null, true, true));
+  if (["login", "other", "err", "running", "closed"].includes(key) && current && current.status.links) {
     main.appendChild(button(t("play.open"), () => startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop"), key !== "running"));
   }
   box.appendChild(main);
@@ -2024,7 +2056,7 @@ async function openGames() {
 // Номер игры не из Steam, добавленной в Steam ярлыком, — большой (старший бит установлен)
 const SHORTCUT_APPID = 2147483648;
 function gameTitle(g) {
-  if (g.kind === "mod") return g.title || `appid ${g.appid}`;
+  if (g.kind === "mod" || g.kind === "lgame") return g.title || `appid ${g.appid}`;
   if (g.kind !== "pfx") return g.title;
   if (g.title) return `${g.title} (appid ${g.appid})`;
   return Number(g.appid) >= SHORTCUT_APPID ? t("games.pfx_shortcut", { appid: g.appid }) : `appid ${g.appid}`;
