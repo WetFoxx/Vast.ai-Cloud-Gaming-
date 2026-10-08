@@ -1244,10 +1244,37 @@ def _activate(bundle_id):
         pass
 
 
+def _front_windows(window):
+    """Windows: карточка поверх всех окон (TopMost) и на передний план с фокусом — тогда Moonlight отпускает мышь.
+    Фоновой программе (служба автозапуска) Windows фокус может не дать — тогда подсветит её значок; поверх окон
+    карточка будет всё равно, а уведомление со звуком придёт в любом случае."""
+    try:
+        from System import Action
+        from System.Drawing import Point
+        from System.Windows.Forms import Cursor, Screen
+        form = window.native
+
+        def front():
+            # Как на Mac: по центру экрана, где мышь, чуть выше середины
+            area = Screen.FromPoint(Cursor.Position).WorkingArea
+            form.Location = Point(int(area.X + (area.Width - form.Width) / 2),
+                                  int(area.Y + area.Height * 0.38 - form.Height / 2))
+            form.TopMost = True
+            form.Activate()
+            form.BringToFront()
+        form.Invoke(Action(front))
+    except Exception:                                  # noqa: BLE001 — не вышло: карточка просто показана
+        settings.applog("карточка: не удалось вывести на передний план")
+
+
 def _float(window):
     """Mac: поднять карточку над всеми окнами, в том числе над полноэкранной игрой (уровень «щита» экрана — выше
     него Moonlight в полноэкранном режиме не бывает), показать на всех рабочих столах (и в полноэкранном), по центру
     экрана с мышью, и забрать фокус — тогда Moonlight отпускает мышь."""
+    if sys.platform == "win32":
+        window.show()
+        _front_windows(window)
+        return
     if sys.platform != "darwin":
         window.show()
         return
