@@ -76,6 +76,15 @@ ASK_POLL = 10       # с: как часто окно спрашивает маш
 BREW = {"rclone": ["rclone"], "tailscale_app": ["--cask", "tailscale-app"], "moonlight": ["--cask", "moonlight"]}
 
 
+
+def _loading_page(text):
+    """Страница-заглушка окна входа Steam, пока грузится сам Steam: текст по центру, светлая и тёмная тема."""
+    import html
+    return ("<!doctype html><meta charset=utf-8><style>:root{color-scheme:light dark}"
+            "body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;"
+            "font:16px -apple-system,'Segoe UI',sans-serif;color:#666;text-align:center;padding:0 40px}"
+            "</style><body><p>" + html.escape(text) + "</p>")
+
 class Api:
     """Функции для страницы. Возвращают словари — pywebview передаёт их в JavaScript как объекты.
     Атрибуты с «_» pywebview странице не показывает."""
@@ -863,9 +872,18 @@ class Api:
             return {"error": {"key": "steam.login_open", "params": {}, "text": "login window is open"}}
         try:
             self._clear_web()                    # прошлый вход в Steam не должен «узнать» человека — нужен чистый
-            w = webview.create_window(str(title)[:60], steamlib.LOGIN_URL, width=900, height=760)
-            closed = threading.Event()
+            # Сначала своя страница «открываю…», потом Steam: до steamcommunity.com бывает очень медленно (облачный
+            # ПК 2026-10-08: ~2 мин и в Chrome) — пустое белое окно выглядело зависшим. Прежняя страница видна,
+            # пока Steam не ответит
+            tr = notify.texts(settings.get("language") or settings.get("ui_language"))
+            w = webview.create_window(str(title)[:60], html=_loading_page(tr["steam.login_loading"]), width=900,
+                                      height=760)
+            closed, shown = threading.Event(), threading.Event()
             w.events.closed += closed.set
+            w.events.loaded += shown.set
+            shown.wait(10)
+            if not closed.is_set():
+                w.load_url(steamlib.LOGIN_URL)
             token, until = None, time.time() + STEAM_LOGIN_MIN * 60
             while not closed.is_set() and time.time() < until:
                 time.sleep(0.4)
