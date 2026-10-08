@@ -830,9 +830,9 @@ class Api:
             code, out = wolfnode.run(node[1], cmd, args, timeout=timeout, on_notice=self._ssh_notice)
         except VastgameError as e:
             return {"error": error_data(e)}
-        m = re.search(r"prog: (\w+)", out or "")
-        settings.applog(f"{cmd} {' '.join(args[:2])}: {m.group(1) if m else (out or '').strip()[-120:]}")
-        return {"result": m.group(1) if m else "failed"}
+        found = re.findall(r"prog: (\w+)", out or "")            # итог — последний ответ (перед ним бывает «ok» Steam)
+        settings.applog(f"{cmd} {' '.join(args[:2])}: {found[-1] if found else (out or '').strip()[-120:]}")
+        return {"result": found[-1] if found else "failed"}
 
     def prog_launch(self, appid, ident, args=""):
         """[v5.6] Запускать игру через программу ident («-» — как обычно), с параметрами: запомнить (уйдёт машинам при

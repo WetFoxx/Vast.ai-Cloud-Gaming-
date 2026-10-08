@@ -175,7 +175,7 @@ class TestPrograms(unittest.TestCase):
     def test_install_into_game(self):
         api = gui.Api()
         with mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args=(), **k: (self.calls.append((cmd, list(args)))
-                                                                                     or (0, "prog: installing\n"))):
+                                                                                     or (0, "prog: ok\nprog: installing\n"))):
             self.assertEqual(api.prog_install("1", "prog:XIVLauncher/Setup.exe"), {"result": "installing"})
         self.assertEqual(self.calls[-1], ("prog-install", ["1", "prog:XIVLauncher/Setup.exe"]))
         self.assertIn("error", api.prog_install("1", "-"))

@@ -9,6 +9,9 @@
  *        уходят ему;
  *      - клавиатуру и мышь — отклоняем (-ENODEV): libvirtualhid сам откатывается на XTest, как без нас.
  *    Если посредник не запущен — ничего не подделываем (всё как без библиотеки).
+ *    «Прямой» uinput (UI_SET_*BIT, UI_DEV_SETUP, UI_ABS_SETUP или write(uinput_user_dev), UI_DEV_CREATE) — так создаёт
+ *    виртуальные геймпады Steam (Steam Input, Remote Play / Steam Link): тот же путь к посреднику; события 32-битных
+ *    программ (Steam — 32-битный) переводятся в 64-битный вид, который ждёт посредник.
  *
  * 2. В играх (SDL, Proton/winebus) — поддельный джойстик /dev/input/event200…207. Посредник кладёт
  *    файл-заглушку (его видят opendir/inotify), а мы на open() подключаемся к посреднику: read()/poll()
@@ -218,7 +221,10 @@ static int open_producer(int flags) {
 static int open_consumer(int num, int flags) {
     int s = broker_connect(flags & O_CLOEXEC);
     if (s < 0) { errno = ENOENT; return -1; }
-    uint32_t req[2] = {(uint32_t)(num - VG_BASE), (uint32_t)sizeof(struct input_event)};
+    /* третье — флаги: 1 — читает сам Steam (посредник не отдаёт ему нажатия его же виртуального геймпада) */
+    extern char *program_invocation_short_name;
+    uint32_t req[3] = {(uint32_t)(num - VG_BASE), (uint32_t)sizeof(struct input_event),
+                       program_invocation_short_name && !strcmp(program_invocation_short_name, "steam") ? 1u : 0u};
     struct vg_desc *d = malloc(sizeof *d);
     if (!d || send_frame(s, T_OPEN, req, sizeof req, 2000) || recv_frame(s, T_DESC, d, sizeof *d, 2000)
         || d->magic != VG_MAGIC) {
@@ -381,8 +387,31 @@ int dup3(int fd, int to, int flags) {
 
 /* ---------------------------------------------------------------- запись (Sunshine) -------- */
 
+static struct vg_desc *builder(struct fdent *e);
+static int send_events(int fd, const void *buf, size_t n);
+
 ssize_t write(int fd, const void *buf, size_t n) {
     struct fdent *e = ent(fd);
+    if (e && e->kind == K_PRODUCER && e->pad < 0 && n == sizeof(struct uinput_user_dev)) {
+        /* старый способ описать устройство «прямого» uinput: имя, номер, оси — до UI_DEV_CREATE */
+        const struct uinput_user_dev *u = buf;
+        struct vg_desc *d = builder(e);
+        if (d) {
+            snprintf(d->name, sizeof d->name, "%s", u->name);
+            d->id = u->id;
+            for (int c = 0; c <= ABS_MAX && c < 64; c++) {
+                d->abs[c].minimum = u->absmin[c];
+                d->abs[c].maximum = u->absmax[c];
+                d->abs[c].fuzz = u->absfuzz[c];
+                d->abs[c].flat = u->absflat[c];
+            }
+        }
+        return (ssize_t)n;
+    }
+    if (e && e->kind == K_PRODUCER && sizeof(struct input_event) != 24) {
+        if (e->pad >= 0 && n && send_events(fd, buf, n)) { errno = EIO; return -1; }
+        return (ssize_t)n;
+    }
     if (e && e->kind == K_PRODUCER) {
         /* события геймпада → посреднику; у несозданного устройства — выбросить. Ждём посредника до 1 с: он бывает
          * занят до 50 мс на «зависшем» читателе (потом его отбрасывает), а ошибку Sunshine считает концом геймпада
@@ -464,6 +493,85 @@ static int evdev_ioctl(struct fdent *e, unsigned long req, void *arg) {
     return -1;
 }
 
+/* ---------------------------------------------------------------- «прямой» uinput (Steam) - */
+
+static struct vg_desc *builder(struct fdent *e) {
+    if (!e->desc && (e->desc = calloc(1, sizeof *e->desc))) {
+        e->desc->magic = VG_MAGIC;
+        e->desc->version = 1;
+        snprintf(e->desc->name, sizeof e->desc->name, "Virtual Gamepad");
+    }
+    return e->desc;
+}
+
+#define SETB(a, b, max) do { if ((unsigned long)(b) <= (unsigned long)(max)) (a)[(b) / 8] |= (uint8_t)(1u << ((b) % 8)); } while (0)
+#define HASB(a, b) ((a)[(b) / 8] & (1u << ((b) % 8)))
+
+/* События 32-битной программы (16 байт: timeval из двух 32-битных) — посреднику в 64-битном виде (24 байта) */
+static int send_events(int fd, const void *buf, size_t n) {
+    struct ev32 { int32_t sec, usec; uint16_t type, code; int32_t value; } __attribute__((packed));
+    struct ev64 { int64_t sec, usec; uint16_t type, code; int32_t value; } __attribute__((packed));
+    size_t cnt = n / sizeof(struct ev32);
+    if (!cnt || cnt > 4096 / sizeof(struct ev64)) return 0;
+    struct ev64 out[4096 / sizeof(struct ev64)];
+    const struct ev32 *in = buf;
+    for (size_t i = 0; i < cnt; i++)
+        out[i] = (struct ev64){in[i].sec, in[i].usec, in[i].type, in[i].code, in[i].value};
+    return send_frame(fd, T_EVENTS, out, (uint32_t)(cnt * sizeof(struct ev64)), PRODUCER_WAIT_MS);
+}
+
+static int uinput_ioctl(int fd, struct fdent *e, unsigned long req, void *arg) {
+    long v = (long)arg;
+    struct vg_desc *d;
+    if (req == UI_DEV_DESTROY) return 0;
+    if (req == UI_GET_VERSION) { if (arg) *(unsigned int *)arg = 5; return 0; }
+    if (req == UI_SET_EVBIT) { if (!(d = builder(e))) goto nomem; SETB(d->evbits, v, 31); return 0; }
+    if (req == UI_SET_KEYBIT) { if (!(d = builder(e))) goto nomem; SETB(d->keybits, v, KEY_MAX); return 0; }
+    if (req == UI_SET_ABSBIT) { if (!(d = builder(e))) goto nomem; SETB(d->absbits, v, ABS_MAX); return 0; }
+    if (req == UI_SET_MSCBIT) { if (!(d = builder(e))) goto nomem; SETB(d->mscbits, v, MSC_MAX); return 0; }
+    if (req == UI_SET_PROPBIT) { if (!(d = builder(e))) goto nomem; SETB(d->propbits, v, INPUT_PROP_MAX); return 0; }
+    if (req == UI_SET_FFBIT || req == UI_SET_RELBIT || req == UI_SET_LEDBIT || req == UI_SET_SNDBIT
+        || req == UI_SET_SWBIT || req == UI_SET_PHYS)
+        return 0;                                      /* вибрацию и прочее не обещаем — молча принимаем */
+#ifdef UI_DEV_SETUP
+    if (req == UI_DEV_SETUP) {
+        const struct uinput_setup *u = arg;
+        if (!u || !(d = builder(e))) goto nomem;
+        d->id = u->id;
+        snprintf(d->name, sizeof d->name, "%s", u->name);
+        return 0;
+    }
+    if (req == UI_ABS_SETUP) {
+        const struct uinput_abs_setup *a = arg;
+        if (!a || !(d = builder(e))) goto nomem;
+        if (a->code <= ABS_MAX) d->abs[a->code] = a->absinfo;
+        return 0;
+    }
+#endif
+    if (req == UI_DEV_CREATE) {
+        d = e->desc;
+        /* только геймпад; клавиатуру и мышь — отказ (Steam и Sunshine переходят на XTest, как без нас) */
+        if (!d || !HASB(d->keybits, BTN_SOUTH) || !HASB(d->evbits, EV_ABS)) { errno = ENODEV; return -1; }
+        uint32_t idx;
+        if (send_frame(fd, T_CREATE, d, sizeof *d, 2000) || recv_frame(fd, T_ASSIGNED, &idx, sizeof idx, 2000)) {
+            errno = EIO;
+            return -1;
+        }
+        e->pad = (int)idx;
+        return 0;
+    }
+    if (_IOC_TYPE(req) == UINPUT_IOCTL_BASE && _IOC_NR(req) == 44 && arg) {  /* UI_GET_SYSNAME(len) */
+        char name[32];
+        snprintf(name, sizeof name, "input%d", VG_BASE + (e->pad < 0 ? 0 : e->pad));
+        return copy_str(arg, _IOC_SIZE(req), name);
+    }
+    errno = EINVAL;
+    return -1;
+nomem:
+    errno = ENOMEM;
+    return -1;
+}
+
 int ioctl(int fd, unsigned long req, ...) {
     va_list ap;
     va_start(ap, req);
@@ -471,11 +579,7 @@ int ioctl(int fd, unsigned long req, ...) {
     va_end(ap);
     struct fdent *e = ent(fd);
     if (e && e->kind == K_CONSUMER) return evdev_ioctl(e, req, arg);
-    if (e && e->kind == K_PRODUCER) {
-        if (req == UI_DEV_DESTROY) return 0;
-        errno = EINVAL;             /* «сырой» uinput не умеем — Sunshine откатится на XTest */
-        return -1;
-    }
+    if (e && e->kind == K_PRODUCER) return uinput_ioctl(fd, e, req, arg);
     REAL(int, ioctl, int, unsigned long, ...);
     return real_ioctl(fd, req, arg);
 }

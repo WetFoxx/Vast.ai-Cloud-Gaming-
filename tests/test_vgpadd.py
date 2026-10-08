@@ -92,7 +92,7 @@ class TestPermanentPad(unittest.TestCase):
     def setUp(self):
         self.d = Path(tempfile.mkdtemp(dir="/tmp"))          # путь сокета не длиннее 104 байт (macOS)
         self.sock = str(self.d / "s")
-        env = {**os.environ, "VGPAD_SOCK": self.sock, "VGPAD_DEV": str(self.d / "input")}
+        env = {**os.environ, "VGPAD_SOCK": self.sock, "VGPAD_DEV": str(self.d / "input"), "VGPAD_IDLE": "0.5"}
         self.p = subprocess.Popen([sys.executable, str(ROOT / "docker" / "vgpad" / "vgpadd.py")], env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(100):
@@ -112,9 +112,12 @@ class TestPermanentPad(unittest.TestCase):
         s.settimeout(5)
         return s
 
-    def producer(self):
+    def producer(self, vendor=None):
         s = self.conn()
-        s.sendall(frame(T_CREATE, vgpadd.x360_desc()))
+        desc = bytearray(vgpadd.x360_desc())
+        if vendor:
+            struct.pack_into("<HH", desc, 10, vendor, 0x11ff)              # виртуальный геймпад Steam: 28de:11ff
+        s.sendall(frame(T_CREATE, bytes(desc)))
         t, data = recv_frame(s)
         self.assertEqual(t, T_ASSIGNED)
         return s, struct.unpack("<I", data)[0]
@@ -148,6 +151,43 @@ class TestPermanentPad(unittest.TestCase):
         self.assertEqual(idx3, 1)
         self.assertTrue((self.d / "input" / "event201").exists())
         for s in (game, sun2, other):
+            s.close()
+
+    def test_switch_moonlight_steam_link(self):
+        # Moonlight подключён и молчит → Steam Link: геймпад Steam занимает место 0 (игра берёт первый геймпад),
+        # нажатия обоих доходят до игры; сам Steam нажатий своего геймпада не получает (иначе принял бы его за новый)
+        game, steam = self.conn(), self.conn()
+        game.sendall(frame(T_OPEN, struct.pack("<II", 0, 24)))
+        steam.sendall(frame(T_OPEN, struct.pack("<III", 0, 24, 1)))
+        for c in (game, steam):
+            self.assertEqual(recv_frame(c)[0], T_DESC)
+        sun, idx = self.producer()
+        self.assertEqual(idx, 0)
+        sun.sendall(frame(T_EVENTS, vgpadd.EV64.pack(0, 0, 0x01, 0x130, 1)))
+        for c in (game, steam):                                           # Moonlight — и игре, и Steam
+            self.assertEqual(vgpadd.EV64.unpack(recv_n(c, 24))[2:], (0x01, 0x130, 1))
+        time.sleep(0.7)                                                   # Moonlight молчит дольше IDLE
+        pad, idx2 = self.producer(vendor=0x28de)                          # подключился Steam Link
+        self.assertEqual(idx2, 0)
+        pad.sendall(frame(T_EVENTS, vgpadd.EV64.pack(0, 0, 0x01, 0x131, 1)))
+        self.assertEqual(vgpadd.EV64.unpack(recv_n(game, 24))[2:], (0x01, 0x131, 1))
+        steam.settimeout(0.5)
+        with self.assertRaises(socket.timeout):
+            steam.recv(24)                                                # Steam своего не получил
+        sun.sendall(frame(T_EVENTS, vgpadd.EV64.pack(0, 0, 0x01, 0x133, 1)))   # вернулся в Moonlight — тоже доходит
+        self.assertEqual(vgpadd.EV64.unpack(recv_n(game, 24))[2:], (0x01, 0x133, 1))
+        pad.close()                                                       # Steam Link отключился — геймпад у игры есть
+        self.assertTrue((self.d / "input" / "event200").exists())
+        for s in (game, steam, sun):
+            s.close()
+
+    def test_busy_slot_gives_second_player_own_pad(self):
+        sun, idx = self.producer()
+        sun.sendall(frame(T_EVENTS, vgpadd.EV64.pack(0, 0, 0x01, 0x130, 1)))   # играет прямо сейчас
+        time.sleep(0.1)
+        pad, idx2 = self.producer(vendor=0x28de)
+        self.assertEqual((idx, idx2), (0, 1))
+        for s in (sun, pad):
             s.close()
 
 
