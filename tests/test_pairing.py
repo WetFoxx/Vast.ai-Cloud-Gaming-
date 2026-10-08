@@ -99,6 +99,30 @@ class TestPair(unittest.TestCase):
             pairing.pair("h", "100.1.1.1")
         self.assertFalse(any(c[0].startswith("wolf sunshine-creds") for c in self.ssh))
 
+    def _hanging_moonlight(self):
+        """Moonlight, который после связки не выходит (Windows: окно с итогом, которого никто не видит)."""
+        if type(self) is not TestPair:
+            self.skipTest("достаточно базовой поддельной Sunshine")
+        exe = self.d / "Moonlight"
+        exe.write_text(f"#!/bin/sh\necho \"$@\" > {self.d}/args\nsleep 30\n")
+        exe.chmod(0o755)
+
+    def test_moonlight_does_not_exit_but_is_paired(self):
+        self.creds_ok = True
+        self._hanging_moonlight()
+        with mock.patch.object(pairing.requests, "post", self.fake_post), mock.patch.object(pairing, "PAIR_SETTLE", 0), \
+                mock.patch.object(pairing.moonlight, "apps", lambda host: ["Desktop"]):
+            self.assertTrue(pairing.pair("h", "100.1.1.1"))
+
+    def test_moonlight_does_not_exit_and_is_not_paired(self):
+        self.creds_ok = True
+        self._hanging_moonlight()
+        with mock.patch.object(pairing.requests, "post", self.fake_post), mock.patch.object(pairing, "PAIR_SETTLE", 0), \
+                mock.patch.object(pairing.moonlight, "apps", lambda host: None):
+            with self.assertRaises(VastgameError) as e:
+                pairing.pair("h", "100.1.1.1")
+        self.assertEqual(e.exception.key, "pair.failed")
+
     def test_moonlight_fails(self):
         self.creds_ok = True
 

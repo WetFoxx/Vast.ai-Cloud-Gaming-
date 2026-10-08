@@ -35,6 +35,7 @@ from wolfnode import ssh_run
 USER = "vastgame"
 PORT = 47990          # кабинет и API Sunshine (открыт только через Tailscale — firewall wolf)
 PAIR_WAIT = 90        # с: сколько ждать, пока Moonlight и Sunshine договорятся
+PAIR_SETTLE = 15   # с: после принятого PIN Moonlight выходит сам за секунды (Mac); дольше — проверяем связку сами
 
 # Сертификат кабинета Sunshine самоподписанный; ходим к нему только через Tailscale (шифрованный
 # туннель до своей машины), поэтому проверку сертификата отключаем и прячем предупреждение об этом
@@ -196,11 +197,30 @@ def _pair(exe, host, ip, on_notice):
         p = subprocess.Popen([exe, "pair", host, "--pin", pin], stdin=subprocess.DEVNULL, stdout=log,
                              stderr=subprocess.STDOUT, env=paths.tailscale_env(), **paths.detached())
         try:
-            end = time.time() + PAIR_WAIT
+            end, accepted = time.time() + PAIR_WAIT, None
             while time.time() < end and p.poll() is None:
-                if _send_pin(ip, pin) == "401":          # логин вдруг перестал подходить — не ждать зря
-                    raise VastgameError("Кабинет Sunshine не принял логин.", key="pair.creds_failed", out="401")
+                if accepted is None:
+                    sent = _send_pin(ip, pin)
+                    if sent == "401":                    # логин вдруг перестал подходить — не ждать зря
+                        raise VastgameError("Кабинет Sunshine не принял логин.", key="pair.creds_failed", out="401")
+                    if sent is True:
+                        accepted = time.time()
+                elif time.time() - accepted > PAIR_SETTLE:
+                    break                                # PIN принят, а Moonlight не выходит (Windows) — проверим сами
                 time.sleep(2)
+            if p.poll() is None and accepted is not None:
+                # Windows: Moonlight после связки показывает окно с итогом и ждёт человека, а окна не видно (запущен
+                # без консоли) — выхода не дождаться (живой случай 2026-10-08). Закрыть и спросить у него список
+                # приложений машины: отвечает — связка есть
+                p.terminate()
+                try:
+                    p.wait(10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                if moonlight.apps(host) is not None:
+                    return
+                raise VastgameError("Moonlight не связался с машиной: связка не подтвердилась.", key="pair.failed",
+                                    out="PIN принят, связка не видна")
             if p.poll() is None:
                 raise VastgameError("Moonlight не связался с машиной за полторы минуты.", key="pair.timeout")
             if p.returncode != 0:
