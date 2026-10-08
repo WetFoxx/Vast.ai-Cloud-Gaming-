@@ -451,6 +451,111 @@ class TestWatch(unittest.TestCase):
         self.assertEqual(opened, ["NEW"])
 
 
+class TestWindows(unittest.TestCase):
+    """Windows (подделка платформы): своё описание, установщик вместо архива, установка — сторожем PowerShell.
+    Сам сторож — настоящий PowerShell — в tests/test_updater_win.py (только в Windows)."""
+    WIN_FILE = "VastGame-Setup-{version}.exe"
+
+    def setUp(self):
+        for name, value in (("WIN", True), ("FILE", self.WIN_FILE)):
+            p = mock.patch.object(updater, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        shutil.rmtree(updater.UPDATE_DIR, ignore_errors=True)
+        updater.settings.set("updated", None)
+        self.d = Path(tempfile.mkdtemp(dir=TMP))
+        self.spawned = []
+
+    def publish_setup(self, body, served=None):
+        import hashlib
+        name = self.WIN_FILE.format(version="9.9.9")
+        m = signed(file=name, size=len(body), sha256=hashlib.sha256(body).hexdigest())
+        FILES.clear()
+        FILES["/latest/vastgame-update.json"] = {"body": json.dumps(m).encode()}
+        FILES["/latest/" + name] = served or {"body": body}
+
+    def test_good_update_is_the_checked_installer(self):
+        body = b"MZ" + os.urandom(5000)
+        self.publish_setup(body)
+        r = updater.prepare()
+        self.assertEqual(r["version"], "9.9.9")
+        self.assertEqual(Path(r["app"]).name, "VastGame-Setup-9.9.9.exe")
+        self.assertEqual(Path(r["app"]).read_bytes(), body)
+
+    def test_not_a_program_is_refused(self):
+        self.publish_setup(b"<html>" + os.urandom(100))           # подписано, но это не программа Windows
+        with self.assertRaises(VastgameError) as c:
+            updater.prepare()
+        self.assertEqual(c.exception.key, "update.err.app")
+        self.assertFalse(updater.UPDATE_DIR.exists())
+
+    def test_swapped_installer_is_refused(self):
+        body = b"MZ" + os.urandom(5000)
+        self.publish_setup(body, served={"body": b"MZ" + os.urandom(5000)})
+        with self.assertRaises(VastgameError) as c:
+            updater.prepare()
+        self.assertEqual(c.exception.key, "update.err.checksum")
+        self.assertFalse(updater.UPDATE_DIR.exists())
+
+    def test_mac_description_is_not_for_windows(self):
+        with self.assertRaises(VastgameError) as c:
+            updater.verify(signed(file="vastgame-9.9.9-mac-arm64.zip"))
+        self.assertEqual(c.exception.key, "update.err.manifest")
+
+    def installed(self):
+        exe = self.d / "VastGame" / "VastGame.exe"
+        exe.parent.mkdir()
+        exe.write_bytes(b"MZ")
+        (exe.parent / "unins000.exe").write_bytes(b"MZ")
+        return exe
+
+    def install(self, exe, spawn=None):
+        updater.install(self.d / "setup.exe", "9.9.9", target=exe, pid=4242, folder=self.d / "update",
+                        spawn=spawn or (lambda cmd, **opts: self.spawned.append((cmd, opts))))
+
+    def test_watcher_is_started(self):
+        exe = self.installed()
+        self.install(exe)
+        self.assertEqual(updater.settings.get("updated"), {"from": updater.VERSION, "to": "9.9.9"})
+        cmd, opts = self.spawned[0]
+        self.assertEqual(cmd[:6], ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                   "-EncodedCommand"])
+        self.assertEqual(base64.b64decode(cmd[6]).decode("utf-16-le"), updater.WATCH_WIN)
+        env = opts["env"]
+        self.assertEqual((env["VG_PID"], env["VG_SETUP"], env["VG_VERSION"], env["VG_EXE"], env["VG_FOLDER"]),
+                         ("4242", str(self.d / "setup.exe"), "9.9.9", str(exe), str(self.d / "update")))
+        self.assertEqual({k: v for k, v in opts.items() if k not in ("env", "stdin", "stdout", "stderr")},
+                         updater.watch_flags())                      # сторож переживёт выход окна
+
+    def test_not_installed_touches_nothing(self):
+        exe = self.d / "dist" / "VastGame.exe"                       # собранное, но не поставленное установщиком
+        exe.parent.mkdir()
+        exe.write_bytes(b"MZ")
+        for target in (exe, None):
+            with self.assertRaises(VastgameError) as c:
+                self.install(target)
+            self.assertEqual(c.exception.key, "update.err.not_app")
+        self.assertEqual((self.spawned, updater.settings.get("updated")), ([], None))
+
+    def test_watcher_did_not_start(self):
+        exe = self.installed()
+        with self.assertRaises(VastgameError) as c:
+            self.install(exe, spawn=mock.Mock(side_effect=FileNotFoundError(2, "No such file")))
+        self.assertEqual(c.exception.key, "update.err.setup")
+        self.assertIsNone(updater.settings.get("updated"))           # окно не скажет «обновлено»
+
+    def test_no_rights(self):
+        exe = self.installed()
+        os.chmod(exe.parent, 0o555)
+        try:
+            with self.assertRaises(VastgameError) as c:
+                self.install(exe)
+        finally:
+            os.chmod(exe.parent, 0o755)
+        self.assertEqual(c.exception.key, "update.err.no_rights")
+        self.assertEqual(self.spawned, [])
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -528,6 +633,24 @@ class TestRelease(unittest.TestCase):
             release.manifest(z)
         m = updater.verify(json.loads((self.d / "vastgame-update.json").read_text()))
         self.assertEqual((m["version"], m["size"]), ("9.9.9", z.stat().st_size))
+
+    def test_manifest_for_windows_installer(self):
+        z = self.d / "VastGame-Setup-9.9.9.exe"
+        z.write_bytes(b"MZ" + os.urandom(300))
+        with mock.patch.object(release, "load_key", lambda: KEY):
+            release.manifest(z)
+        data = json.loads((self.d / "vastgame-update-win.json").read_text())
+        m = updater.verify(data, file=updater.WIN_FILE)
+        self.assertEqual((m["version"], m["file"], m["size"]), ("9.9.9", z.name, z.stat().st_size))
+        with self.assertRaises(VastgameError):                       # приложение для Mac его не примет
+            updater.verify(data)
+        self.assertFalse((self.d / "vastgame-update.json").exists())
+
+    def test_manifest_needs_a_known_file(self):
+        z = self.d / "VastGame-9.9.9.exe"
+        z.write_bytes(b"MZ")
+        with mock.patch.object(release, "load_key", lambda: KEY), self.assertRaises(SystemExit):
+            release.manifest(z)
 
     def test_manifest_with_another_key_is_refused(self):
         # Ключ в Связке ключей не тот, что вшит в приложение, — ошибка здесь, а не у людей после выпуска

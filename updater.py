@@ -38,7 +38,11 @@ from vastapi import VastgameError
 from version import VERSION
 
 REPO = "WetFoxx/Vast.ai-Cloud-Gaming-"
-MANIFEST = "vastgame-update.json"
+WIN = sys.platform == "win32"
+# Windows: своё описание и вместо архива — установщик (Inno Setup, vastgame.iss); описание Mac не меняется,
+# поэтому уже установленные версии для Mac его не замечают
+MAC_MANIFEST, WIN_MANIFEST = "vastgame-update.json", "vastgame-update-win.json"
+MANIFEST = WIN_MANIFEST if WIN else MAC_MANIFEST
 # Проверка на своём Mac без публикации: VASTGAME_UPDATE_URL=http://127.0.0.1:<порт>/vastgame-update.json
 # (архив тогда берётся из той же папки)
 OVERRIDE = os.environ.get("VASTGAME_UPDATE_URL")
@@ -46,7 +50,8 @@ URL = OVERRIDE or f"https://github.com/{REPO}/releases/latest/download/{MANIFEST
 # Открытый ключ выпусков (base64 32 байт; создан release.py keygen 2026-09-28, закрытый — в Связке ключей Алексея)
 PUBLIC_KEY = "d0QgFz3vzLarH0PQgbETopZvO5OZvZO+g79SXwifho0="
 FORMAT = 1                   # вид описания; другой вид старое приложение не понимает и не ставит
-FILE = "vastgame-{version}-mac-arm64.zip"
+MAC_FILE, WIN_FILE = "vastgame-{version}-mac-arm64.zip", "VastGame-Setup-{version}.exe"
+FILE = WIN_FILE if WIN else MAC_FILE
 BUNDLE_ID = "com.vastgame.app"
 CHECK_EVERY = 6 * 3600       # с: как часто проверять, пока окно открыто
 RETRY_AFTER = 30 * 60        # с: узнать не удалось (нет сети) — снова через полчаса
@@ -85,9 +90,9 @@ def canonical(data):
                       separators=(",", ":"), ensure_ascii=True).encode()
 
 
-def verify(data, public_key=None):
-    """Проверить описание: подпись ключом выпусков, потом поля. Возвращает его без подписи;
-    не то — VastgameError (update.err.*)."""
+def verify(data, public_key=None, file=None):
+    """Проверить описание: подпись ключом выпусков, потом поля (file — вид имени файла; по умолчанию своей
+    системы). Возвращает его без подписи; не то — VastgameError (update.err.*)."""
     key = public_key or PUBLIC_KEY
     if not key:
         raise VastgameError("В этой сборке нет ключа проверки обновлений.", key="update.err.nokey")
@@ -98,7 +103,7 @@ def verify(data, public_key=None):
         raise VastgameError("Обновление отклонено: подпись не сходится.", key="update.err.signature") from None
     m = {k: v for k, v in data.items() if k != "signature"}
     if not (m.get("format") == FORMAT and parse(m.get("version"))
-            and m.get("file") == FILE.format(version=m.get("version"))
+            and m.get("file") == (file or FILE).format(version=m.get("version"))
             and type(m.get("size")) is int and 0 < m["size"] <= MAX_SIZE
             and isinstance(m.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", m["sha256"])):
         raise VastgameError("Обновление отклонено: описание версии не того вида.", key="update.err.manifest")
@@ -239,6 +244,14 @@ def prepare(on_progress=None, say=None, folder=None):
     shutil.rmtree(folder, ignore_errors=True)         # прежние скачивания, не дошедшие до установки
     try:
         z = download(m, on_progress, folder)
+        if WIN:
+            # Установщик проверить до установки можно только по подписанному описанию (размер и SHA-256 сошлись
+            # в download) и по виду файла; самопроверку новой версии не запустить — она внутри установщика
+            with open(z, "rb") as f:
+                if f.read(2) != b"MZ":
+                    raise VastgameError("Обновление отклонено: внутри не то приложение или не та версия.",
+                                        key="update.err.app")
+            return {"version": m["version"], "app": str(z)}
         say("Проверяю новую версию", key="update.verifying", version=m["version"])
         app = unpack(z, m, folder)
         z.unlink()
@@ -289,9 +302,12 @@ mv "$target" "$target.failed" && mv "$backup" "$target" && rm -rf "$target.faile
 
 
 def bundle_path():
-    """Папка самого приложения (…/vastgame.app) — у собранного; запущено из папки проекта — None."""
+    """Папка самого приложения (…/vastgame.app) — у собранного; запущено из папки проекта — None.
+    Windows — сам VastGame.exe."""
     if not getattr(sys, "frozen", False):
         return None
+    if WIN:
+        return Path(sys.executable).resolve()
     app = Path(sys.executable).resolve().parents[2]      # vastgame.app/Contents/MacOS/vastgame
     return app if app.suffix == ".app" else None
 
@@ -327,6 +343,8 @@ def install(staged_app, version, target=None, pid=None, folder=None, opener="/us
     """Поставить проверенную новую версию staged_app на место приложения target и запустить сторожа.
     Вернулась без ошибки — вызывающий сразу выходит (os._exit): новую версию откроет сторож.
     Не вышло — VastgameError, приложение не тронуто."""
+    if WIN:
+        return _install_win(staged_app, version, target, pid, folder, spawn)
     target = Path(target) if target else bundle_path()
     check_place(target)
     folder = Path(folder or UPDATE_DIR)
@@ -352,6 +370,74 @@ def install(staged_app, version, target=None, pid=None, folder=None, opener="/us
                                  str(pid or os.getpid()), version, str(WAIT), opener],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True)
+
+
+# ---------------------------------------------------------------- Windows
+#
+# Файлы заменяет сам установщик (Inno Setup; сорвался — возвращает прежние), но пока окно открыто, они заняты.
+# Поэтому окно запускает сторожа (WATCH_WIN — PowerShell без окна, отдельно от программы) и сразу выходит. Сторож
+# ждёт, пока окно закроется, тихо запускает установщик, ждёт его конца и открывает VastGame: установщик закончил
+# с кодом 0 — уже новую, иначе прежнюю, с пометкой FAILED. Дальше, как на Mac, — after_start.
+
+WATCH_WIN = r'''
+$f = $env:VG_FOLDER
+function say($t) { Add-Content -LiteralPath "$f\update.log" -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + " $t") -Encoding UTF8 }
+try { Wait-Process -Id ([int]$env:VG_PID) -Timeout 60 -ErrorAction Stop } catch {}
+$code = -1
+try {
+  $p = Start-Process -FilePath $env:VG_SETUP -PassThru -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$f\setup.log`"")
+  $null = $p.Handle
+  $p.WaitForExit()
+  $code = $p.ExitCode
+} catch { say "установщик не запустился: $_" }
+if ($code -eq 0) {
+  say "поставлена $env:VG_VERSION"
+  Remove-Item -LiteralPath $env:VG_SETUP -ErrorAction SilentlyContinue
+} else {
+  say "установка $env:VG_VERSION не прошла (код $code) — открываю прежнюю версию"
+  Set-Content -LiteralPath "$f\failed" -Value $env:VG_VERSION
+}
+Start-Process -FilePath $env:VG_EXE
+'''
+
+
+def watch_flags():
+    """Как запускать сторожа Windows: скрытая консоль в своей группе процессов. Без консоли (DETACHED_PROCESS, как
+    у фоновых операций) PowerShell молча выходит, ничего не сделав (проверено 2026-10-08)."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def check_place_win(exe):
+    """Windows: обновляется только VastGame, поставленный установщиком (рядом его unins000.exe), и только если
+    в его папку можно писать; иначе VastgameError."""
+    if not exe or not (Path(exe).parent / "unins000.exe").is_file():
+        raise VastgameError("Обновление ставится только в установленный VastGame.", key="update.err.not_app")
+    if not os.access(Path(exe).parent, os.W_OK):
+        raise VastgameError("Нет прав заменить приложение.", key="update.err.no_rights", error="нет прав на запись")
+
+
+def _install_win(setup, version, exe=None, pid=None, folder=None, spawn=None):
+    """Запустить сторожа, который поставит проверенный установщик setup после выхода окна (WATCH_WIN).
+    Вернулась без ошибки — окно сразу выходит. Не вышло — VastgameError, ничего не тронуто."""
+    exe = Path(exe) if exe else bundle_path()
+    check_place_win(exe)
+    folder = Path(folder or UPDATE_DIR)
+    (folder / STARTED).unlink(missing_ok=True)
+    (folder / FAILED).unlink(missing_ok=True)
+    settings.set("updated", {"from": VERSION, "to": version})
+    env = dict(os.environ, VG_FOLDER=str(folder), VG_PID=str(pid or os.getpid()), VG_SETUP=str(setup),
+               VG_VERSION=version, VG_EXE=str(exe))
+    script = base64.b64encode(WATCH_WIN.encode("utf-16-le")).decode()
+    try:
+        (spawn or subprocess.Popen)(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                     "-EncodedCommand", script], env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **watch_flags())
+    except OSError as e:
+        settings.set("updated", None)
+        raise VastgameError(f"Не удалось запустить установку: {e.strerror}", key="update.err.setup",
+                            error=e.strerror) from None
 
 
 def after_start():

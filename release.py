@@ -155,13 +155,20 @@ def restore(path):
 
 
 def manifest(zip_path):
+    """Подписать описание для архива Mac (vastgame-update.json) или установщика Windows (vastgame-update-win.json)
+    — рядом с файлом."""
     zip_path = Path(zip_path)
-    m = re.fullmatch(r"vastgame-(\d+\.\d+\.\d+)-mac-arm64\.zip", zip_path.name)
-    if not m or not zip_path.is_file():
-        sys.exit("Нужен архив vastgame-<версия>-mac-arm64.zip.")
+    kinds = ((r"vastgame-(\d+\.\d+\.\d+)-mac-arm64\.zip", updater.MAC_FILE, updater.MAC_MANIFEST),
+             (r"VastGame-Setup-(\d+\.\d+\.\d+)\.exe", updater.WIN_FILE, updater.WIN_MANIFEST))
+    for pattern, file, name in kinds:
+        m = re.fullmatch(pattern, zip_path.name)
+        if m and zip_path.is_file():
+            break
+    else:
+        sys.exit("Нужен архив vastgame-<версия>-mac-arm64.zip или установщик VastGame-Setup-<версия>.exe.")
     data = sign_manifest(load_key(), zip_path, m.group(1))
-    updater.verify(data)      # вшитый в приложение открытый ключ эту подпись принимает (иначе — ошибка здесь)
-    out = zip_path.with_name(updater.MANIFEST)
+    updater.verify(data, file=file)   # вшитый в приложение открытый ключ эту подпись принимает (иначе — ошибка здесь)
+    out = zip_path.with_name(name)
     out.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
     print(f"Подписано: {out} (версия {data['version']}, {data['size']} байт)")
 
@@ -293,7 +300,7 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("keygen", help="создать ключ подписи выпусков (один раз)")
     sub.add_parser("restore", help="вернуть ключ из резервной копии").add_argument("file")
-    sub.add_parser("manifest", help="подписать описание для архива").add_argument("zip")
+    sub.add_parser("manifest", help="подписать описание для архива Mac или установщика Windows").add_argument("zip")
     sub.add_parser("publish", help="выпустить версию из version.py").add_argument("--notes", required=True)
     a = p.parse_args(argv)
     if a.cmd == "keygen":

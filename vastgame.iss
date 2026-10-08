@@ -3,8 +3,9 @@
 ;
 ; Для одного пользователя, без прав администратора: %LOCALAPPDATA%\Programs\VastGame, ярлык в «Пуске» с именем
 ; приложения для Windows VastGame.App (по нему уведомления подписаны «VastGame», notify.WIN_APP_ID).
-; Тихое обновление (его запускает сама программа, updater): /VERYSILENT — закрыть VastGame, заменить файлы, открыть
-; снова. Удаление («Параметры → Приложения») убирает и автозапуск; настройки и историю (%APPDATA%\vastgame) оставляет.
+; Тихое обновление (/VERYSILENT) запускает сторож программы (updater.WATCH_WIN) после её выхода; он же открывает
+; VastGame после установки. Удаление («Параметры → Приложения») убирает и автозапуск; настройки и историю
+; (%APPDATA%\vastgame) оставляет.
 
 #ifndef AppVersion
   #error Передай версию: ISCC /DAppVersion=X.Y.Z vastgame.iss
@@ -57,8 +58,6 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\VastGame.exe"; Description: "{cm:LaunchProgram,VastGame}"; Flags: nowait postinstall skipifsilent
-; тихое обновление из самой программы — открыть новую версию
-Filename: "{app}\VastGame.exe"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 ; «Продолжать после перезагрузки» (autostart.py) — задача Планировщика
