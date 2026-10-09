@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_game_select import TMP, WOLF, heredoc  # noqa: E402
+from test_game_select import TMP, WOLF, fn, heredoc  # noqa: E402
 from test_shortcuts import Base  # noqa: E402
 
 VGRUN = TMP / "vg-run"
@@ -148,6 +148,29 @@ class TestVgRun(unittest.TestCase):
 class TestWolfSide(unittest.TestCase):
     def test_prefix_temp_not_archived(self):
         self.assertIn("game--*)    F \"$A\" \\( -ipath '*/drive_c/users/*/AppData/Local/Temp'", WOLF)
+
+    def test_games_being_added_are_hidden(self):
+        # [живой случай 2026-10-09] посреди установки 7-Zip машина спросила «новая игра — в облако?»: папка уже есть,
+        # паспорта ещё нет. Пока помощник жив (его номер в метке) — папки нет ни для вопросов, ни для выгрузки
+        h = Path(tempfile.mkdtemp(dir=TMP))
+        gd, marks = h / "Games", h / ".local/share/vastgame/adding"
+        for n in ("Old", "Adding", "Crashed", "Unpack.vgtmp"):
+            (gd / n).mkdir(parents=True)
+        marks.mkdir(parents=True)
+        dead = subprocess.run(["sh", "-c", "echo $$"], capture_output=True, text=True).stdout.strip()
+        (marks / "Adding").write_text(str(os.getpid()))
+        (marks / "Crashed").write_text(dead)                             # помощник упал — метка не мешает
+        script = f'''
+DH="{h}"; GD="{gd}"
+ld() {{ for d in "$1"/*/; do d=${{d%/}}; echo "$2${{d##*/}}"; done; }}
+{fn("ldg")}
+ldg
+'''
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout.split()
+        self.assertEqual(sorted(out), ["game--Crashed", "game--Old"])
+        self.assertIn("ldg; }", fn("ondisk"))
+        self.assertIn("{ ldg;", fn("gsync"))
+        self.assertEqual(WOLF.count('ld "$GD"'), 1)                     # только внутри ldg
 
 
 
@@ -315,6 +338,7 @@ class TestOpenFlows(OpenBase):
         (bin_ / "zenity").chmod(0o755)
         self.vgrun = bin_ / "vg-run"
         self.vgrun.write_text('#!/bin/sh\necho "vg-run $*" >> "$VG_CALLS"\n'
+                              'm="$HOME/.local/share/vastgame/adding/${1##*/}"; [ -e "$m" ] && echo "mark $(cat "$m")" >> "$VG_CALLS"\n'
                               '[ "$2" = --exe ] && [ -n "$VG_INSTALL" ] && mkdir -p "$1/$(dirname "$VG_INSTALL")" '
                               '&& touch "$1/$VG_INSTALL"\nexit 0\n')
         self.vgrun.chmod(0o755)
@@ -338,6 +362,8 @@ class TestOpenFlows(OpenBase):
         self.assertEqual(code, 0)
         self.assertIn(f"vg-run {self.gd}/Genshin --exe {setup}", calls)
         self.assertEqual(self.manifest("Genshin")["exe"], launcher)
+        self.assertTrue(any(c.startswith("mark ") for c in calls))         # во время установки — метка «добавляется»
+        self.assertEqual(list((self.home / ".local/share/vastgame/adding").iterdir()), [])   # после — убрана
         self.assertTrue((self.home / ".local/share/vastgame/requests/shortcuts").exists())   # ярлык Steam — wolf
 
     def test_portable_moved_with_its_folder(self):

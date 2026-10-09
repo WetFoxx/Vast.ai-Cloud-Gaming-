@@ -414,6 +414,19 @@ names() { sed -n -E 's/\.tar\.zst(\.parts)?\t.*//p' "$LS" | awk '!s[$0]++' | gre
 # [v4.4] Большие архивы — частями, параллельно: parts put|get|rm ОБЪЕКТ [--no-trash] (ход — в wolf.log)
 parts() { local c=$1; shift; WOLF_TMP="$T" WOLF_PG="${PG:-}" python3 /usr/local/bin/wolf-parts.py "$c" "$R" "$@" 2>>/var/log/wolf.log; }
 ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null; }
+# [v5.7] Игры из Games без тех, что сейчас добавляет помощник vg-open (метка ~/.local/share/vastgame/adding/ПАПКА с
+# номером его процесса) и без его временных папок распаковки (*.vgtmp): о недоустановленной игре не спрашивать и не
+# выгружать её (живой случай 2026-10-09: вопрос «новая игра 7-Zip» всплыл посреди установки). Процесса нет — метка не
+# мешает (помощник упал, машину перезапустили).
+ldg() {
+  local n p
+  ld "$GD" game-- | while IFS= read -r n; do
+    case $n in *.vgtmp) continue ;; esac
+    p=$(cat "$DH/.local/share/vastgame/adding/${n#game--}" 2>/dev/null) || p=""
+    [[ $p =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && continue
+    echo "$n"
+  done
+}
 # Папка для игр не из Steam (v3.10): если её нет — создать пустой. Зовётся при загрузке и каждые
 # GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
 # при этом не страдает — выгружаются только папки, которые есть на диске.
@@ -654,7 +667,7 @@ wants() { [ "$SV" = 1 ] && ! inlist "$1" sel.saves_off; }
 incloud() { [ -n "${LS:-}" ] && [ -s "$LS" ] && awk -F'\t' -v o="$1.tar.zst" 'index($1, o)==1 {f=1} END {exit !f}' "$LS"; }
 # Игры на диске: sgame--ПАПКА (steamapps/common) и game--ПАПКА ($GD), без служебных
 ondisk() {
-  { ld "$DH/$SR/steamapps/common" sgame--; ld "$GD" game--; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \
+  { ld "$DH/$SR/steamapps/common" sgame--; ldg; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \
     | LC_ALL=C sort
 }
 # [v4.8] Игры, о которых спрашивать человека: без игр Steam, если их качает Steam
@@ -1772,7 +1785,7 @@ gsync() {
   local n run=""
   [ -n "$SR" ] || sr
   [ -n "${NOW:-}" ] || run=$(running_archives)
-  { ld "$GD" game--; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; ld "$PD" prog--; } | while IFS= read -r n; do
+  { ldg; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; ld "$PD" prog--; } | while IFS= read -r n; do
     case $n in prog--*) echo "$n"; continue ;; esac      # [v5.4] программы для игр — всегда, без вопросов
     grep -qxF -- "$n" <<< "$run" && continue
     case $n in sgame--*) store && ! tool "$n" && continue ;; esac   # [v4.8] игры Steam качает Steam — не выгружаем
@@ -3426,6 +3439,23 @@ def info(text):
     z("--info", "--width=460", f"--text={text}")
 
 
+class adding:
+    """Пока игра добавляется, машина о её папке не спрашивает и не выгружает её (метка с номером этого процесса)."""
+    def __init__(self, folder):
+        self.mark = os.path.join(STATE, "adding", os.path.basename(folder))
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.mark), exist_ok=True)
+        with open(self.mark, "w") as f:
+            f.write(str(os.getpid()))
+
+    def __exit__(self, *exc):
+        try:
+            os.remove(self.mark)
+        except OSError:
+            pass
+
+
 def finish(folder):
     request_shortcuts()
     name = os.path.basename(folder)
@@ -3458,10 +3488,17 @@ def do_installer(f):
     folder = os.path.join(GD, name)
     if os.path.exists(folder) and not ask(t("exists", name=name), t("ok")):
         return
-    os.makedirs(folder, exist_ok=True)
-    before = set(exes(folder))
-    subprocess.run([VGRUN, folder, "--exe", f])
-    if choose_exe(folder, before):
+    if os.path.exists(folder):                            # ставим в уже добавленную — метка спрятала бы её («удалена?»)
+        before = set(exes(folder))
+        subprocess.run([VGRUN, folder, "--exe", f])
+        ok = choose_exe(folder, before)
+    else:
+        with adding(folder):
+            os.makedirs(folder)
+            before = set(exes(folder))
+            subprocess.run([VGRUN, folder, "--exe", f])
+            ok = choose_exe(folder, before)
+    if ok:
         finish(folder)
 
 
@@ -3487,23 +3524,24 @@ def do_archive(f):
     folder = os.path.join(GD, name)
     p = subprocess.Popen(["zenity", "--title", t("title"), "--progress", "--pulsate", "--no-cancel", "--auto-close",
                           f"--text={t('unpacking')}"], stdin=subprocess.PIPE, text=True)
-    try:
-        unpack(f, folder)
-    finally:
-        p.stdin.close()
-        p.wait()
-    found = candidates(folder)
-    setups = [x for x in os.listdir(folder) if x.lower().endswith((".exe", ".msi")) and INSTALLER.search(x)]
-    if not found and setups:                              # в архиве установщик — ставить его в эту же игру
-        before = set(exes(folder))
-        subprocess.run([VGRUN, folder, "--exe", os.path.join(folder, setups[0])])
-        if choose_exe(folder, before):
-            finish(folder)
-        return
-    if not found:
-        info(t("noexe", name=name))
-        return
-    if choose_exe(folder):
+    with adding(folder):
+        try:
+            unpack(f, folder)
+        finally:
+            p.stdin.close()
+            p.wait()
+        found = candidates(folder)
+        setups = [x for x in os.listdir(folder) if x.lower().endswith((".exe", ".msi")) and INSTALLER.search(x)]
+        if not found and setups:                          # в архиве установщик — ставить его в эту же игру
+            before = set(exes(folder))
+            subprocess.run([VGRUN, folder, "--exe", os.path.join(folder, setups[0])])
+            ok = choose_exe(folder, before)
+        elif not found:
+            info(t("noexe", name=name))
+            return
+        else:
+            ok = choose_exe(folder)
+    if ok:
         finish(folder)
 
 

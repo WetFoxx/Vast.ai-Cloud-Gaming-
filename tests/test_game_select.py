@@ -35,7 +35,7 @@ SHORT_PY = TMP / "wolf-shortcuts.py"
 SHORT_PY.write_text(heredoc("wolf-shortcuts.py", "SHORTCUTS"))
 FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "store", "tool", "inlist", "addline", "rmline", "want", "wants",
                                    "ondisk", "askable", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
-                                   "gsync", "idirs", "flags_ready", "steam_ready", "incloud"))
+                                   "gsync", "idirs", "flags_ready", "steam_ready", "incloud", "ldg"))
 FUNCS += "\n" + re.search(r"^HID=.*$", WOLF, re.M).group(0)
 
 
