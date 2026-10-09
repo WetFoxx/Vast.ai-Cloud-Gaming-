@@ -110,11 +110,12 @@ class TestMods(unittest.TestCase):
         cloudgames.remember_answer("mod", "mod--20", False)
         cloudgames.remember_answer("mod", "mod--30", True)
         cloudgames.remember_answer("mod", "mod--30", False)                 # передумал
-        self.assertEqual(cloudgames.mods_answers(), {"yes": ["10"], "no": []})      # [v5.1] выключен — просто не сохраняем
+        # [v5.7] «С модами» по умолчанию у всех, «Без модов» — исключения
+        self.assertEqual(cloudgames.mods_answers(), {"yes": ["10"], "no": ["20", "30"], "all": True})
         body = core.rental_body({"hash_id": "h"}, 100, sync={"select": {"games": [], "saves_off": [],
                                                                        "mods": cloudgames.mods_answers()},
                                                             "play": {"appid": "10", "account": "76561198059309761", "mods": True}})
-        self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_SYNC"]))["mods"], {"yes": ["10"], "no": []})
+        self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_SYNC"]))["mods"], {"yes": ["10"], "no": ["20", "30"], "all": True})
         self.assertTrue(json.loads(base64.b64decode(body["env"]["VG_PLAY"]))["mods"])
 
     def test_mod_question_is_recognised(self):

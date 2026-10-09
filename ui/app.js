@@ -802,7 +802,7 @@ $("rent").addEventListener("click", async () => {
     return;
   }
   const game = playGame ? { appid: playGame.appid, account: playGame.account, mods: !!playGame.mods,
-                            gdata: !!playGame.gdata, recipe: !!playGame.recipe } : null;
+                            gdata: !!playGame.gdata, ...(playGame.mods ? { recipe: !!playGame.recipe } : {}) } : null;
   const r = await api().play(o.id, null, disk, LANG, spare, docker, select, game);   // язык — для уведомления в конце
   if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
   playNow = playGame ? { ...playGame } : null;
@@ -860,60 +860,69 @@ function renderOffersGame() {
     }
     main.appendChild(seg);
   }
-  main.appendChild(modsSaveBlock(playGame.appid, playGame.modsInfo, (on) => { playGame.mods = on; viaText(); }));
+  // [v5.7] «С модами | Без модов» — когда у игры есть что выбирать: моды в облаке, запуск через программу, рецепт (перевод
+  // FF14 — часть «С модами»). Иначе блока нет: игра «с модами» — поставишь мод при закрытой игре, он сохранится сам
+  const via = ((libData && libData.launch_sel) || {})[playGame.appid];
+  const recipeBox = el("div");
+  const drawRecipe = () => {
+    recipeBox.innerHTML = "";
+    if (recipeOf(playGame.appid) && playGame.mods) recipeBox.appendChild(recipeBlock(playGame.appid, (on) => { playGame.recipe = on; }));
+  };
+  if (playGame.modsInfo || (via && via.id) || recipeOf(playGame.appid)) {
+    main.appendChild(modsChoiceBlock(playGame.appid, playGame.modsInfo, via, (on) => { playGame.mods = on; drawRecipe(); }));
+  }
   main.appendChild(gdataBlock(playGame.appid, playGame.gdataInfo, (on) => { playGame.gdata = on; }));
-  if (recipeOf(playGame.appid)) main.appendChild(recipeBlock(playGame.appid, (on) => { playGame.recipe = on; }));
+  drawRecipe();
+  main.appendChild(recipeBox);
   // [v5.4] программы, которые запустятся вместе с игрой (выбраны раньше на главном)
   const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
   if (auto.length) main.appendChild(el("div", { className: "og-progs" },
     t("progs.with_game", { list: auto.map((i) => i.split("/").pop()).join(", ") })));
-  // [v5.6] игра запускается через программу (выбрано раньше на главном) — видно и можно вернуть обычный запуск
-  const via = ((libData && libData.launch_sel) || {})[playGame.appid];
-  const viaLabel = el("span", {});
-  // через программу — только с включёнными «Моды» («игра с модами, как я её настроил»)
-  const viaText = () => { if (via && via.id) viaLabel.textContent = t(playGame.mods ? "progs.launch_via" : "progs.launch_via.off",
-    { name: via.id.split("/").pop() }) + " · "; };
-  if (via && via.id) {
-    viaText();
-    const line = el("div", { className: "og-progs" });
-    line.appendChild(viaLabel);
-    const reset = el("button", { className: "link" }, t("progs.launch_via.reset"));
-    reset.addEventListener("click", async () => {
-      if (!DEMO) await api().prog_launch(playGame.appid, "-", "");
-      delete libData.launch_sel[playGame.appid];
-      renderOffersGame();
-    });
-    line.appendChild(reset);
-    main.appendChild(line);
-  }
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
   main.appendChild(none);
   box.appendChild(main);
 }
 
-// [v5.1] Один тумблер «Моды» у игры (заметный блок на карточке игры и на главном во время игры): включён — моды из облака
-// накладываются поверх игры из Steam и изменения сохраняются обратно; выключен — чистая игра, ничего не сохраняется
-// (моды в облаке остаются). Выбирается перед арендой; на главном во время игры — только виден (locked): машина
-// получила выбор при аренде, менять его на ходу нельзя (решение Алексея 2026-10-02).
-function modsSaveOn(appid) { return !!(libData && libData.mods_save && libData.mods_save[appid]); }
-function modsSaveBlock(appid, info, onChange, locked = false, state = null) {
-  const on = state === null ? modsSaveOn(appid) : state;
-  const box = el("label", { className: "mods-save" + (on ? " on" : "") + (locked ? " locked" : "") });
-  const cb = el("input", { type: "checkbox", checked: on, disabled: locked });
-  const txt = el("div");
-  const head = el("b", {}, t("mods.toggle"));
-  if (info) head.appendChild(el("span", { className: "mods-cloud" }, " · " + t("mods.cloud", { size: size(info.bytes), date: info.mtime || "" })));
-  txt.append(head, el("span", { className: "sub" }, t(on ? "mods.on" : "mods.off") + (locked ? " " + t("mods.locked") : "")));
-  box.append(txt, cb);
-  if (locked) return box;
-  cb.addEventListener("change", async () => {
-    if (libData) libData.mods_save = { ...(libData.mods_save || {}), [appid]: cb.checked };
-    box.classList.toggle("on", cb.checked);
-    txt.lastChild.textContent = t(cb.checked ? "mods.on" : "mods.off");
-    if (onChange) onChange(cb.checked);
-    if (!DEMO) await api().set_mods_save(appid, cb.checked);
-  });
+// [v5.7] «С модами | Без модов» вместо тумблеров «Моды» и «Запуск через» (решение Алексея 2026-10-10). С модами — моды из
+// облака поверх чистой игры из Steam, запуск через выбранную программу, изменения при закрытой игре сохраняются как
+// моды; без модов — чистая игра, моды в облаке не трогаются. Данные игры (её сохранения в папке) — в обоих режимах.
+// По умолчанию — с модами (выбор «Без модов» запоминается для игры). Выбирается перед арендой.
+function modsSaveOn(appid) {
+  const v = libData && libData.mods_save ? libData.mods_save[appid] : undefined;
+  return v === undefined || v === null ? true : !!v;
+}
+function modsChoiceBlock(appid, info, via, onChange) {
+  const box = el("div", { className: "mods-choice" });
+  const seg = el("div", { className: "seg" });
+  const sub = el("div", { className: "sub" });
+  const draw = () => {
+    const on = modsSaveOn(appid);
+    for (const b of seg.children) b.classList.toggle("on", (b.dataset.on === "1") === on);
+    const parts = [];
+    if (on) {
+      if (info) parts.push(t("mods.with.cloud", { size: size(info.bytes), date: info.mtime || "" }));
+      if (via && via.id) parts.push(t("mods.with.via", { name: via.id.split("/").pop() }));
+      parts.push(t("mods.with.save"));
+    } else {
+      parts.push(t("mods.without.sub"));
+    }
+    sub.textContent = parts.join(" · ");
+  };
+  for (const [on, key] of [[true, "mods.with"], [false, "mods.without"]]) {
+    const b = el("button", { className: "chip" }, t(key));
+    b.dataset.on = on ? "1" : "0";
+    b.addEventListener("click", async () => {
+      if (modsSaveOn(appid) === on) return;
+      if (libData) libData.mods_save = { ...(libData.mods_save || {}), [appid]: on };
+      draw();
+      if (onChange) onChange(on);
+      if (!DEMO) await api().set_mods_save(appid, on);
+    });
+    seg.appendChild(b);
+  }
+  box.append(seg, sub);
+  draw();
   return box;
 }
 
@@ -999,9 +1008,12 @@ function renderPlay(play, game, streaming, progs) {
     main.append(bar, el("div", { className: "sub" }, `${pct}% · ${size(pg.done)} / ${size(pg.total)}`
       + (sp ? " · " + t("arch.speed", { speed: size(sp) }) + (sp > 0 ? " · " + leftText((pg.total - pg.done) / sp) : "") : "")));
   }
-  if (game && game.appid) main.appendChild(modsSaveBlock(game.appid, null, null, true, !!game.mods));
+  // [v5.7] с модами или без — одной строкой (только когда было что выбирать: моды в облаке или выбрано «Без модов»)
+  if (game && game.appid && (!game.mods || (libData && libData.mods && libData.mods[game.appid]))) {
+    main.appendChild(el("div", { className: "og-progs" }, t(game.mods ? "mods.playing.with" : "mods.playing.without")));
+  }
   if (game && game.appid && game.gdata) main.appendChild(gdataBlock(game.appid, null, null, true, true));
-  if (game && game.appid && game.recipe) main.appendChild(recipeBlock(game.appid, null, true, true));
+  if (game && game.appid && game.recipe && game.mods) main.appendChild(recipeBlock(game.appid, null, true, true));
   if (["login", "other", "err", "running", "closed"].includes(key) && current && current.status.links) {
     main.appendChild(button(t("play.open"), () => startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop"), key !== "running"));
   }

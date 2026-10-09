@@ -131,7 +131,7 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(run("arch", 7, d / "missing.acf")[1].strip(), "mod--7--app7")
 
 
-MODF = "\n".join(fn(n) for n in ("acf_get", "flags_ready", "mods_snap", "mods_scan", "mods_check", "mods_push")) \
+MODF = "\n".join(fn(n) for n in ("acf_get", "flags_ready", "mods_snap", "mods_scan", "mods_check", "mods_push", "modson")) \
     .replace("/usr/local/bin/wolf-mods.py", str(PY))
 
 
@@ -179,6 +179,18 @@ mkdir -p "$S/van" "$S/x"; : > "$S/sel.on"; : > "$S/sel.store"
         same = ('read -r c fp j < <(python3 "%s" diff "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"); '
                 'echo "$fp" > "$S/van/10.fp"; mods_push; mods_check 10') % PY
         out = self.run_m(m, same, sel=on)
+        self.assertNotIn("PACK", out)
+        self.assertNotIn("PUSH", out)
+
+    def test_mods_on_by_default_except_without_mods(self):
+        # [v5.7] «С модами» у всех (sel.mods_all), кроме игр, где выбрано «Без модов» (sel.mods_no)
+        m = self.machine()
+        self.run_m(m, "mods_scan")
+        (m.d / "home/sa/steamapps/common/Ten/mod.dll").write_bytes(b"M")
+        out = self.run_m(m, "mods_check 10; mods_push", sel=': > "$S/sel.mods_all"')
+        self.assertIn("PUSH 10", out)
+        self.assertIn("PACK 10 Ten", out)
+        out = self.run_m(m, "mods_check 10; mods_push; echo END", sel=': > "$S/sel.mods_all"; echo 10 > "$S/sel.mods_no"')
         self.assertNotIn("PACK", out)
         self.assertNotIn("PUSH", out)
 

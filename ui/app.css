@@ -506,6 +506,11 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .game-banner .gb-text { position: relative; padding: 18px 22px; }
 .game-banner h1 { color: #fff; margin: 0; }
 .game-banner .sub { color: rgba(255, 255, 255, .78); }
+/* [v5.7] «С модами | Без модов» — два крупных переключателя и строка о том, что будет */
+.mods-choice { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 12px;
+  background: var(--card-2); border: 1px solid var(--border); }
+.offers-game .mods-choice .seg .chip { font-size: 14px; padding: 7px 16px; }
+.mods-choice .sub { font-size: 12px; }
 .mods-save { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 12px; cursor: pointer;
   background: var(--card-2); border: 1px solid var(--border); transition: border-color .25s, box-shadow .25s; }
 .mods-save > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }

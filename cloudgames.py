@@ -154,10 +154,12 @@ def remember_mods(appid, yes):
 
 
 def mods_answers():
-    """{"yes": [номера], "no": []} — игры с включённым тумблером «Сохранять моды в облако», для машины (v5.1: вопросов
-    нет; выключенный тумблер — моды остаются на машине)."""
+    """{"yes": [номера], "no": [номера], "all": True} — игры «С модами» / «Без модов», для машины (v5.1: вопросов нет;
+    «Без модов» — моды остаются в облаке, изменения не сохраняются)."""
     sel = settings.get("mods_sel") or {}
-    return {"yes": sorted(a for a, v in sel.items() if v and str(a).isdigit()), "no": []}
+    # [v5.7] «С модами» — по умолчанию у всех игр ("all"), «Без модов» — исключения ("no")
+    return {"yes": sorted(a for a, v in sel.items() if v and str(a).isdigit()),
+            "no": sorted(a for a, v in sel.items() if not v and str(a).isdigit()), "all": True}
 
 
 def remember_answer(kind, archive, yes):

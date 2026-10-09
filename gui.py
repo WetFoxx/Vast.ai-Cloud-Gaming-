@@ -312,6 +312,8 @@ class Api:
         chosen["launch"] = settings.get("launch_sel") or {}                            # [v5.6] «запускать через»
         chosen["gdata"] = cloudgames.gdata_list()                                      # [v5.6] «игру в облаке»
         chosen["recipes"] = cloudgames.recipes_list()                                  # [v5.6] перевод FF14…
+        if play and not play.get("mods"):                  # [v5.7] «Без модов» — и без рецепта (перевод — тоже мод)
+            chosen["recipes"].pop(play["appid"], None)
         sync.update(steam_games=False, other_games=True, saves=True)
         settings.set("sync", sync)
         sync["select"] = chosen
@@ -904,7 +906,7 @@ class Api:
             cloudgames.remember_recipe(appid, bool(game.get("recipe")))
         return {"appid": appid, "account": acc, "name": g["name"], "cap": g.get("cap") or g.get("header") or "",
                 "hero": g.get("hero") or "", "header": g.get("header") or "", "mods": mods,
-                "gdata": appid in cloudgames.gdata_list(), "recipe": appid in cloudgames.recipes_list()}
+                "gdata": appid in cloudgames.gdata_list(), "recipe": mods and appid in cloudgames.recipes_list()}
 
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}

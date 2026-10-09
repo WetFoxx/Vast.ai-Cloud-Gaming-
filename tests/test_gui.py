@@ -582,6 +582,16 @@ class TestPlay(unittest.TestCase):
             wait_done(self.api, session=True)
         self.assertTrue(json.loads(base64.b64decode(self.body["env"]["VG_PLAY"]))["mods"])
         self.assertEqual(gui.cloudgames.mods_answers()["yes"], ["10"])  # включён — накладывать и сохранять
+        # [v5.7] «Без модов» у игры с рецептом — машине без рецепта этой игры (перевод — тоже мод); выбор не забыт
+        self.wait_idle()
+        gui.settings.set("recipe_sel", {"10": True, "39210": True})
+        self.addCleanup(gui.settings.set, "recipe_sel", None)
+        with mock.patch.object(gui.steamlib, "cached", lambda: lib), mock.patch.object(gui.steamlib, "accounts", lambda: accs), \
+             mock.patch.object(gui.cloudgames, "RECIPES", {"ff14-ru": ("10", "39210")}):
+            self.api.play(5, None, None, "ru", None, False, None, {"appid": "10", "account": A, "mods": False})
+            wait_done(self.api, session=True)
+        self.assertEqual(json.loads(base64.b64decode(self.body["env"]["VG_SYNC"]))["recipes"], {"39210": ["ff14-ru"]})
+        self.assertTrue(gui.settings.get("recipe_sel")["10"])
         # Следующая аренда без игры — просто рабочий стол, прежняя игра забыта
         self.wait_idle()
         self.api.play(5, None, None, "ru")
@@ -593,6 +603,7 @@ class TestPlay(unittest.TestCase):
         # [v5.7] выбора игр нет: сохранения — всегда (прежний выбор «не синхронизировать» не действует), свои игры из
         # облака — все ("own": "all"), игры Steam — из Steam; выбор со страницы прежней версии не учитывается
         import base64, json
+        gui.settings.set("mods_sel", None)                 # «Без модов» из других тестов — не сюда
         gui.settings.set("sync_sel", {"games": {"game--B": True, "sgame--A": True}, "saves": {"pfx--1": False}})
         self.addCleanup(gui.settings.set, "sync_sel", None)
         gui.settings.set("launch_sel", {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}})   # [v5.6]
@@ -607,7 +618,7 @@ class TestPlay(unittest.TestCase):
         wait_done(self.api, session=True)
         env = self.body["env"]
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": ["game--B"], "saves_off": [], "steam": "store", "mods": {"yes": [], "no": []},
+                         {"games": ["game--B"], "saves_off": [], "steam": "store", "mods": {"yes": [], "no": [], "all": True},
                           "progs": {}, "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}},
                           "gdata": ["312060"], "recipes": {"312060": ["ff14-ru"]}, "own": "all"})
         self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "1", "1"))
@@ -891,9 +902,9 @@ class TestModsSave(unittest.TestCase):
         api = gui.Api()
         gui.settings.set("mods_sel", None)
         self.assertEqual(api.set_mods_save("10", True), {"ok": True})
-        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": ["10"], "no": []})
+        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": ["10"], "no": [], "all": True})
         self.assertEqual(api.set_mods_save("10", False), {"ok": True})
-        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": [], "no": []})
+        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": [], "no": ["10"], "all": True})
         self.assertIn("error", api.set_mods_save("10; rm", True))
 
     def test_recipe_toggle(self):
@@ -908,8 +919,10 @@ class TestModsSave(unittest.TestCase):
                          {"appid": "20", "name": "G", "accounts": ["7"], "family": []}]}
         with mock.patch.object(gui.steamlib, "cached", lambda: lib), \
              mock.patch.object(gui.steamlib, "accounts", lambda: [{"id": "7"}]):
-            self.assertTrue(api._library_game({"appid": "312060", "account": "7", "recipe": True})["recipe"])
-            self.assertFalse(api._library_game({"appid": "20", "account": "7", "recipe": True})["recipe"])
+            self.assertTrue(api._library_game({"appid": "312060", "account": "7", "mods": True, "recipe": True})["recipe"])
+            self.assertFalse(api._library_game({"appid": "20", "account": "7", "mods": True, "recipe": True})["recipe"])
+            # [v5.7] «Без модов» — и без перевода (страница его не шлёт; выбор перевода при этом не забывается)
+            self.assertFalse(api._library_game({"appid": "312060", "account": "7", "mods": False})["recipe"])
         self.assertEqual(gui.cloudgames.recipes_list(), {"312060": ["ff14-ru"], "39210": ["ff14-ru"]})
 
     def test_game_in_cloud_toggle(self):

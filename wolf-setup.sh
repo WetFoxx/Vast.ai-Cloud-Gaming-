@@ -616,6 +616,9 @@ for key in ("yes", "no"):                                        # [v5.0] пре
 # [v5.6] тумблер «Моды» включён — от него зависит «запуск игры через программу» (sel.mods_yes — сохранять изменения;
 # сейчас то же самое, но сохранение может быть выключено отдельно)
 open(os.path.join(s, "sel.mods_on"), "w").write("".join(str(n) + "\n" for n in mods.get("yes") or [] if str(n).isdigit()))
+# [v5.7] «С модами» — по умолчанию у всех игр (кнопки «С модами | Без модов»): sel.mods_all, исключения — sel.mods_no
+if mods.get("all") is True:
+    open(os.path.join(s, "sel.mods_all"), "w").close()
 # [v5.6] «хранить игру в облаке»: номера игр, файлы которых (то, что качает их собственный лаунчер) — архивом lgame--
 open(os.path.join(s, "sel.gdata"), "w").write("".join(str(n) + "\n" for n in d.get("gdata") or [] if str(n).isdigit()))
 if d.get("steam") == "store":
@@ -646,6 +649,8 @@ selon()  { [ -e "$S/sel.on" ]; }
 store()  { [ -e "$S/sel.store" ]; }
 tool()   { case $1 in sgame--Proton*|sgame--SteamLinuxRuntime*|"sgame--Steam Linux Runtime"*|"sgame--Steamworks Shared"|"sgame--Steam Controller Configs") return 0 ;; esac; return 1; }
 inlist() { grep -qxF -- "$1" "$S/$2" 2>/dev/null; }
+# [v5.7] Игра «с модами»: выбрана явно или «с модами» у всех, кроме отмеченных «Без модов»
+modson() { inlist "$1" sel.mods_yes || { [ -e "$S/sel.mods_all" ] && ! inlist "$1" sel.mods_no; }; }
 addline() { inlist "$1" "$2" || printf '%s\n' "$1" >> "$S/$2"; }
 rmline() { [ -e "$S/$2" ] || return 0; grep -vxF -- "$1" "$S/$2" > "$S/$2.new"; mv -f "$S/$2.new" "$S/$2"; }
 # Синхронизировать ли архив игры (sgame--/game--) и сохранения (pfx--)
@@ -986,7 +991,7 @@ lgame_track() {
 # После выхода из игры: тумблер «Сохранять моды» включён и моды изменились — выгрузить (в фоне)
 mods_check() {
   local a=$1 d cnt fp junk
-  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.upd" ] && inlist "$a" sel.mods_yes || return 0
+  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.upd" ] && modson "$a" || return 0
   d=$(idir "$a"); [ -n "$d" ] || return 0
   read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || return 0
   [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && return 0
@@ -999,7 +1004,7 @@ mods_push() {
   for a in "$@"; do
     [[ $a =~ ^[0-9]+$ ]] && [ -e "$S/van/$a.tsv" ] || continue
     [ -e "$S/van/$a.upd" ] && { log "моды $a: Steam обновлял игру в этой сессии — не выгружаю"; continue; }
-    inlist "$a" sel.mods_yes || continue                 # [v5.1] только с включённым тумблером
+    modson "$a" || continue                              # [v5.1] только с включённым тумблером; [v5.7] «С модами»
     d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
     read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || continue
     [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && continue
@@ -4243,9 +4248,16 @@ def mods_on(sdir, appid):
     """Тумблер «Моды» у игры включён (VG_SYNC → sel.mods_on): только тогда игра запускается через программу —
     «игра с модами, как я её настроил»; выключен — как обычно (решение Алексея 2026-10-08)."""
     try:
-        return str(appid) in Path(sdir, "sel.mods_on").read_text().split()
+        if str(appid) in Path(sdir, "sel.mods_on").read_text().split():
+            return True
     except OSError:
+        pass
+    if not Path(sdir, "sel.mods_all").exists():              # [v5.7] «С модами» у всех, кроме «Без модов»
         return False
+    try:
+        return str(appid) not in Path(sdir, "sel.mods_no").read_text().split()
+    except OSError:
+        return True
 
 
 def launch_set(root, pd, home, user, appid, ident, args, sdir=None):
