@@ -114,3 +114,56 @@ class TestRemove(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGameDataRow(TestRemove):
+    """[v5.7] Данные игры (gsave--НОМЕР--Название) — в строке её сохранений, «Убрать» убирает оба архива."""
+
+    def setUp(self):
+        super().setUp()
+        self.cloud["gsave--1--Hades"] = {"size": 3, "mtime": "2026-10-10", "files": ["gsave--1--Hades.tar.zst"]}
+        self.cloud["gsave--7--Celeste"] = {"size": 2, "mtime": "2026-10-09", "files": ["gsave--7--Celeste.tar.zst"]}
+
+    def fake_trash(self, files):
+        self.trashed += files
+        for n in list(self.cloud):
+            if any(f.startswith(n + ".") for f in files):
+                self.cloud.pop(n)
+        return True
+
+    def test_listing_merges_into_saves_row(self):
+        g = {x["name"]: x for x in cloudgames.listing()["games"]}
+        self.assertEqual(sorted(g), ["gsave--7--Celeste", "pfx--1"])
+        self.assertEqual((g["pfx--1"]["bytes"], g["pfx--1"]["also"], g["pfx--1"]["mtime"]), (8, ["gsave--1--Hades"], "2026-10-10"))
+        self.assertEqual(g["pfx--1"]["title"], "Hades")                    # Steam названия не знает — из архива
+        c = g["gsave--7--Celeste"]                                        # сохранений Proton нет — своя строка
+        self.assertEqual((c["kind"], c["appid"], c["title"]), ("pfx", "7", "Celeste"))
+
+    def test_remove_without_machine_trashes_both(self):
+        self.machine(running=False, node=False)
+        self.assertEqual(cloudgames.remove("pfx--1"), "drive")
+        self.assertEqual(sorted(self.trashed), ["gsave--1--Hades.tar.zst", "pfx--1.tar.zst", "pfx--1.tar.zst.abcd1234"])
+        self.assertNotIn("gsave--1--Hades", self.cloud)
+
+    def test_remove_with_machine_forgets_both(self):
+        self.machine(running=True, node=True)
+        orig = cloudgames.ssh_run
+
+        def ssh_run(ip, cmd, timeout=180, on_notice=None):
+            orig(ip, cmd, timeout, on_notice)
+            self.cloud.pop(cmd.split(" ", 2)[2], None)
+            return 0, ""
+        with mock.patch.object(cloudgames, "ssh_run", ssh_run):
+            self.assertEqual(cloudgames.remove("pfx--1"), "machine")
+        self.assertEqual(self.ssh, ["wolf forget pfx--1", "wolf forget gsave--1--Hades"])
+
+    def test_one_left_is_an_error(self):
+        self.machine(running=False, node=False)
+        with mock.patch.object(cloudgames.drive, "trash", lambda files: self.cloud.pop("pfx--1") and True):
+            with self.assertRaises(VastgameError) as e:
+                cloudgames.remove("pfx--1")
+        self.assertEqual(e.exception.params.get("name") if hasattr(e.exception, "params") else None, "gsave--1--Hades")
+
+
+for _n in [n for n in vars(TestRemove) if n.startswith("test_")]:   # унаследованные проверки — только в TestRemove
+    setattr(TestGameDataRow, _n, None)

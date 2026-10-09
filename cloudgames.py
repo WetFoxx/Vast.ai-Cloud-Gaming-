@@ -18,6 +18,9 @@ KINDS = ("sgame", "game", "lgame", "pfx", "mod", "prog")   # игра Steam, н�
                                              # сохранения (префикс Proton), моды (v5.0), [v5.4] программы (папка Programs)
 MOD = re.compile(r"^mod--(\d+)--(.*)$")      # моды игры Steam: mod--НОМЕР--Название
 LGAME = re.compile(r"^lgame--(\d+)--(.*)$")  # [v5.6] файлы игры, которые докачал её лаунчер: lgame--НОМЕР--Название
+# [v5.7] данные игры (сохранения и настройки, которые игра пишет в свою папку): gsave--НОМЕР--Название. На экране —
+# в строке сохранений той же игры (pfx--НОМЕР), не отдельным пунктом; «Убрать» убирает оба
+GSAVE = re.compile(r"^gsave--(\d+)--(.*)$")
 
 
 def listing():
@@ -34,8 +37,11 @@ def listing():
         raise VastgameError("Не удалось открыть Google Drive — проверь интернет или пройди шаг 2: vastgame setup",
                             key="games.drive_failed")
     names = steamnames.for_archives(arch)
-    games, service = [], []
+    games, service, gsaves = [], [], []
     for base, info in arch.items():
+        if GSAVE.match(base):
+            gsaves.append((base, info))
+            continue
         kind = base.split("--")[0] if "--" in base else None
         if kind not in KINDS:
             service.append((base, info["size"]))
@@ -50,6 +56,18 @@ def listing():
                       "bytes": info["size"], "mtime": info["mtime"], "files": info["files"],
                       # служебное Steam (Proton, Runtime…) и его «сохранения» — нужно для запуска игр
                       "system": bool(TOOL.match(base)) or (kind == "pfx" and rest in TOOL_APPIDS)})
+    for base, info in gsaves:
+        m = GSAVE.match(base)
+        g = next((x for x in games if x["kind"] == "pfx" and x["appid"] == m[1]), None)
+        if g:
+            g["also"] = g.get("also", []) + [base]
+            g["bytes"] += info["size"]
+            g["files"] = g["files"] + info["files"]
+            g["mtime"] = max(g["mtime"] or "", info["mtime"] or "")
+            g["title"] = g["title"] or m[2]
+        else:
+            games.append({"name": base, "kind": "pfx", "appid": m[1], "title": names.get(m[1], "") or m[2],
+                          "bytes": info["size"], "mtime": info["mtime"], "files": info["files"], "system": False})
     games.sort(key=lambda g: (KINDS.index(g["kind"]), -g["bytes"]))
     return {"games": games,
             "service": {"names": sorted(n for n, _ in service), "bytes": sum(b for _, b in service)}}
@@ -177,10 +195,11 @@ def remove(name, on_notice=None):
     if inst and node:
         # Машина работает — через wolf: он пометит архив и не выгрузит его заново.
         # wolf forget всегда отвечает кодом 0 — результат проверяем по списку ниже
-        code, out = wolfnode.run(node[1], "forget", [name], timeout=300, on_notice=on_notice, ssh=ssh_run)
-        if code != 0:
-            raise VastgameError(f"wolf forget не сработал (код {code}): {out.strip()[-300:]}",
-                                key="games.forget_failed", code=code, out=out.strip()[-300:])
+        for n in [name] + g.get("also", []):              # [v5.7] со строкой — данные игры (страница: по одному)
+            code, out = wolfnode.run(node[1], "forget", [n], timeout=300, on_notice=on_notice, ssh=ssh_run)
+            if code != 0:
+                raise VastgameError(f"wolf forget не сработал (код {code}): {out.strip()[-300:]}",
+                                    key="games.forget_failed", code=code, out=out.strip()[-300:])
         how = "machine"
     elif inst:
         raise VastgameError("Машина арендована, но её узла нет в Tailscale — удалять мимо неё нельзя:\n"
@@ -191,6 +210,8 @@ def remove(name, on_notice=None):
             raise VastgameError("Не все файлы удалось убрать — запусти команду ещё раз.", key="games.trash_failed")
         how = "drive"
     # Проверка: в облаке архива больше нет
-    if name in (drive.archives() or {}):
-        raise VastgameError(f"!!! {name} всё ещё в облаке — проверь на Drive.", key="games.still_there", name=name)
+    left = drive.archives() or {}
+    for n in [name] + g.get("also", []):
+        if n in left:
+            raise VastgameError(f"!!! {n} всё ещё в облаке — проверь на Drive.", key="games.still_there", name=n)
     return how

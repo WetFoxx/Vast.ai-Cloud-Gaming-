@@ -562,7 +562,7 @@ TXT
 }
 sz()    { tr '\0' '\n' < "$1" | awk -F'\t' '{s+=$3} END{printf "%.0f", s}'; }
 # Архив одной игры: его можно убрать из облака (wolf forget или вручную на Drive)
-gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*|prog--*|lgame--*) return 0 ;; esac; return 1; }
+gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*|prog--*|lgame--*|gsave--*) return 0 ;; esac; return 1; }
 # Перестать синхронизировать архив на этом инстансе: забыть версию, манифест и
 # отпечаток и поставить метку x/, чтобы таймеры и wolf-watch не выгрузили его снова
 drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1"; : > "$S/x/$1"; }
@@ -894,7 +894,7 @@ mods_snap() {
   exec 7> "$L/snap-$1.lock"; flock 7               # [v5.6] запуск из библиотеки ждёт, пока архив игры восстановится
   [ -e "$S/van/$1.tsv" ] && { exec 7>&-; return 0; }
   python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/$2" "$S/van/$1.tsv" && echo "$3" > "$S/van/$1.build" \
-    && log "моды $1: чистая игра запомнена" && lgame_restore "$1" "$2"
+    && log "моды $1: чистая игра запомнена" && lgame_restore "$1" "$2" && gsave_restore "$1" "$2"
   exec 7>&-
 }
 # [v5.6] Игра, которую докачивает её лаунчер, «в облаке» (sel.gdata): её файлы — архив lgame--НОМЕР--Название.
@@ -914,6 +914,33 @@ lgame_restore() {
   else
     log "игра $a: из облака не восстановилась — лаунчер скачает её сам"
   fi
+}
+# [v5.7] Данные игры (сохранения и настройки, которые запущенная игра пишет в свою папку) — архив gsave--НОМЕР--Название:
+# всегда (с модами и без), восстановление — сразу после файлов игры и до модов; восстановленное — данные игры (claim data)
+gsave_name() { python3 /usr/local/bin/wolf-mods.py arch "$1" "$DH/$SR/steamapps/appmanifest_$1.acf" gsave; }
+gsave_restore() {
+  local a=$1 d=$2 n LS
+  [ "$SV" = 1 ] || return 0
+  LS=$T/ls.gsave-$a
+  rl > "$LS" 2>/dev/null || { log "данные игры $a: не удалось получить список облака — игра начнёт с чистого листа"; return 0; }
+  n=$(sed -n -E "s/^(gsave--$a--[^\t]*)\.tar\.zst(\.parts)?\t.*/\1/p" "$LS" | head -1)
+  [ -n "$n" ] || return 0
+  if LS=$LS unpack "$n"; then
+    log "данные игры $a: из облака на месте ($(python3 /usr/local/bin/wolf-mods.py claim \
+      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" data) файлов)"
+    spec "$n" && man "$n" > "$S/m/$n" && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+  else
+    log "данные игры $a: из облака не восстановились"
+  fi
+}
+gsave_push() {
+  local f a
+  [ "$SV" = 1 ] || return 0
+  for f in "$S/van"/*.pend.tsv; do
+    a=${f##*/}; a=${a%.pend.tsv}
+    [[ $a =~ ^[0-9]+$ ]] && [ -s "$f" ] && [ -n "$(idir "$a")" ] || continue
+    pack "$(gsave_name "$a")"
+  done
 }
 # Выключение: файлы игр «в облаке» — их архивами (только изменения, большие — частями)
 lgame_push() {
@@ -1031,6 +1058,7 @@ spec() {
     prog--*)      B=$PD Z=$ZG DB=1 A=${1#prog--} ;;         # [v5.4] программы для игр
     sgame--*)     Z=$ZG DB=1 A=${1#sgame--} ;;
     lgame--*)     Z=$ZG DB=1 A=${1#lgame--}; A=${A%%--*} ;;   # [v5.6] файлы игры от её лаунчера (номер игры)
+    gsave--*)     A=${1#gsave--}; A=${A%%--*} ;;              # [v5.7] данные игры в её папке (номер игры)
     *)            return 1 ;;
   esac
 }
@@ -1065,6 +1093,7 @@ ls_() {
     prog--*)    F "$A" ;;
     sgame--*)   F "$s/common/$A" ;;
     lgame--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" ;;
+    gsave--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" data ;;
   esac
 }
 man() { [ -n "$SR" ] || sr; (cd "$B" && ls_ "$1") | LC_ALL=C sort -z; }
@@ -1263,6 +1292,10 @@ watch_games() {
       last[$k]=$now
       case $k in
         app:*) a=${k#app:}
+               # [v5.7] последний отрезок наблюдения — сейчас, а не через 30 с: данные игры до выгрузки
+               d=$(idir "$a"); [ -n "$d" ] && [ -e "$S/van/$a.seen.tsv" ] && python3 /usr/local/bin/wolf-mods.py track \
+                 "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 0 "$PD" >> /var/log/wolf.log 2>&1
+               store && [ "$SV" = 1 ] && [ -s "$S/van/$a.pend.tsv" ] && arr+=("$(gsave_name "$a")")
                mods_check "$a"                                       # [v5.0] появились моды — спросить
                # [v5.7] «диска C:» от Steam нет (своя игра из Games — её C: в папке игры, едет с game--) — нечего выгружать
                wants "pfx--$a" && [ -d "$DH/$SR/steamapps/compatdata/$a" ] && arr+=("pfx--$a")
@@ -1837,7 +1870,7 @@ bk() {
     prog_scan      # [v5.7] программу удалили за последние 30 с — убрать из облака, а не выгружать снова
     "$0" state; "$0" games
     "$0" mods                                    # [v5.0] моды игр Steam
-    "$0" lgame                                   # [v5.6] файлы игр, которые качает их лаунчер («в облаке»)
+    "$0" lgame                                   # [v5.6] файлы игр, которые качает их лаунчер («в облаке»); [v5.7] данные игр
     return 0
   fi
   rl > "$LS" || { log "$m: не удалось получить список облака"; return 1; }
@@ -1868,7 +1901,7 @@ bk() {
     mods)
       shift; mods_push "$@"; return 0 ;;
     lgame)
-      shift; lgame_push; return 0 ;;
+      shift; lgame_push; gsave_push; return 0 ;;
   esac
   [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
   [ "$m" = state ] && gindex
@@ -2323,7 +2356,7 @@ def page():
 WOLF = '/usr/local/bin/wolf'
 # Имя архива игры: папки бывают с пробелами («sgame--The Blood of Dawnwalker»); без «/» и управляющих
 # символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
-ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame)--[^/\x00-\x1f]{1,200}$')
+ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,200}$')
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
 MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
@@ -4376,14 +4409,22 @@ w /usr/local/bin/wolf-mods.py <<'MODS'
 #                                       дампы и кэши (не повод спрашивать человека)
 #   pack ПАПКА СНИМОК АРХИВ НОМЕР СБОРКА  упаковать моды (zstd) → «сколько отпечаток»; 0 — модов нет, архив не создан
 #   apply ПАПКА                         stdin — распакованный tar модов: наложить поверх игры, удалить удалённое → «сколько отпечаток»
-#   arch НОМЕР ПАСПОРТ [ВИД]            имя архива: mod--НОМЕР--Название (из паспорта Steam); ВИД lgame — архив игры
+#   arch НОМЕР ПАСПОРТ [ВИД]            имя архива: mod--НОМЕР--Название (из паспорта Steam); ВИД lgame — архив игры,
+#                                       [v5.7] gsave — данные игры
 # [v5.6] Игры, которые докачивает их собственный лаунчер (FF14, MMO…): файлы лаунчера — слой «игра» (СНИМОК.game.tsv),
 # моды считаются поверх «чистая игра из Steam + слой игры». Слой копится наблюдением (track, раз в 30 с): пока игра
 # запущена из Steam и не работает программа из папки Programs, изменения в папке игры — её файлы; но только у игры,
 # в которой так появилось больше LAUNCHER_BYTES (иначе — обычная игра: у неё и сохранения бывают в папке, они — моды).
 #   track ПАПКА СНИМОК ИГРА_ЗАПУЩЕНА PROGRAMS   шаг наблюдения (ИГРА_ЗАПУЩЕНА 1/0)
 #   claim ПАПКА СНИМОК                  всё, что сейчас поверх чистой игры, — файлы игры (после восстановления архива игры)
-#   man ПАПКА СНИМОК                    список файлов слоя игры для архива lgame-- (формат find wolf: путь, тип, размер, время)
+#   man ПАПКА СНИМОК [data]             список файлов слоя игры для архива lgame-- (формат find wolf: путь, тип, размер, время);
+#                                       data — слоя «данные игры» для gsave-- (без мусора)
+# [v5.7] Три вида изменений в папке игры (решение Алексея 2026-10-10: моды — без хлама): при закрытой игре — моды
+# (человек положил мод, запустил установщик или менеджер модов); запущенная игра написала сама — «данные игры»
+# (сохранения и настройки в папке игры; СНИМОК.pend.tsv): архив gsave--, всегда, в обоих режимах, без журналов, дампов
+# и кэша; больше LAUNCHER_BYTES — слой «игра» (лаунчер докачивает). Запущенная игра изменила файл, который уже был
+# модом (настройки ReShade из игры), — изменение остаётся модом. Журналы и дампы не попадают и в моды.
+#   claim ПАПКА СНИМОК data             всё, что сейчас поверх «чистая игра + слой игры», — данные игры (после gsave--)
 import hashlib, io, json, os, re, stat, subprocess, sys, tarfile
 
 META = ".vastgame-mod.json"
@@ -4449,14 +4490,15 @@ def save(path, d):
     os.replace(tmp, path)
 
 
-def baseline(snapf):
-    """Чистая игра из Steam с наложенным слоем игры (размер -1 — лаунчер удалил файл Steam)."""
+def baseline(snapf, data=True):
+    """Чистая игра из Steam с наложенным слоем игры и [v5.7] данными игры (размер -1 — удалён при запущенной игре)."""
     base = load(snapf)
-    for rel, v in load_opt(side(snapf, ".game.tsv")).items():
-        if v[0] < 0:
-            base.pop(rel, None)
-        else:
-            base[rel] = v
+    for ext in (".game.tsv", ".pend.tsv") if data else (".game.tsv",):
+        for rel, v in load_opt(side(snapf, ext)).items():
+            if v[0] < 0:
+                base.pop(rel, None)
+            else:
+                base[rel] = v
     return base
 
 
@@ -4496,6 +4538,13 @@ def track(root, snapf, running, pd):
         os.remove(seen_f)                                          # последний отрезок — и наблюдение до следующего запуска
     if not changed and not gone or _programs_running(pd):
         return 0
+    # [v5.7] файл, который до этого отрезка был модом (не совпадал с «чистая игра + слой игры + данные игры»), остаётся
+    # модом: запущенная игра поменяла настройки мода — это часть мода, а не данные игры
+    base = baseline(snapf)
+    changed = {r: v for r, v in changed.items() if r not in seen or seen[r] == base.get(r)}
+    gone = [r for r in gone if seen[r] == base.get(r)]
+    if not changed and not gone:
+        return 0
     van = load(snapf)
     game_f, pend_f, mark = side(snapf, ".game.tsv"), side(snapf, ".pend.tsv"), side(snapf, ".ltype")
     known = os.path.exists(mark)
@@ -4519,8 +4568,15 @@ def track(root, snapf, running, pd):
     return 0
 
 
-def claim(root, snapf):
-    """Всё, что сейчас поверх чистой игры, — файлы игры (восстановили архив игры, модов ещё не накладывали)."""
+def claim(root, snapf, layer="game"):
+    """Всё, что сейчас поверх чистой игры, — файлы игры (восстановили архив игры, модов ещё не накладывали).
+    [v5.7] layer data — поверх «чистая игра + слой игры»: данные игры (восстановили gsave--, модов ещё нет)."""
+    if layer == "data":
+        base, now = baseline(snapf, data=False), walk(root)
+        got = {r: v for r, v in now.items() if base.get(r) != v and r != META}
+        save(side(snapf, ".pend.tsv"), got)
+        print(len(got))
+        return 0
     van, now = load(snapf), walk(root)
     game = {r: v for r, v in now.items() if van.get(r) != v and r != META}
     game.update({r: (-1, 0) for r in van if r not in now})
@@ -4530,11 +4586,12 @@ def claim(root, snapf):
     return 0
 
 
-def man(root, snapf):
-    """Файлы слоя игры, которые есть на диске, — для архива lgame-- (как F в wolf: путь\tтип\tразмер\tвремя\tссылка)."""
+def man(root, snapf, layer="game"):
+    """Файлы слоя игры, которые есть на диске, — для архива lgame-- (как F в wolf: путь\tтип\tразмер\tвремя\tссылка).
+    [v5.7] layer data — данные игры для gsave--, без журналов, дампов и кэша."""
     out = sys.stdout.buffer
-    for rel, v in sorted(load_opt(side(snapf, ".game.tsv")).items()):
-        if v[0] < 0:
+    for rel, v in sorted(load_opt(side(snapf, ".game.tsv" if layer == "game" else ".pend.tsv")).items()):
+        if v[0] < 0 or layer == "data" and junk(rel):
             continue
         p = os.path.join(root, rel)
         try:
@@ -4552,9 +4609,15 @@ def junk(rel):
     return parts[-1].endswith(JUNK_EXT) or parts[-1].startswith("crash") or any(p in JUNK_DIRS for p in parts[:-1])
 
 
+def junk_file(rel):
+    """[v5.7] Журнал, дамп, временный файл — не мод, даже если появился при закрытой игре."""
+    name = rel.lower().rsplit("/", 1)[-1]
+    return name.endswith(JUNK_EXT) or name.startswith("crash")
+
+
 def changes(root, snapf):
-    base, now = baseline(snapf), walk(root)                        # [v5.6] файлы лаунчера — не моды
-    files = sorted(r for r, v in now.items() if base.get(r) != v and r != META)
+    base, now = baseline(snapf), walk(root)                        # [v5.6] файлы лаунчера — не моды; [v5.7] данные игры — тоже
+    files = sorted(r for r, v in now.items() if base.get(r) != v and r != META and not junk_file(r))
     deleted = sorted(r for r in base if r not in now)
     h = hashlib.sha1()
     for r in files:
@@ -4652,14 +4715,14 @@ if __name__ == "__main__":
             sys.exit(pack(a[1], a[2], a[3], a[4], a[5]))
         if a[:1] == ["apply"] and len(a) == 2:
             sys.exit(apply(a[1]))
-        if a[:1] == ["arch"] and len(a) in (3, 4) and a[1].isdigit() and (len(a) == 3 or a[3] in ("mod", "lgame")):
+        if a[:1] == ["arch"] and len(a) in (3, 4) and a[1].isdigit() and (len(a) == 3 or a[3] in ("mod", "lgame", "gsave")):
             sys.exit(arch(*a[1:]))
         if a[:1] == ["track"] and len(a) == 5 and a[3] in ("0", "1"):
             sys.exit(track(a[1], a[2], a[3] == "1", a[4]))
-        if a[:1] == ["claim"] and len(a) == 3:
-            sys.exit(claim(a[1], a[2]))
-        if a[:1] == ["man"] and len(a) == 3:
-            sys.exit(man(a[1], a[2]))
+        if a[:1] == ["claim"] and (len(a) == 3 or len(a) == 4 and a[3] == "data"):
+            sys.exit(claim(*a[1:]))
+        if a[:1] == ["man"] and (len(a) == 3 or len(a) == 4 and a[3] == "data"):
+            sys.exit(man(*a[1:]))
     except (OSError, ValueError, tarfile.TarError) as e:
         print(f"wolf-mods: ошибка {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

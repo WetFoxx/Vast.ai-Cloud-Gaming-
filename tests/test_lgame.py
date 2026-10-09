@@ -92,14 +92,51 @@ class TestLauncherGame(Game):
         self.track(False)
         self.assertEqual(self.mods(), (["game/mods/translation.pak"], []))   # в моды — только он
 
-    def test_ordinary_game_stays_as_before(self):
-        # Обычная игра: сохранения и логи в папке игры, мало — моды, как раньше (не «файлы игры»)
+    def data_layer(self):
+        return set(wm.load_opt(wm.side(self.van, ".pend.tsv")))
+
+    def man_rows(self, layer):
+        out = Path(self.d / ("man." + layer))
+        with mock.patch.object(sys, "stdout", mock.Mock(buffer=open(out, "wb"))) as fake:
+            wm.man(str(self.root), self.van, layer)
+            fake.buffer.close()
+        return [r.split("\t")[0] for r in out.read_bytes().decode().split("\0") if r]
+
+    def test_ordinary_game_saves_are_game_data_not_mods(self):
+        # [v5.7] Обычная игра пишет сохранения, настройки и журналы в свою папку — это данные игры (gsave--, всегда),
+        # а не моды и не «файлы игры»; журналы и кэш не попадают никуда
         self.track(True)
         self.write("save/slot1.sav", 300)
+        self.write("Logs/game.log", 50)
+        self.write("shadercache/a.bin", 40)
         self.track(False)
         self.assertFalse(os.path.exists(wm.side(self.van, ".ltype")))
         self.assertEqual(self.game_layer(), set())
-        self.assertEqual(self.mods()[0], ["save/slot1.sav"])
+        self.assertEqual(self.mods(), ([], []))
+        self.assertEqual(self.data_layer(), {"save/slot1.sav", "Logs/game.log", "shadercache/a.bin"})
+        self.assertEqual(self.man_rows("data"), [str(self.root / "save/slot1.sav")])
+
+    def test_mods_put_while_closed_stay_mods_even_if_game_changes_them(self):
+        self.write("reshade-shaders/ReShade.ini", 20)                      # поставили при закрытой игре — мод
+        self.write("dxgi.dll", 70)
+        self.write("ReShade.log", 9)                                       # журнал установщика — не мод
+        self.assertEqual(self.mods()[0], ["dxgi.dll", "reshade-shaders/ReShade.ini"])
+        self.track(True)
+        self.write("reshade-shaders/ReShade.ini", 25)                      # настройки ReShade поменяли в игре
+        self.write("save/slot1.sav", 300)
+        self.track(False)
+        self.assertEqual(self.mods()[0], ["dxgi.dll", "reshade-shaders/ReShade.ini"])
+        self.assertEqual(self.data_layer(), {"save/slot1.sav"})
+
+    def test_game_data_restored_then_mods_on_top(self):
+        self.write("game/ffxiv_dx11.exe", 800)                             # «файлы игры» из облака
+        wm.claim(str(self.root), self.van)
+        self.write("save/slot1.sav", 300)                                  # потом данные игры из облака
+        self.assertEqual(wm.claim(str(self.root), self.van, "data"), 0)
+        self.assertEqual(self.data_layer(), {"save/slot1.sav"})
+        self.assertEqual(self.mods(), ([], []))
+        self.write("mods/x.pak", 5)                                        # моды из облака — сверху, видны как моды
+        self.assertEqual(self.mods()[0], ["mods/x.pak"])
 
     def test_mod_manager_from_programs_is_mods_while_game_runs(self):
         open(wm.side(self.van, ".ltype"), "w").close()                      # игра уже известна как лаунчерная
@@ -154,7 +191,16 @@ class TestWolfSide(unittest.TestCase):
     def test_archive_kind(self):
         self.assertIn('lgame--*)     Z=$ZG DB=1 A=${1#lgame--}; A=${A%%--*}', WOLF)
         self.assertIn("lgame--*)   python3 /usr/local/bin/wolf-mods.py man", WOLF)
-        self.assertRegex(WOLF, r"gamearch\(\) \{ case \$1 in [^)]*\|lgame--\*\)")
+        self.assertRegex(WOLF, r"gamearch\(\) \{ case \$1 in [^)]*\|lgame--\*[|)]")
+        self.assertRegex(WOLF, r"gamearch\(\) \{ case \$1 in [^)]*\|gsave--\*\)")
+        self.assertIn('gsave--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" data', WOLF)
+        self.assertIn("&& lgame_restore \"$1\" \"$2\" && gsave_restore \"$1\" \"$2\"", WOLF)
+        self.assertIn("lgame_push; gsave_push;", WOLF)
+        from test_game_select import fn
+        w = fn("watch_games")
+        self.assertIn('[ -e "$S/van/$a.seen.tsv" ] && python3 /usr/local/bin/wolf-mods.py track', w)   # последний отрезок
+        self.assertIn('store && [ "$SV" = 1 ] && [ -s "$S/van/$a.pend.tsv" ] && arr+=("$(gsave_name "$a")")', w)
+        self.assertLess(w.index("wolf-mods.py track"), w.index("gsave_name"))
         self.assertIn('"$0" lgame', WOLF)                                   # при выключении — выгрузить
         # запуск из библиотеки: моды — после восстановления архива игры
         self.assertIn('flock "$L/snap-$a.lock" true', WOLF)
