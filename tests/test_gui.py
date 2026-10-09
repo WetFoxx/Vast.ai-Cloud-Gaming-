@@ -186,15 +186,16 @@ class TestPrograms(unittest.TestCase):
         self.assertEqual((out["1"]["name"], out["2"]["name"]), ("Dawnwalker", ""))
 
     def test_status_record_parsed(self):
-        rec = (1, "ok", json.dumps({"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}, 5]},
+        rec = (1, "ok", json.dumps({"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}, 5],
+                                          "name": "Test7z"},
                                     "2": {"installed": True, "launch": {"id": "pfx:a.exe", "args": "-x"}},
                                     "3": {"launch": "мусор"}, "bad": {}}))
         self.assertEqual(gui.core.progs_of({"progs": rec}),
                          {"1": {"running": True, "auto": ["prog:a.exe"], "progs": [{"id": "prog:a.exe"}], "installed": False,
-                                "launch": None},
-                          "2": {"running": False, "auto": [], "progs": [], "installed": True,           # [v5.6]
+                                "name": "Test7z", "launch": None},                                   # [v5.7] имя с машины
+                          "2": {"running": False, "auto": [], "progs": [], "installed": True, "name": "",  # [v5.6]
                                 "launch": {"id": "pfx:a.exe", "args": "-x"}},
-                          "3": {"running": False, "auto": [], "progs": [], "installed": False, "launch": None}})
+                          "3": {"running": False, "auto": [], "progs": [], "installed": False, "name": "", "launch": None}})
         self.assertEqual(gui.core.progs_of({"progs": (1, "ok", "не json")}), {})
         self.assertIn("progs", gui.core.NOT_ARCHIVES)                    # не архив: не мешает «Закончить»
 

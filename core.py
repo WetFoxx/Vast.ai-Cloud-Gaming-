@@ -152,6 +152,7 @@ def progs_of(s):
                            "auto": [x for x in v.get("auto") or [] if isinstance(x, str)],
                            "progs": [p for p in v.get("progs") or [] if isinstance(p, dict) and isinstance(p.get("id"), str)],
                            "installed": bool(v.get("installed")),
+                           "name": str(v.get("name") or "")[:200],   # [v5.7] с машины (у сторонних игр — только так)
                            "launch": v["launch"] if isinstance(v.get("launch"), dict)
                            and isinstance(v["launch"].get("id"), str) else None}
     return out

@@ -790,7 +790,7 @@ class Api:
         games = {g["appid"]: g.get("name") for g in (steamlib.cached() or {}).get("games") or []}
         now = settings.get("play_now") or {}
         for a, v in progs.items():
-            v["name"] = games.get(a) or (now.get("name") if str(now.get("appid")) == a else "") or ""
+            v["name"] = games.get(a) or (now.get("name") if str(now.get("appid")) == a else "") or v.get("name") or ""
         return progs
 
     def prog_run(self, appid, ident):
@@ -1013,8 +1013,8 @@ class Api:
             _, items = asks.pending()
             if any(a["kind"] == kind and a["archive"] == archive for a in items):
                 raise VastgameError("Машина не приняла ответ", key="ask.failed", code=0, out="")
-        if not items:
-            self.card_close()
+        if not items:                            # закрыть после ответа странице: destroy() изнутри вызова, которого
+            threading.Timer(0.3, self.card_close).start()   # ждёт сама карточка, вешал её (живой случай 2026-10-09)
         return {"ok": True, "left": len(items)}
 
     def card_close(self):

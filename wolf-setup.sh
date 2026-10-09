@@ -3112,6 +3112,27 @@ def _launch_parts(pid):
     return head, args[-1], env
 
 
+def app_name(root, appid):
+    """[v5.7] Название игры: из паспорта Steam, у сторонних игр — из shortcuts.vdf (AppName рядом с её appid)."""
+    try:
+        m = re.search(r'"name"\s*"([^"]*)"', (root / "steamapps" / f"appmanifest_{appid}.acf").read_text(errors="replace"))
+        if m:
+            return m.group(1)[:200]
+    except OSError:
+        pass
+    want = (int(appid) - (1 << 32) if int(appid) >= 1 << 31 else int(appid)).to_bytes(4, "little", signed=True)
+    for f in sorted((root / "userdata").glob("*/config/shortcuts.vdf")):
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        for m in re.finditer(rb"\x02appid\x00" + re.escape(want), data, re.I):
+            n = re.search(rb"\x01AppName\x00([^\x00]*)\x00", data[m.end():m.end() + 600], re.I)
+            if n:
+                return n.group(1).decode("utf-8", "replace")[:200]
+    return ""
+
+
 def _game_dir(root, appid):
     acf = root / "steamapps" / f"appmanifest_{appid}.acf"
     try:
@@ -3336,8 +3357,8 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
     play = (Path(sdir, "play.app").read_text().strip() if Path(sdir, "play.app").exists() else "")
     if play.isdigit():
         show.setdefault(play)
-    for a in _jload(Path(sdir, "launch.sel"), {}):                # [v5.6] игры, которые запускаются через программу
-        if str(a).isdigit():
+    for a in _jload(Path(sdir, "launch.sel"), {}):                # [v5.6] игры, которые запускаются через программу,
+        if str(a).isdigit() and _game_dir(root, str(a)):         # — если игра есть на этой машине (выбор едет на каждую)
             show.setdefault(str(a))
     cache = _jload(Path(sdir, "progs.cache"), {})              # папка игры большая — обходить не чаще раза в 30 с
     for a in show:
@@ -3345,7 +3366,8 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
             cache[a] = {"t": now, "list": programs(root, pd, sdir, a)}
     _jsave(Path(sdir, "progs.cache"), {a: v for a, v in cache.items() if a in show})
     report = {a: {"running": a in running, "auto": auto.get(a) or [], "progs": cache[a]["list"],
-                  "installed": bool(_game_dir(root, a)), "launch": launch_choice(home, a) if home else None}
+                  "installed": bool(_game_dir(root, a)), "launch": launch_choice(home, a) if home else None,
+                  "name": app_name(root, a)}
               for a in show}
     text = json.dumps(report, ensure_ascii=False, sort_keys=True)
     st = Path(sdir, "st", "progs")

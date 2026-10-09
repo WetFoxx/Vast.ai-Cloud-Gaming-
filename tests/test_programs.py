@@ -197,6 +197,30 @@ class TestAutoAndReport(Base):
         self.assertEqual((self.w.sdir / "st/progs").stat().st_mtime_ns, mtime)   # не изменилось — не переписываем
 
 
+    def test_launch_choice_shown_only_for_games_on_machine(self):
+        # [v5.7] выбор «запускать через» едет на каждую машину — блок программ только у игр, которые здесь есть;
+        # название — с машины (у сторонних игр его больше неоткуда взять)
+        (self.w.sdir / "launch.sel").write_text(json.dumps({APP: {"id": "pfx:x.exe", "args": ""},
+                                                            "312060": {"id": "pfx:x.exe", "args": ""}}))
+        acf = self.w.root / "steamapps" / f"appmanifest_{APP}.acf"
+        acf.write_text(acf.read_text().replace('"installdir"', '"name"\t\t"The Blood of Dawnwalker"\n\t"installdir"'))
+        self.tick(1000)
+        rep = self.report()
+        self.assertEqual(list(rep), [APP])
+        self.assertEqual(rep[APP]["name"], "The Blood of Dawnwalker")
+
+    def test_shortcut_name(self):
+        import struct
+        cfg = self.w.root / "userdata/123/config"
+        cfg.mkdir(parents=True)
+        aid = 2338403652
+        data = (b"\x00shortcuts\x00\x000\x00\x02appid\x00" + struct.pack("<i", aid - (1 << 32))
+                + b"\x01AppName\x00Test7z\x00\x01Exe\x00\"x\"\x00\x08\x08")
+        (cfg / "shortcuts.vdf").write_bytes(data)
+        self.assertEqual(ws.app_name(self.w.root, str(aid)), "Test7z")
+        self.assertEqual(ws.app_name(self.w.root, "1"), "")
+
+
 class TestWolf(unittest.TestCase):
     def test_programs_uploaded_always_and_auto_from_vg_sync(self):
         m = Machine()
