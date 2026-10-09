@@ -429,6 +429,7 @@ const I18N = {
     "archive.prog": "программа {name}",
     "games.confirm.mod": "Моды игры «{title}», {size}, уйдут в корзину Google Drive — 30 дней их можно вернуть. Сама игра и её сохранения останутся.",
     "archive.mod": "моды {name}",
+    "archive.gsave": "данные игры {name}",
     "library.mods": "моды",
     "library.demo": "демо",
     "play.state.mods": "Накладываю моды на {name}…",
@@ -1226,6 +1227,7 @@ const I18N = {
     "archive.prog": "program {name}",
     "games.confirm.mod": "The mods of “{title}”, {size}, go to the Google Drive trash — you can restore them for 30 days. The game itself and its saves stay.",
     "archive.mod": "mods {name}",
+    "archive.gsave": "game data {name}",
     "library.mods": "mods",
     "library.demo": "demo",
     "play.state.mods": "Applying mods to {name}…",
@@ -2023,6 +2025,7 @@ const I18N = {
     "archive.prog": "programa {name}",
     "games.confirm.mod": "Los mods de «{title}», {size}, irán a la papelera de Google Drive: puedes recuperarlos durante 30 días. El juego y sus partidas guardadas se quedan.",
     "archive.mod": "mods {name}",
+    "archive.gsave": "datos del juego {name}",
     "library.mods": "mods",
     "library.demo": "demo",
     "play.state.mods": "Aplicando mods a {name}…",
@@ -2436,6 +2439,8 @@ function archiveName(name, gameNames = GAME_NAMES) {
   if (I18N.en["archive." + name]) return t("archive." + name);
   const mod = /^mod--\d+--(.+)$/.exec(name);                   // [v5.0] моды: mod--НОМЕР--Название
   if (mod) return t("archive.mod", { name: mod[1] });
+  const gs = /^gsave--\d+--(.+)$/.exec(name);                 // [v5.7] данные игры: gsave--НОМЕР--Название
+  if (gs) return t("archive.gsave", { name: gs[1] });
   const m = /^(pfx|game|sgame|prog)--(.+)$/.exec(name);
   if (!m) return name;
   const shown = m[1] === "pfx" ? gameNames[m[2]] || "appid " + m[2] : m[2];
