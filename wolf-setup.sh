@@ -935,7 +935,7 @@ ls_() {
     # меняет — сохранения уходили в облако по кругу, по 2 ГБ каждые полминуты (живой случай 2026-10-08)
     compatdata) F "$s/compatdata" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
     pfx--*)     F "$s/compatdata/$A" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
-    game--*)    F "$A" ;;
+    game--*)    F "$A" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;   # [v5.7] .prefix своей игры
     prog--*)    F "$A" ;;
     sgame--*)   F "$s/common/$A" ;;
     lgame--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" ;;
@@ -2309,6 +2309,21 @@ import binascii, glob, os, re, struct, sys
 
 TAG = "vastgame"
 CHECK = "--check" in sys.argv
+VGRUN = "/usr/local/bin/vg-run"         # [v5.7] своя игра (паспорт .vastgame.json) — ярлык на запускатель, без Proton
+OWN = ".vastgame.json"
+
+
+def own_game(folder):
+    """[v5.7] Своя игра: в папке паспорт с exe внутри неё (как проверяет vg-run)."""
+    import json
+    try:
+        d = json.load(open(os.path.join(folder, OWN), encoding="utf-8"))
+        exe = d["exe"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(exe, str) or not exe or exe.startswith("/") or ".." in exe.split("/"):
+        return False
+    return os.path.realpath(os.path.join(folder, exe)).startswith(os.path.realpath(folder) + os.sep)
 SKIP = re.compile(r"unins|setup|install|redist|vcredist|vc_redist|dxsetup|dotnet|directx|crash|report|"
                   r"easyanticheat|eac_|beservice|battleye|updater|launcherhelper|ue4prereq|ueprereq|prereq",
                   re.I)
@@ -2423,9 +2438,9 @@ def signed(n):
     return n - (1 << 32) if n >= 1 << 31 else n
 
 
-def entry(name, exe_q, start_q, aid):
+def entry(name, exe_q, start_q, aid, opts=""):
     return {"appid": ("int", signed(aid)), "AppName": name, "Exe": exe_q, "StartDir": start_q, "icon": "",
-            "ShortcutPath": "", "LaunchOptions": "", "IsHidden": ("int", 0), "AllowDesktopConfig": ("int", 1),
+            "ShortcutPath": "", "LaunchOptions": opts, "IsHidden": ("int", 0), "AllowDesktopConfig": ("int", 1),
             "AllowOverlay": ("int", 1), "OpenVR": ("int", 0), "Devkit": ("int", 0), "DevkitGameID": "",
             "DevkitOverrideAppID": ("int", 0), "LastPlayTime": ("int", 0), "FlatpakAppID": "",
             "tags": {"0": TAG}}
@@ -2435,8 +2450,9 @@ def unq(s):
     return s.strip().strip('"')
 
 
-def sync_user(cfg_dir, games, changed_ids):
-    """Обновить shortcuts.vdf одного пользователя Steam. True — файл изменился."""
+def sync_user(cfg_dir, games, changed_ids, own=()):
+    """Обновить shortcuts.vdf одного пользователя Steam. True — файл изменился. own — [(папка, название)] своих игр
+    (паспорт .vastgame.json): ярлык на vg-run с папкой в параметрах, без Proton (его запускает vg-run)."""
     path = os.path.join(cfg_dir, "shortcuts.vdf")
     try:
         with open(path, "rb") as f:
@@ -2449,14 +2465,30 @@ def sync_user(cfg_dir, games, changed_ids):
     lst = root.setdefault("shortcuts", {})
     items = [lst[k] for k in sorted(lst, key=lambda x: int(x) if x.isdigit() else 0)]
     ours = lambda e: TAG in (e.get("tags") or {}).values()
+    own_dirs = {f for f, _ in own}
+    vgrun = lambda e: unq(e.get("Exe") or e.get("exe") or "") == VGRUN
     keep, change = [], False
     for e in items:
         exe = unq(e.get("Exe") or e.get("exe") or "")
-        if ours(e) and not os.path.isfile(exe):            # папку удалили — убрать и из Steam
+        if ours(e) and vgrun(e):                            # [v5.7] своя игра: папки или паспорта больше нет — убрать
+            if unq(e.get("LaunchOptions") or "") not in own_dirs:
+                change = True
+                continue
+        elif ours(e) and not os.path.isfile(exe):          # папку удалили — убрать и из Steam
+            change = True
+            continue
+        elif ours(e) and any(exe.startswith(f + os.sep) for f in own_dirs):   # стала своей игрой — прежний ярлык долой
             change = True
             continue
         keep.append(e)
     present = [unq(e.get("Exe") or e.get("exe") or "") for e in keep]
+    have_own = {unq(e.get("LaunchOptions") or "") for e in keep if vgrun(e)}
+    for folder, name in own:
+        if folder in have_own:
+            continue
+        exe_q = f'"{VGRUN}"'
+        keep.append(entry(name, exe_q, f'"{folder}/"', appid(exe_q, name), f'"{folder}"'))
+        change = True
     for folder, name, exe in games:
         if any(p == exe or p.startswith(folder + os.sep) for p in present):
             continue                                        # уже есть (наша или добавлена руками)
@@ -2466,7 +2498,7 @@ def sync_user(cfg_dir, games, changed_ids):
         changed_ids.add(aid)
         change = True
     for e in keep:                                          # Proton — и нашим, добавленным раньше
-        if ours(e):
+        if ours(e) and not vgrun(e):                        # своим играм Proton включает vg-run, не Steam
             changed_ids.add(e["appid"][1] & 0xFFFFFFFF)
     if change and not CHECK:
         root["shortcuts"] = {str(n): e for n, e in enumerate(keep)}
@@ -2693,6 +2725,10 @@ def main(games_dir, steam_root):
     if "--index" in sys.argv:                              # [v4.6] для списка игр приложения (wolf-games.py)
         for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
             folder = os.path.join(games_dir, d)
+            if not d.startswith(".") and os.path.isdir(folder) and own_game(folder):     # [v5.7] своя игра
+                name = d.replace("_", " ").strip()
+                print(f"game--{d}\t{appid(chr(34) + VGRUN + chr(34), name)}\t{name}")
+                continue
             exe = None if d.startswith(".") or not os.path.isdir(folder) else main_exe(folder)
             if exe:
                 name, quoted = d.replace("_", " ").strip(), '"' + exe + '"'     # как в sync_user (без \\ в f-строке: Python 3.10)
@@ -2703,10 +2739,13 @@ def main(games_dir, steam_root):
         if not CHECK:
             print(f"steam input: выключен по умолчанию, изменено: {'да' if changed else 'нет'}")
         return 3 if changed else 0
-    games = []
+    games, own = [], []
     for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
         folder = os.path.join(games_dir, d)
         if d.startswith(".") or not os.path.isdir(folder):
+            continue
+        if own_game(folder):                               # [v5.7] своя игра — ярлык на vg-run
+            own.append((folder, d.replace("_", " ").strip()))
             continue
         exe = main_exe(folder)
         if exe:
@@ -2718,11 +2757,11 @@ def main(games_dir, steam_root):
     for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
         cfg = os.path.join(users, u, "config")
         if u.isdigit() and u != "0" and os.path.isdir(cfg):
-            changed |= sync_user(cfg, games, ids)
+            changed |= sync_user(cfg, games, ids, own)
     changed |= sync_proton(os.path.join(steam_root, "config", "config.vdf"), ids)
     changed |= steam_input_off(steam_root)                 # и новым сторонним играм, и поставленным за сессию
     if not CHECK:
-        print(f"shortcuts: игр в папке {len(games)}, изменено: {'да' if changed else 'нет'}")
+        print(f"shortcuts: игр в папке {len(games) + len(own)}, изменено: {'да' if changed else 'нет'}")
     return 3 if changed else 0
 
 
@@ -2805,6 +2844,135 @@ GAMES
 # [v5.6] Прокладка в параметрах запуска Steam («…/vg-launch %command%»): подменяет .exe игры — аргумент после
 # «…/proton ГЛАГОЛ» — на программу из launch/НОМЕР (строки: путь, параметры, id; .once — один раз: установщик).
 # Нет выбора или файла программы — игра запускается как обычно. Параметры делятся по пробелам, без оболочки.
+# [v5.7] Своя игра (папка Games с паспортом .vastgame.json): запуск через Proton без Steam, «диск C:» — .prefix в папке
+# игры (установщик ставит куда хочет — всё оказывается внутри папки; разведка 2026-10-09). То же, что делает Steam:
+# вход Steam Linux Runtime (по require_tool_appid Proton) → proton waitforexitandrun exe; в Docker вход — наша
+# пропускающая заплатка (VG=1). В Steam у такой игры ярлык на этот файл (без Proton) — видна в Big Picture и Steam Link.
+#   vg-run ПАПКА_ИГРЫ                      — запустить игру (exe и args из паспорта)
+#   vg-run ПАПКА_ИГРЫ --exe ПУТЬ [ПАРАМ…]  — любой .exe в её «диске C:» (установщик, лаунчер)
+w /usr/local/bin/vg-run <<'VGRUN'
+#!/usr/bin/env python3
+import json, os, re, shlex, sys, time
+
+MANIFEST = ".vastgame.json"
+
+
+def manifest(game):
+    """Паспорт игры: {"exe": путь от папки игры, "args": строка} — exe только внутри папки (без «..» и ссылок наружу)."""
+    try:
+        d = json.load(open(os.path.join(game, MANIFEST), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    exe = d.get("exe") if isinstance(d, dict) else None
+    if not isinstance(exe, str) or not exe or exe.startswith("/") or ".." in exe.split("/") or "\0" in exe:
+        return None
+    path = os.path.realpath(os.path.join(game, exe))
+    if not path.startswith(os.path.realpath(game) + os.sep):
+        return None
+    args = d.get("args") if isinstance(d.get("args"), str) else ""
+    return {**d, "exe": path, "args": args[:300]}
+
+
+def steam_root():
+    for p in (os.environ.get("STEAM_COMPAT_CLIENT_INSTALL_PATH"), os.path.expanduser("~/.steam/debian-installation"),
+              os.path.expanduser("~/.local/share/Steam"), os.path.expanduser("~/.steam/steam")):
+        if p and os.path.isdir(os.path.join(p, "steamapps")):
+            return os.path.realpath(p)
+    return None
+
+
+def _acf_dir(root, appid):
+    try:
+        m = re.search(r'"installdir"\s*"([^"]+)"', open(os.path.join(root, "steamapps", f"appmanifest_{appid}.acf"),
+                                                         encoding="utf-8", errors="replace").read())
+    except OSError:
+        return None
+    return m and os.path.join(root, "steamapps", "common", m.group(1))
+
+
+def proton(root):
+    """Proton, который выбран в Steam «для всех игр» (CompatToolMapping "0"), иначе Proton Experimental; и вход Steam
+    Linux Runtime, который ему нужен (require_tool_appid в toolmanifest.vdf)."""
+    common = os.path.join(root, "steamapps", "common")
+    names = []
+    try:
+        cfg = open(os.path.join(root, "config", "config.vdf"), encoding="utf-8", errors="replace").read()
+        m = re.search(r'"CompatToolMapping"\s*\{\s*"0"\s*\{[^}]*?"name"\s*"([^"]+)"', cfg)
+        if m:
+            names.append(m.group(1))
+    except OSError:
+        pass
+    dirs = [os.path.join(common, "Proton - Experimental")]
+    for n in names:                                     # proton_9 → «Proton 9.0», свои — compatibilitytools.d/n
+        dirs.insert(0, os.path.join(root, "compatibilitytools.d", n))
+        v = re.fullmatch(r"proton_(\d+)", n)
+        if v:
+            dirs.insert(1, os.path.join(common, f"Proton {v.group(1)}.0"))
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, "proton")):
+            tool = open(os.path.join(d, "toolmanifest.vdf"), encoding="utf-8", errors="replace").read() \
+                if os.path.isfile(os.path.join(d, "toolmanifest.vdf")) else ""
+            m = re.search(r'"require_tool_appid"\s*"(\d+)"', tool)
+            slr = _acf_dir(root, m.group(1)) if m else None
+            entry = slr and os.path.join(slr, "_v2-entry-point")
+            return os.path.join(d, "proton"), (entry if entry and os.path.isfile(entry) else None)
+    return None, None
+
+
+def command(game, exe=None, args=()):
+    """(argv, env, cwd) запуска или (None, причина)."""
+    game = os.path.realpath(game)
+    if exe is None:
+        m = manifest(game)
+        if not m:
+            return None, "нет паспорта .vastgame.json или в нём неверный exe"
+        exe, args = m["exe"], shlex.split(m["args"]) if m["args"] else []
+    if not os.path.isfile(exe):
+        return None, f"нет файла {exe}"
+    root = steam_root()
+    if not root:
+        return None, "нет Steam"
+    pr, entry = proton(root)
+    if not pr:
+        return None, "нет Proton"
+    env = dict(os.environ)
+    prefix = os.path.join(game, ".prefix")
+    os.makedirs(prefix, exist_ok=True)
+    env.update(STEAM_COMPAT_DATA_PATH=prefix, STEAM_COMPAT_CLIENT_INSTALL_PATH=root)
+    env.setdefault("SteamAppId", "0")
+    env.setdefault("SteamGameId", "0")
+    if os.path.exists("/opt/vastgame/real/steam"):     # Docker: вход Runtime — наша пропускающая заплатка
+        env.setdefault("VG", "1")
+    proton_cmd = [pr, "waitforexitandrun", exe, *args]
+    argv = [entry, "--verb=waitforexitandrun", "--", *proton_cmd] if entry else proton_cmd
+    return (argv, env, os.path.dirname(exe), exe), None
+
+
+def main(a):
+    if not a:
+        print("vg-run ПАПКА_ИГРЫ [--exe ПУТЬ [ПАРАМЕТРЫ…]]", file=sys.stderr)
+        return 2
+    game = a[0]
+    exe, args = (os.path.realpath(a[2]), a[3:]) if a[1:2] == ["--exe"] and len(a) >= 3 else (None, ())
+    cmd, why = command(game, exe, args)
+    try:
+        with open("/tmp/vastgame-launch.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} vg-run {os.path.basename(os.path.realpath(game))}: "
+                    f"{why or os.path.basename(cmd[3])}\n")
+    except OSError:
+        pass
+    if not cmd:
+        print(f"vg-run: {why}", file=sys.stderr)
+        return 1
+    argv, env, cwd, _ = cmd
+    os.chdir(cwd)
+    os.execvpe(argv[0], argv, env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+VGRUN
+
 w /usr/local/bin/vg-launch <<'VGLAUNCH'
 #!/bin/bash
 app=${SteamAppId:-${STEAM_COMPAT_APP_ID:-}}
