@@ -181,7 +181,7 @@ class TestStateAndLogon(unittest.TestCase):
         self.assertEqual(list(e.iterdir()), [])
 
 
-PLAY = "\n".join(fn(n) for n in ("play_init", "play_prepare", "flags_ready", "play_watch", "play_launch")) \
+PLAY = "\n".join(fn(n) for n in ("play_init", "play_prepare", "flags_ready", "play_watch", "play_launch", "mods_mark")) \
     .replace("/usr/local/bin/wolf-steam.py", str(PY))
 
 

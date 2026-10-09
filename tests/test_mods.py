@@ -91,9 +91,11 @@ class TestRoundTrip(unittest.TestCase):
         (game / "Logs").mkdir()
         (game / "Logs/run.txt").write_text("x")
         (game / "crash_2026.dmp").write_text("x")
-        self.assertEqual(run("diff", game, snap)[1].split()[2], "1")           # только мусор — не спрашиваем
+        (game / ".sentry-native").mkdir()
+        (game / ".sentry-native/session.json").write_text("x")
+        self.assertEqual(run("diff", game, snap)[1].split()[:2], ["0", "0"])   # [v5.7] мусор — вовсе не моды
         (game / "settings.ini").write_text("fov=110")
-        self.assertEqual(run("diff", game, snap)[1].split()[2], "0")           # настройка — уже не мусор
+        self.assertEqual(run("diff", game, snap)[1].split()[0], "1")           # настройка — уже мод
 
     def test_unsafe_archive_cannot_escape(self):
         d = Path(tempfile.mkdtemp(dir=TMP))
@@ -193,6 +195,40 @@ mkdir -p "$S/van" "$S/x"; : > "$S/sel.on"; : > "$S/sel.store"
         out = self.run_m(m, "mods_check 10; mods_push; echo END", sel=': > "$S/sel.mods_all"; echo 10 > "$S/sel.mods_no"')
         self.assertNotIn("PACK", out)
         self.assertNotIn("PUSH", out)
+
+    def test_mark_before_launch(self):
+        # [v5.7] точка отсчёта «что пишет запущенная игра» — до запуска; пока игра стартует (5 мин), её не закрывают
+        m = self.machine()
+        self.run_m(m, "mods_scan")
+        mark = "\n".join(fn(n) for n in ("mods_mark", "lgame_track")).replace("/usr/local/bin/wolf-mods.py", str(PY)) \
+            .replace("/var/log/wolf.log", str(m.d / "wolf.log"))
+        env = f'PD=""; {mark}\n'                                     # без /proc на Mac
+        van = m.d / "S/van"
+        self.run_m(m, env + "mods_mark 10")
+        self.assertTrue((van / "10.seen.tsv").exists() and (van / "10.armed").exists())
+        self.run_m(m, env + "lgame_track")                                 # игра ещё не появилась — ждём
+        self.assertTrue((van / "10.seen.tsv").exists())
+        (m.d / "home/sa/steamapps/common/Ten/crash_reporter.json").write_text("x")   # игра пишет с первой секунды
+        m.running = ["app:10"]
+        self.run_m(m, env + "lgame_track")                                 # появилась — точка уже есть
+        self.assertFalse((van / "10.armed").exists())
+        m.running = []
+        self.run_m(m, env + "lgame_track")                                 # закрыли — последний отрезок
+        self.assertIn("crash_reporter.json", (van / "10.pend.tsv").read_text())       # данные игры, не мод
+        out = self.run_m(m, "mods_check 10; mods_push; echo END", sel=': > "$S/sel.mods_all"')
+        self.assertNotIn("PACK", out)
+        # не запустилась за 5 минут — наблюдение закрывается
+        self.run_m(m, env + "mods_mark 10")
+        import os, time
+        old = time.time() - 600
+        os.utime(van / "10.armed", (old, old))
+        self.run_m(m, env + "lgame_track")
+        self.assertFalse((van / "10.seen.tsv").exists() or (van / "10.armed").exists())
+
+    def test_mark_wiring(self):
+        self.assertIn('mods_mark "$a"', fn("play_launch"))
+        self.assertLess(fn("play_launch").index("mods_mark"), fn("play_launch").index("-applaunch"))
+        self.assertIn('[ -n "${seen[$k]:-}" ] || mods_mark "${k#app:}"', fn("watch_games"))
 
     def test_steam_update_blocks_upload(self):
         m = self.machine()

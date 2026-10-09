@@ -878,6 +878,7 @@ play_watch() {
 play_launch() {
   local a=$1 k i
   st play up "launch"
+  mods_mark "$a"                                     # [v5.7] что игра напишет с первой секунды — данные игры, не моды
   for k in 1 2; do
     u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
     for i in $(seq "${PLAY_LAUNCH_WAIT:-40}"); do
@@ -985,8 +986,22 @@ lgame_track() {
     d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
     on=0; grep -qx "app:$a" <<< "$keys" && on=1
     [ $on = 1 ] || [ -e "$S/van/$a.seen.tsv" ] || continue
+    # [v5.7] точку отсчёта сняли перед запуском (mods_mark), игра ещё стартует — не закрывать наблюдение (5 мин)
+    if [ $on = 1 ]; then rm -f "$S/van/$a.armed"
+    elif [ -n "$(find "$S/van/$a.armed" -mmin -5 2>/dev/null)" ]; then continue
+    else rm -f "$S/van/$a.armed"; fi
     python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/$d" "$f" "$on" "$PD" >> /var/log/wolf.log 2>&1
   done
+}
+# [v5.7] Точка отсчёта «что пишет запущенная игра» — до её запуска (play_launch) или сразу, как игра появилась (wolf watch,
+# раз в 5 с): раньше её снимал проход раз в 30 с, и всё, что игра создавала в первые секунды (отчёты о сбоях, журналы,
+# настройки), считалось модами (живой случай 2026-10-10, Avatar Legends). mods_mark НОМЕР
+mods_mark() {
+  local a=$1 d
+  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.seen.tsv" ] || return 0
+  d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || return 0
+  python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 1 "$PD" >> /var/log/wolf.log 2>&1
+  : > "$S/van/$a.armed"
 }
 # После выхода из игры: тумблер «Сохранять моды» включён и моды изменились — выгрузить (в фоне)
 mods_check() {
@@ -1283,7 +1298,7 @@ watch_games() {
                [ "$(rd "$S/nm/${k%%=*}")" = "${k#*=}" ] || printf '%s' "${k#*=}" > "$S/nm/${k%%=*}" ;;
         dir:*) [ -d "$GD/${k#dir:}" ] || continue
                cur[$k]=1; seen[$k]=$now ;;
-        app:*) cur[$k]=1; seen[$k]=$now ;;
+        app:*) cur[$k]=1; [ -n "${seen[$k]:-}" ] || mods_mark "${k#app:}"; seen[$k]=$now ;;
       esac
     done < <(running_keys)
     arr=()
@@ -4440,7 +4455,8 @@ w /usr/local/bin/wolf-mods.py <<'MODS'
 import hashlib, io, json, os, re, stat, subprocess, sys, tarfile
 
 META = ".vastgame-mod.json"
-JUNK_DIRS = {"logs", "log", "crashes", "crashdumps", "crash", "cache", "caches", "shadercache", "__pycache__", "temp", "tmp"}
+JUNK_DIRS = {"logs", "log", "crashes", "crashdumps", "crash", "cache", "caches", "shadercache", "__pycache__", "temp", "tmp",
+             ".sentry-native", "sentry", "crashpad", "crashreports", "crashreporter"}    # [v5.7] отчёты о сбоях
 JUNK_EXT = (".log", ".dmp", ".mdmp", ".tmp", ".etl")
 
 
@@ -4516,6 +4532,8 @@ def baseline(snapf, data=True):
 
 def _programs_running(pd):
     """Работает ли программа из папки Programs (менеджер модов и т.п.): её изменения — моды, а не файлы игры."""
+    if not pd:
+        return False
     roots = {x.lower().rstrip("/") + "/" for x in (pd, os.path.realpath(pd)) if x.strip("/")}
     for d in os.listdir("/proc") if roots else []:
         if not d.isdigit():
@@ -4621,15 +4639,10 @@ def junk(rel):
     return parts[-1].endswith(JUNK_EXT) or parts[-1].startswith("crash") or any(p in JUNK_DIRS for p in parts[:-1])
 
 
-def junk_file(rel):
-    """[v5.7] Журнал, дамп, временный файл — не мод, даже если появился при закрытой игре."""
-    name = rel.lower().rsplit("/", 1)[-1]
-    return name.endswith(JUNK_EXT) or name.startswith("crash")
-
-
 def changes(root, snapf):
     base, now = baseline(snapf), walk(root)                        # [v5.6] файлы лаунчера — не моды; [v5.7] данные игры — тоже
-    files = sorted(r for r, v in now.items() if base.get(r) != v and r != META and not junk_file(r))
+    # [v5.7] журналы, дампы, кэш и отчёты о сбоях — не моды, даже если появились при закрытой игре
+    files = sorted(r for r, v in now.items() if base.get(r) != v and r != META and not junk(r))
     deleted = sorted(r for r in base if r not in now)
     h = hashlib.sha1()
     for r in files:
