@@ -268,27 +268,6 @@ class Api:
         saved = settings.get("sync") or {}
         return {k: bool(saved.get(k, v)) for k, v in core.SYNC_DEFAULTS.items()}
 
-    def sync_list(self):
-        """Игры в облаке для выбора синхронизации: одна строка на игру (файлы игры и её сохранения вместе, служебное
-        Steam скрыто) и запомненный выбор. Прямо с Google Drive — машина не нужна."""
-        data, index = parallel.run(cloudgames.listing, drive.games_index)
-        rows = cloudgames.rows(data, index)
-        unknown = [r["saves"] for r in rows if not r["title"] and r["saves"]]
-        steam = [r["appid"] for r in rows if r["appid"] and r["appid"].isdigit() and int(r["appid"]) < SHORTCUT_APPID]
-        names, covers = parallel.run(lambda: steamnames.for_archives(unknown) if unknown else {},
-                                     lambda: steamnames.covers(steam) if steam else {})
-        # [v4.8] Игры Steam качает сам Steam — в выборе синхронизации от них остаются только сохранения
-        rows = [r if r["kind"] != "steam" else {**r, "kind": "saves", "game": None, "game_bytes": 0}
-                for r in rows if r["kind"] != "steam" or r["saves"]]
-        sel = cloudgames.selection(rows)
-        for r in rows:
-            r["title"] = r["title"] or names.get(r["appid"] or "") or ""
-            r["cover"] = covers.get(r["appid"] or "")
-            r["sync_game"] = sel["games"].get(r["game"], False) if r["game"] else None
-            r["sync_saves"] = sel["saves"].get(r["saves"], True) if r["saves"] else None
-        snapshot.save("sync", {"rows": rows})
-        return {"rows": rows}
-
     # ---- [0.4.5] Прошлый ответ медленного экрана — показать сразу, пока идёт свежий (snapshot.py)
     def snapshot(self, name):
         """Последний удачный ответ экрана name или None. То, что человек мог поменять с тех пор (фильтры, выбор
@@ -300,11 +279,6 @@ class Api:
             return None
         if name.startswith("offers:"):
             d.update(filters=self._offer_filters(), sync=self._sync())
-        elif name == "sync":
-            sel = cloudgames.selection(d.get("rows") or [])
-            for r in d.get("rows") or []:
-                r["sync_game"] = sel["games"].get(r["game"], False) if r.get("game") else None
-                r["sync_saves"] = sel["saves"].get(r["saves"], True) if r.get("saves") else None
         return d
 
     def play(self, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, select=None, game=None):
@@ -312,8 +286,8 @@ class Api:
         закрытие окна. sync — тумблеры синхронизации (запоминаются), disk — ГБ с ползунка,
         lang — язык окна для уведомления в конце, spare — следующие машины его списка (на замену,
         если Vast не запустит выбранную), docker — вкладка «Docker» (основная с 0.3.1).
-        select — выбор игр ({"games": {архив: bool}, "saves": {архив: bool}}, запоминается): машина (wolf-setup.sh
-        v4.6) качает и выгружает только выбранные игры; прежним скриптам — тумблеры по этому выбору.
+        select — не используется с v5.7 (выбора игр нет: свои игры из облака — все, сохранения — всегда); параметр
+        оставлен, чтобы страница прежней версии не ломалась.
         game — игра из библиотеки ({"appid", "account"}): машина (v4.8) входит в Steam этим аккаунтом, Steam сам
         качает и запускает игру. Без неё — просто машина с рабочим столом, как раньше."""
         if self._busy():
@@ -326,22 +300,21 @@ class Api:
         if game and not play:
             return {"error": {"key": "library.bad_game", "params": {}, "text": "game is not in the library"}}
         sync = {k: bool((sync or {}).get(k, v)) for k, v in self._sync().items()}
-        if not isinstance(select, dict) and isinstance(settings.get("sync_sel"), dict):
-            select = {}                      # список игр не загрузился — выбор, запомненный в прошлый раз
-        if isinstance(select, dict):
-            chosen = cloudgames.remember(select)
-            chosen["games"] = [a for a in chosen["games"] if not a.startswith("sgame--")]   # [v4.8] их качает Steam
-            chosen["mods"] = cloudgames.mods_answers()                                     # [v5.0] «сохранять моды?»
-            chosen["progs"] = settings.get("progs_sel") or {}                              # [v5.4] «вместе с игрой»
-            chosen["launch"] = settings.get("launch_sel") or {}                            # [v5.6] «запускать через»
-            chosen["gdata"] = cloudgames.gdata_list()                                      # [v5.6] «игру в облаке»
-            chosen["recipes"] = cloudgames.recipes_list()                                  # [v5.6] перевод FF14…
-            sync.update(steam_games=False,
-                        other_games=any(a.startswith("game--") for a in chosen["games"]), saves=True)
-            settings.set("sync", sync)
-            sync["select"] = chosen
-        else:
-            settings.set("sync", sync)
+        # [v5.7] Выбора игр и сохранений больше нет (решение Алексея 2026-10-09: человеку меньше решений): игры Steam
+        # качает Steam, свои игры из облака — все ("own": "all"; новая на диске — по вопросу машины), сохранения — всегда.
+        # select со страницы прежних версий не учитывается; выбор игр из прошлых аренд (sync_sel) — для старых скриптов
+        chosen = cloudgames.remember({})
+        chosen["games"] = [a for a in chosen["games"] if a.startswith("game--")]
+        chosen["saves_off"] = []
+        chosen["own"] = "all"
+        chosen["mods"] = cloudgames.mods_answers()                                     # [v5.0] «сохранять моды?»
+        chosen["progs"] = settings.get("progs_sel") or {}                              # [v5.4] «вместе с игрой»
+        chosen["launch"] = settings.get("launch_sel") or {}                            # [v5.6] «запускать через»
+        chosen["gdata"] = cloudgames.gdata_list()                                      # [v5.6] «игру в облаке»
+        chosen["recipes"] = cloudgames.recipes_list()                                  # [v5.6] перевод FF14…
+        sync.update(steam_games=False, other_games=True, saves=True)
+        settings.set("sync", sync)
+        sync["select"] = chosen
         settings.set("play_now", play)       # что запускаем — экрану хода и главному (окно могут закрыть и открыть)
         if play:
             sync["play"] = play

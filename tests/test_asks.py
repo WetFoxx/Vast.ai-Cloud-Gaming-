@@ -1,5 +1,4 @@
-# Выбор игр и вопросы машины (wolf-setup.sh v4.6) на стороне приложения: список «одна строка на игру», запомненный
-# выбор, VG_SYNC в аренде, вопросы «новая / удалённая игра» — уведомление, ответ машине, служба без окна.
+# Вопросы машины (wolf-setup.sh v4.6) на стороне приложения: запомненные ответы, VG_SYNC в аренде, вопросы «новая / удалённая игра» — уведомление, ответ машине, служба без окна.
 # Без сети и без машины: Tailscale, страница /json и команды машине — поддельные.
 
 import base64
@@ -51,28 +50,6 @@ def rec(ts, state, text=""):
     return wolfnode.Rec((ts, state, text))
 
 
-class TestRows(unittest.TestCase):
-    def test_one_row_per_game_saves_joined_tools_hidden(self):
-        data = listing(("sgame--The Blood of Dawnwalker", 53_000), ("pfx--3751260", 21),
-                       ("sgame--Proton - Experimental", 900), ("pfx--1493710", 1),        # Proton и его «сохранения»
-                       ("sgame--SteamLinuxRuntime_4", 700), ("game--Witcher", 48_000), ("pfx--2931553111", 9),
-                       ("pfx--1091500", 41))                                              # сохранения без игры
-        index = [{"archive": "sgame--The Blood of Dawnwalker", "appid": "3751260", "name": "The Blood of Dawnwalker"},
-                 {"archive": "game--Witcher", "appid": "2931553111", "name": "The Witcher 3", "kind": "folder"},
-                 {"archive": "sgame--Some Tool", "appid": "777", "name": "Tool", "tool": True}]
-        rows = cloudgames.rows(data, index)
-        self.assertEqual([r["id"] for r in rows], ["sgame--The Blood of Dawnwalker", "game--Witcher", "pfx--1091500"])
-        dawn, witcher, cyber = rows
-        self.assertEqual((dawn["saves"], dawn["kind"], dawn["title"]), ("pfx--3751260", "steam", "The Blood of Dawnwalker"))
-        self.assertEqual((witcher["saves"], witcher["kind"], witcher["title"]), ("pfx--2931553111", "folder", "The Witcher 3"))
-        self.assertEqual((cyber["game"], cyber["kind"], cyber["title"]), (None, "saves", ""))   # название спросит окно
-
-    def test_without_index_game_and_saves_are_separate(self):
-        # Облако до v4.6 (списка игр ещё нет): чья это папка сохранений — не знаем, строки раздельные
-        rows = cloudgames.rows(listing(("sgame--Hades II", 5), ("pfx--1145350", 1)), [])
-        self.assertEqual([r["id"] for r in rows], ["sgame--Hades II", "pfx--1145350"])
-
-
 class TestSystemFiles(unittest.TestCase):
     def test_steam_system_files_marked(self):
         # Экран «Игры в облаке»: Proton, Runtime… и их «сохранения» — отдельной группой «системные файлы Steam»
@@ -87,30 +64,12 @@ class TestSystemFiles(unittest.TestCase):
         self.assertEqual(system, ["pfx--1493710", "sgame--Proton - Experimental", "sgame--SteamLinuxRuntime_4"])
 
 
-class TestSelection(unittest.TestCase):
+class TestRemember(unittest.TestCase):
     def setUp(self):
         settings.FILE.unlink(missing_ok=True)
         self.rows = [{"game": "sgame--A", "saves": "pfx--1", "kind": "steam"},
                      {"game": "game--B", "saves": None, "kind": "folder"},
                      {"game": None, "saves": "pfx--2", "kind": "saves"}]
-
-    def test_first_time_from_old_toggles(self):
-        settings.set("sync", {"steam_games": True, "other_games": False, "saves": True})
-        sel = cloudgames.selection(self.rows)
-        self.assertEqual(sel, {"games": {"sgame--A": True, "game--B": False}, "saves": {"pfx--1": True, "pfx--2": True}})
-        # запомнено: новые игры дальше — выключены, прежние тумблеры больше не читаются
-        settings.set("sync", {"steam_games": True, "other_games": True, "saves": False})
-        rows = self.rows + [{"game": "sgame--New", "saves": "pfx--3", "kind": "steam"}]
-        sel = cloudgames.selection(rows)
-        self.assertEqual(sel["games"], {"sgame--A": True, "game--B": False, "sgame--New": False})
-        self.assertEqual(sel["saves"]["pfx--3"], True)                 # сохранения — по умолчанию вкл.
-
-    def test_old_saves_off_carried(self):
-        settings.set("sync", {"steam_games": False, "other_games": True, "saves": False})
-        self.assertEqual(cloudgames.selection(self.rows)["saves"], {"pfx--1": False, "pfx--2": False})
-
-    def test_new_user_nothing_selected(self):
-        self.assertEqual(cloudgames.selection(self.rows)["games"], {"sgame--A": False, "game--B": False})
 
     def test_remember_merges_and_filters(self):
         cloudgames.remember({"games": {"sgame--A": True, "evil/../x": True, "pfx--9": True}, "saves": {"pfx--1": False}})
@@ -182,6 +141,11 @@ class TestRental(unittest.TestCase):
                                 "play": {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends"}})
         self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_PLAY"])),
                          {"appid": "2424420", "account": "76561198059309761", "name": "Avatar Legends", "mods": False})
+
+    def test_own_games_all(self):
+        # [v5.7] выбора игр нет: машине — «все свои игры из облака»
+        body = core.rental_body({"hash_id": "h"}, 100, sync={"select": {"games": [], "saves_off": [], "own": "all"}})
+        self.assertEqual(json.loads(base64.b64decode(body["env"]["VG_SYNC"]))["own"], "all")
 
     def test_without_select_no_vg_sync(self):
         self.assertNotIn("VG_SYNC", core.rental_body({"hash_id": "h"}, 100, sync={"saves": True})["env"])
@@ -284,30 +248,6 @@ class TestAsks(unittest.TestCase):
     def test_no_machine_nothing(self):
         with mock.patch.object(wolfnode, "ts_node", lambda: None):
             self.assertEqual(asks.pending(), (None, []))
-
-
-class TestSyncList(unittest.TestCase):
-    def test_rows_with_choice_titles_and_covers(self):
-        settings.FILE.unlink(missing_ok=True)
-        settings.set("sync_sel", {"games": {"sgame--Hades II": True}, "saves": {"pfx--1091500": False}})
-        data = listing(("sgame--Hades II", 5), ("pfx--1145350", 1), ("pfx--1091500", 2), ("game--Mine", 3))
-        index = [{"archive": "sgame--Hades II", "appid": "1145350", "name": "Hades II"},
-                 {"archive": "game--Mine", "appid": "2931553111", "name": "Mine", "kind": "folder"}]
-        asked = []
-        with mock.patch.object(cloudgames, "listing", lambda: data), \
-             mock.patch.object(gui.drive, "games_index", lambda: index), \
-             mock.patch.object(gui.steamnames, "for_archives", lambda a: {"1091500": "Cyberpunk 2077"}), \
-             mock.patch.object(gui.steamnames, "covers", lambda ids: asked.append(sorted(ids)) or {"1145350": "https://x.steamstatic.com/c.jpg"}):
-            rows = gui.Api().sync_list()["rows"]
-        by = {r["id"]: r for r in rows}
-        self.assertEqual(len(rows), 3)
-        # [v4.8] игру Steam качает Steam — от её строки остаются сохранения
-        self.assertEqual((by["sgame--Hades II"]["kind"], by["sgame--Hades II"]["game"]), ("saves", None))
-        self.assertEqual((by["sgame--Hades II"]["sync_game"], by["sgame--Hades II"]["sync_saves"]), (None, True))
-        self.assertEqual((by["game--Mine"]["sync_game"], by["game--Mine"]["sync_saves"]), (False, None))
-        self.assertEqual((by["pfx--1091500"]["title"], by["pfx--1091500"]["sync_saves"]), ("Cyberpunk 2077", False))
-        self.assertEqual(by["sgame--Hades II"]["cover"], "https://x.steamstatic.com/c.jpg")
-        self.assertEqual(asked, [["1091500", "1145350"]])              # у своей игры (ярлык) обложки нет — не спрашиваем
 
 
 class TestCovers(unittest.TestCase):

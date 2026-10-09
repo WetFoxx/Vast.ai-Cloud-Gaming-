@@ -158,7 +158,7 @@ def progs_of(s):
     return out
 
 
-def vg_sync(games, saves_off, mods=None, progs=None, launch=None, gdata=None, recipes=None):
+def vg_sync(games, saves_off, mods=None, progs=None, launch=None, gdata=None, recipes=None, own=None):
     """VG_SYNC для wolf-setup.sh v4.6: base64 от JSON — имена с пробелами переживают /etc/environment.
     [v4.8] "steam": "store" — игры Steam качает сам Steam: машина не скачивает их из облака, не выгружает и не
     спрашивает о них (игры из папки Games — по выбору, как раньше)."""
@@ -168,7 +168,8 @@ def vg_sync(games, saves_off, mods=None, progs=None, launch=None, gdata=None, re
                                         "progs": progs or {},           # [v5.4] программы «вместе с игрой»
                                         "launch": launch or {},         # [v5.6] «запускать игру через программу»
                                         "gdata": list(gdata or []),     # [v5.6] «хранить игру в облаке»
-                                        "recipes": recipes or {}},      # [v5.6] рецепты (перевод FF14…)
+                                        "recipes": recipes or {},       # [v5.6] рецепты (перевод FF14…)
+                                        **({"own": own} if own else {})},  # [v5.7] "all" — все свои игры из облака
                                        ensure_ascii=False).encode()).decode()
 
 
@@ -236,7 +237,7 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     sel = (sync or {}).get("select")
     if isinstance(sel, dict):
         env["VG_SYNC"] = vg_sync(sel.get("games") or [], sel.get("saves_off") or [], sel.get("mods"), sel.get("progs"),
-                                 sel.get("launch"), sel.get("gdata"), sel.get("recipes"))
+                                 sel.get("launch"), sel.get("gdata"), sel.get("recipes"), sel.get("own"))
     play = (sync or {}).get("play")
     if isinstance(play, dict) and play.get("appid") and play.get("account"):
         env["VG_PLAY"] = vg_play(play)

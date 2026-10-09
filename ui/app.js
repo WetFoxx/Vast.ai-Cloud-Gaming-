@@ -416,7 +416,6 @@ async function openOffers(disk, docker) {
   showError("offers-error", null);
   const my = ++offersReq;
   showTabs();
-  if (!reload) loadSyncList();               // выбор игр — с Drive, от списка машин не зависит: сразу и параллельно
   const fresh = DEMO ? null : api().offers(disk ?? null, offersDocker, replaceMode);
   if (!replaceMode) {
     const snap = await snapshotOf("offers:" + (offersDocker == null ? "auto" : offersDocker ? "docker" : "kvm"));
@@ -472,108 +471,6 @@ $("offers-refresh").addEventListener("click", () => openOffers(offersData ? offe
 // Ползунок диска: число меняется сразу, список машин (цены зависят от диска) — когда отпустили
 $("disk").addEventListener("input", () => { $("disk-value").textContent = t("disk.value", { gb: $("disk").value }); });
 $("disk").addEventListener("change", () => openOffers(Number($("disk").value)));
-
-// ---- Что синхронизировать: игры из облака — одна строка на игру (её файлы и сохранения вместе, служебное Steam
-// скрыто). «Игра» — скачивать при запуске и выгружать; «Сохранения» — то же для сохранений. Выбор запоминается.
-let syncRows = null, syncReq = 0;
-async function loadSyncList() {
-  const my = ++syncReq;
-  syncRows = null;
-  $("sync-summary").textContent = t("sync.loading");
-  $("sync-list").innerHTML = "";
-  $("sync-covers").innerHTML = "";
-  $("sync-cols").hidden = true;
-  $("sync-toggle").hidden = true;
-  $("sync-note").hidden = true;
-  setStale("sync-card", false);
-  const fresh = DEMO ? null : api().sync_list();
-  const snap = await snapshotOf("sync");
-  if (my === syncReq && !syncRows && snap && Array.isArray(snap.rows)) {
-    syncRows = snap.rows;
-    setStale("sync-card", true);             // прошлый список: тумблеры не нажимаются, пока не придёт свежий
-    renderSync();
-  }
-  const d = DEMO ? demoSync() : await fresh;
-  if (my !== syncReq) return;
-  setStale("sync-card", false);
-  if (d.error) {
-    $("sync-summary").textContent = "";
-    $("sync-note").hidden = false;
-    $("sync-note").textContent = t("sync.error", { error: errText(d.error) });
-    return;
-  }
-  syncRows = d.rows;
-  renderSync();
-}
-$("sync-toggle").addEventListener("click", () => {
-  $("sync-body").hidden = !$("sync-body").hidden;
-  $("sync-toggle").textContent = t($("sync-body").hidden ? "sync.edit" : "sync.hide");
-});
-
-function gameCover(r) {
-  // Обложка из магазина Steam; игра не из Steam (или картинки нет) — первая буква на градиенте
-  const box = el("span", { className: "cover" }, (r.title || "?").trim().charAt(0).toUpperCase());
-  if (r.cover) {
-    const img = new Image();
-    img.alt = "";
-    img.onload = () => { box.textContent = ""; box.appendChild(img); box.classList.add("img"); };
-    img.src = r.cover;
-  }
-  return box;
-}
-
-function syncToggle(r, part) {
-  // part: "game" | "saves"; нет такого архива в облаке — прочерк с подсказкой
-  if (!r[part]) return el("span", { className: "dash", title: t(part === "game" ? "sync.no_game" : "sync.no_saves") }, "—");
-  const box = el("input", { type: "checkbox", checked: !!r["sync_" + part] });
-  box.setAttribute("aria-label", t("sync.col." + part) + ": " + (r.title || r.id));
-  box.addEventListener("change", () => { r["sync_" + part] = box.checked; syncSummary(); });
-  return box;
-}
-
-function renderSync() {
-  const ul = $("sync-list");
-  ul.innerHTML = "";
-  $("sync-cols").hidden = !syncRows.length;
-  $("sync-toggle").hidden = !syncRows.length;
-  for (const r of syncRows) {
-    const li = el("li");
-    const name = el("span", { className: "name" });
-    name.append(el("b", {}, r.title || r.appid || r.id));
-    const bits = [];
-    if (r.game) bits.push(t("sync.size.game", { size: size(r.game_bytes) }));
-    else bits.push(t("sync.no_game.short"));
-    if (r.saves) bits.push(t("sync.size.saves", { size: size(r.saves_bytes) }));
-    if (r.kind === "folder") bits.push(t("sync.folder"));
-    name.append(el("span", { className: "sub" }, bits.join(" · ")));
-    li.append(gameCover(r), name, syncToggle(r, "game"), syncToggle(r, "saves"));
-    ul.appendChild(li);
-  }
-  syncSummary();
-}
-
-function syncSummary() {
-  if (!syncRows) return;
-  if (!syncRows.length) { $("sync-summary").textContent = t("sync.empty"); return; }
-  const games = syncRows.filter((r) => r.game), on = games.filter((r) => r.sync_game);
-  const saves = syncRows.filter((r) => r.saves), savesOn = saves.filter((r) => r.sync_saves);
-  const bytes = on.reduce((a, r) => a + r.game_bytes, 0);
-  $("sync-summary").textContent = t("sync.summary", { on: on.length, all: games.length, size: size(bytes),
-                                                        saves: savesOn.length, saves_all: saves.length });
-  // Обложки выбранных игр — сразу видно, что скачается (до 6, остальное — числом)
-  const covers = $("sync-covers");
-  covers.innerHTML = "";
-  for (const r of on.slice(0, 6)) { const c = gameCover(r); c.title = r.title || r.id; covers.appendChild(c); }
-  if (on.length > 6) covers.appendChild(el("span", { className: "chip muted" }, "+" + (on.length - 6)));
-  if (!on.length) covers.appendChild(el("span", { className: "sub" }, t("sync.none_selected")));
-}
-
-// Выбор для аренды: {"games": {архив: вкл}, "saves": {архив: вкл}}; список не загрузился — null (как в прошлый раз)
-function syncSelect() {
-  if (!syncRows) return null;
-  const pick = (part) => Object.fromEntries(syncRows.filter((r) => r[part]).map((r) => [r[part], !!r["sync_" + part]]));
-  return { games: pick("game"), saves: pick("saves") };
-}
 
 // ---- Фильтры списка машин: страны, скорость интернета, пинг, сортировка (запоминаются в Python)
 let filters = null, page = 0;
@@ -865,18 +762,10 @@ $("rent").addEventListener("click", async () => {
     text += "\n\n" + t("confirm.rent.game", { name: playGame.name, account: accName(playGame.account) });
     text += " " + t(playGame.mods ? "confirm.rent.mods" : "confirm.rent.clean");
   }
-  const select = syncSelect();
-  if (select) {
-    const on = syncRows.filter((r) => r.game && r.sync_game);
-    const bytes = on.reduce((a, r) => a + r.game_bytes, 0);
-    text += "\n\n" + (on.length ? t("confirm.rent.games", { list: on.map((r) => r.title || r.id).join(", "), size: size(bytes) })
-                                  : t("confirm.rent.games_none"));
-    const off = syncRows.filter((r) => r.saves && !r.sync_saves).length;
-    if (off) text += " " + t("confirm.rent.saves_some_off", { n: off });
-  }
+  const select = null;                       // [v5.7] выбора игр нет: свои игры из облака — все, сохранения — всегда
   if (docker) {
-    // Трафик в деньгах: час трансляции (~30 ГБ ↑) и скачивание выбранных игр (↓)
-    const gamesBytes = syncRows ? syncRows.filter((r) => r.game && r.sync_game).reduce((a, r) => a + r.game_bytes, 0) : 0;
+    // Трафик в деньгах: час трансляции (~30 ГБ ↑)
+    const gamesBytes = 0;
     text += "\n\n" + (o.tb_down < 0.1 && o.tb_up < 0.1 ? t("confirm.rent.traffic_free")
       : t("confirm.rent.traffic", { price: trafficText(o), hour: money((o.tb_up || 0) * STREAM_TB_HOUR) })
         + (gamesBytes ? t("confirm.rent.traffic_games", { size: size(gamesBytes), cost: money((o.tb_down || 0) * gamesBytes / 1e12) }) : "") + ".");
@@ -2552,19 +2441,6 @@ function demoOffers(disk) {
            last: { gpu: "RTX 3080", country: "Ohio, US", start: Date.now() / 1000 - 86400 * 2,
                    offer: busy ? null : { id: 90, gpu: "RTX 3080", country: "Ohio, US", cc: "US", price: 0.162, traffic: 0.05, total: 0.212,
                                           reliability: 0.991, net_down: 900, net_up: 700, ping: { ms: 190, kind: "measured" } } } };
-}
-function demoSync() {
-  const cover = (id) => `https://cdn.cloudflare.steamstatic.com/steam/apps/${id}/capsule_231x87.jpg`;
-  return { rows: [
-    { id: "sgame--The Blood of Dawnwalker", title: "The Blood of Dawnwalker", kind: "steam", appid: "3751260", cover: null,
-      game: "sgame--The Blood of Dawnwalker", game_bytes: 53.2e9, saves: "pfx--3751260", saves_bytes: 21e6, sync_game: true, sync_saves: true },
-    { id: "sgame--Hades II", title: "Hades II", kind: "steam", appid: "1145350", cover: cover(1145350),
-      game: "sgame--Hades II", game_bytes: 11.8e9, saves: "pfx--1145350", saves_bytes: 3e6, sync_game: false, sync_saves: true },
-    { id: "game--Witcher3", title: "The Witcher 3 GOTY", kind: "folder", appid: "2931553111", cover: null,
-      game: "game--Witcher3", game_bytes: 48.1e9, saves: "pfx--2931553111", saves_bytes: 9e6, sync_game: false, sync_saves: true },
-    { id: "pfx--1091500", title: "Cyberpunk 2077", kind: "saves", appid: "1091500", cover: cover(1091500),
-      game: null, game_bytes: 0, saves: "pfx--1091500", saves_bytes: 41e6, sync_game: null, sync_saves: false },
-  ] };
 }
 function demoCheck() {
   const o = offerList(offersData).find((x) => x.id === selected);

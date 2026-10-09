@@ -519,6 +519,8 @@ open(os.path.join(s, "sel.mods_on"), "w").write("".join(str(n) + "\n" for n in m
 open(os.path.join(s, "sel.gdata"), "w").write("".join(str(n) + "\n" for n in d.get("gdata") or [] if str(n).isdigit()))
 if d.get("steam") == "store":
     open(os.path.join(s, "sel.store"), "w").close()
+if d.get("own") == "all":                              # [v5.7] свои игры (папка Games) — все, что есть в облаке
+    open(os.path.join(s, "sel.own_all"), "w").close()
 recipes = d.get("recipes") if isinstance(d.get("recipes"), dict) else {}  # [v5.6] рецепты: {номер: ["ff14-ru"]}
 by = {}
 for k, v in recipes.items():
@@ -550,11 +552,16 @@ want() {
   if selon; then
     tool "$1" && return 0
     case $1 in sgame--*) store && return 1 ;; esac
+    # [v5.7] «все свои игры»: игра из Games, которая уже есть в облаке и на которую не отвечали «не синхронизировать»;
+    # новая на диске — по-прежнему с вопросом (её нет в облаке)
+    case $1 in game--*) [ -e "$S/sel.own_all" ] && ! inlist "$1" sel.skip && incloud "$1" && return 0 ;; esac
     inlist "$1" sel.games; return
   fi
   case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
 }
 wants() { [ "$SV" = 1 ] && ! inlist "$1" sel.saves_off; }
+# Есть ли архив в облаке (по списку $LS: одним файлом или частями); списка нет — «нет»
+incloud() { [ -n "${LS:-}" ] && [ -s "$LS" ] && awk -F'\t' -v o="$1.tar.zst" 'index($1, o)==1 {f=1} END {exit !f}' "$LS"; }
 # Игры на диске: sgame--ПАПКА (steamapps/common) и game--ПАПКА ($GD), без служебных
 ondisk() {
   { ld "$DH/$SR/steamapps/common" sgame--; ld "$GD" game--; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \

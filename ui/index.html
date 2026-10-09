@@ -136,23 +136,6 @@
     <div class="note" id="offers-docker-note" data-i18n="offers.mode.docker_note" hidden></div>
     <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->
     <section class="card attention replace-card" id="offers-current" hidden></section>
-    <!-- Что синхронизировать: одна строка на игру (её файлы и сохранения вместе), выбор запоминается -->
-    <section class="card sync-card" id="sync-card">
-      <div class="stale-note" data-i18n="app.updating"></div>
-      <div class="sync-head">
-        <div class="sync-head-text">
-          <div class="sync-title" data-i18n="sync.title"></div>
-          <div class="sync-summary" id="sync-summary" data-i18n="sync.loading"></div>
-          <div class="sync-covers" id="sync-covers"></div>
-        </div>
-        <button class="small primary" id="sync-toggle" data-i18n="sync.edit" hidden></button>
-      </div>
-      <div class="sync-body" id="sync-body" hidden>
-      <div class="sync-cols" id="sync-cols" hidden><span></span><span></span><span data-i18n="sync.col.game"></span><span data-i18n="sync.col.saves"></span></div>
-      <ul class="sync-list" id="sync-list"></ul>
-      </div>
-      <div class="note" id="sync-note" hidden></div>
-    </section>
     <!-- Фильтры — одной строкой; включённый подсвечен. Диск, страны, видеокарты — панелью под строкой -->
     <div class="filter-chips">
       <button class="chip" id="f-disk-btn"><span data-i18n="disk.chip"></span> <b id="disk-value"></b></button>

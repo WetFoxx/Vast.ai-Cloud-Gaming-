@@ -35,7 +35,7 @@ SHORT_PY = TMP / "wolf-shortcuts.py"
 SHORT_PY.write_text(heredoc("wolf-shortcuts.py", "SHORTCUTS"))
 FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "store", "tool", "inlist", "addline", "rmline", "want", "wants",
                                    "ondisk", "askable", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
-                                   "gsync", "idirs", "flags_ready", "steam_ready"))
+                                   "gsync", "idirs", "flags_ready", "steam_ready", "incloud"))
 FUNCS += "\n" + re.search(r"^HID=.*$", WOLF, re.M).group(0)
 
 
@@ -136,6 +136,24 @@ class TestUpload(unittest.TestCase):
         m.run("addline 'sgame--New One' sel.skip", env=env)
         out = m.run("gsync", env=env + "; NOW=1")
         self.assertNotIn("sgame--New One", out)                                     # ответил «нет» — не выгружаем
+
+
+class TestOwnGamesAll(unittest.TestCase):
+    """[v5.7] Выбора игр нет: «все свои игры» — те, что уже в облаке; новая на диске — с вопросом; «не надо» — нет."""
+
+    def test_own_all(self):
+        m = Machine(cloud=["game--Mine.tar.zst", "game--Big.tar.zst.parts", "game--Skipped.tar.zst"])
+        vg = base64.b64encode(json.dumps({"games": [], "steam": "store", "own": "all"}).encode()).decode()
+        script = ('sel_init; addline game--Skipped sel.skip; '
+                  'for g in game--Mine game--Big game--Skipped game--New game--Min; do want "$g" && echo "YES $g"; done; true')
+        out = m.run(script, env=f'VG_SYNC="{vg}"')
+        self.assertEqual(out.split(), ["YES", "game--Mine", "YES", "game--Big"])
+        self.assertTrue((m.d / "S/sel.own_all").exists())
+        # без флага (прежнее приложение) — только выбранные, как раньше
+        vg0 = base64.b64encode(json.dumps({"games": ["game--Big"], "steam": "store"}).encode()).decode()
+        out = m.run('sel_init; for g in game--Mine game--Big; do want "$g" && echo "YES $g"; done; true', env=f'VG_SYNC="{vg0}"')
+        self.assertEqual(out.split(), ["YES", "game--Big"])
+        self.assertFalse((m.d / "S/sel.own_all").exists())
 
 
 class TestSteamReady(unittest.TestCase):

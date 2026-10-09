@@ -549,8 +549,11 @@ class TestPlay(unittest.TestCase):
             self.api.play(5, {"steam_games": True, "saves": False})
             self.gate.set()
             wait_done(self.api, session=True)
-            self.assertEqual(self.api._sync(), {"steam_games": True, "other_games": True, "saves": False})
-        self.assertEqual(bodies[0]["env"], {"SYNC_STEAM_GAMES": "1", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
+            # [v5.7] прежние тумблеры («сохранения: выкл.») больше не действуют: сохранения всегда, игры Steam — из Steam
+            self.assertEqual(self.api._sync(), {"steam_games": False, "other_games": True, "saves": True})
+        env = bodies[0]["env"]
+        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "1", "1"))
+        self.assertIn("VG_SYNC", env)
 
     def test_library_game_goes_to_machine(self):
         # [v4.8] игра из библиотеки → VG_PLAY (номер, аккаунт, название из библиотеки); чужая/неизвестная — отказ
@@ -587,9 +590,11 @@ class TestPlay(unittest.TestCase):
         self.assertIsNone(gui.settings.get("play_now"))
 
     def test_game_selection_goes_to_rental(self):
-        # [v4.6] выбор игр со страницы → VG_SYNC (base64 JSON) и тумблеры для прежних скриптов; запоминается
+        # [v5.7] выбора игр нет: сохранения — всегда (прежний выбор «не синхронизировать» не действует), свои игры из
+        # облака — все ("own": "all"), игры Steam — из Steam; выбор со страницы прежней версии не учитывается
         import base64, json
-        gui.settings.set("sync_sel", None)
+        gui.settings.set("sync_sel", {"games": {"game--B": True, "sgame--A": True}, "saves": {"pfx--1": False}})
+        self.addCleanup(gui.settings.set, "sync_sel", None)
         gui.settings.set("launch_sel", {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}})   # [v5.6]
         self.addCleanup(gui.settings.set, "launch_sel", None)
         gui.settings.set("gdata_sel", {"312060": True, "20": False})                              # [v5.6]
@@ -598,16 +603,15 @@ class TestPlay(unittest.TestCase):
         self.addCleanup(gui.settings.set, "recipe_sel", None)
         self.gate.set()
         self.api.play(5, None, None, "ru", None, False,
-                      {"games": {"sgame--The Blood of Dawnwalker": True, "game--B": False}, "saves": {"pfx--1": False}})
+                      {"games": {"sgame--The Blood of Dawnwalker": True, "game--C": True}, "saves": {"pfx--2": False}})
         wait_done(self.api, session=True)
         env = self.body["env"]
-        # [v4.8] игры Steam качает Steam — их нет в выборе для машины (и тумблер Steam для старых скриптов выключен)
         self.assertEqual(json.loads(base64.b64decode(env["VG_SYNC"])),
-                         {"games": [], "saves_off": ["pfx--1"], "steam": "store", "mods": {"yes": [], "no": []}, "progs": {},
-                          "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}}, "gdata": ["312060"],
-                          "recipes": {"312060": ["ff14-ru"]}})
-        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "0", "1"))
-        # список игр в следующий раз не загрузился — выбор прошлого раза, а не «как раньше»
+                         {"games": ["game--B"], "saves_off": [], "steam": "store", "mods": {"yes": [], "no": []},
+                          "progs": {}, "launch": {"10": {"id": "pfx:users/x/XIVLauncher.exe", "args": ""}},
+                          "gdata": ["312060"], "recipes": {"312060": ["ff14-ru"]}, "own": "all"})
+        self.assertEqual((env["SYNC_STEAM_GAMES"], env["SYNC_OTHER_GAMES"], env["SYNC_SAVES"]), ("0", "1", "1"))
+        # без выбора со страницы — то же самое
         self.wait_idle()
         self.api.play(5, None, None, "ru")
         wait_done(self.api, session=True)
