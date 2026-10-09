@@ -743,6 +743,29 @@ scan_games() {
   done <<< "$cur"
   printf '%s\n' "$cur" > "$S/present"
 }
+# [v5.7] Папку программы удалили из Programs — убрать её и из облака (в корзину Drive, 30 дней), без вопроса: папку
+# программы человек удаляет сам (живой случай 2026-10-09: удалённые программы возвращались на следующей машине —
+# scan_games смотрит только на игры). Первый проход запоминает, что есть после загрузки. Нет самой папки Programs —
+# ничего не трогаем (mkpd её вернёт). Нет связи с облаком или forget не удался — попробуем в следующий раз.
+# Папка с тем же именем появилась снова — снова выгружается (метка «убран из облака» снимается).
+prog_scan() {
+  local n cur old lsd="" f="$T/ls.pscan"
+  [ -e "$L/boot-done" ] && [ -d "$PD" ] || return 0
+  cur=$(ld "$PD" prog-- | LC_ALL=C sort)
+  [ -e "$S/present.prog" ] || { printf '%s\n' "$cur" > "$S/present.prog"; return 0; }
+  old=$(cat "$S/present.prog")
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$cur" || continue
+    if [ -z "$lsd" ]; then rl > "$f" 2>/dev/null || return 0; lsd=1; fi
+    awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" || continue
+    log "$n: папку удалили из Programs — убираю и из облака"
+    LS=$f forget "$n" || return 0
+  done <<< "$old"
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$old" && rm -f "$S/x/$n"
+  done <<< "$cur"
+  printf '%s\n' "$cur" > "$S/present.prog"
+}
 # wolf answer new|del АРХИВ yes|no — ответ человека (через bk: свежий список облака для forget)
 answer() {
   local k=$1 n=$2 a=$3 p
@@ -1217,7 +1240,7 @@ watch_games() {
     [ -e "$L/boot-done" ] || continue
     [ -n "$SR" ] || sr
     now=$(date +%s); cur=()
-    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; lgame_track; own_shortcuts; own_icons; own_noexec; fi   # [v4.6] вопросы; [v5.0] чистые игры
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; prog_scan; mods_scan; lgame_track; own_shortcuts; own_icons; own_noexec; fi   # [v4.6] вопросы; [v5.0] чистые игры
     # [v5.4] программы «вместе с игрой» и список программ для приложения
     python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
     while IFS= read -r k; do
@@ -1811,6 +1834,7 @@ bk() {
     [ -e "$S/play.app" ] && [ ! -e "$S/play.done" ] && echo stop > "$S/play.done"   # [v4.8] не запускать игру при выключении
     steam_off && steam_gone                      # [v5.3] данные аккаунтов, из которых вышли, — до выгрузки
     shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
+    prog_scan      # [v5.7] программу удалили за последние 30 с — убрать из облака, а не выгружать снова
     "$0" state; "$0" games
     "$0" mods                                    # [v5.0] моды игр Steam
     "$0" lgame                                   # [v5.6] файлы игр, которые качает их лаунчер («в облаке»)

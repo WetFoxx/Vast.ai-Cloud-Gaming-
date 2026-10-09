@@ -259,3 +259,54 @@ class TestWolf(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProgramDeleted(unittest.TestCase):
+    """[v5.7] Папку удалили из Programs — программа уходит из облака сама (живой случай 2026-10-09: возвращалась)."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(dir=TMP))
+        for sub in ("S/x", "T", "L", "Programs/WeMod", "Programs/REFramework", "Programs/Local"):
+            (self.d / sub).mkdir(parents=True, exist_ok=True)
+        (self.d / "L/boot-done").touch()
+        self.cloud = self.d / "cloud"
+        self.cloud.write_text("prog--WeMod.tar.zst\t1\nprog--REFramework.tar.zst.parts\t1\n")   # Local ещё не выгружена
+
+    def scan(self, online=True):
+        script = f'''
+S="{self.d}/S"; T="{self.d}/T"; L="{self.d}/L"; PD="{self.d}/Programs"
+ld() {{ for x in "$1"/*/; do [ -d "$x" ] || continue; x=${{x%/}}; echo "$2${{x##*/}}"; done; }}
+log() {{ echo "LOG $*"; }}
+rl() {{ {"cat " + str(self.cloud) if online else "return 1"}; }}
+forget() {{ echo "FORGET $1 LS=$LS"; }}
+{fn("prog_scan")}
+prog_scan
+'''
+        import subprocess
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+
+    def test_deleted_folder_leaves_cloud(self):
+        self.assertEqual(self.scan(), "")                                    # первый проход — запомнить
+        import shutil
+        for n in ("WeMod", "REFramework", "Local"):
+            shutil.rmtree(self.d / "Programs" / n)
+        self.assertEqual(self.scan(online=False), "")                        # нет связи — потом
+        out = self.scan()
+        self.assertIn(f"FORGET prog--WeMod LS={self.d}/T/ls.pscan", out)
+        self.assertIn("FORGET prog--REFramework", out)                       # частями — тоже
+        self.assertNotIn("Local", out)                                       # в облаке не было — нечего убирать
+        self.assertEqual(self.scan(), "")                                    # второй раз — не убирает
+        (self.d / "S/x/prog--WeMod").touch()                                 # forget пометил «убран»
+        (self.d / "Programs/WeMod").mkdir()                                  # положили снова — снова выгружается
+        self.scan()
+        self.assertFalse((self.d / "S/x/prog--WeMod").exists())
+
+    def test_whole_programs_folder_gone_touches_nothing(self):
+        self.scan()
+        import shutil
+        shutil.rmtree(self.d / "Programs")
+        self.assertEqual(self.scan(), "")
+
+    def test_wiring(self):
+        self.assertIn("scan_games; prog_scan;", fn("watch_games"))
+        self.assertIn("prog_scan", fn("bk"))
