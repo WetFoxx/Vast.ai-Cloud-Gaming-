@@ -986,7 +986,8 @@ function renderOffersGame() {
     { name: via.id.split("/").pop() }) + " · "; };
   if (via && via.id) {
     viaText();
-    const line = el("div", { className: "og-progs" }, viaLabel);
+    const line = el("div", { className: "og-progs" });
+    line.appendChild(viaLabel);
     const reset = el("button", { className: "link" }, t("progs.launch_via.reset"));
     reset.addEventListener("click", async () => {
       if (!DEMO) await api().prog_launch(playGame.appid, "-", "");
@@ -2102,7 +2103,7 @@ function renderGames() {
   $("games-search").hidden = d.games.length < 8;          // поиск нужен, когда игр много
   const q = $("games-search").hidden ? "" : $("games-search").value.trim().toLowerCase();
   // Служебное Steam (Proton, Runtime…) — отдельной свёрнутой группой в конце: нужно для запуска игр
-  const order = { sgame: 0, game: 1, pfx: 2, mod: 3, system: 4 };
+  const order = { sgame: 0, game: 1, lgame: 2, pfx: 3, mod: 4, prog: 5, system: 6 };   // каждый вид — иначе NaN и группы рвутся
   const grp = (g) => (g.system ? "system" : g.kind);
   const shown = d.games
     .filter((g) => !q || gameTitle(g).toLowerCase().includes(q) || g.name.toLowerCase().includes(q))
