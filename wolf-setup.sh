@@ -764,7 +764,7 @@ prog_scan() {
     if [ -z "$lsd" ]; then rl > "$f" 2>/dev/null || return 0; lsd=1; fi
     awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" || continue
     log "$n: папку удалили из Programs — убираю и из облака"
-    LS=$f forget "$n" || return 0
+    LS=$f forget "$n" < /dev/null || return 0             # forget не должен съесть список из stdin
   done <<< "$old"
   while IFS= read -r n; do
     [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$old" && rm -f "$S/x/$n"
@@ -1037,7 +1037,8 @@ mods_pack() {
       "$(rd "$S/van/$a.build")" 2>>/var/log/wolf.log) || { rm -f "$out"; st "$base" err "не удалось собрать архив модов"; return 1; }
   read -r cnt fp <<< "$r"
   if [ "$cnt" = 0 ]; then
-    names "^mod--$a--" | while IFS= read -r n; do forget "$n"; done
+    names "^mod--$a--" | while IFS= read -r n; do forget "$n" < /dev/null; rm -f "$S/x/$n"; done
+    # [v5.7] убрали сами, а не человек: новый мод в этой же сессии снова выгружается (живой случай 2026-10-10)
     st "$base" ok "модов больше нет — архив убран из облака (в корзине Drive 30 дней)"
   else
     rc copyto "$out" "$R/$base.tar.zst" --drive-chunk-size=64M || { rm -f "$out"; st "$base" err "выгрузка модов не удалась"; return 1; }

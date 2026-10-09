@@ -225,6 +225,24 @@ mkdir -p "$S/van" "$S/x"; : > "$S/sel.on"; : > "$S/sel.store"
         self.run_m(m, env + "lgame_track")
         self.assertFalse((van / "10.seen.tsv").exists() or (van / "10.armed").exists())
 
+    def test_empty_mods_removed_without_forget_mark(self):
+        # [v5.7] модов не осталось — архив убираем сами; пометка «убран человеком» не ставится: новый мод в этой же
+        # сессии снова уезжает в облако (живой случай 2026-10-10)
+        m = self.machine()
+        self.run_m(m, "mods_scan")
+        pack = fn("mods_pack").replace("/usr/local/bin/wolf-mods.py", str(PY)).replace("/var/log/wolf.log", str(m.d / "wolf.log"))
+        stubs = ('R=cloud; names() { echo "mod--10--Ten"; }; forget() { : > "$S/x/$1"; echo "FORGET $1"; }\n'
+                 'rc() { echo "RC $1"; }\n')
+        out = self.m_run(m, stubs + pack + "\nmods_pack 10 Ten")
+        self.assertIn("FORGET mod--10--Ten", out)
+        self.assertFalse((m.d / "S/x/mod--10--Ten").exists())              # метки «убран человеком» нет
+        (m.d / "home/sa/steamapps/common/Ten/mod.dll").write_bytes(b"M")
+        out = self.m_run(m, stubs + pack + "\nmods_pack 10 Ten")
+        self.assertIn("RC copyto", out)
+
+    def m_run(self, m, body):
+        return m.run(f"{FUNCS}\n{MODF}\nrd() {{ cat \"$1\" 2>/dev/null; }}\nmkdir -p \"$S/van\" \"$S/x\"\n{body}")
+
     def test_mark_wiring(self):
         self.assertIn('mods_mark "$a"', fn("play_launch"))
         self.assertLess(fn("play_launch").index("mods_mark"), fn("play_launch").index("-applaunch"))
