@@ -172,6 +172,10 @@ ldg
         self.assertIn("{ ldg;", fn("gsync"))
         self.assertEqual(WOLF.count('ld "$GD"'), 1)                     # только внутри ldg
 
+    def test_own_game_exit_no_empty_saves_push(self):
+        # [живой случай 2026-10-09] своя игра из Steam: выход → «выгружаю pfx--<номер ярлыка>», а «диска C:» от Steam нет
+        self.assertIn('wants "pfx--$a" && [ -d "$DH/$SR/steamapps/compatdata/$a" ] && arr+=("pfx--$a")', fn("watch_games"))
+
 
 
 # ---------------------------------------------------------------- помощник двойного щелчка (vg-open)

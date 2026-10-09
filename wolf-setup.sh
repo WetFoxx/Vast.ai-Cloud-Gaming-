@@ -1241,7 +1241,8 @@ watch_games() {
       case $k in
         app:*) a=${k#app:}
                mods_check "$a"                                       # [v5.0] появились моды — спросить
-               wants "pfx--$a" && arr+=("pfx--$a")
+               # [v5.7] «диска C:» от Steam нет (своя игра из Games — её C: в папке игры, едет с game--) — нечего выгружать
+               wants "pfx--$a" && [ -d "$DH/$SR/steamapps/compatdata/$a" ] && arr+=("pfx--$a")
                d=$(idir "$a"); [ -n "$d" ] && want "sgame--$d" && steam_ready "sgame--$d" && arr+=("sgame--$d") ;;
         dir:*) want "game--${k#dir:}" && arr+=("game--${k#dir:}") ;;
       esac
