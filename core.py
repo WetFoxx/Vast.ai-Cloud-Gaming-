@@ -277,9 +277,19 @@ def rent(offer_id, body, offer=None):
     return iid, t0
 
 
+def _trace(text):
+    """[0.5.3] Ход «Закончить» и удаления — в app.log с временем (разбор «машина не удалялась, пока открыт Moonlight»,
+    2026-10-09): где именно ждали — на Mac, в сети или на машине."""
+    import settings
+    settings.applog(text)
+
+
 def delete_instance(iid):
     """Удалить инстанс. (успех, сообщение Vast)."""
+    t = time.time()
+    _trace(f"удаление {iid}: запрос к Vast")
     r = call("DELETE", f"instances/{iid}/", {})
+    _trace(f"удаление {iid}: Vast ответил за {time.time() - t:.1f} с, успех={bool(r.get('success'))}")
     if r.get("success"):
         history.ended(iid)
     return bool(r.get("success")), r.get("msg")
@@ -653,7 +663,10 @@ def stop(ui, dry_run=False):
     ui.stage("shutdown", "Закрываю Steam и выгружаю всё в Google Drive (может занять несколько минут)...")
     # wolf finish (v3.11+): машина сама выгружает, проверяет и удаляет себя отдельной службой —
     # обрыв связи с этим компьютером её уже не прервёт. Мы только следим и перепроверяем.
+    t = time.time()
+    _trace(f"закончить {iid}: команда finish машине")
     code, out = _on_machine(ip, "finish", timeout=60, on_notice=ui.tailscale)
+    _trace(f"закончить {iid}: машина ответила за {time.time() - t:.1f} с, код {code}")
     if _finish_started(ip, t0, out):
         return _follow_finish(ui, iid, ip, t0)
     ui.say(f"Ответ машины на «wolf finish»: {out.strip()[-200:]}", "detail", key="core.finish_answer",
@@ -847,7 +860,10 @@ def emergency_delete(expected_id):
     """Удалить машину БЕЗ выгрузки — для зависшей или сломанной. Удаляет только машину с номером
     expected_id (её человек видел в окне и дважды подтвердил); если сейчас другая — VastgameError.
     Возвращает True, если машина исчезла из списка, False — если Vast ещё не убрал её."""
+    t = time.time()
+    _trace(f"удалить без выгрузки {expected_id}: начало")
     inst = list_instances()
+    _trace(f"удалить без выгрузки {expected_id}: список машин от Vast за {time.time() - t:.1f} с")
     if not inst:
         raise VastgameError("Инстансов нет — удалять нечего.", key="core.no_instances")
     ids = [i["id"] for i in inst]
@@ -860,5 +876,7 @@ def emergency_delete(expected_id):
     for _ in range(6):
         time.sleep(5)
         if expected_id not in [i["id"] for i in list_instances()]:
+            _trace(f"удалить без выгрузки {expected_id}: машины нет через {time.time() - t:.1f} с")
             return True
+    _trace(f"удалить без выгрузки {expected_id}: через {time.time() - t:.1f} с машина ещё в списке Vast")
     return False

@@ -372,6 +372,7 @@ class Api:
 
     def stop(self, lang=None):
         """«Закончить»: выгрузить всё, проверить и удалить машину — в фоновом процессе."""
+        settings.applog(f"закончить: нажато, Moonlight {'идёт' if moonlight.streaming() else 'не идёт'}")
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         if not jobs.spawn("stop", lang=lang):
@@ -381,6 +382,7 @@ class Api:
     def emergency_delete(self, machine_id):
         """Удалить машину без выгрузки. Страница уже дважды спросила; удаляем только машину,
         которую человек видел (machine_id), и только когда не идёт другая операция."""
+        settings.applog(f"удалить без выгрузки: нажато, Moonlight {'идёт' if moonlight.streaming() else 'не идёт'}")
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         try:
