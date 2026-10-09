@@ -289,9 +289,9 @@ for _ in {1..60}; do getent hosts github.com >/dev/null && break; sleep 2; done
 # ничего не ставим: apt здесь только потерял бы время
 if [ "$WM" != docker ]; then
 # xrandr/xhost/xset — x11-xserver-utils, cvt — xserver-xorg-core
-hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables 2>/dev/null || {
+hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables zenity 2>/dev/null || {
   apt-get update -q
-  apt-get install -yq curl zstd unzip x11-xserver-utils xserver-xorg-core libnotify-bin python3 iptables
+  apt-get install -yq curl zstd unzip x11-xserver-utils xserver-xorg-core libnotify-bin python3 iptables zenity
 }
 hash rclone 2>/dev/null    || curl -fsSL https://rclone.org/install.sh | bash
 hash tailscale 2>/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
@@ -418,6 +418,58 @@ ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null
 # GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
 # при этом не страдает — выгружаются только папки, которые есть на диске.
 mkgd()  { [ -d "$GD" ] || { u mkdir -p "$GD" && log "папка для игр $GD создана"; }; }
+# [v5.7] Двойной щелчок на рабочем столе машины (XFCE в Docker, KDE на KVM — обе читают mimeapps.list): .exe, .msi и
+# архивы открывает помощник vg-open; язык его окон — язык Steam (его задаёт приложение по языку VastGame)
+OWN_MIME="application/x-ms-dos-executable application/x-msdownload application/x-msi application/x-ms-installer
+application/vnd.microsoft.portable-executable application/zip application/x-7z-compressed application/vnd.rar
+application/x-rar application/x-rar-compressed"
+own_setup() {
+  local a="$DH/.local/share/applications" v="$DH/.local/share/vastgame" l
+  u mkdir -p "$a" "$v/requests" "$DH/.config"
+  case ${SL:-} in russian) l=ru ;; spanish|latam) l=es ;; *) l=en ;; esac
+  u sh -c 'echo "$1" > "$0"' "$v/lang" "$l"
+  u sh -c 'printf "%s\n" "[Desktop Entry]" "Type=Application" "Name=VastGame" "Exec=/usr/local/bin/vg-open %f" \
+    "MimeType=$1" "NoDisplay=true" > "$0"' "$a/vastgame-open.desktop" "$(echo $OWN_MIME | tr ' ' ';');"
+  u python3 - "$DH/.config/mimeapps.list" $OWN_MIME <<'PY'
+import sys, re
+path, mimes = sys.argv[1], sys.argv[2:]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    text = ""
+lines, sect, out, seen = text.splitlines(), None, [], False
+for ln in lines:
+    m = re.match(r"^\[(.+)\]$", ln.strip())
+    if m:
+        if sect == "Default Applications" and not seen:
+            out += [f"{x}=vastgame-open.desktop" for x in mimes]; seen = True
+        sect = m.group(1)
+    elif sect == "Default Applications" and ln.split("=", 1)[0] in mimes:
+        continue                                           # наше значение — ниже, заново
+    out.append(ln)
+if sect == "Default Applications" and not seen:
+    out += [f"{x}=vastgame-open.desktop" for x in mimes]; seen = True
+if not seen:
+    out += ["", "[Default Applications]"] + [f"{x}=vastgame-open.desktop" for x in mimes]
+open(path, "w", encoding="utf-8").write("\n".join(out).strip("\n") + "\n")
+PY
+  hash update-desktop-database 2>/dev/null && u update-desktop-database "$a" 2>/dev/null
+  return 0
+}
+# Запрос помощника (своя игра добавлена или стала своей): обновить ярлыки Steam — только когда не идёт ни одна игра
+# (Steam для этого закрывается и открывается)
+own_shortcuts() {
+  local r="$DH/.local/share/vastgame/requests/shortcuts"
+  [ -e "$r" ] || return 0
+  [ -n "$SR" ] || sr
+  [ -n "$SR" ] || return 0
+  running_keys | grep -qE '^(app|dir):' && return 0
+  rm -f "$r"
+  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --check >/dev/null 2>&1
+  [ $? = 3 ] || return 0
+  if pgrep -x steam >/dev/null; then steam_off && { shortcuts; steam_go; }; else shortcuts; fi
+  log "свои игры: ярлыки Steam обновлены по запросу помощника"
+}
 # [v5.4] Папка Programs (программы для игр): подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
 # README_ru/en/es.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
 mkpd() {
@@ -1114,7 +1166,7 @@ watch_games() {
     [ -e "$L/boot-done" ] || continue
     [ -n "$SR" ] || sr
     now=$(date +%s); cur=()
-    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; lgame_track; fi   # [v4.6] вопросы; [v5.0] чистые игры
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; lgame_track; own_shortcuts; fi   # [v4.6] вопросы; [v5.0] чистые игры
     # [v5.4] программы «вместе с игрой» и список программ для приложения
     python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
     while IFS= read -r k; do
@@ -1627,6 +1679,7 @@ boot() {
 
   mkgd   # папка для игр не из Steam — после восстановления архивов (они создают свои подпапки)
   mkpd
+  own_setup                                    # [v5.7] двойной щелчок по .exe/.msi/архиву — помощник VastGame
 
   # Манифест есть, а игры нет ни на диске, ни в облаке (архив удалили с Drive или инстанс
   # удалили раньше, чем игра успела выгрузиться) — убираем манифест, и Steam покажет игру
@@ -2972,6 +3025,340 @@ def main(a):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 VGRUN
+
+# [v5.7] Двойной щелчок по .exe/.msi/архиву на рабочем столе машины — помощник VastGame (окна zenity на языке
+# VastGame): установщик → своя игра Games/Название со своим «диском C:» (vg-run --exe); portable → перенести в Games;
+# архив → распаковать в Games; .exe внутри своей игры → запустить в её «диске C:». Паспорт игры .vastgame.json —
+# что запускать; ярлык в Steam обновляет wolf (запрос в ~/.local/share/vastgame/requests).
+w /usr/local/bin/vg-open <<'VGOPEN'
+#!/usr/bin/env python3
+import json, os, re, shutil, subprocess, sys, time, zipfile
+
+HOME = os.path.expanduser("~")
+GD = os.environ.get("VG_GAMES") or os.path.join(HOME, "Downloads", "Games")
+STATE = os.path.join(HOME, ".local", "share", "vastgame")
+VGRUN = os.environ.get("VG_RUN") or "/usr/local/bin/vg-run"
+MANIFEST = ".vastgame.json"
+ARCHIVES = (".zip", ".7z", ".rar")
+INSTALLER = re.compile(r"setup|install|^ins[_-]|_ins\b", re.I)
+SKIP = re.compile(r"unins|setup|install|redist|vc_?redist|dxsetup|dotnet|directx|crash|report|update|helper|"
+                  r"webhelper|cefprocess|elevat|service|vulkan|prereq", re.I)
+SYSTEM_DIRS = re.compile(r"^(windows|program files( \(x86\))?/(common files|internet explorer|windows (media player|nt|"
+                         r"photo viewer)|microsoft|steam)|programdata/microsoft|users/[^/]+/appdata/local/(temp|microsoft)|"
+                         r"proton_shortcuts|openxr|vrclient)(/|$)", re.I)
+KNOWN = {"xivlauncher.exe": "XIVLauncher", "epicgameslauncher.exe": "Epic Games", "battle.net launcher.exe": "Battle.net",
+         "battle.net.exe": "Battle.net", "upc.exe": "Ubisoft Connect", "ubisoftconnect.exe": "Ubisoft Connect",
+         "eadesktop.exe": "EA app", "galaxyclient.exe": "GOG Galaxy", "riotclientservices.exe": "Riot Client",
+         "hoyoplay.exe": "HoYoPlay", "wutheringwaves.exe": "Wuthering Waves", "launcher.exe": None}
+
+T = {
+ "ru": {"title": "VastGame", "what": "Что это за файл?\n{file}", "kind.installer": "Установщик игры или лаунчера",
+        "kind.portable": "Игра без установки (portable)", "name": "Как назвать игру?\nПапка появится в Games, игра — в Steam.",
+        "exists": "Игра «{name}» уже есть. Поставить в неё?\n(Так ставят моды и дополнения с установщиком.)",
+        "installing": "Идёт установка «{name}». Пройди шаги установщика как обычно — путь можно не менять: всё ляжет в "
+                      "папку игры.", "none": "Установщик закончил, но новых программ не видно.\nЕсли установка ещё идёт — "
+                      "дождись конца и нажми «Проверить снова».", "again": "Проверить снова", "pick": "Что запускать у «{name}»?",
+        "move": "Перенести «{src}» в Games и добавить в Steam как «{name}»?", "unpack": "Распаковать «{file}» в Games как «{name}»?",
+        "unpacking": "Распаковываю…", "noexe": "В «{name}» не нашлось программ для запуска (.exe).",
+        "inside": "Запустить «{file}» в «диске C:» игры «{name}»?", "main": "Сделать «{file}» главной программой игры «{name}»?",
+        "done": "Готово: «{name}» добавлена.\nВ Steam она появится, когда закроются игры (Steam перезапустится сам).",
+        "play": "Играть сейчас", "ok": "Готово", "cancel": "Отмена", "bad": "Не получилось: {why}"},
+ "en": {"title": "VastGame", "what": "What is this file?\n{file}", "kind.installer": "Game or launcher installer",
+        "kind.portable": "Game without installation (portable)", "name": "What should the game be called?\nA folder appears in Games, the game appears in Steam.",
+        "exists": "«{name}» already exists. Install into it?\n(That's how mods and add-ons with an installer go.)",
+        "installing": "Installing «{name}». Go through the installer as usual — no need to change the path: everything lands in the game folder.",
+        "none": "The installer finished, but no new programs showed up.\nIf it's still installing, wait and press «Check again».",
+        "again": "Check again", "pick": "What should «{name}» start?",
+        "move": "Move «{src}» to Games and add it to Steam as «{name}»?", "unpack": "Unpack «{file}» into Games as «{name}»?",
+        "unpacking": "Unpacking…", "noexe": "No programs to start (.exe) found in «{name}».",
+        "inside": "Run «{file}» in the C: drive of «{name}»?", "main": "Make «{file}» the main program of «{name}»?",
+        "done": "Done: «{name}» is added.\nIt shows up in Steam once games are closed (Steam restarts by itself).",
+        "play": "Play now", "ok": "Done", "cancel": "Cancel", "bad": "That didn't work: {why}"},
+ "es": {"title": "VastGame", "what": "¿Qué es este archivo?\n{file}", "kind.installer": "Instalador de un juego o launcher",
+        "kind.portable": "Juego sin instalación (portable)", "name": "¿Cómo se llamará el juego?\nAparecerá una carpeta en Games y el juego en Steam.",
+        "exists": "«{name}» ya existe. ¿Instalar dentro?\n(Así se instalan mods y extras con instalador.)",
+        "installing": "Instalando «{name}». Sigue el instalador como siempre; no hace falta cambiar la ruta: todo queda en la carpeta del juego.",
+        "none": "El instalador terminó, pero no aparecieron programas nuevos.\nSi aún se está instalando, espera y pulsa «Comprobar otra vez».",
+        "again": "Comprobar otra vez", "pick": "¿Qué debe iniciar «{name}»?",
+        "move": "¿Mover «{src}» a Games y añadirlo a Steam como «{name}»?", "unpack": "¿Descomprimir «{file}» en Games como «{name}»?",
+        "unpacking": "Descomprimiendo…", "noexe": "No se encontraron programas (.exe) en «{name}».",
+        "inside": "¿Ejecutar «{file}» en la unidad C: de «{name}»?", "main": "¿Hacer de «{file}» el programa principal de «{name}»?",
+        "done": "Listo: «{name}» se añadió.\nAparecerá en Steam cuando se cierren los juegos (Steam se reinicia solo).",
+        "play": "Jugar ahora", "ok": "Listo", "cancel": "Cancelar", "bad": "No funcionó: {why}"},
+}
+
+
+def lang():
+    try:
+        v = open(os.path.join(STATE, "lang")).read().strip()
+    except OSError:
+        v = ""
+    return v if v in T else "en"
+
+
+def t(key, **kw):
+    return T[lang()].get(key, T["en"][key]).format(**kw)
+
+
+# ---------------------------------------------------------------- решения (без окон — проверяются тестами)
+def kind(path):
+    """archive | installer | inside (в папке своей игры) | ask (exe: установщик или portable — спросить)."""
+    low = path.lower()
+    if low.endswith(ARCHIVES):
+        return "archive"
+    if game_of(path):
+        return "inside"
+    if low.endswith(".msi") or INSTALLER.search(os.path.basename(path)):
+        return "installer"
+    return "ask"
+
+
+def game_of(path):
+    """Папка игры в Games, внутри которой лежит файл, или None."""
+    rp, gd = os.path.realpath(path), os.path.realpath(GD)
+    if not rp.startswith(gd + os.sep):
+        return None
+    top = rp[len(gd) + 1:].split(os.sep)[0]
+    return os.path.join(gd, top) if top and not top.startswith(".") else None
+
+
+def clean_name(s):
+    s = re.sub(r"\.(exe|msi|zip|7z|rar)$", "", s, flags=re.I)
+    s = re.sub(r"[_]+", " ", s)
+    s = re.sub(r"[-_ ]*(setup|installer|install|x64|x86|win64|win32|v?\d+(\.\d+)+)[-_ ]*", " ", s, flags=re.I)
+    s = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "", s)
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return s[:60] or "Game"
+
+
+def exes(folder, before=()):
+    """Новые программы своей игры (пути от папки): в её «диске C:» — кроме системных папок Windows, и в самой папке;
+    служебные (удаление, обновление, помощники) — нет. Знакомые лаунчеры — первыми, потом выше по папкам, крупнее."""
+    out = []
+    drive = os.path.join(folder, ".prefix", "pfx", "drive_c")
+    for base, rel0 in ((drive, ".prefix/pfx/drive_c/"), (folder, "")):
+        for root, dirs, files in os.walk(base):
+            r = os.path.relpath(root, base).replace(os.sep, "/")
+            r = "" if r == "." else r + "/"
+            if base == folder:
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+            dirs[:] = [d for d in dirs if not SYSTEM_DIRS.match(r + d)]
+            for f in files:
+                if not f.lower().endswith(".exe") or SKIP.search(f):
+                    continue
+                rel = rel0 + r + f
+                if rel in before:
+                    continue
+                try:
+                    size = os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    continue
+                low = f.lower()                           # launcher.exe — знакомый, только в папке HoYoPlay
+                known = low in KNOWN and (KNOWN[low] is not None or "hoyoplay" in r.lower())
+                out.append((not known, rel.count("/"), -size, rel))
+    return [x[3] for x in sorted(out)]
+
+
+def write_manifest(folder, exe, how):
+    data = {"version": 1, "exe": exe, "args": "", "kind": how, "name": os.path.basename(folder), "added": int(time.time())}
+    tmp = os.path.join(folder, MANIFEST + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, os.path.join(folder, MANIFEST))
+
+
+def request_shortcuts():
+    d = os.path.join(STATE, "requests")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "shortcuts"), "w").close()
+
+
+def portable_plan(exe):
+    """(что переносить, название, путь exe от папки игры): папку с игрой — целиком; exe прямо в «Загрузках», на
+    рабочем столе или в домашней папке — только его (а не всю папку)."""
+    parent = os.path.dirname(os.path.realpath(exe))
+    general = {os.path.realpath(p) for p in (HOME, os.path.join(HOME, "Downloads"), os.path.join(HOME, "Desktop"),
+                                             GD, "/tmp")}
+    if parent in general or parent == "/":
+        return exe, clean_name(os.path.basename(exe)), os.path.basename(exe)
+    return parent, clean_name(os.path.basename(parent)), os.path.relpath(os.path.realpath(exe), parent).replace(os.sep, "/")
+
+
+def unique(name):
+    n, i = name, 2
+    while os.path.exists(os.path.join(GD, n)):
+        n, i = f"{name} {i}", i + 1
+    return n
+
+
+def unpack(archive, dest):
+    """Распаковать в dest (только внутрь); одна общая папка сверху — её содержимое поднимается в dest."""
+    tmp = dest + ".vgtmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    if archive.lower().endswith(".zip"):
+        with zipfile.ZipFile(archive) as z:
+            for n in z.namelist():
+                if n.startswith(("/", "\\")) or ".." in n.replace("\\", "/").split("/"):
+                    raise ValueError(f"путь {n!r} в архиве")
+            z.extractall(tmp)
+    else:
+        tool = shutil.which("bsdtar") and ["bsdtar", "-xf", archive, "-C", tmp] or \
+            shutil.which("7z") and ["7z", "x", "-y", f"-o{tmp}", archive]
+        if not tool:
+            raise ValueError("нечем распаковать .7z/.rar (нет bsdtar и 7z)")
+        subprocess.run(tool, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for root, dirs, files in os.walk(tmp):
+            for x in dirs + files:
+                p = os.path.join(root, x)
+                if os.path.islink(p) and not os.path.realpath(p).startswith(os.path.realpath(tmp) + os.sep):
+                    os.unlink(p)                                  # ссылка наружу — нет
+    items = [x for x in os.listdir(tmp) if not x.startswith("__MACOSX")]
+    src = os.path.join(tmp, items[0]) if len(items) == 1 and os.path.isdir(os.path.join(tmp, items[0])) else tmp
+    shutil.move(src, dest)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- окна
+def z(*args):
+    r = subprocess.run(["zenity", "--title", t("title"), *args], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def ask(text, yes, no=None):
+    return z("--question", "--width=460", f"--text={text}", f"--ok-label={yes}", f"--cancel-label={no or t('cancel')}")[0] == 0
+
+
+def pick(text, items, labels=None):
+    rows = []
+    for i, it in enumerate(items):
+        rows += [str(i), labels[i] if labels else it]
+    code, out = z("--list", "--width=560", "--height=360", f"--text={text}", "--column=#", "--column=",
+                  "--hide-column=1", "--print-column=1", *rows)
+    return items[int(out)] if code == 0 and out.isdigit() and int(out) < len(items) else None
+
+
+def entry(text, value):
+    code, out = z("--entry", "--width=460", f"--text={text}", f"--entry-text={value}")
+    return clean_name(out) if code == 0 and out.strip() else None
+
+
+def info(text):
+    z("--info", "--width=460", f"--text={text}")
+
+
+def finish(folder):
+    request_shortcuts()
+    name = os.path.basename(folder)
+    if ask(t("done", name=name), t("play"), t("ok")):
+        subprocess.Popen([VGRUN, folder], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def choose_exe(folder, before=()):
+    name = os.path.basename(folder)
+    while True:
+        found = exes(folder, before)
+        if found:
+            exe = found[0] if len(found) == 1 else pick(t("pick", name=name), found[:20])
+            if exe:
+                write_manifest(folder, exe, "installer" if exe.startswith(".prefix/") else "portable")
+                return True
+            return False
+        if not ask(t("none"), t("again")):
+            return False
+
+
+def do_installer(f):
+    name = entry(t("name"), clean_name(os.path.basename(f)))
+    if not name:
+        return
+    folder = os.path.join(GD, name)
+    if os.path.exists(folder) and not ask(t("exists", name=name), t("ok")):
+        return
+    os.makedirs(folder, exist_ok=True)
+    before = set(exes(folder))
+    subprocess.run([VGRUN, folder, "--exe", f])
+    if choose_exe(folder, before):
+        finish(folder)
+
+
+def do_portable(f):
+    src, name, rel = portable_plan(f)
+    name = unique(name)
+    if not ask(t("move", src=os.path.basename(src), name=name), t("ok")):
+        return
+    folder = os.path.join(GD, name)
+    if src == f:
+        os.makedirs(folder)
+        shutil.move(f, os.path.join(folder, os.path.basename(f)))
+    else:
+        shutil.move(src, folder)
+    write_manifest(folder, rel, "portable")
+    finish(folder)
+
+
+def do_archive(f):
+    name = unique(clean_name(os.path.basename(f)))
+    if not ask(t("unpack", file=os.path.basename(f), name=name), t("ok")):
+        return
+    folder = os.path.join(GD, name)
+    p = subprocess.Popen(["zenity", "--title", t("title"), "--progress", "--pulsate", "--no-cancel", "--auto-close",
+                          f"--text={t('unpacking')}"], stdin=subprocess.PIPE, text=True)
+    try:
+        unpack(f, folder)
+    finally:
+        p.stdin.close()
+        p.wait()
+    found = exes(folder)
+    setups = [x for x in os.listdir(folder) if x.lower().endswith((".exe", ".msi")) and INSTALLER.search(x)]
+    if not found and setups:                              # в архиве установщик — ставить его в эту же игру
+        before = set(exes(folder))
+        subprocess.run([VGRUN, folder, "--exe", os.path.join(folder, setups[0])])
+        if choose_exe(folder, before):
+            finish(folder)
+        return
+    if not found:
+        info(t("noexe", name=name))
+        return
+    if choose_exe(folder):
+        finish(folder)
+
+
+def do_inside(f):
+    folder = game_of(f)
+    name = os.path.basename(folder)
+    if os.path.isfile(os.path.join(folder, MANIFEST)):
+        if ask(t("inside", file=os.path.basename(f), name=name), t("play")):
+            subprocess.Popen([VGRUN, folder, "--exe", f], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    if ask(t("main", file=os.path.basename(f), name=name), t("ok")):
+        write_manifest(folder, os.path.relpath(os.path.realpath(f), os.path.realpath(folder)).replace(os.sep, "/"), "portable")
+        finish(folder)
+
+
+def main(a):
+    if not a or not os.path.isfile(a[0]):
+        return 2
+    f = os.path.realpath(a[0])
+    os.makedirs(GD, exist_ok=True)
+    k = kind(f)
+    if k == "ask":
+        k = pick(t("what", file=os.path.basename(f)), ["installer", "portable"],
+                 [t("kind.installer"), t("kind.portable")])
+        if not k:
+            return 0
+    try:
+        {"archive": do_archive, "installer": do_installer, "portable": do_portable, "inside": do_inside}[k](f)
+    except Exception as e:
+        info(t("bad", why=f"{type(e).__name__}: {str(e)[:200]}"))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+VGOPEN
 
 w /usr/local/bin/vg-launch <<'VGLAUNCH'
 #!/bin/bash

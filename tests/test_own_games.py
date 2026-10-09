@@ -150,5 +150,186 @@ class TestWolfSide(unittest.TestCase):
         self.assertIn("game--*)    F \"$A\" \\( -ipath '*/drive_c/users/*/AppData/Local/Temp'", WOLF)
 
 
+
+# ---------------------------------------------------------------- помощник двойного щелчка (vg-open)
+import importlib.util  # noqa: E402
+
+VGOPEN = TMP / "vg-open.py"
+VGOPEN.write_text(heredoc("vg-open", "VGOPEN"))
+
+
+def load_vgopen(home):
+    os.environ["HOME"] = str(home)
+    os.environ.pop("VG_GAMES", None)
+    spec = importlib.util.spec_from_file_location(f"vgopen_{id(home)}", VGOPEN)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class OpenBase(unittest.TestCase):
+    def setUp(self):
+        self.old_home = os.environ.get("HOME")
+        self.home = Path(tempfile.mkdtemp(dir=TMP)).resolve()
+        self.vo = load_vgopen(self.home)
+        self.gd = self.home / "Downloads/Games"
+        self.gd.mkdir(parents=True)
+
+    def tearDown(self):
+        os.environ["HOME"] = self.old_home
+
+    def f(self, rel, size=10):
+        p = self.home / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * size)
+        return p
+
+
+class TestOpenDecisions(OpenBase):
+    def test_kind(self):
+        self.assertEqual(self.vo.kind(str(self.f("Downloads/Genshin_Impact_setup.exe"))), "installer")
+        self.assertEqual(self.vo.kind(str(self.f("Downloads/game.msi"))), "installer")
+        self.assertEqual(self.vo.kind(str(self.f("Downloads/Hollow.zip"))), "archive")
+        self.assertEqual(self.vo.kind(str(self.f("Downloads/Hollow Knight/hollow_knight.exe"))), "ask")
+        self.assertEqual(self.vo.kind(str(self.f("Downloads/Games/Mine/tool.exe"))), "inside")
+        self.assertIsNone(self.vo.game_of(str(self.f("Downloads/Games/.hidden/x.exe"))))
+
+    def test_clean_name(self):
+        c = self.vo.clean_name
+        self.assertEqual(c("Genshin_Impact_setup_2.3.1.exe"), "Genshin Impact")
+        self.assertEqual(c("HoYoPlay-installer-x64.exe"), "HoYoPlay")
+        self.assertEqual(c('bad/na:me*?.zip'), "badname")
+        self.assertEqual(c("setup.exe"), "Game")
+
+    def test_exes_skip_windows_and_helpers_known_first(self):
+        g = self.gd / "Genshin"
+        drive = ".prefix/pfx/drive_c/"
+        for rel, size in ((drive + "windows/system32/notepad.exe", 9), (drive + "Program Files/Common Files/x.exe", 9),
+                          (drive + "Program Files/HoYoPlay/launcher.exe", 5),
+                          (drive + "Program Files/HoYoPlay/unins000.exe", 99),
+                          (drive + "Program Files/HoYoPlay/games/Genshin Impact Game/GenshinImpact.exe", 900),
+                          (drive + "users/steamuser/AppData/Local/Temp/is-1/setup.tmp.exe", 50)):
+            self.f(str((g / rel).relative_to(self.home)), size)
+        self.assertEqual(self.vo.exes(str(g)), [drive + "Program Files/HoYoPlay/launcher.exe",
+                                                drive + "Program Files/HoYoPlay/games/Genshin Impact Game/GenshinImpact.exe"])
+        before = set(self.vo.exes(str(g)))
+        self.f(str((g / (drive + "Program Files/Mod/ModTool.exe")).relative_to(self.home)))
+        self.assertEqual(self.vo.exes(str(g), before), [drive + "Program Files/Mod/ModTool.exe"])   # только новое
+
+    def test_portable_plan(self):
+        lone = self.f("Downloads/Celeste.exe")
+        self.assertEqual(self.vo.portable_plan(str(lone)), (str(lone), "Celeste", "Celeste.exe"))   # не вся папка «Загрузки»
+        exe = self.f("Downloads/Hollow Knight v1.5/bin/hollow_knight.exe")
+        self.assertEqual(self.vo.portable_plan(str(exe)),
+                         (str(self.home / "Downloads/Hollow Knight v1.5/bin"), "bin", "hollow_knight.exe"))
+
+    def test_unpack_flattens_and_refuses_escape(self):
+        import zipfile
+        z = self.home / "Downloads/Hollow.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("Hollow Knight/hollow_knight.exe", "x")
+            zf.writestr("Hollow Knight/data/a.dat", "y")
+        self.vo.unpack(str(z), str(self.gd / "Hollow"))
+        self.assertTrue((self.gd / "Hollow/hollow_knight.exe").exists())     # общая папка сверху — поднята
+        bad = self.home / "Downloads/bad.zip"
+        with zipfile.ZipFile(bad, "w") as zf:
+            zf.writestr("../../evil.exe", "x")
+        with self.assertRaises(ValueError):
+            self.vo.unpack(str(bad), str(self.gd / "Bad"))
+        self.assertFalse((self.home / "evil.exe").exists())
+
+
+class TestOpenFlows(OpenBase):
+    """Сценарии целиком: zenity и vg-run — поддельные (ответы по очереди, вызовы — в журнал)."""
+
+    def setUp(self):
+        super().setUp()
+        bin_ = self.home / "bin"
+        bin_.mkdir()
+        self.answers = self.home / "answers"
+        self.calls = self.home / "calls"
+        (bin_ / "zenity").write_text('#!/bin/sh\necho "zenity $*" >> "$VG_CALLS"\n'
+                                     'line=$(head -1 "$VG_ANS"); sed -i.b 1d "$VG_ANS"\n'
+                                     'code=${line%%|*}; out=${line#*|}; [ -n "$out" ] && echo "$out"; exit "$code"\n')
+        (bin_ / "zenity").chmod(0o755)
+        self.vgrun = bin_ / "vg-run"
+        self.vgrun.write_text('#!/bin/sh\necho "vg-run $*" >> "$VG_CALLS"\n'
+                              '[ "$2" = --exe ] && [ -n "$VG_INSTALL" ] && mkdir -p "$1/$(dirname "$VG_INSTALL")" '
+                              '&& touch "$1/$VG_INSTALL"\nexit 0\n')
+        self.vgrun.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.home), PATH=f"{bin_}:{os.environ['PATH']}", VG_RUN=str(self.vgrun),
+                        VG_ANS=str(self.answers), VG_CALLS=str(self.calls))
+
+    def run_open(self, path, answers, install=None):
+        self.answers.write_text("".join(a + "\n" for a in answers))
+        env = dict(self.env, **({"VG_INSTALL": install} if install else {}))
+        r = subprocess.run([sys.executable, str(VGOPEN), str(path)], env=env, capture_output=True, text=True, timeout=30)
+        calls = self.calls.read_text().splitlines() if self.calls.exists() else []
+        return r.returncode, calls
+
+    def manifest(self, name):
+        return json.loads((self.gd / name / ".vastgame.json").read_text())
+
+    def test_installer_to_own_game(self):
+        setup = self.f("Downloads/HoYoPlay_setup.exe")
+        launcher = ".prefix/pfx/drive_c/Program Files/HoYoPlay/launcher.exe"
+        code, calls = self.run_open(setup, ["0|Genshin", "1|"], install=launcher)    # название; «Готово» (не играть)
+        self.assertEqual(code, 0)
+        self.assertIn(f"vg-run {self.gd}/Genshin --exe {setup}", calls)
+        self.assertEqual(self.manifest("Genshin")["exe"], launcher)
+        self.assertTrue((self.home / ".local/share/vastgame/requests/shortcuts").exists())   # ярлык Steam — wolf
+
+    def test_portable_moved_with_its_folder(self):
+        exe = self.f("Downloads/Hollow Knight/hollow_knight.exe")
+        self.f("Downloads/Hollow Knight/data/a.dat")
+        code, calls = self.run_open(exe, ["0|1", "0|", "1|"])                       # «portable»; «да»; «Готово»
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manifest("Hollow Knight")["exe"], "hollow_knight.exe")
+        self.assertTrue((self.gd / "Hollow Knight/data/a.dat").exists())
+        self.assertFalse((self.home / "Downloads/Hollow Knight").exists())
+
+    def test_cancel_changes_nothing(self):
+        exe = self.f("Downloads/Hollow Knight/hollow_knight.exe")
+        code, _ = self.run_open(exe, ["0|1", "1|"])                                  # «portable»; «Отмена»
+        self.assertTrue(exe.exists())
+        self.assertEqual(list(self.gd.iterdir()), [])
+
+    def test_play_now_runs_the_game(self):
+        exe = self.f("Downloads/Celeste.exe")
+        code, calls = self.run_open(exe, ["0|1", "0|", "0|"])                       # portable; да; «Играть сейчас»
+        import time
+        for _ in range(50):
+            calls = self.calls.read_text().splitlines()
+            if any(c.startswith("vg-run") for c in calls):
+                break
+            time.sleep(0.1)
+        self.assertIn(f"vg-run {self.gd}/Celeste", calls)
+
+
+class TestOwnSetup(unittest.TestCase):
+    def test_mime_binding_keeps_other_defaults(self):
+        from test_game_select import Machine, fn
+        m = Machine()
+        cfg = m.d / "home/.config"
+        cfg.mkdir(parents=True)
+        (cfg / "mimeapps.list").write_text("[Default Applications]\ntext/plain=mousepad.desktop\n"
+                                           "application/zip=xarchiver.desktop\n\n[Added Associations]\nx/y=z.desktop\n")
+        own_mime = re.search(r'^OWN_MIME="[^"]*"', WOLF, re.M | re.S).group(0)
+        for _ in range(2):
+            m.run(own_mime + "\n" + fn("own_setup") + "\nSL=russian; own_setup")
+        text = (cfg / "mimeapps.list").read_text()
+        self.assertIn("text/plain=mousepad.desktop", text)
+        self.assertIn("application/zip=vastgame-open.desktop", text)
+        self.assertNotIn("xarchiver", text)
+        self.assertEqual(text.count("application/x-ms-dos-executable=vastgame-open.desktop"), 1)   # не задваивается
+        self.assertIn("[Added Associations]\nx/y=z.desktop", text)
+        self.assertEqual((m.d / "home/.local/share/vastgame/lang").read_text().strip(), "ru")
+        desk = (m.d / "home/.local/share/applications/vastgame-open.desktop").read_text()
+        self.assertIn("Exec=/usr/local/bin/vg-open %f", desk)
+        self.assertIn("application/x-msi;", desk)
+
+
+import re  # noqa: E402
+
 if __name__ == "__main__":
     unittest.main()
