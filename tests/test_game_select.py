@@ -155,6 +155,19 @@ class TestOwnGamesAll(unittest.TestCase):
         self.assertEqual(out.split(), ["YES", "game--Big"])
         self.assertFalse((m.d / "S/sel.own_all").exists())
 
+    def test_added_through_vastgame_needs_no_question(self):
+        # [v5.7] своя игра с паспортом — синхронизируется без вопроса; явное «не синхронизировать» — уважается
+        m = Machine()
+        for g in ("Mine", "Skipped", "Plain"):
+            (m.d / "home/Games" / g).mkdir(parents=True)
+        for g in ("Mine", "Skipped"):
+            (m.d / "home/Games" / g / ".vastgame.json").write_text('{"exe": "a.exe"}')
+        vg = base64.b64encode(json.dumps({"games": [], "steam": "store", "own": "all"}).encode()).decode()
+        out = m.run('sel_init; addline game--Skipped sel.skip; '
+                    'for g in game--Mine game--Skipped game--Plain; do want "$g" && echo "YES $g"; done; true',
+                    env=f'VG_SYNC="{vg}"')
+        self.assertEqual(out.split(), ["YES", "game--Mine"])
+
 
 class TestSteamReady(unittest.TestCase):
     def test_only_fully_installed_steam_games_uploaded(self):

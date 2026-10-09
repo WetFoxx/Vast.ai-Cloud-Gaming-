@@ -456,6 +456,42 @@ PY
   hash update-desktop-database 2>/dev/null && u update-desktop-database "$a" 2>/dev/null
   return 0
 }
+# [v5.7] Значки своих игр на рабочем столе машины (как ярлыки в Windows): двойной щелчок — vg-run, без вопросов.
+# Появляются один раз на машину (удалил значок — до следующей аренды не вернётся: $S/own.icons); игру удалили — убираются
+own_icons() {
+  local dk f d n
+  dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
+  [ -d "$dk" ] || return 0
+  for f in "$dk"/*.desktop; do
+    [ -e "$f" ] && grep -qx 'X-VastGame=own' "$f" || continue
+    d=$(sed -n 's/^X-VastGame-Folder=//p' "$f" | head -1)
+    [ -f "$d/.vastgame.json" ] || { rm -f "$f"; rmline "$d" own.icons; }
+  done
+  for d in "$GD"/*/; do
+    d=${d%/}; [ -f "$d/.vastgame.json" ] || continue
+    inlist "$d" own.icons && continue
+    n=${d##*/}; f="$dk/$n.desktop"
+    [ -e "$f" ] || u python3 - "$f" "$d" "$n" <<'PY'
+import sys
+path, folder, name = sys.argv[1:4]
+q = lambda s: '"' + "".join("\\" + c if c in '"`$\\' else c for c in s).replace("%", "%%") + '"'
+open(path, "w", encoding="utf-8").write("\n".join([
+    "[Desktop Entry]", "Type=Application", f"Name={name}", f"Exec=/usr/local/bin/vg-run {q(folder)}",
+    "Icon=applications-games", "Terminal=false", "X-VastGame=own", f"X-VastGame-Folder={folder}", ""]))
+PY
+    u chmod 755 "$f" 2>/dev/null
+    addline "$d" own.icons
+  done
+}
+# [v5.7] Пометка «исполняемый» у .exe/.msi в Загрузках и на рабочем столе: с ней XFCE пытается запустить файл как
+# программу Linux и молчит (живой случай 2026-10-09), а не отдаёт его помощнику; Windows-программам она не нужна
+own_noexec() {
+  local dk
+  dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
+  u find "$dk" "$DH/Downloads" -maxdepth 6 \( -name .prefix -o -name steamapps -o -name compatdata \) -prune -o \
+    -type f \( -iname '*.exe' -o -iname '*.msi' \) -perm /111 -exec chmod a-x {} + 2>/dev/null
+  return 0
+}
 # Запрос помощника (своя игра добавлена или стала своей): обновить ярлыки Steam — только когда не идёт ни одна игра
 # (Steam для этого закрывается и открывается)
 own_shortcuts() {
@@ -607,6 +643,8 @@ want() {
     # [v5.7] «все свои игры»: игра из Games, которая уже есть в облаке и на которую не отвечали «не синхронизировать»;
     # новая на диске — по-прежнему с вопросом (её нет в облаке)
     case $1 in game--*) [ -e "$S/sel.own_all" ] && ! inlist "$1" sel.skip && incloud "$1" && return 0 ;; esac
+    # [v5.7] своя игра, добавленная через окно VastGame (паспорт .vastgame.json), — без вопроса: человек сам её добавил
+    case $1 in game--*) [ -f "$GD/${1#game--}/.vastgame.json" ] && ! inlist "$1" sel.skip && return 0 ;; esac
     inlist "$1" sel.games; return
   fi
   case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
@@ -1166,7 +1204,7 @@ watch_games() {
     [ -e "$L/boot-done" ] || continue
     [ -n "$SR" ] || sr
     now=$(date +%s); cur=()
-    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; lgame_track; own_shortcuts; fi   # [v4.6] вопросы; [v5.0] чистые игры
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; mods_scan; lgame_track; own_shortcuts; own_icons; own_noexec; fi   # [v4.6] вопросы; [v5.0] чистые игры
     # [v5.4] программы «вместе с игрой» и список программ для приложения
     python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
     while IFS= read -r k; do
@@ -1680,6 +1718,7 @@ boot() {
   mkgd   # папка для игр не из Steam — после восстановления архивов (они создают свои подпапки)
   mkpd
   own_setup                                    # [v5.7] двойной щелчок по .exe/.msi/архиву — помощник VastGame
+  own_icons; own_noexec                        # [v5.7] значки своих игр на рабочем столе
 
   # Манифест есть, а игры нет ни на диске, ни в облаке (архив удалили с Drive или инстанс
   # удалили раньше, чем игра успела выгрузиться) — убираем манифест, и Steam покажет игру
@@ -3062,7 +3101,8 @@ T = {
         "unpacking": "Распаковываю…", "noexe": "В «{name}» не нашлось программ для запуска (.exe).",
         "inside": "Запустить «{file}» в «диске C:» игры «{name}»?", "main": "Сделать «{file}» главной программой игры «{name}»?",
         "done": "Готово: «{name}» добавлена.\nВ Steam она появится, когда закроются игры (Steam перезапустится сам).",
-        "play": "Играть сейчас", "ok": "Готово", "cancel": "Отмена", "bad": "Не получилось: {why}"},
+        "play": "Играть сейчас", "ok": "Готово", "cancel": "Отмена", "bad": "Не получилось: {why}",
+        "choose": "Выбрать", "yes": "Да", "recommended": "(рекомендую)"},
  "en": {"title": "VastGame", "what": "What is this file?\n{file}", "kind.installer": "Game or launcher installer",
         "kind.portable": "Game without installation (portable)", "name": "What should the game be called?\nA folder appears in Games, the game appears in Steam.",
         "exists": "«{name}» already exists. Install into it?\n(That's how mods and add-ons with an installer go.)",
@@ -3073,7 +3113,8 @@ T = {
         "unpacking": "Unpacking…", "noexe": "No programs to start (.exe) found in «{name}».",
         "inside": "Run «{file}» in the C: drive of «{name}»?", "main": "Make «{file}» the main program of «{name}»?",
         "done": "Done: «{name}» is added.\nIt shows up in Steam once games are closed (Steam restarts by itself).",
-        "play": "Play now", "ok": "Done", "cancel": "Cancel", "bad": "That didn't work: {why}"},
+        "play": "Play now", "ok": "Done", "cancel": "Cancel", "bad": "That didn't work: {why}",
+        "choose": "Choose", "yes": "Yes", "recommended": "(recommended)"},
  "es": {"title": "VastGame", "what": "¿Qué es este archivo?\n{file}", "kind.installer": "Instalador de un juego o launcher",
         "kind.portable": "Juego sin instalación (portable)", "name": "¿Cómo se llamará el juego?\nAparecerá una carpeta en Games y el juego en Steam.",
         "exists": "«{name}» ya existe. ¿Instalar dentro?\n(Así se instalan mods y extras con instalador.)",
@@ -3084,7 +3125,8 @@ T = {
         "unpacking": "Descomprimiendo…", "noexe": "No se encontraron programas (.exe) en «{name}».",
         "inside": "¿Ejecutar «{file}» en la unidad C: de «{name}»?", "main": "¿Hacer de «{file}» el programa principal de «{name}»?",
         "done": "Listo: «{name}» se añadió.\nAparecerá en Steam cuando se cierren los juegos (Steam se reinicia solo).",
-        "play": "Jugar ahora", "ok": "Listo", "cancel": "Cancelar", "bad": "No funcionó: {why}"},
+        "play": "Jugar ahora", "ok": "Listo", "cancel": "Cancelar", "bad": "No funcionó: {why}",
+        "choose": "Elegir", "yes": "Sí", "recommended": "(recomendado)"},
 }
 
 
@@ -3157,6 +3199,141 @@ def exes(folder, before=()):
                 known = low in KNOWN and (KNOWN[low] is not None or "hoyoplay" in r.lower())
                 out.append((not known, rel.count("/"), -size, rel))
     return [x[3] for x in sorted(out)]
+
+
+def pe_gui(path):
+    """Оконная ли программа Windows: True — окно (игры, лаунчеры), False — консоль (утилиты), None — не понять."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+        if head[:2] != b"MZ":
+            return None
+        pe = int.from_bytes(head[0x3C:0x40], "little")
+        if head[pe:pe + 4] != b"PE\0\0":
+            return None
+        sub = int.from_bytes(head[pe + 24 + 68:pe + 24 + 70], "little")
+        return {2: True, 3: False}.get(sub)
+    except OSError:
+        return None
+
+
+def product_name(path):
+    """«Название продукта» из сведений о версии файла Windows (то, что видно в его «Свойствах»), или ""."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(64 << 20)
+    except OSError:
+        return ""
+    key = "ProductName".encode("utf-16-le") + b"\0\0"
+    i = data.rfind(key)
+    if i < 0:
+        return ""
+    i += len(key)
+    while i < len(data) - 1 and data[i:i + 2] == b"\0\0":
+        i += 2
+    j = i
+    while j < len(data) - 1 and data[j:j + 2] != b"\0\0":
+        j += 2
+    name = data[i:j].decode("utf-16-le", "replace").strip()
+    return name if 0 < len(name) <= 80 and name.isprintable() else ""
+
+
+def lnk_target(path):
+    """Куда ведёт ярлык Windows (.lnk): путь вида C:\\…\\x.exe или None."""
+    try:
+        data = open(path, "rb").read(65536)
+    except OSError:
+        return None
+    if data[:4] != b"\x4c\0\0\0":
+        return None
+    for enc, pat in (("latin-1", rb"[A-Za-z]:\\[^\x00]+?\.[eE][xX][eE]"),          # LinkInfo — путь к программе
+                     ("utf-16-le", rb"(?:[A-Za-z]\x00:\x00\\\x00(?:[^\x00]\x00)+?\.\x00[eE]\x00[xX]\x00[eE]\x00)")):
+        m = re.search(pat, data)
+        if m:
+            return m.group(0).decode(enc)
+    return None
+
+
+SHORTCUT_SKIP = re.compile(r"unins|uninstall|remove|help|readme|manual|website|web site|homepage|support|update|"
+                           r"license|changelog|удал|справк|сайт", re.I)
+
+
+def shortcuts(folder):
+    """{путь exe от папки игры: название ярлыка} — ярлыки, которые положил установщик (рабочий стол, меню «Пуск»)."""
+    drive = os.path.join(folder, ".prefix", "pfx", "drive_c")
+    out = {}
+    roots = [os.path.join(drive, "ProgramData", "Microsoft", "Windows", "Start Menu"),
+             os.path.join(drive, "users")]
+    for base in roots:
+        for root, dirs, files in os.walk(base):
+            low = root.lower()
+            if base.endswith("users") and not ("desktop" in low or "start menu" in low):
+                if "appdata" in low and "roaming" not in low:
+                    dirs[:] = []
+                continue
+            for f in files:
+                if not f.lower().endswith(".lnk") or SHORTCUT_SKIP.search(f):
+                    continue
+                win = lnk_target(os.path.join(root, f))
+                if not win or win[1:3] != ":\\":
+                    continue
+                rel = win_to_rel(folder, win)
+                if rel:
+                    out.setdefault(rel, f[:-4])
+    return out
+
+
+def win_to_rel(folder, win):
+    """C:\\Program Files\\X\\a.exe → путь от папки игры (как есть на диске, без учёта регистра), если файл есть."""
+    drive = win[0].upper()
+    parts = [x for x in win[3:].split("\\") if x]
+    if drive == "C":
+        base, rel = os.path.join(folder, ".prefix", "pfx", "drive_c"), ".prefix/pfx/drive_c"
+    elif drive == "Z":
+        real = "/" + "/".join(parts)
+        top = os.path.realpath(folder) + os.sep
+        return os.path.relpath(real, folder).replace(os.sep, "/") if os.path.realpath(real).startswith(top) \
+            and os.path.isfile(real) else None
+    else:
+        return None
+    cur = base
+    for part in parts:
+        try:
+            match = next((x for x in os.listdir(cur) if x.lower() == part.lower()), None)
+        except OSError:
+            return None
+        if not match:
+            return None
+        cur = os.path.join(cur, match)
+        rel += "/" + match
+    return rel if os.path.isfile(cur) else None
+
+
+def candidates(folder, before=()):
+    """[(путь от папки игры, подпись)] — что запускать: сначала ярлыки установщика, иначе программы; консольные
+    утилиты — только если оконных нет. Первая — рекомендуемая."""
+    sc = {k: v for k, v in shortcuts(folder).items() if k not in before}
+    found = exes(folder, before)
+    gui = lambda rel: pe_gui(os.path.join(folder, rel)) is not False
+    if sc:
+        order = sorted(sc, key=lambda r: (found.index(r) if r in found else len(found), r))
+        order = [r for r in order if gui(r)] or order
+        return [(r, sc[r]) for r in order]
+    pick_ = [r for r in found if gui(r)] or found
+    return [(r, label(r)) for r in pick_]
+
+
+def label(rel):
+    """«7zFM.exe — C:\\Program Files\\7-Zip» вместо технического пути."""
+    name, where = os.path.basename(rel), os.path.dirname(rel)
+    if where.startswith(".prefix/pfx/drive_c"):
+        where = "C:\\" + where[len(".prefix/pfx/drive_c"):].strip("/").replace("/", "\\")
+    return f"{name} — {where}" if where else name
+
+
+def default_name(path):
+    """Название игры по умолчанию: «Название продукта» файла, иначе — из имени файла."""
+    return clean_name(product_name(path) or os.path.basename(path))
 
 
 def write_manifest(folder, exe, how):
@@ -3233,13 +3410,15 @@ def pick(text, items, labels=None):
     rows = []
     for i, it in enumerate(items):
         rows += [str(i), labels[i] if labels else it]
-    code, out = z("--list", "--width=560", "--height=360", f"--text={text}", "--column=#", "--column=",
-                  "--hide-column=1", "--print-column=1", *rows)
+    code, out = z("--list", "--width=600", "--height=360", f"--text={text}", "--column=#", "--column=",
+                  "--hide-column=1", "--print-column=1", f"--ok-label={t('choose')}", f"--cancel-label={t('cancel')}",
+                  *rows)
     return items[int(out)] if code == 0 and out.isdigit() and int(out) < len(items) else None
 
 
 def entry(text, value):
-    code, out = z("--entry", "--width=460", f"--text={text}", f"--entry-text={value}")
+    code, out = z("--entry", "--width=460", f"--text={text}", f"--entry-text={value}", f"--ok-label={t('ok')}",
+                  f"--cancel-label={t('cancel')}")
     return clean_name(out) if code == 0 and out.strip() else None
 
 
@@ -3257,9 +3436,13 @@ def finish(folder):
 def choose_exe(folder, before=()):
     name = os.path.basename(folder)
     while True:
-        found = exes(folder, before)
+        found = candidates(folder, before)
         if found:
-            exe = found[0] if len(found) == 1 else pick(t("pick", name=name), found[:20])
+            if len(found) == 1:
+                exe = found[0][0]
+            else:
+                labels = [lab + (" " + t("recommended") if i == 0 else "") for i, (_, lab) in enumerate(found[:20])]
+                exe = pick(t("pick", name=name), [r for r, _ in found[:20]], labels)
             if exe:
                 write_manifest(folder, exe, "installer" if exe.startswith(".prefix/") else "portable")
                 return True
@@ -3269,7 +3452,7 @@ def choose_exe(folder, before=()):
 
 
 def do_installer(f):
-    name = entry(t("name"), clean_name(os.path.basename(f)))
+    name = entry(t("name"), default_name(f))
     if not name:
         return
     folder = os.path.join(GD, name)
@@ -3309,7 +3492,7 @@ def do_archive(f):
     finally:
         p.stdin.close()
         p.wait()
-    found = exes(folder)
+    found = candidates(folder)
     setups = [x for x in os.listdir(folder) if x.lower().endswith((".exe", ".msi")) and INSTALLER.search(x)]
     if not found and setups:                              # в архиве установщик — ставить его в эту же игру
         before = set(exes(folder))
