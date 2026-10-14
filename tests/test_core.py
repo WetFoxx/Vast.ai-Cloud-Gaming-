@@ -200,6 +200,27 @@ class TestWaitReady(Base):
         self.assertEqual((e.exception.key, self.deleted), ("core.try_another", [42]))
         self.assertIn("unreachable", str(core.market.bad_hosts().get(str(OFFER["machine_id"]), {}).get("key")))
 
+    def test_silent_but_machine_says_tailscale_ok_keeps_waiting(self):
+        # [2026-10-15] машина сама пишет «Tailscale в порядке» — рвётся у компьютера (VPN): не менять, сказать и ждать
+        self.running_machine()
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "h"))
+        pages = iter([None, None, None, {"boot": (T0 + 60, "ok", "готово")}])
+        self.patch(core, "wolf_status", lambda ip: next(pages, {"boot": (T0 + 60, "ok", "готово")}))
+        self.patch(core, "UNREACH_MIN", -1)
+
+        class Log:
+            def __init__(self, iid):
+                self.broken, self.ts_ok = None, "tok"
+
+            def poll(self, ui, force=False):
+                pass
+        self.patch(core, "_MachineLog", Log)
+        ui = FakeUI()
+        self.assertEqual(core.wait_ready(42, T0, OFFER, ui)["boot"][1], "ok")
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(ui.keys.count("core.mac_cant_reach"), 1)        # один раз, не на каждом круге
+        self.assertNotIn(str(OFFER["machine_id"]), core.market.bad_hosts())
+
     def test_node_gone_resets_silence_timer(self):
         # узел пропал из сети и вернулся — отсчёт «не отвечает» заново (это не та же тишина)
         self.running_machine()

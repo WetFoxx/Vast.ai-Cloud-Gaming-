@@ -105,6 +105,19 @@ class TestBrokenVideo(TestPoll):
         self.assertEqual(self.poll("[vastgame t] журнал Xorg (NVIDIA, ошибки):\n(EE) no screens found\n"),
                          "экран не запускается (Xorg)")                          # образ до 0.5.3
 
+    def test_tailscale_report(self):
+        with mock.patch.object(core, "instance_logs", lambda iid, tail=300: (
+                "[vastgame t] tailscale: NoState offline DERP — адрес — здоровье: Tailscale is starting. Please wait.\n"
+                "[vastgame t] tailscale: Running online DERP tok адрес 100.1.2.3 здоровье: ok\n")):
+            m = core._MachineLog(5)
+            m.poll(Ui(), force=True)
+        self.assertEqual(m.ts_ok, "tok")
+        with mock.patch.object(core, "instance_logs", lambda iid, tail=300:
+                               "[vastgame t] tailscale: Running online DERP tok адрес x здоровье: not connected to home DERP\n"):
+            m = core._MachineLog(5)
+            m.poll(Ui(), force=True)
+        self.assertIsNone(m.ts_ok)                                         # не в порядке — значит, беда машины
+
     def test_wait_replaces_machine(self):
         import inspect
         src = inspect.getsource(core.wait_ready)

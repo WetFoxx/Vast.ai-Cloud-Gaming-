@@ -408,6 +408,7 @@ class _MachineLog:
     def __init__(self, iid):
         self.iid, self.next, self.shown = iid, time.time() + LOG_FIRST, None
         self.broken = None                     # [0.5.3] видео на машине не работает — причина (менять машину сразу)
+        self.ts_ok = None                      # [0.5.3] машина сама пишет «Tailscale в порядке» — сервер-посредник (DERP)
 
     def poll(self, ui, force=False):
         if not force and time.time() < self.next or "unittest" in sys.modules and not self.TESTS:
@@ -428,6 +429,10 @@ class _MachineLog:
                 old.unlink()
         except OSError:
             pass
+        ts = re.findall(r"tailscale: (\w+) (online|offline) DERP (\S+) .*здоровье: (.+)", text)
+        if ts:
+            st, on, derp, health = ts[-1]
+            self.ts_ok = derp if st == "Running" and on == "online" and health.strip() == "ok" else None
         bad = re.findall(r"!!! видео не работает: (.+)", text)
         if bad:
             self.broken = bad[-1].strip()[:150]
@@ -505,7 +510,7 @@ def wait_ready(iid, t0, o, ui, docker=False):
     # ---- Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
     ui.stage("tailscale", "Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
     started = time.time()
-    warned, approve_url, reach_since = False, None, None
+    warned, approve_url, reach_since, mac_warned = False, None, None, False
     mlog = _MachineLog(iid)
     while True:
         try:
@@ -540,8 +545,18 @@ def wait_ready(iid, t0, o, ui, docker=False):
         reach_since = (reach_since or time.time()) if node else None
         if reach_since and time.time() - reach_since > UNREACH_MIN * 60:
             mlog.poll(ui, force=True)
-            _failed_start(iid, f"Машина в сети Tailscale, но не отвечает {UNREACH_MIN} минуты — связи с ней нет.", o, ui,
-                          bad_host=True, key="core.fail_unreachable", min=UNREACH_MIN)
+            if mlog.ts_ok:
+                # Машина сама пишет «Tailscale в порядке» — связь рвётся у компьютера (живой случай 2026-10-15: VPN incy в
+                # режиме TUN, до сервера-посредника в Токио не доходило; корейская машина была исправна). Замена не
+                # поможет, хост не виноват — сказать человеку и ждать дальше (до TAILSCALE_MIN)
+                if not mac_warned:
+                    mac_warned = True
+                    ui.say(f"Машина в порядке, но этот компьютер не достаёт до неё через Tailscale (посредник "
+                           f"{mlog.ts_ok}). Часто мешает VPN — выключи его.", "warn", key="core.mac_cant_reach",
+                           derp=mlog.ts_ok)
+            else:
+                _failed_start(iid, f"Машина в сети Tailscale, но не отвечает {UNREACH_MIN} минуты — связи с ней нет.", o, ui,
+                              bad_host=True, key="core.fail_unreachable", min=UNREACH_MIN)
         if time.time() - started > TAILSCALE_MIN * 60:
             mlog.poll(ui, force=True)
             raise VastgameError(f"!!! Узел не появился в Tailscale за {TAILSCALE_MIN} минут. "
