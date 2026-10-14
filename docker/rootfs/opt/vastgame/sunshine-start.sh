@@ -70,14 +70,22 @@ CONF
   chown "$DU:" "$CONF"
 }
 
+# [0.5.3] Многокарточный хост (Vast сдаёт одну карту из нескольких): кодировщик NVIDIA в контейнере спотыкается о
+# чужие карты («unsupported device», NVIDIA/nvidia-container-toolkit#1249) — vgnv (LD_PRELOAD) оставляет ему только
+# свои, по адресам PCI из nvidia-smi (в контейнере он видит только свои). Ход — /tmp/vgnv.log (диагностика видео)
+NVKEEP=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | tr -d ' ' | paste -sd, -)
+PRE=libvgpad.so
+[ -f /usr/lib/x86_64-linux-gnu/libvgnv.so ] && [ -n "$NVKEEP" ] && PRE="libvgpad.so libvgnv.so"
+
 start() {  # $1 захват  $2 кодировщик
   pkill -u "$DU" -x sunshine; sleep 1
   conf "$1" "$2"
   rm -f "$LOGF"
   if [ "$1" = nvfbc ]; then
-    u setsid env LD_PRELOAD=libvgpad.so LD_LIBRARY_PATH=/opt/fbc "$SUN" "$CONF" </dev/null >/dev/null 2>&1 9>&- &
+    u setsid env LD_PRELOAD="$PRE" VG_NV_KEEP="$NVKEEP" VG_NV_LOG=/tmp/vgnv.log LD_LIBRARY_PATH=/opt/fbc "$SUN" "$CONF" \
+      </dev/null >/dev/null 2>&1 9>&- &
   else
-    u setsid env LD_PRELOAD=libvgpad.so "$SUN" "$CONF" </dev/null >/dev/null 2>&1 9>&- &
+    u setsid env LD_PRELOAD="$PRE" VG_NV_KEEP="$NVKEEP" VG_NV_LOG=/tmp/vgnv.log "$SUN" "$CONF" </dev/null >/dev/null 2>&1 9>&- &
   fi
   # Проверка кодировщиков у Sunshine на медленных хостах идёт дольше 20 с (было 20 — у друга 2026-09-26 так
   # забраковали три исправные машины): ждём до 90 с
@@ -132,6 +140,8 @@ video_diag() {
   ls -1 /usr/lib/x86_64-linux-gnu/libnvidia-encode.so* /usr/lib/x86_64-linux-gnu/libnvcuvid.so* 2>&1 | sed 's/^/  lib: /'
   grep -iE "nvenc|cuda|encod|driver|api version|codec|capab" "$LOGF" 2>/dev/null | grep -viE "may generate errors" \
     | tail -25 | cut -c1-220 | sed 's/^/  sunshine> /'
+  echo "  свои карты (VG_NV_KEEP): ${NVKEEP:-нет}"
+  tail -6 /tmp/vgnv.log 2>/dev/null | sed 's/^/  /'
 }
 if [ -n "$PROBE" ]; then
   pkill -u "$DU" -x sunshine                   # проба закончилась — настоящую Sunshine запустит агент
