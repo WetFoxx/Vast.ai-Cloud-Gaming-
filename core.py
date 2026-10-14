@@ -37,6 +37,9 @@ VAST_START_MIN = 10      # сколько ждать, пока Vast запуст
                          # в Create/Loading (у KVM на Vast такое бывает часто): удалить, взять следующую
 TAILSCALE_WARN_MIN = 10  # после стольких минут без узла — подсказать, где искать причину
 TAILSCALE_MIN = 20       # сколько всего ждать узел в Tailscale
+# [2026-10-15] Узел «в сети», но не отвечает (живой случай: Корея, RTX 2060 — Tailscale видит узел, а ни ping, ни
+# страница машины не проходят, Mac отправил 8 КБ, получил 0) — столько минут, и машину заменить, а не ждать 20
+UNREACH_MIN = 4
 SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown (wolf finish — сколько ждать, пока выгрузка не двигается)
 SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина удалит себя сама (wolf finish ждёт 30 с перед удалением)
 GONE_CHECK_SEC = 60      # пока ждём машину — раз в столько секунд спрашивать Vast, есть ли она ещё
@@ -502,7 +505,7 @@ def wait_ready(iid, t0, o, ui, docker=False):
     # ---- Узел появляется в Tailscale (wolf-setup.sh поднимает его с восстановленной личностью)
     ui.stage("tailscale", "Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
     started = time.time()
-    warned, approve_url = False, None
+    warned, approve_url, reach_since = False, None, None
     mlog = _MachineLog(iid)
     while True:
         try:
@@ -534,6 +537,11 @@ def wait_ready(iid, t0, o, ui, docker=False):
         if node and wolf_status(node[1]) is not None:
             _, ip, dns = node
             break
+        reach_since = (reach_since or time.time()) if node else None
+        if reach_since and time.time() - reach_since > UNREACH_MIN * 60:
+            mlog.poll(ui, force=True)
+            _failed_start(iid, f"Машина в сети Tailscale, но не отвечает {UNREACH_MIN} минуты — связи с ней нет.", o, ui,
+                          bad_host=True, key="core.fail_unreachable", min=UNREACH_MIN)
         if time.time() - started > TAILSCALE_MIN * 60:
             mlog.poll(ui, force=True)
             raise VastgameError(f"!!! Узел не появился в Tailscale за {TAILSCALE_MIN} минут. "

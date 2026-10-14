@@ -188,6 +188,27 @@ class TestWaitReady(Base):
             core.wait_ready(42, T0, OFFER, ui)
         self.assertEqual(e.exception.key, "core.cancel_delete_failed")
 
+    def test_online_but_silent_node_replaced(self):
+        # [2026-10-15] узел в сети, а страница машины не отвечает — через UNREACH_MIN минут заменить машину
+        self.running_machine()
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "h"))
+        self.patch(core, "wolf_status", lambda ip: None)
+        self.patch(core, "UNREACH_MIN", -1)
+        self.patch(core, "delete_instance", self.fake_delete([42]))
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, FakeUI())
+        self.assertEqual((e.exception.key, self.deleted), ("core.try_another", [42]))
+        self.assertIn("unreachable", str(core.market.bad_hosts().get(str(OFFER["machine_id"]), {}).get("key")))
+
+    def test_node_gone_resets_silence_timer(self):
+        # узел пропал из сети и вернулся — отсчёт «не отвечает» заново (это не та же тишина)
+        self.running_machine()
+        nodes = iter([(True, "1", "h"), None, (True, "1", "h"), (True, "1", "h")])
+        self.patch(core, "ts_node", lambda: next(nodes, (True, "1", "h")))
+        pages = iter([None, None, {"boot": (T0 + 60, "ok", "готово")}])
+        self.patch(core, "wolf_status", lambda ip: next(pages, {"boot": (T0 + 60, "ok", "готово")}))
+        self.assertEqual(core.wait_ready(42, T0, OFFER, FakeUI())["boot"][1], "ok")
+
     def test_restore_machine_stops_answering(self):
         self.running_machine()
         self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "h"))
