@@ -362,7 +362,7 @@ class TestOpenFlows(OpenBase):
     def test_installer_to_own_game(self):
         setup = self.f("Downloads/HoYoPlay_setup.exe")
         launcher = ".prefix/pfx/drive_c/Program Files/HoYoPlay/launcher.exe"
-        code, calls = self.run_open(setup, ["0|Genshin", "1|"], install=launcher)    # название; «Готово» (не играть)
+        code, calls = self.run_open(setup, ["0|0", "0|Genshin", "1|"], install=launcher)   # игра; название; «Готово»
         self.assertEqual(code, 0)
         self.assertIn(f"vg-run {self.gd}/Genshin --exe {setup}", calls)
         self.assertEqual(self.manifest("Genshin")["exe"], launcher)
@@ -373,7 +373,7 @@ class TestOpenFlows(OpenBase):
     def test_portable_moved_with_its_folder(self):
         exe = self.f("Downloads/Hollow Knight/hollow_knight.exe")
         self.f("Downloads/Hollow Knight/data/a.dat")
-        code, calls = self.run_open(exe, ["0|1", "0|", "1|"])                       # «portable»; «да»; «Готово»
+        code, calls = self.run_open(exe, ["0|0", "0|1", "0|", "1|"])               # игра; «portable»; «да»; «Готово»
         self.assertEqual(code, 0)
         self.assertEqual(self.manifest("Hollow Knight")["exe"], "hollow_knight.exe")
         self.assertTrue((self.gd / "Hollow Knight/data/a.dat").exists())
@@ -381,13 +381,13 @@ class TestOpenFlows(OpenBase):
 
     def test_cancel_changes_nothing(self):
         exe = self.f("Downloads/Hollow Knight/hollow_knight.exe")
-        code, _ = self.run_open(exe, ["0|1", "1|"])                                  # «portable»; «Отмена»
+        code, _ = self.run_open(exe, ["0|0", "0|1", "1|"])                          # игра; «portable»; «Отмена»
         self.assertTrue(exe.exists())
         self.assertEqual(list(self.gd.iterdir()), [])
 
     def test_play_now_runs_the_game(self):
         exe = self.f("Downloads/Celeste.exe")
-        code, calls = self.run_open(exe, ["0|1", "0|", "0|"])                       # portable; да; «Играть сейчас»
+        code, calls = self.run_open(exe, ["0|0", "0|1", "0|", "0|"])               # игра; portable; да; «Играть сейчас»
         import time
         for _ in range(50):
             calls = self.calls.read_text().splitlines()
@@ -395,6 +395,110 @@ class TestOpenFlows(OpenBase):
                 break
             time.sleep(0.1)
         self.assertIn(f"vg-run {self.gd}/Celeste", calls)
+
+
+class TestProgramsForGames(TestOpenFlows):
+    """[v5.7] Шаг 4а: двойной щелчок по программе для игры — в Programs, игра выбирается сама или из списка."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = self.home / "proc"
+        self.proc.mkdir()
+        self.env["VG_PROC"] = str(self.proc)
+        self.pd = self.home / "Downloads/Programs"
+        sa = self.home / ".steam/debian-installation/steamapps"
+        for appid, name, d in (("2424420", "Avatar Legends", "Avatar"), ("489830", "Skyrim Special Edition", "Skyrim SE"),
+                               ("1493710", "Proton Experimental", "Proton - Experimental"), ("70", "Half-Life", "HL")):
+            (sa / f"appmanifest_{appid}.acf").parent.mkdir(parents=True, exist_ok=True)
+            (sa / f"appmanifest_{appid}.acf").write_text(f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"name"\t\t"{name}"\n'
+                                                         f'\t"installdir"\t\t"{d}"\n}}\n')
+            if appid != "70":                                               # Half-Life — паспорт есть, папки нет
+                (sa / "common" / d).mkdir(parents=True)
+        self.sa = sa
+
+    def run_game(self, appid):
+        (self.proc / "4242").mkdir()
+        (self.proc / "4242/cmdline").write_bytes(f"reaper\0SteamLaunch\0AppId={appid}\0--\0x".encode())
+
+    def texts(self, calls):
+        return "\n".join(calls)                                       # текст окна с переносами — несколько строк журнала
+
+    def test_decisions(self):
+        vo = self.vo
+        for f in ("Vortex-1.12.3-setup.exe", "WeMod-Setup-x64.exe", "skse64_loader.exe", "Fluffy Mod Manager 3.084.zip",
+                  "ReShade_Setup_6.3.exe", "Cheat Engine 7.5.exe", "MO2-2.5.2.7z"):
+            self.assertTrue(vo.is_tool(str(self.f("Downloads/" + f))), f)
+        for f in ("HoYoPlay_setup.exe", "Celeste.exe", "Hollow Knight.zip"):
+            self.assertFalse(vo.is_tool(str(self.f("Downloads/" + f))), f)
+        games = vo.steam_games()
+        self.assertEqual([g["name"] for g in games], ["Avatar Legends", "Skyrim Special Edition"])   # без Proton и без HL
+        self.assertEqual(vo.game_choice(games, set()), (None, True))
+        self.assertEqual(vo.game_choice(games, {"489830"})[0]["name"], "Skyrim Special Edition")
+        self.assertEqual(vo.game_choice(games[:1], set())[0]["appid"], "2424420")
+        self.assertEqual(vo.game_choice([], set()), (None, False))
+        os.environ["VG_PROC"] = str(self.proc)
+        self.addCleanup(os.environ.pop, "VG_PROC", None)
+        self.run_game("489830")
+        vo2 = load_vgopen(self.home)
+        self.assertEqual(vo2.running_appids(), {"489830"})
+        inside = self.f(".steam/debian-installation/steamapps/common/Skyrim SE/skse64_loader.exe")
+        self.assertEqual(vo2.steam_game_of(str(inside))["appid"], "489830")
+
+    def test_known_tool_while_game_runs_no_questions(self):
+        self.run_game("489830")
+        exe = self.f("Downloads/WeMod.exe")
+        code, calls = self.run_open(exe, ["0|"])                          # только «готово»
+        self.assertEqual(code, 0)
+        self.assertTrue((self.pd / "WeMod/WeMod.exe").exists())
+        self.assertFalse(exe.exists())
+        self.assertNotIn("--list", self.texts(calls))                      # ни «что это», ни «для какой игры»
+        self.assertEqual(len([c for c in calls if c.startswith("zenity")]), 1)
+        self.assertIn("· Skyrim Special Edition", self.texts(calls))
+
+    def test_unknown_archive_for_a_game_picked_from_list(self):
+        import zipfile
+        arc = self.home / "Downloads/SomeTool_v1.2.zip"
+        with zipfile.ZipFile(arc, "w") as zf:
+            zf.writestr("SomeTool/SomeTool.exe", b"MZ")
+            zf.writestr("SomeTool/data/a.txt", b"x")
+        code, calls = self.run_open(arc, ["0|1", "0|0", "0|", "0|"])      # программа; Avatar; распаковать; готово
+        self.assertEqual(code, 0)
+        self.assertTrue((self.pd / "SomeTool/SomeTool.exe").exists())     # общая папка сверху поднята
+        self.assertTrue((self.pd / "SomeTool/data/a.txt").exists())
+        self.assertIn("· Avatar Legends", self.texts(calls))
+        self.assertEqual(list((self.home / ".local/share/vastgame/unpack").iterdir()), [])   # временное убрано
+        self.assertFalse(any(p.name.endswith(".vgtmp") for p in self.pd.iterdir()))
+
+    def test_installer_goes_to_programs_for_now(self):
+        setup = self.f("Downloads/Vortex-1.12.3-setup.exe")
+        code, calls = self.run_open(setup, ["0|0", "0|"])                  # Avatar; «понятно»
+        self.assertTrue((self.pd / "Vortex/Vortex-1.12.3-setup.exe").exists())
+        self.assertIn("Install into the game", self.texts(calls))
+        self.assertFalse(any(c.startswith("vg-run") for c in calls))      # не своя игра
+
+    def test_inside_steam_game_and_already_in_programs(self):
+        exe = self.f(".steam/debian-installation/steamapps/common/Skyrim SE/skse64_loader.exe")
+        code, calls = self.run_open(exe, ["0|"])
+        self.assertTrue(exe.exists())
+        self.assertIn("Skyrim Special Edition", self.texts(calls))
+        self.assertEqual(list(self.gd.iterdir()), [])
+        self.calls.unlink()
+        exe2 = self.f("Downloads/Programs/WeMod/WeMod.exe")
+        code, calls = self.run_open(exe2, ["0|"])
+        self.assertTrue(exe2.exists())
+        self.assertEqual(len([c for c in calls if c.startswith("zenity")]), 1)
+
+    def test_cancel_purpose_changes_nothing(self):
+        exe = self.f("Downloads/Unknown.exe")
+        code, calls = self.run_open(exe, ["1|"])
+        self.assertEqual(code, 0)
+        self.assertTrue(exe.exists())
+        self.assertFalse(self.pd.exists() and any(self.pd.iterdir()))
+        self.assertEqual(list(self.gd.iterdir()), [])
+
+
+for _n in [n for n in vars(TestOpenFlows) if n.startswith("test_")]:   # сценарии своих игр — только в TestOpenFlows
+    setattr(TestProgramsForGames, _n, None)
 
 
 class TestOwnSetup(unittest.TestCase):

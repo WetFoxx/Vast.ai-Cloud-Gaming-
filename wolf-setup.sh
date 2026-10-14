@@ -3167,6 +3167,10 @@ import json, os, re, shutil, subprocess, sys, time, zipfile
 
 HOME = os.path.expanduser("~")
 GD = os.environ.get("VG_GAMES") or os.path.join(HOME, "Downloads", "Games")
+PD = os.environ.get("VG_PROGRAMS") or os.path.join(HOME, "Downloads", "Programs")   # [v5.7] программы для игр
+STEAM = [os.environ["VG_STEAM"]] if os.environ.get("VG_STEAM") else \
+    [os.path.join(HOME, x) for x in (".steam/debian-installation", ".local/share/Steam", ".steam/steam")]
+PROC = os.environ.get("VG_PROC") or "/proc"
 STATE = os.path.join(HOME, ".local", "share", "vastgame")
 VGRUN = os.environ.get("VG_RUN") or "/usr/local/bin/vg-run"
 MANIFEST = ".vastgame.json"
@@ -3181,6 +3185,13 @@ KNOWN = {"xivlauncher.exe": "XIVLauncher", "epicgameslauncher.exe": "Epic Games"
          "battle.net.exe": "Battle.net", "upc.exe": "Ubisoft Connect", "ubisoftconnect.exe": "Ubisoft Connect",
          "eadesktop.exe": "EA app", "galaxyclient.exe": "GOG Galaxy", "riotclientservices.exe": "Riot Client",
          "hoyoplay.exe": "HoYoPlay", "wutheringwaves.exe": "Wuthering Waves", "launcher.exe": None}
+# [v5.7] Программы для игр, которые узнаём сами (по имени файла или «Названию продукта»): менеджеры модов, загрузчики,
+# трейнеры, оверлеи — им не нужна своя игра в Games, они работают с игрой Steam
+MOD_TOOLS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|wemod|reshade|xivlauncher|skse|f4se|sfse|obse|"
+                       r"nvse|mod ?engine|seamless|\bersc\b|cheat ?engine|trainer|r2modman|thunderstore|bepinex|melonloader|"
+                       r"special ?k|flawless ?widescreen|wabbajack|\bxedit\b|sseedit|fo4edit|bodyslide|reframework|"
+                       r"cyber ?engine|\bloot\b|wrye", re.I)
+STEAM_TOOLS = re.compile(r"^(proton|steam linux runtime|steamworks|steam controller|steamvr)", re.I)
 
 T = {
  "ru": {"title": "VastGame", "what": "Что это за файл?\n{file}", "kind.installer": "Установщик игры или лаунчера",
@@ -3194,7 +3205,18 @@ T = {
         "inside": "Запустить «{file}» в «диске C:» игры «{name}»?", "main": "Сделать «{file}» главной программой игры «{name}»?",
         "done": "Готово: «{name}» добавлена.\nВ Steam она появится, когда закроются игры (Steam перезапустится сам).",
         "play": "Играть сейчас", "ok": "Готово", "cancel": "Отмена", "bad": "Не получилось: {why}",
-        "choose": "Выбрать", "yes": "Да", "recommended": "(рекомендую)"},
+        "choose": "Выбрать", "yes": "Да", "recommended": "(рекомендую)",
+        "purpose": "Что такое «{file}»?", "purpose.game": "Игра (или её лаунчер)",
+        "purpose.program": "Программа для игры — менеджер модов, загрузчик, трейнер",
+        "which": "Для какой игры «{file}»?",
+        "prog.done": "Готово: «{name}» — в папке Programs, уедет в облако сама.\nЗапуск — в VastGame, блок «Программы игры»{game}: "
+                     "«Запустить» (когда игра запущена) или «Вместе с игрой».",
+        "prog.installer": "Установщик «{name}» — в папке Programs.\nПоставь его в игру: VastGame, блок «Программы игры»{game} → "
+                          "«Установить в игру» (игра должна быть закрыта).",
+        "prog.inside": "«{file}» — в папке игры «{game}».\nЗапуск — в VastGame, блок «Программы игры»: «Запустить» (когда игра "
+                       "запущена) или «Запуск игры через».",
+        "prog.already": "«{file}» уже в папке Programs.\nЗапуск — в VastGame, блок «Программы игры».",
+        "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?"},
  "en": {"title": "VastGame", "what": "What is this file?\n{file}", "kind.installer": "Game or launcher installer",
         "kind.portable": "Game without installation (portable)", "name": "What should the game be called?\nA folder appears in Games, the game appears in Steam.",
         "exists": "«{name}» already exists. Install into it?\n(That's how mods and add-ons with an installer go.)",
@@ -3206,7 +3228,18 @@ T = {
         "inside": "Run «{file}» in the C: drive of «{name}»?", "main": "Make «{file}» the main program of «{name}»?",
         "done": "Done: «{name}» is added.\nIt shows up in Steam once games are closed (Steam restarts by itself).",
         "play": "Play now", "ok": "Done", "cancel": "Cancel", "bad": "That didn't work: {why}",
-        "choose": "Choose", "yes": "Yes", "recommended": "(recommended)"},
+        "choose": "Choose", "yes": "Yes", "recommended": "(recommended)",
+        "purpose": "What is «{file}»?", "purpose.game": "A game (or its launcher)",
+        "purpose.program": "A program for a game — mod manager, loader, trainer",
+        "which": "Which game is «{file}» for?",
+        "prog.done": "Done: «{name}» is in the Programs folder and goes to the cloud by itself.\nStart it in VastGame, "
+                     "«Game programs»{game}: «Start» (while the game runs) or «With the game».",
+        "prog.installer": "The «{name}» installer is in the Programs folder.\nInstall it into the game: VastGame, «Game "
+                          "programs»{game} → «Install into the game» (the game must be closed).",
+        "prog.inside": "«{file}» is in the folder of «{game}».\nStart it in VastGame, «Game programs»: «Start» (while the "
+                       "game runs) or «Start the game through».",
+        "prog.already": "«{file}» is already in the Programs folder.\nStart it in VastGame, «Game programs».",
+        "prog.unpack": "Unpack «{file}» into Programs as «{name}»?"},
  "es": {"title": "VastGame", "what": "¿Qué es este archivo?\n{file}", "kind.installer": "Instalador de un juego o launcher",
         "kind.portable": "Juego sin instalación (portable)", "name": "¿Cómo se llamará el juego?\nAparecerá una carpeta en Games y el juego en Steam.",
         "exists": "«{name}» ya existe. ¿Instalar dentro?\n(Así se instalan mods y extras con instalador.)",
@@ -3218,7 +3251,18 @@ T = {
         "inside": "¿Ejecutar «{file}» en la unidad C: de «{name}»?", "main": "¿Hacer de «{file}» el programa principal de «{name}»?",
         "done": "Listo: «{name}» se añadió.\nAparecerá en Steam cuando se cierren los juegos (Steam se reinicia solo).",
         "play": "Jugar ahora", "ok": "Listo", "cancel": "Cancelar", "bad": "No funcionó: {why}",
-        "choose": "Elegir", "yes": "Sí", "recommended": "(recomendado)"},
+        "choose": "Elegir", "yes": "Sí", "recommended": "(recomendado)",
+        "purpose": "¿Qué es «{file}»?", "purpose.game": "Un juego (o su launcher)",
+        "purpose.program": "Un programa para un juego: gestor de mods, cargador, trainer",
+        "which": "¿Para qué juego es «{file}»?",
+        "prog.done": "Listo: «{name}» está en la carpeta Programs y se sube a la nube sola.\nSe inicia en VastGame, "
+                     "«Programas del juego»{game}: «Iniciar» (con el juego abierto) o «Con el juego».",
+        "prog.installer": "El instalador de «{name}» está en la carpeta Programs.\nInstálalo en el juego: VastGame, "
+                          "«Programas del juego»{game} → «Instalar en el juego» (el juego debe estar cerrado).",
+        "prog.inside": "«{file}» está en la carpeta de «{game}».\nSe inicia en VastGame, «Programas del juego»: «Iniciar» "
+                       "(con el juego abierto) o «Iniciar el juego con».",
+        "prog.already": "«{file}» ya está en la carpeta Programs.\nSe inicia en VastGame, «Programas del juego».",
+        "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?"},
 }
 
 
@@ -3245,6 +3289,75 @@ def kind(path):
     if low.endswith(".msi") or INSTALLER.search(os.path.basename(path)):
         return "installer"
     return "ask"
+
+
+def is_tool(path):
+    """[v5.7] Знакомая программа для игр (менеджер модов, загрузчик, трейнер) — по имени файла или «Названию продукта»."""
+    return bool(MOD_TOOLS.search(os.path.basename(path)) or (path.lower().endswith(".exe") and MOD_TOOLS.search(product_name(path))))
+
+
+def under(path, base):
+    rp, b = os.path.realpath(path), os.path.realpath(base)
+    return rp.startswith(b + os.sep)
+
+
+def steam_root():
+    return next((r for r in STEAM if os.path.isdir(os.path.join(r, "steamapps"))), None)
+
+
+def steam_games():
+    """[v5.7] Игры Steam на машине: [{appid, name, dir}] по названию (служебное Steam — нет; папки игры нет — нет)."""
+    root, out = steam_root(), []
+    if not root:
+        return out
+    sa = os.path.join(root, "steamapps")
+    for f in sorted(os.listdir(sa)):
+        m = re.match(r"appmanifest_(\d+)\.acf$", f)
+        if not m:
+            continue
+        try:
+            text = open(os.path.join(sa, f), encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        name = re.search(r'"name"\s+"([^"]*)"', text)
+        d = re.search(r'"installdir"\s+"([^"]*)"', text)
+        if not d or "/" in d.group(1) or d.group(1) in ("", ".", ".."):
+            continue
+        g = {"appid": m.group(1), "name": name.group(1) if name else d.group(1), "dir": os.path.join(sa, "common", d.group(1))}
+        if os.path.isdir(g["dir"]) and not STEAM_TOOLS.match(g["name"]):
+            out.append(g)
+    return sorted(out, key=lambda g: g["name"].lower())
+
+
+def running_appids():
+    """Номера запущенных игр Steam (у их процессов в командной строке «AppId=N»)."""
+    out = set()
+    try:
+        pids = [d for d in os.listdir(PROC) if d.isdigit()]
+    except OSError:
+        return out
+    for d in pids:
+        try:
+            out |= set(re.findall(rb"AppId=(\d+)", open(os.path.join(PROC, d, "cmdline"), "rb").read()))
+        except OSError:
+            continue
+    return {x.decode() for x in out}
+
+
+def steam_game_of(path, games=None):
+    """Игра Steam, в папке которой лежит файл, или None."""
+    return next((g for g in games if under(path, g["dir"])), None) if games is not None else \
+        steam_game_of(path, steam_games())
+
+
+def game_choice(games, running):
+    """(игра, нужно ли спрашивать): запущенная — она; одна на машине — она; нет игр — (None, False); иначе спросить."""
+    run = [g for g in games if g["appid"] in running]
+    if run:
+        return run[0], False
+    if len(games) == 1:
+        return games[0], False
+    return None, len(games) > 1
 
 
 def game_of(path):
@@ -3453,18 +3566,26 @@ def portable_plan(exe):
     return parent, clean_name(os.path.basename(parent)), os.path.relpath(os.path.realpath(exe), parent).replace(os.sep, "/")
 
 
-def unique(name):
+def unique(name, base=GD):
     n, i = name, 2
-    while os.path.exists(os.path.join(GD, n)):
+    while os.path.exists(os.path.join(base, n)):
         n, i = f"{name} {i}", i + 1
     return n
 
 
 def unpack(archive, dest):
-    """Распаковать в dest (только внутрь); одна общая папка сверху — её содержимое поднимается в dest."""
-    tmp = dest + ".vgtmp"
+    """Распаковать в dest (только внутрь); одна общая папка сверху — её содержимое поднимается в dest. [v5.7] Временная
+    папка — вне Games и Programs: машина не выгрузит недораспакованное."""
+    tmp = os.path.join(STATE, "unpack", f"{os.getpid()}-{os.path.basename(dest)}")
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
+    try:
+        _unpack(archive, tmp, dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _unpack(archive, tmp, dest):
     if archive.lower().endswith(".zip"):
         with zipfile.ZipFile(archive) as z:
             for n in z.namelist():
@@ -3485,7 +3606,6 @@ def unpack(archive, dest):
     items = [x for x in os.listdir(tmp) if not x.startswith("__MACOSX")]
     src = os.path.join(tmp, items[0]) if len(items) == 1 and os.path.isdir(os.path.join(tmp, items[0])) else tmp
     shutil.move(src, dest)
-    shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- окна
@@ -3637,11 +3757,73 @@ def do_inside(f):
         finish(folder)
 
 
+# ---------------------------------------------------------------- [v5.7] программы для игр
+def choose_game(f):
+    games = steam_games()
+    g, need = game_choice(games, running_appids())
+    if need:
+        g = pick(t("which", file=os.path.basename(f)), games, [x["name"] for x in games])
+    return g
+
+
+def game_part(g):
+    return f" · {g['name']}" if g else ""
+
+
+def do_program(f, g):
+    """Программа для игры: архив — распаковать, .exe или его папку — перенести в Programs/Название; установщик — туда
+    же (ставится в игру из VastGame — «Установить в игру»). Папка Programs уезжает в облако сама."""
+    os.makedirs(PD, exist_ok=True)
+    low = f.lower()
+    if low.endswith(ARCHIVES):
+        name = unique(clean_name(os.path.basename(f)), PD)
+        if not ask(t("prog.unpack", file=os.path.basename(f), name=name), t("ok")):
+            return
+        unpack(f, os.path.join(PD, name))
+    elif low.endswith(".msi") or INSTALLER.search(os.path.basename(f)):
+        name = unique(default_name(f), PD)
+        os.makedirs(os.path.join(PD, name))
+        shutil.move(f, os.path.join(PD, name, os.path.basename(f)))
+        info(t("prog.installer", name=name, game=game_part(g)))
+        return
+    else:
+        src, name, _ = portable_plan(f)
+        name = unique(clean_name(product_name(f) or name) if src == f else name, PD)
+        if src == f:
+            os.makedirs(os.path.join(PD, name))
+            shutil.move(f, os.path.join(PD, name, os.path.basename(f)))
+        else:
+            shutil.move(src, os.path.join(PD, name))
+    info(t("prog.done", name=name, game=game_part(g)))
+
+
 def main(a):
     if not a or not os.path.isfile(a[0]):
         return 2
     f = os.path.realpath(a[0])
     os.makedirs(GD, exist_ok=True)
+    try:
+        if not game_of(f):                               # [v5.7] своя игра в Games — как раньше; иначе: программа?
+            g = steam_game_of(f)
+            if g:
+                info(t("prog.inside", file=os.path.basename(f), game=g["name"]))
+                return 0
+            if under(f, PD):
+                info(t("prog.already", file=os.path.basename(f)))
+                return 0
+            p = "program" if is_tool(f) else pick(t("purpose", file=os.path.basename(f)), ["game", "program"],
+                                                  [t("purpose.game"), t("purpose.program")])
+            if not p:
+                return 0
+            if p == "program":
+                g = choose_game(f)
+                if g is None and len(steam_games()) > 1:
+                    return 0                              # список был — человек нажал «Отмена»
+                do_program(f, g)
+                return 0
+    except Exception as e:
+        info(t("bad", why=f"{type(e).__name__}: {str(e)[:200]}"))
+        return 1
     k = kind(f)
     if k == "ask":
         k = pick(t("what", file=os.path.basename(f)), ["installer", "portable"],
