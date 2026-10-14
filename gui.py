@@ -855,7 +855,7 @@ class Api:
         return {**lib, "progs_sel": settings.get("progs_sel") or {},                # [v5.4] программы «вместе с игрой»
                 "launch_sel": settings.get("launch_sel") or {},              # [v5.6] «запускать игру через»
                 "mods": mods if mods is not None else settings.get("mods_known") or {},
-                "mods_save": settings.get("mods_sel") or {},
+                "mods_save": cloudgames.mods_sel(),
                 "lgame": lgame if lgame is not None else settings.get("lgame_known") or {},
                 "gdata": settings.get("gdata_sel") or {},
                 "recipes": settings.get("recipe_sel") or {},

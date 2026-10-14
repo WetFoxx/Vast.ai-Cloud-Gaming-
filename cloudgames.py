@@ -146,9 +146,21 @@ def gdata_list():
     return sorted(a for a, v in (settings.get("gdata_sel") or {}).items() if v and str(a).isdigit())
 
 
-def remember_mods(appid, yes):
-    """Тумблер «Сохранять моды в облако» этой игры — для следующих машин (VG_SYNC "mods")."""
+def mods_sel():
+    """[v5.7] Выбор «С модами / Без модов» по играм {номер: bool}. Один раз стирает «выключено» прежних версий: там
+    тумблер «Моды» был выключен по умолчанию и записывался при каждом запуске игры — это не выбор человека, а теперь по
+    умолчанию «С модами» (решение Алексея 2026-10-14)."""
     sel = dict(settings.get("mods_sel") or {})
+    if not settings.get("mods_sel_v57"):
+        sel = {a: v for a, v in sel.items() if v}
+        settings.set("mods_sel", sel)
+        settings.set("mods_sel_v57", True)
+    return sel
+
+
+def remember_mods(appid, yes):
+    """Выбор «С модами / Без модов» этой игры — для следующих машин (VG_SYNC "mods")."""
+    sel = mods_sel()
     sel[str(appid)] = bool(yes)
     settings.set("mods_sel", sel)
 
@@ -156,7 +168,7 @@ def remember_mods(appid, yes):
 def mods_answers():
     """{"yes": [номера], "no": [номера], "all": True} — игры «С модами» / «Без модов», для машины (v5.1: вопросов нет;
     «Без модов» — моды остаются в облаке, изменения не сохраняются)."""
-    sel = settings.get("mods_sel") or {}
+    sel = mods_sel()
     # [v5.7] «С модами» — по умолчанию у всех игр ("all"), «Без модов» — исключения ("no")
     return {"yes": sorted(a for a, v in sel.items() if v and str(a).isdigit()),
             "no": sorted(a for a, v in sel.items() if not v and str(a).isdigit()), "all": True}

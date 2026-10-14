@@ -907,6 +907,17 @@ class TestModsSave(unittest.TestCase):
         self.assertEqual(gui.cloudgames.mods_answers(), {"yes": [], "no": ["10"], "all": True})
         self.assertIn("error", api.set_mods_save("10; rm", True))
 
+    def test_old_mods_off_forgotten_once(self):
+        # [v5.7] «выключено» прежних версий — не выбор человека (тумблер был выключен по умолчанию): стирается один раз,
+        # «включено» остаётся; «Без модов», выбранное после этого, запоминается и больше не стирается
+        gui.settings.set("mods_sel", {"10": True, "20": False, "30": False})
+        gui.settings.set("mods_sel_v57", None)
+        self.addCleanup(gui.settings.set, "mods_sel", None)
+        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": ["10"], "no": [], "all": True})
+        self.assertEqual(gui.Api().set_mods_save("20", False), {"ok": True})
+        self.assertEqual(gui.cloudgames.mods_answers(), {"yes": ["10"], "no": ["20"], "all": True})
+        self.assertEqual(gui.cloudgames.mods_sel(), {"10": True, "20": False})
+
     def test_recipe_toggle(self):
         # [v5.6] «Русский перевод» — только у FF14 (пробной и полной); машине — {номер: [рецепт]}
         api = gui.Api()
