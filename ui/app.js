@@ -521,12 +521,15 @@ function trafficText(o, sep = " / ") {
 // или ошибка хоста), фоновый процесс возьмёт следующую из этого списка — в порядке и с фильтрами человека, но только
 // «не хуже»: видеокарта не слабее, цена в час не выше (в Docker — и трафик), пинг не больше (пинг выбранной неизвестен —
 // только из той же страны). Цену фоновый процесс перепроверяет ещё раз по свежим данным.
+// [2026-10-15] Замена — «похожая», а не «не хуже»: видеокарта не слабее, цена и трафик до +20%, пинг до +25% и 20 мс
+// (раньше после сбоя часто не оставалось ни одной замены). Тот же запас +20% по цене сверяет фоновый процесс (jobs.py)
+const SPARE_MARGIN = 1.2;
 function notWorse(x, o) {
   const gx = gpuRank(x), go = gpuRank(o);
-  if (gx == null || go == null || gx < go || x.price > o.price) return false;
-  if (offersDocker && x.traffic_tb > o.traffic_tb) return false;
+  if (gx == null || go == null || gx < go || x.price > o.price * SPARE_MARGIN + 1e-9) return false;
+  if (offersDocker && x.traffic_tb > o.traffic_tb * SPARE_MARGIN + 1e-9) return false;
   if (o.ping.ms == null) return x.cc === o.cc;
-  return x.ping.ms != null && x.ping.ms <= o.ping.ms;
+  return x.ping.ms != null && x.ping.ms <= o.ping.ms * 1.25 + 20;
 }
 function spareFor(id) {
   const list = offerList(offersData), o = list.find((x) => x.id === id);

@@ -79,12 +79,46 @@ class TestSunshineReport(unittest.TestCase):
 
     def run_block(self, log):
         text = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
-        a = text.index('  if grep -qE "Found \\[0\\] outputs')
-        b = text.index("  fi\n", a) + 5
+        a = text.index("why_bad() {")
+        b = text.index("\n}\n", a) + 3
         d = Path(tempfile.mkdtemp())
         (d / "log").write_text(log)
-        script = f'LOGF={d}/log\nTRIES=3\nreport() {{ echo "$1|$2"; }}\n' + text[a:b]
+        script = f'LOGF={d}/log\nTRIES=3\n' + text[a:b] + 'echo "err|$(why_bad)"'
         return sh("bash", "-c", script).stdout.strip()
+
+    def run_probe(self, log):
+        """[0.5.3] Итог пробы кодировщика — строкой в журнал контейнера (её читает приложение у Vast)."""
+        text = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
+        a = text.index("why_bad() {")
+        b = text.index("  exit 0\nfi\n", a) + len("  exit 0\nfi\n")
+        d = Path(tempfile.mkdtemp())
+        (d / "log").write_text(log)
+        body = text[a:b].replace("/run/vastgame/nvenc", f"{d}/nvenc")
+        script = f'LOGF={d}/log\nTRIES=3\nPROBE=1\nDU=user\npkill() {{ :; }}\n' + body + "echo NOT-PROBE"
+        out = sh("bash", "-c", script).stdout.strip()
+        return out, (d / "nvenc").read_text().strip() if (d / "nvenc").exists() else None
+
+    def test_probe_results(self):
+        out, nv = self.run_probe("[t]: Info: Found H.264 encoder: h264_nvenc\n")
+        self.assertEqual((out, nv), ("видео: NVENC работает (проба)", "ok"))
+        out, nv = self.run_probe("[t]: Error: Could not open codec [h264_nvenc]: Function not implemented\n"
+                                 "[t]: Fatal: Couldn't find any working encoder\n")
+        self.assertEqual(nv, "no")
+        self.assertEqual(out, "!!! видео не работает: NVENC не работает (3 попытки): Error: Could not open codec "
+                              "[h264_nvenc]: Function not implemented")
+        out, nv = self.run_probe("[t]: Info: Found [0] outputs\n[t]: Fatal: Couldn't find any working encoder\n")
+        self.assertTrue(out.startswith("!!! видео не работает: нет выхода на монитор"), out)
+        out, nv = self.run_probe("[t]: Info: still testing\n")              # не закончилась — не браковать
+        self.assertEqual((out, nv), ("видео: проба NVENC не закончилась за 90 с — проверит агент", None))
+
+    def test_probe_wiring(self):
+        sun = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
+        self.assertIn("C=/tmp/sunshine-probe; CONF=$C/probe.conf; STATE=$C/state.json", sun)   # не трогает связку
+        self.assertLess(sun.index("C=/tmp/sunshine-probe"), sun.index("conf() {"))
+        ep = (D / "rootfs/opt/vastgame/entrypoint.sh").read_text()
+        self.assertIn('"$V/sunshine-start.sh" probe', ep)
+        self.assertLess(ep.index('"$V/sunshine-start.sh" probe'), ep.index("stage wolf"))      # до агента
+        self.assertIn('log "!!! видео не работает: экран не запускается:', ep)
 
     def test_no_outputs(self):
         out = self.run_block("Info: Found [0] outputs\nFatal: Platform failed to initialize\n"

@@ -203,7 +203,9 @@ def disk_size(disk, tpl):
 # больше — это отбирает страница, цена в час и трафик не выше — перепроверяется здесь по свежим ценам); таких нет —
 # ошибка core.no_spare, человек выбирает сам.
 RACE = 1             # машин сразу
-MAX_RENTS = 3        # всего аренд за один запуск: выбранная и до двух замен
+MAX_RENTS = 5        # всего аренд за один запуск: выбранная и до четырёх замен ([2026-10-15] было 3 — не хватало)
+SPARE_MARGIN = 1.2   # [2026-10-15] замена — «похожая»: цена в час и трафик до +20% к выбранной (было «не дороже» —
+                     # после сбоя часто не оставалось ни одной замены)
 RACE_POLL = 10       # с: как часто спрашивать Vast о состоянии машин
 GONE_WAIT = 60       # с: ждать, пока удалённая машина исчезнет у Vast, прежде чем брать другую
 
@@ -319,8 +321,8 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
                     raise                              # выбранную заняли, пока подтверждали
                 continue                               # замену заняли или не подходит — дальше по списку
             if not chosen and (o.get("machine_id") in used or str(o.get("machine_id")) in bad
-                               or o.get("dph_total", 0) > limit["price"] + 1e-6
-                               or docker and _traffic(o) > limit["traffic"] + 1e-9):
+                               or o.get("dph_total", 0) > limit["price"] * SPARE_MARGIN + 1e-6
+                               or docker and _traffic(o) > limit["traffic"] * SPARE_MARGIN + 1e-9):
                 continue
             if not announced:
                 job.stage("vast", "Vast запускает машину")

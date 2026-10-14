@@ -89,6 +89,34 @@ class TestPoll(unittest.TestCase):
             core._MachineLog(1).poll(Ui(), force=True)
 
 
+class TestBrokenVideo(TestPoll):
+    """[0.5.3] «!!! видео не работает» в журнале — машину менять сразу, не дожидаясь Tailscale."""
+
+    def poll(self, text):
+        with mock.patch.object(core, "instance_logs", lambda iid, tail=300: text):
+            m = core._MachineLog(5)
+            m.poll(Ui(), force=True)
+        return m.broken
+
+    def test_markers(self):
+        self.assertIsNone(self.poll(LOG))
+        self.assertEqual(self.poll(LOG + "[vastgame t] !!! видео не работает: NVENC не работает (3 попытки): Error: x\n"),
+                         "NVENC не работает (3 попытки): Error: x")
+        self.assertEqual(self.poll("[vastgame t] журнал Xorg (NVIDIA, ошибки):\n(EE) no screens found\n"),
+                         "экран не запускается (Xorg)")                          # образ до 0.5.3
+
+    def test_wait_replaces_machine(self):
+        import inspect
+        src = inspect.getsource(core.wait_ready)
+        i = src.index("mlog.poll(ui)\n")
+        self.assertIn("if mlog.broken:", src[i:i + 200])
+        self.assertIn('key="core.fail_nvenc"', src[i:i + 500])
+
+
+for _n in [n for n in vars(TestPoll) if n.startswith("test_")]:
+    setattr(TestBrokenVideo, _n, None)
+
+
 class TestVastRequest(unittest.TestCase):
     def test_put_then_s3(self):
         calls = []

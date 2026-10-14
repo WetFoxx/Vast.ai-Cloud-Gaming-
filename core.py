@@ -376,7 +376,7 @@ class _Watch:
 # [2026-10-14] Пока ждём узел в Tailscale, машину не видно — а там много шагов (драйвер NVIDIA, экран, скрипт,
 # сетевая личность с Drive). Журнал контейнера есть у Vast без Tailscale: раз в минуту — что машина делает сейчас
 # (на экран запуска), сам журнал без секретов — в machine-logs/<номер>.log (разбор зависших запусков)
-LOG_FIRST, LOG_EVERY, LOG_KEEP = 60, 60, 20
+LOG_FIRST, LOG_EVERY, LOG_KEEP = 30, 30, 20
 _STAGE = re.compile(r"этап: (\w+)")
 _SECRET = re.compile(r"(?i)((?:api[_-]?key|token|secret|passw\w*|authkey|bearer|cookie|credential)\w*\s*[=:]\s*)\S+")
 _LONG = re.compile(r"[A-Za-z0-9_\-+/=.]{40,}")
@@ -404,6 +404,7 @@ class _MachineLog:
 
     def __init__(self, iid):
         self.iid, self.next, self.shown = iid, time.time() + LOG_FIRST, None
+        self.broken = None                     # [0.5.3] видео на машине не работает — причина (менять машину сразу)
 
     def poll(self, ui, force=False):
         if not force and time.time() < self.next or "unittest" in sys.modules and not self.TESTS:
@@ -424,6 +425,11 @@ class _MachineLog:
                 old.unlink()
         except OSError:
             pass
+        bad = re.findall(r"!!! видео не работает: (.+)", text)
+        if bad:
+            self.broken = bad[-1].strip()[:150]
+        elif "журнал Xorg (NVIDIA, ошибки):" in text:         # образ до 0.5.3: экран не поднялся
+            self.broken = "экран не запускается (Xorg)"
         stage, last = machine_step(text)
         if stage and (stage, last) != self.shown:
             self.shown = (stage, last)
@@ -505,6 +511,10 @@ def wait_ready(iid, t0, o, ui, docker=False):
             mlog.poll(ui, force=True)                  # отменили / машину удалили — журнал на разбор
             raise
         mlog.poll(ui)
+        if mlog.broken:
+            # [0.5.3] поломку видео видно в журнале Vast за минуту — не ждать Tailscale (раньше 5–10 минут на машину)
+            _failed_start(iid, f"На этой машине не работает видео: {mlog.broken}.", o, ui,
+                          bad_host=True, key="core.fail_nvenc", msg=mlog.broken)
         # Первая машина без личности в облаке и без ключа ждёт одобрения в Tailscale (v3.12):
         # ссылку она кладёт на Drive — показать/открыть её человеку; пока ждём его, таймер заново
         url = drive.ts_login_link(iid)

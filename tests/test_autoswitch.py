@@ -172,6 +172,15 @@ class Race(unittest.TestCase):
         self.assertIsNone(job.error)
         self.assertEqual(self.rented, [1, 3])
 
+    def test_replacement_a_bit_more_expensive_is_fine(self):
+        # [2026-10-15] «похожая»: до +20% к цене выбранной — берём (раньше — только не дороже, и замен не оставалось)
+        self.over = {2: {"dph_total": 0.22}}
+        self.run_after = {2: 30}
+        job = self.play(spare=(2,))
+        self.assertIsNone(job.error)
+        self.assertEqual(self.rented, [1, 2])
+        self.assertEqual(jobs.MAX_RENTS, 5)
+
     def test_docker_replacement_traffic_not_higher(self):
         self.over = {1: {"inet_up_cost": 0.001}, 2: {"inet_up_cost": 0.002}, 3: {"inet_down_cost": 0.001}}
         self.run_after = {2: 30, 3: 30}
