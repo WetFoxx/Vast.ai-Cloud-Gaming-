@@ -185,6 +185,52 @@ class TestChoice(World):
         self.assertEqual((rep["running"], rep["installed"]), (False, True))   # игра с выбором — в отчёте и без запуска
         self.assertEqual(rep["launch"], {"id": "pfx:" + XIV, "args": ""})
 
+    def test_helper_requests(self):
+        # [v5.7] просьбы помощника двойного щелчка: закрытый список, номер — цифры, путь — game/prog/pfx; выбор (auto,
+        # launch) запоминается и уходит окну в отчёте progs (поле helper)
+        d = self.w.d / "req"
+        d.mkdir()
+        import io, contextlib
+
+        def parse(obj, link=False):
+            f = d / "r.json"
+            if f.exists() or f.is_symlink():
+                f.unlink()
+            if link:
+                (d / "t.json").write_text(json.dumps(obj))
+                f.symlink_to(d / "t.json")
+            else:
+                f.write_text(json.dumps(obj))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = ws.helper_req(str(f))
+            return code, out.getvalue().strip()
+        ok = {"cmd": "auto", "appid": APP, "id": "prog:WeMod/WeMod.exe", "value": "on"}
+        self.assertEqual(parse(ok), (0, f"auto\t{APP}\tprog:WeMod/WeMod.exe\ton"))
+        self.assertEqual(parse({**ok, "cmd": "run", "value": ""})[0], 0)
+        self.assertEqual(parse({**ok, "cmd": "launch", "value": "-silent"})[0], 0)
+        for bad in ({**ok, "cmd": "rm"}, {**ok, "appid": "1; rm"}, {**ok, "id": "/etc/passwd"}, {**ok, "id": "inst:x.exe"},
+                    {**ok, "value": "maybe"}, {**ok, "id": "prog:a\tb"}):
+            self.assertEqual(parse(bad), (1, ""), bad)
+        self.assertEqual(parse(ok, link=True), (1, ""))                       # ссылка вместо файла — нет
+        ws.helper_note(str(self.w.sdir), APP, "auto", "prog:WeMod/WeMod.exe", "on")
+        ws.helper_note(str(self.w.sdir), APP, "launch", "pfx:" + XIV, "")
+        ws.tick(self.w.root, str(self.w.pd), str(self.w.sdir), None, now=1000, home=str(self.home))
+        rep = json.loads((self.w.sdir / "st/progs").read_text().split("|", 2)[2])[APP]
+        self.assertEqual(rep["helper"]["auto"], ["prog:WeMod/WeMod.exe"])
+        self.assertEqual(rep["helper"]["launch"], {"id": "pfx:" + XIV, "args": ""})
+        self.assertGreater(rep["helper"]["t"], 0)
+        ws.helper_note(str(self.w.sdir), APP, "auto", "prog:WeMod/WeMod.exe", "off")
+        self.assertEqual(json.loads((self.w.sdir / "progs.helper").read_text())[APP]["auto"], [])
+
+    def test_helper_requests_wiring(self):
+        from test_game_select import fn
+        f = fn("prog_requests")
+        self.assertIn("wolf-steam.py helper-req", f)
+        self.assertIn('auto)   r=$(prog_cmd auto "$a" "$id" "$v"', f)
+        self.assertIn("helper-note", f)
+        self.assertIn("prog_requests", fn("watch_games"))
+
 
 class TestWrapper(unittest.TestCase):
     """vg-launch — настоящий bash; «Steam» — команда, у которой первым стоит скрипт, печатающий свои аргументы."""

@@ -146,6 +146,26 @@ class TestPrograms(unittest.TestCase):
             self.assertIn("error", gui.Api().prog_run(a, i))
         self.assertEqual(self.calls, [])
 
+    def test_choice_from_machine_helper_remembered_once(self):
+        # [v5.7] выбор помощника двойного щелчка на машине («вместе с игрой», «запуск через») — окну в память, один раз
+        gui.settings.set("launch_sel", None)
+        gui.settings.set("progs_helper_seen", None)
+        self.addCleanup(gui.settings.set, "launch_sel", None)
+        self.addCleanup(gui.settings.set, "progs_helper_seen", None)
+        gui.settings.set("progs_sel", {"1": ["game:t.exe"]})
+        rep = {"1": {"progs": [], "helper": {"t": 100, "auto": ["prog:WeMod/WeMod.exe", "/bin/sh"],
+                                             "launch": {"id": "pfx:XIV/XIVLauncher.exe", "args": ""}}},
+               "2": {"progs": [], "helper": {"t": "x", "auto": ["prog:a.exe"]}}}          # испорченный — мимо
+        gui.Api()._progs(rep)
+        self.assertEqual(gui.settings.get("progs_sel"), {"1": ["game:t.exe", "prog:WeMod/WeMod.exe"]})
+        self.assertEqual(gui.settings.get("launch_sel"), {"1": {"id": "pfx:XIV/XIVLauncher.exe", "args": ""}})
+        gui.Api().prog_auto("1", "prog:WeMod/WeMod.exe", False)                       # человек выключил в окне
+        gui.Api()._progs(rep)                                                          # тот же отчёт — не возвращаем
+        self.assertEqual(gui.settings.get("progs_sel"), {"1": ["game:t.exe"]})
+        rep["1"]["helper"]["t"] = 200                                                  # помощник снова включил
+        gui.Api()._progs(rep)
+        self.assertEqual(gui.settings.get("progs_sel"), {"1": ["game:t.exe", "prog:WeMod/WeMod.exe"]})
+
     def test_auto_remembered_and_sent(self):
         api = gui.Api()
         api.prog_auto("1", "prog:WeMod/WeMod.exe", True)

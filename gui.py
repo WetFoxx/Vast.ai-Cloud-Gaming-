@@ -764,11 +764,34 @@ class Api:
         """Программы игр с машины + названия игр (из библиотеки или игры, с которой арендована машина)."""
         if not progs:
             return {}
+        self._from_machine(progs)
         games = {g["appid"]: g.get("name") for g in (steamlib.cached() or {}).get("games") or []}
         now = settings.get("play_now") or {}
         for a, v in progs.items():
             v["name"] = games.get(a) or (now.get("name") if str(now.get("appid")) == a else "") or v.get("name") or ""
         return progs
+
+    @staticmethod
+    def _from_machine(progs):
+        """[v5.7] Выбор, сделанный на машине помощником двойного щелчка («Вместе с игрой», «Запуск игры через»), — себе в
+        память, один раз на каждое изменение (поле helper.t в отчёте машины): следующая машина получит его так же, как
+        выбор из окна. Помощник только включает — выключают в окне."""
+        seen = dict(settings.get("progs_helper_seen") or {})
+        for a, v in progs.items():
+            h = v.get("helper") if isinstance(v, dict) else None
+            if not (str(a).isdigit() and isinstance(h, dict) and isinstance(h.get("t"), int) and h["t"] > seen.get(a, 0)):
+                continue
+            auto = [x for x in h.get("auto") or [] if isinstance(x, str) and PROG_ID.match(x)]
+            if auto:
+                sel = settings.get("progs_sel") or {}
+                settings.set("progs_sel", {**sel, a: (sel.get(a) or []) + [x for x in auto if x not in (sel.get(a) or [])]})
+            via = h.get("launch")
+            if isinstance(via, dict) and isinstance(via.get("id"), str) and PROG_ID.match(via["id"]) \
+                    and PROG_ARGS.match(str(via.get("args") or "")):
+                settings.set("launch_sel", {**(settings.get("launch_sel") or {}), a: {"id": via["id"], "args": str(via.get("args") or "")}})
+            seen[a] = h["t"]
+            settings.applog(f"выбор с машины для {a}: вместе с игрой {auto or '—'}, запуск через {(via or {}).get('id', '—')}")
+            settings.set("progs_helper_seen", seen)
 
     def prog_run(self, appid, ident):
         """Запустить программу рядом с игрой. {"result": ok|running|nogame|noproton|nofile}."""

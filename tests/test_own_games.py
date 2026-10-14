@@ -422,6 +422,15 @@ class TestProgramsForGames(TestOpenFlows):
         (self.proc / "4242").mkdir()
         (self.proc / "4242/cmdline").write_bytes(f"reaper\0SteamLaunch\0AppId={appid}\0--\0x".encode())
 
+    def asked(self):
+        """Просьбы помощника машине (requests/prog), по порядку: (cmd, appid, id, value)."""
+        d = self.home / ".local/share/vastgame/requests/prog"
+        out = []
+        for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+            j = json.loads(f.read_text())
+            out.append((j["cmd"], j["appid"], j["id"], j["value"]))
+        return out
+
     def texts(self, calls):
         return "\n".join(calls)                                       # текст окна с переносами — несколько строк журнала
 
@@ -449,9 +458,11 @@ class TestProgramsForGames(TestOpenFlows):
     def test_known_tool_while_game_runs_no_questions(self):
         self.run_game("489830")
         exe = self.f("Downloads/WeMod.exe")
-        code, calls = self.run_open(exe, ["0|"])                          # только «готово»
+        code, calls = self.run_open(exe, ["0|"])                          # только «вместе с игрой?» — «да»
         self.assertEqual(code, 0)
         self.assertTrue((self.pd / "WeMod/WeMod.exe").exists())
+        self.assertEqual(self.asked(), [("auto", "489830", "prog:WeMod/WeMod.exe", "on"),
+                                        ("run", "489830", "prog:WeMod/WeMod.exe", "")])   # игра идёт — открыть сразу
         self.assertFalse(exe.exists())
         self.assertNotIn("--list", self.texts(calls))                      # ни «что это», ни «для какой игры»
         self.assertEqual(len([c for c in calls if c.startswith("zenity")]), 1)
@@ -463,8 +474,9 @@ class TestProgramsForGames(TestOpenFlows):
         with zipfile.ZipFile(arc, "w") as zf:
             zf.writestr("SomeTool/SomeTool.exe", b"MZ")
             zf.writestr("SomeTool/data/a.txt", b"x")
-        code, calls = self.run_open(arc, ["0|1", "0|0", "0|", "0|"])      # программа; Avatar; распаковать; готово
+        code, calls = self.run_open(arc, ["0|1", "0|0", "0|", "1|"])      # программа; Avatar; распаковать; «нет»
         self.assertEqual(code, 0)
+        self.assertEqual(self.asked(), [])                                 # не вместе с игрой, игра не запущена
         self.assertTrue((self.pd / "SomeTool/SomeTool.exe").exists())     # общая папка сверху поднята
         self.assertTrue((self.pd / "SomeTool/data/a.txt").exists())
         self.assertIn("· Avatar Legends", self.texts(calls))
@@ -494,9 +506,10 @@ class TestProgramsForGames(TestOpenFlows):
     def test_installer_into_game(self):
         setup = self.f("Downloads/Vortex-1.12.3-setup.exe")
         seen = self.machine()
-        code, calls = self.run_open(setup, ["0|0", "0|"])                  # Avatar; «понятно»
+        code, calls = self.run_open(setup, ["0|0", "0|", "0|", "0|"])      # Avatar; два окна «идёт…»; «вместе с игрой» — да
         self.assertEqual(code, 0)
         self.assertEqual(seen, {"appid": "2424420", "path": "Vortex/Vortex-1.12.3-setup.exe", "exists": True})
+        self.assertEqual(self.asked(), [("auto", "2424420", "pfx:Program Files/Black Tree Gaming Ltd/Vortex/Vortex.exe", "on")])
         self.assertIn("Vortex.exe", self.texts(calls))
         self.assertTrue(setup.exists())                                    # твой файл на месте
         self.assertEqual(list((self.home / ".local/share/vastgame/installers").iterdir()), [])   # копия убрана
@@ -518,11 +531,20 @@ class TestProgramsForGames(TestOpenFlows):
         self.assertTrue(setup.exists())
         self.assertFalse((self.home / ".local/share/vastgame/requests/install").exists())
 
+    def test_loader_installed_sets_game_start(self):
+        setup = self.f("Downloads/XIVLauncher-win-Setup.exe")
+        self.machine(exes=("users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe",))
+        code, calls = self.run_open(setup, ["0|0", "0|"])                  # Avatar; «понятно» (вопроса нет)
+        self.assertEqual(self.asked(), [("launch", "2424420", "pfx:users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe", "")])
+        self.assertIn("now starts through «XIVLauncher.exe»", self.texts(calls))
+        self.assertNotIn("--question", self.texts(calls))
+
     def test_inside_steam_game_and_already_in_programs(self):
         exe = self.f(".steam/debian-installation/steamapps/common/Skyrim SE/skse64_loader.exe")
         code, calls = self.run_open(exe, ["0|"])
         self.assertTrue(exe.exists())
         self.assertIn("Skyrim Special Edition", self.texts(calls))
+        self.assertEqual(self.asked(), [("launch", "489830", "game:skse64_loader.exe", "")])   # загрузчик — сам
         self.assertEqual(list(self.gd.iterdir()), [])
         self.calls.unlink()
         exe2 = self.f("Downloads/Programs/WeMod/WeMod.exe")

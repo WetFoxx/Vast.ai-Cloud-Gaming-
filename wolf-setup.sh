@@ -535,6 +535,24 @@ install_requests() {
     log "установка в игру $a по просьбе помощника: ${p##*/} — $r"
   done
 }
+# [v5.7] Просьбы помощника о программах: requests/prog/*.json → wolf-steam.py helper-req (закрытый список, проверка) →
+# wolf prog run|auto|launch; выбор (auto, launch) — в progs.helper для окна VastGame. Раз в 5 с из wolf watch
+prog_requests() {
+  local d="$DH/.local/share/vastgame/requests/prog" f cmd a id v r
+  for f in "$d"/*.json; do
+    [ -f "$f" ] || continue
+    IFS=$'\t' read -r cmd a id v < <(python3 /usr/local/bin/wolf-steam.py helper-req "$f")
+    rm -f "$f"
+    [ -n "$cmd" ] || continue
+    case $cmd in
+      run)    r=$(prog_cmd run "$a" "$id" 2>&1 | tail -1) ;;
+      auto)   r=$(prog_cmd auto "$a" "$id" "$v" 2>&1 | tail -1) ;;
+      launch) r=$(prog_cmd launch "$a" "$id" "$v" 2>&1 | tail -1) ;;
+    esac
+    case $cmd in auto|launch) python3 /usr/local/bin/wolf-steam.py helper-note "$S" "$a" "$cmd" "$id" "$v" ;; esac
+    log "программа ${id##*/} для $a по просьбе помощника: $cmd — $r"
+  done
+}
 # [v5.4] Папка Programs (программы для игр): подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
 # README_ru/en/es.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
 mkpd() {
@@ -1310,6 +1328,7 @@ watch_games() {
     # [v5.4] программы «вместе с игрой» и список программ для приложения
     python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
     install_requests                                  # [v5.7] установщик с двойного щелчка — в «диск C:» игры
+    prog_requests                                     # [v5.7] запустить / вместе с игрой / запуск через — с двойного щелчка
     while IFS= read -r k; do
       case $k in
         nm:*)  k=${k#nm:}
@@ -3191,6 +3210,10 @@ PROC = os.environ.get("VG_PROC") or "/proc"
 STATE = os.path.join(HOME, ".local", "share", "vastgame")
 INST = os.path.join(STATE, "installers")              # [v5.7] установщики для «диска C:» игры Steam — не в облако
 REQ = os.path.join(STATE, "requests", "install")
+REQP = os.path.join(STATE, "requests", "prog")         # [v5.7] запустить / вместе с игрой / запуск через — машине
+# Загрузчики: игра запускается через них (Steam — вместо игры, с тем же Proton) — ставим «Запуск игры через» сами
+LOADERS = re.compile(r"^(skse64_loader|skse_loader|f4se_loader|sfse_loader|obse_loader|nvse_loader|modengine2?_launcher|"
+                     r"launchmod_.*|ersc_launcher|seamlesscoop.*launcher|xivlauncher)\.exe$", re.I)
 POLL = float(os.environ.get("VG_POLL") or 1)
 VGRUN = os.environ.get("VG_RUN") or "/usr/local/bin/vg-run"
 MANIFEST = ".vastgame.json"
@@ -3233,8 +3256,11 @@ T = {
                      "«Запустить» (когда игра запущена) или «Вместе с игрой».",
         "prog.installer": "Установщик «{name}» — в папке Programs.\nПоставь его в игру: VastGame, блок «Программы игры»{game} → "
                           "«Установить в игру» (игра должна быть закрыта).",
-        "prog.inside": "«{file}» — в папке игры «{game}».\nЗапуск — в VastGame, блок «Программы игры»: «Запустить» (когда игра "
-                       "запущена) или «Запуск игры через».",
+        "prog.inside": "«{file}» — программа игры «{game}».",
+        "prog.auto": "Запускать «{exe}» вместе с «{game}»?\n(Поменять можно в VastGame, блок «Программы игры».)",
+        "prog.auto.now": "«{game}» сейчас запущена — «{exe}» откроется сразу.",
+        "prog.auto.yes": "Да, вместе с игрой", "prog.auto.no": "Нет",
+        "prog.via": "«{game}» теперь запускается через «{exe}».\n(Поменять — VastGame, «Программы игры» → «Запуск игры».)",
         "prog.already": "«{file}» уже в папке Programs.\nЗапуск — в VastGame, блок «Программы игры».",
         "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?",
         "inst.close": "«{game}» сейчас запущена. Ставить можно только в закрытую игру — закрой её и нажми «Поставить».",
@@ -3269,8 +3295,11 @@ T = {
                      "«Game programs»{game}: «Start» (while the game runs) or «With the game».",
         "prog.installer": "The «{name}» installer is in the Programs folder.\nInstall it into the game: VastGame, «Game "
                           "programs»{game} → «Install into the game» (the game must be closed).",
-        "prog.inside": "«{file}» is in the folder of «{game}».\nStart it in VastGame, «Game programs»: «Start» (while the "
-                       "game runs) or «Start the game through».",
+        "prog.inside": "«{file}» is a program of «{game}».",
+        "prog.auto": "Start «{exe}» together with «{game}»?\n(You can change it in VastGame, «Game programs».)",
+        "prog.auto.now": "«{game}» is running — «{exe}» opens right away.",
+        "prog.auto.yes": "Yes, with the game", "prog.auto.no": "No",
+        "prog.via": "«{game}» now starts through «{exe}».\n(Change it in VastGame, «Game programs» → «Game start».)",
         "prog.already": "«{file}» is already in the Programs folder.\nStart it in VastGame, «Game programs».",
         "prog.unpack": "Unpack «{file}» into Programs as «{name}»?",
         "inst.close": "«{game}» is running. Programs can only be installed into a closed game — close it and press «Install».",
@@ -3305,8 +3334,11 @@ T = {
                      "«Programas del juego»{game}: «Iniciar» (con el juego abierto) o «Con el juego».",
         "prog.installer": "El instalador de «{name}» está en la carpeta Programs.\nInstálalo en el juego: VastGame, "
                           "«Programas del juego»{game} → «Instalar en el juego» (el juego debe estar cerrado).",
-        "prog.inside": "«{file}» está en la carpeta de «{game}».\nSe inicia en VastGame, «Programas del juego»: «Iniciar» "
-                       "(con el juego abierto) o «Iniciar el juego con».",
+        "prog.inside": "«{file}» es un programa de «{game}».",
+        "prog.auto": "¿Iniciar «{exe}» junto con «{game}»?\n(Se puede cambiar en VastGame, «Programas del juego».)",
+        "prog.auto.now": "«{game}» está abierto: «{exe}» se abre ahora mismo.",
+        "prog.auto.yes": "Sí, con el juego", "prog.auto.no": "No",
+        "prog.via": "«{game}» ahora se inicia con «{exe}».\n(Se cambia en VastGame, «Programas del juego» → «Inicio del juego».)",
         "prog.already": "«{file}» ya está en la carpeta Programs.\nSe inicia en VastGame, «Programas del juego».",
         "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?",
         "inst.close": "«{game}» está abierto. Solo se puede instalar con el juego cerrado: ciérralo y pulsa «Instalar».",
@@ -3825,6 +3857,41 @@ def choose_game(f):
     return g
 
 
+def send(cmd, g, ident, value=""):
+    """Просьба машине о программе (wolf watch, раз в 5 с): run | auto (on/off) | launch (параметры)."""
+    os.makedirs(REQP, exist_ok=True)
+    name = f"{int(time.time() * 1000)}-{os.getpid()}-{cmd}"
+    tmp = os.path.join(REQP, "." + name)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"cmd": cmd, "appid": g["appid"], "id": ident, "value": value}, fh)
+    os.replace(tmp, os.path.join(REQP, name + ".json"))
+
+
+def main_program(folder):
+    """Главная программа в папке (путь от папки) или None: знакомые программы для модов — первыми."""
+    found = exes(folder)
+    return next((r for r in found if MOD_TOOLS.search(os.path.basename(r))), found[0] if found else None)
+
+
+def after_add(g, ident, text):
+    """[v5.7] Программа на месте: загрузчик — игра запускается через него (сами); иначе — «вместе с игрой?» и сразу
+    открыть, если игра идёт. Нет игры — только сообщение."""
+    if not g or not ident:
+        info(text)
+        return
+    exe = os.path.basename(ident.split(":", 1)[1])
+    if LOADERS.match(exe):
+        send("launch", g, ident, "")
+        info(text + "\n\n" + t("prog.via", game=g["name"], exe=exe))
+        return
+    running = g["appid"] in running_appids()
+    q = text + "\n\n" + t("prog.auto", exe=exe, game=g["name"]) + ("\n" + t("prog.auto.now", game=g["name"], exe=exe) if running else "")
+    if ask(q, t("prog.auto.yes"), t("prog.auto.no")):
+        send("auto", g, ident, "on")
+    if running:
+        send("run", g, ident)
+
+
 def game_part(g):
     return f" · {g['name']}" if g else ""
 
@@ -3855,7 +3922,8 @@ def do_program(f, g):
             shutil.move(f, os.path.join(PD, name, os.path.basename(f)))
         else:
             shutil.move(src, os.path.join(PD, name))
-    info(t("prog.done", name=name, game=game_part(g)))
+    rel = main_program(os.path.join(PD, name))
+    after_add(g, f"prog:{name}/{rel}" if rel else None, t("prog.done", name=name, game=game_part(g)))
 
 
 def waiting(text, done, limit):
@@ -3927,10 +3995,14 @@ def do_install(f, g):
         return
     shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
     try:
-        exes = [os.path.basename(x) for x in json.loads(done).get("exes") or []]
+        new = [x for x in json.loads(done).get("exes") or [] if isinstance(x, str)]
     except (ValueError, AttributeError):
-        exes = []
-    info(t("inst.done", name=name, game=g["name"], exes=", ".join(exes)) if exes else t("inst.none"))
+        new = []
+    if not new:
+        info(t("inst.none"))
+        return
+    main_ = next((x for x in new if MOD_TOOLS.search(os.path.basename(x))), new[0])
+    after_add(g, "pfx:" + main_, t("inst.done", name=name, game=g["name"], exes=", ".join(os.path.basename(x) for x in new)))
 
 
 def main(a):
@@ -3942,7 +4014,8 @@ def main(a):
         if not game_of(f):                               # [v5.7] своя игра в Games — как раньше; иначе: программа?
             g = steam_game_of(f)
             if g:
-                info(t("prog.inside", file=os.path.basename(f), game=g["name"]))
+                rel = os.path.relpath(f, os.path.realpath(g["dir"])).replace(os.sep, "/")
+                after_add(g, "game:" + rel, t("prog.inside", file=os.path.basename(f), game=g["name"]))
                 return 0
             if under(f, PD):
                 info(t("prog.already", file=os.path.basename(f)))
@@ -4510,6 +4583,44 @@ def _jsave(path, data):
     os.replace(tmp, path)
 
 
+# [v5.7] Просьбы помощника двойного щелчка (vg-open, от имени пользователя): requests/prog/*.json {cmd, appid, id, value}
+# — закрытый список: run (запустить рядом с игрой), auto (вместе с игрой: on|off), launch (запуск игры через неё,
+# value — параметры). Путь программы проверяет _resolve, как у просьб окна. Выбор помощника (auto, launch) — в
+# progs.helper: окно VastGame берёт его себе (в отчёте progs — поле helper) и отдаёт следующим машинам
+HELPER_ID = re.compile(r"^(game|prog|pfx):[^\x00-\x1f]{1,400}$")
+
+
+def helper_req(path):
+    """Разобрать просьбу: «cmd\tномер\tid\tvalue» или ничего (неверная — молча мимо)."""
+    try:
+        if os.path.islink(path):
+            return 1
+        d = json.loads(Path(path).read_text(encoding="utf-8")[:4096])
+    except (OSError, ValueError):
+        return 1
+    cmd, a, ident, v = (str(d.get(k) or "") for k in ("cmd", "appid", "id", "value"))
+    ok = a.isdigit() and HELPER_ID.match(ident) and "\t" not in ident and \
+        (cmd == "run" or cmd == "auto" and v in ("on", "off") or cmd == "launch" and re.match(r"^[^\x00-\x1f\t]{0,300}$", v))
+    if not ok:
+        return 1
+    print(f"{cmd}\t{a}\t{ident}\t{v}")
+    return 0
+
+
+def helper_note(sdir, appid, cmd, ident, value):
+    """Запомнить выбор помощника для окна VastGame: {номер: {t, auto: [id], launch: {id, args}}}."""
+    f = Path(sdir, "progs.helper")
+    d = _jload(f, {})
+    rec = d.setdefault(str(appid), {"auto": []})
+    if cmd == "auto":
+        rec["auto"] = [x for x in rec.get("auto") or [] if x != ident] + ([ident] if value == "on" else [])
+    elif cmd == "launch":
+        rec["launch"] = {"id": ident, "args": value}
+    rec["t"] = int(time.time())
+    _jsave(f, d)
+    return 0
+
+
 def set_auto(sdir, appid, ident, on):
     """Тумблер «Вместе с игрой» (из приложения во время игры или из VG_SYNC при загрузке)."""
     auto = _jload(Path(sdir, "progs.auto"), {})
@@ -4556,6 +4667,10 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
     for a in _jload(Path(sdir, "launch.sel"), {}):                # [v5.6] игры, которые запускаются через программу,
         if str(a).isdigit() and _game_dir(root, str(a)):         # — если игра есть на этой машине (выбор едет на каждую)
             show.setdefault(str(a))
+    helper = _jload(Path(sdir, "progs.helper"), {})              # [v5.7] выбор помощника двойного щелчка — окну
+    for a in helper:
+        if str(a).isdigit():
+            show.setdefault(str(a))
     cache = _jload(Path(sdir, "progs.cache"), {})              # папка игры большая — обходить не чаще раза в 30 с
     for a in show:
         if now - (cache.get(a) or {}).get("t", 0) > 30:
@@ -4563,7 +4678,7 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
     _jsave(Path(sdir, "progs.cache"), {a: v for a, v in cache.items() if a in show})
     report = {a: {"running": a in running, "auto": auto.get(a) or [], "progs": cache[a]["list"],
                   "installed": bool(_game_dir(root, a)), "launch": launch_choice(home, a) if home else None,
-                  "name": app_name(root, a)}
+                  "name": app_name(root, a), **({"helper": helper[a]} if a in helper else {})}
               for a in show}
     text = json.dumps(report, ensure_ascii=False, sort_keys=True)
     st = Path(sdir, "st", "progs")
@@ -4746,6 +4861,10 @@ if __name__ == "__main__":
             r = launch(Path(a[1]), a[2], a[4], a[5], a[3])
             print(f"prog: {r}")
             sys.exit(0 if r in ("ok", "running") else 3)
+        if a[:1] == ["helper-req"] and len(a) == 2:
+            sys.exit(helper_req(a[1]))
+        if a[:1] == ["helper-note"] and len(a) == 6 and a[2].isdigit() and a[3] in ("auto", "launch"):
+            sys.exit(helper_note(a[1], a[2], a[3], a[4], a[5]))
         if a[:1] == ["progs-auto"] and len(a) == 5 and a[2].isdigit() and a[4] in ("on", "off"):
             sys.exit(set_auto(a[1], a[2], a[3], a[4] == "on"))
         if a[:1] in (["seen"], ["gone"]) and len(a) == 3:
