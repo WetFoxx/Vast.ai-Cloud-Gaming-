@@ -122,6 +122,8 @@ class TestSunshineReport(unittest.TestCase):
         self.assertIn('"$V/sunshine-start.sh" probe', ep)
         self.assertLess(ep.index('"$V/sunshine-start.sh" probe'), ep.index("stage wolf"))      # до агента
         self.assertIn('log "!!! видео не работает: экран не запускается:', ep)
+        self.assertIn("ts_report", ep)                                      # [0.5.3] Tailscale — в журнал Vast
+        self.assertLess(ep.index("ts_report() {"), ep.index("while :; do\n  sleep 10"))
 
     def test_no_outputs(self):
         out = self.run_block("Info: Found [0] outputs\nFatal: Platform failed to initialize\n"
