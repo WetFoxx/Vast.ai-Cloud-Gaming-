@@ -519,6 +519,22 @@ own_shortcuts() {
   if pgrep -x steam >/dev/null; then steam_off && { shortcuts; steam_go; }; else shortcuts; fi
   log "свои игры: ярлыки Steam обновлены по запросу помощника"
 }
+# [v5.7] Помощник двойного щелчка (vg-open, от имени пользователя) просит поставить установщик в «диск C:» игры Steam:
+# requests/install/НОМЕР.req — путь установщика от ~/.local/share/vastgame/installers (другие места wolf-steam.py не
+# примет). Дальше — как «Установить в игру» из окна; ответ — НОМЕР.res (prog: installing | running | notinstalled | nofile),
+# итог установки — НОМЕР.done (wolf-steam.py install_done). Раз в 5 с из wolf watch
+install_requests() {
+  local d="$DH/.local/share/vastgame/requests/install" f a p r
+  for f in "$d"/*.req; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    a=${f##*/}; a=${a%.req}
+    p=$(head -c 1024 "$f" | head -1); rm -f "$f"
+    [[ $a =~ ^[0-9]+$ ]] && [ -n "$p" ] || continue
+    r=$(prog_cmd install "$a" "inst:$p" 2>&1 | tail -1)
+    printf '%s\n' "$r" > "$d/$a.res"; chown "$DU:" "$d/$a.res" 2>/dev/null
+    log "установка в игру $a по просьбе помощника: ${p##*/} — $r"
+  done
+}
 # [v5.4] Папка Programs (программы для игр): подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
 # README_ru/en/es.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
 mkpd() {
@@ -1293,6 +1309,7 @@ watch_games() {
     if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; prog_scan; mods_scan; lgame_track; own_shortcuts; own_icons; own_noexec; fi   # [v4.6] вопросы; [v5.0] чистые игры
     # [v5.4] программы «вместе с игрой» и список программ для приложения
     python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
+    install_requests                                  # [v5.7] установщик с двойного щелчка — в «диск C:» игры
     while IFS= read -r k; do
       case $k in
         nm:*)  k=${k#nm:}
@@ -3172,6 +3189,9 @@ STEAM = [os.environ["VG_STEAM"]] if os.environ.get("VG_STEAM") else \
     [os.path.join(HOME, x) for x in (".steam/debian-installation", ".local/share/Steam", ".steam/steam")]
 PROC = os.environ.get("VG_PROC") or "/proc"
 STATE = os.path.join(HOME, ".local", "share", "vastgame")
+INST = os.path.join(STATE, "installers")              # [v5.7] установщики для «диска C:» игры Steam — не в облако
+REQ = os.path.join(STATE, "requests", "install")
+POLL = float(os.environ.get("VG_POLL") or 1)
 VGRUN = os.environ.get("VG_RUN") or "/usr/local/bin/vg-run"
 MANIFEST = ".vastgame.json"
 ARCHIVES = (".zip", ".7z", ".rar")
@@ -3216,7 +3236,20 @@ T = {
         "prog.inside": "«{file}» — в папке игры «{game}».\nЗапуск — в VastGame, блок «Программы игры»: «Запустить» (когда игра "
                        "запущена) или «Запуск игры через».",
         "prog.already": "«{file}» уже в папке Programs.\nЗапуск — в VastGame, блок «Программы игры».",
-        "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?"},
+        "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?",
+        "inst.close": "«{game}» сейчас запущена. Ставить можно только в закрытую игру — закрой её и нажми «Поставить».",
+        "inst.go": "Поставить",
+        "inst.prepare": "Готовлю установку «{name}» в «{game}»…",
+        "inst.wait": "Ставлю «{name}» в «{game}».\nОкно установщика откроется само (в первый раз — через пару минут: "
+                     "сначала ставятся библиотеки Visual C++). Пройди его шаги как обычно, путь не меняй.",
+        "inst.done": "Готово: «{name}» стоит в «{game}» ({exes}).\nЗапуск — в VastGame, блок «Программы игры»: «Запустить» "
+                     "или «Вместе с игрой». Уедет в облако вместе с сохранениями игры.",
+        "inst.none": "Установщик закончил, но новых программ в игре не видно. Если установка не прошла — открой установщик "
+                     "ещё раз.",
+        "inst.notinstalled": "«{game}» ещё не скачана Steam — ставить некуда. Дождись, пока Steam её скачает, и открой "
+                             "установщик снова.",
+        "inst.noanswer": "Машина не ответила. Попробуй ещё раз через минуту.",
+        "inst.timeout": "Установка идёт слишком долго. Когда закончится, программа появится в VastGame, блок «Программы игры».",},
  "en": {"title": "VastGame", "what": "What is this file?\n{file}", "kind.installer": "Game or launcher installer",
         "kind.portable": "Game without installation (portable)", "name": "What should the game be called?\nA folder appears in Games, the game appears in Steam.",
         "exists": "«{name}» already exists. Install into it?\n(That's how mods and add-ons with an installer go.)",
@@ -3239,7 +3272,20 @@ T = {
         "prog.inside": "«{file}» is in the folder of «{game}».\nStart it in VastGame, «Game programs»: «Start» (while the "
                        "game runs) or «Start the game through».",
         "prog.already": "«{file}» is already in the Programs folder.\nStart it in VastGame, «Game programs».",
-        "prog.unpack": "Unpack «{file}» into Programs as «{name}»?"},
+        "prog.unpack": "Unpack «{file}» into Programs as «{name}»?",
+        "inst.close": "«{game}» is running. Programs can only be installed into a closed game — close it and press «Install».",
+        "inst.go": "Install",
+        "inst.prepare": "Preparing to install «{name}» into «{game}»…",
+        "inst.wait": "Installing «{name}» into «{game}».\nThe installer window opens by itself (the first time — in a couple "
+                     "of minutes: Visual C++ libraries go first). Go through it as usual, don't change the path.",
+        "inst.done": "Done: «{name}» is installed in «{game}» ({exes}).\nStart it in VastGame, «Game programs»: «Start» or "
+                     "«With the game». It goes to the cloud with the game's saves.",
+        "inst.none": "The installer finished, but no new programs showed up in the game. If it didn't install — open the "
+                     "installer again.",
+        "inst.notinstalled": "Steam hasn't downloaded «{game}» yet — nothing to install into. Wait for the download and open "
+                             "the installer again.",
+        "inst.noanswer": "The machine didn't answer. Try again in a minute.",
+        "inst.timeout": "The installation takes too long. When it's done, the program shows up in VastGame, «Game programs».",},
  "es": {"title": "VastGame", "what": "¿Qué es este archivo?\n{file}", "kind.installer": "Instalador de un juego o launcher",
         "kind.portable": "Juego sin instalación (portable)", "name": "¿Cómo se llamará el juego?\nAparecerá una carpeta en Games y el juego en Steam.",
         "exists": "«{name}» ya existe. ¿Instalar dentro?\n(Así se instalan mods y extras con instalador.)",
@@ -3262,7 +3308,20 @@ T = {
         "prog.inside": "«{file}» está en la carpeta de «{game}».\nSe inicia en VastGame, «Programas del juego»: «Iniciar» "
                        "(con el juego abierto) o «Iniciar el juego con».",
         "prog.already": "«{file}» ya está en la carpeta Programs.\nSe inicia en VastGame, «Programas del juego».",
-        "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?"},
+        "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?",
+        "inst.close": "«{game}» está abierto. Solo se puede instalar con el juego cerrado: ciérralo y pulsa «Instalar».",
+        "inst.go": "Instalar",
+        "inst.prepare": "Preparando la instalación de «{name}» en «{game}»…",
+        "inst.wait": "Instalando «{name}» en «{game}».\nLa ventana del instalador se abre sola (la primera vez, en un par de "
+                     "minutos: antes se instalan las bibliotecas Visual C++). Síguela como siempre, sin cambiar la ruta.",
+        "inst.done": "Listo: «{name}» está instalado en «{game}» ({exes}).\nSe inicia en VastGame, «Programas del juego»: "
+                     "«Iniciar» o «Con el juego». Se sube a la nube con las partidas del juego.",
+        "inst.none": "El instalador terminó, pero no aparecieron programas nuevos en el juego. Si no se instaló, abre el "
+                     "instalador otra vez.",
+        "inst.notinstalled": "Steam aún no descargó «{game}»: no hay dónde instalar. Espera la descarga y abre el instalador "
+                             "otra vez.",
+        "inst.noanswer": "La máquina no respondió. Inténtalo de nuevo en un minuto.",
+        "inst.timeout": "La instalación tarda demasiado. Cuando termine, el programa aparecerá en VastGame, «Programas del juego».",},
 }
 
 
@@ -3781,6 +3840,8 @@ def do_program(f, g):
             return
         unpack(f, os.path.join(PD, name))
     elif low.endswith(".msi") or INSTALLER.search(os.path.basename(f)):
+        if g:                                             # [v5.7] шаг 4б — сразу в «диск C:» игры
+            return do_install(f, g)
         name = unique(default_name(f), PD)
         os.makedirs(os.path.join(PD, name))
         shutil.move(f, os.path.join(PD, name, os.path.basename(f)))
@@ -3795,6 +3856,81 @@ def do_program(f, g):
         else:
             shutil.move(src, os.path.join(PD, name))
     info(t("prog.done", name=name, game=game_part(g)))
+
+
+def waiting(text, done, limit):
+    """Окно «идёт…» (без кнопки отмены), пока done() не вернёт не-None или не пройдёт limit секунд: итог done() или None."""
+    p = subprocess.Popen(["zenity", "--title", t("title"), "--progress", "--pulsate", "--no-cancel", "--auto-close",
+                          "--width=460", f"--text={text}"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, text=True)
+    try:
+        end = time.time() + limit
+        while time.time() < end:
+            r = done()
+            if r is not None:
+                return r
+            time.sleep(POLL)
+        return None
+    finally:
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
+        p.wait()
+
+
+def read(path):
+    try:
+        return open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+
+
+def do_install(f, g):
+    """[v5.7] Установщик программы — в «диск C:» игры Steam: машина (wolf, раз в 5 с) запускает его через Steam вместо
+    игры, как «Установить в игру» в окне VastGame. Ставить можно только в закрытую игру."""
+    while g["appid"] in running_appids():
+        if not ask(t("inst.close", game=g["name"]), t("inst.go")):
+            return
+    name = unique(default_name(f), INST)
+    os.makedirs(os.path.join(INST, name))
+    shutil.copy2(f, os.path.join(INST, name, os.path.basename(f)))   # копия: твой файл остаётся, где был
+    os.makedirs(REQ, exist_ok=True)
+    a = g["appid"]
+    for x in (".res", ".done"):
+        try:
+            os.remove(os.path.join(REQ, a + x))
+        except OSError:
+            pass
+    tmp = os.path.join(REQ, f".{a}.req")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(f"{name}/{os.path.basename(f)}\n")
+    os.replace(tmp, os.path.join(REQ, a + ".req"))
+    res = waiting(t("inst.prepare", name=name, game=g["name"]), lambda: read(os.path.join(REQ, a + ".res")), 60)
+    if res is None:
+        try:
+            os.remove(os.path.join(REQ, a + ".req"))      # машина не взяла — не ставить потом неожиданно
+        except OSError:
+            pass
+        shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
+        info(t("inst.noanswer"))
+        return
+    res = res.strip()
+    if res != "prog: installing":
+        shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
+        info(t("inst.notinstalled", game=g["name"]) if res == "prog: notinstalled" else
+             t("inst.close", game=g["name"]) if res == "prog: running" else t("bad", why=res[:200]))
+        return
+    done = waiting(t("inst.wait", name=name, game=g["name"]), lambda: read(os.path.join(REQ, a + ".done")), 3600)
+    if done is None:
+        info(t("inst.timeout"))
+        return
+    shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
+    try:
+        exes = [os.path.basename(x) for x in json.loads(done).get("exes") or []]
+    except (ValueError, AttributeError):
+        exes = []
+    info(t("inst.done", name=name, game=g["name"], exes=", ".join(exes)) if exes else t("inst.none"))
 
 
 def main(a):
@@ -4258,14 +4394,19 @@ def _mine(pfx):
         return set()
 
 
-def install_done(root, sdir, appid, user=None, running=None):
-    """Установщик закончил (игра Steam больше не запущена): новые главные программы «диска C:» — «свои»."""
+def install_done(root, sdir, appid, user=None, running=None, home=None):
+    """Установщик закончил (игра Steam больше не запущена): новые главные программы «диска C:» — «свои».
+    [v5.7] Пока запуск ещё ждёт очереди (launch/НОМЕР.once или .next — сначала ставятся библиотеки Visual C++, потом
+    установщик человека), установка не кончилась. Итог — и помощнику двойного щелчка (requests/install/НОМЕР.done)."""
     before_f = Path(sdir, "van", f"{appid}.pfx.before")
     if not before_f.exists():
         return
     if (running if running is not None else games_running()).get(str(appid)) or time.time() - before_f.stat().st_mtime < 10:
         return
+    if home and any(Path(home, ".local/share/vastgame/launch", f"{appid}{x}").exists() for x in (".once", ".next")):
+        return
     pfx = _pfx(root, appid)
+    new = set()
     if pfx:
         before = set(before_f.read_text().splitlines())
         new = _main_exes(pfx) - before
@@ -4275,13 +4416,24 @@ def install_done(root, sdir, appid, user=None, running=None):
             _owner(f, user)
             print(f"установлено в игру {appid}: " + ", ".join(sorted(os.path.basename(x) for x in new)))
     before_f.unlink()
+    if home and Path(home, INST_REQ).is_dir():
+        done = Path(home, INST_REQ, f"{appid}.done")
+        _jsave(done, {"exes": sorted(new)})
+        _owner(done, user)
 
 
-def _resolve(root, pd, appid, ident, must_exist=True):
+INST = ".local/share/vastgame/installers"              # [v5.7] установщики от помощника двойного щелчка (не в облаке)
+INST_REQ = ".local/share/vastgame/requests/install"
+
+
+def _resolve(root, pd, appid, ident, must_exist=True, home=None):
     """Путь к программе по id — только внутри папки игры, папки программ или «диска C:» игры (ни «..», ни ссылок
-    наружу). must_exist=False — при загрузке: игру Steam ещё не скачал, префикс ещё не создан — путь всё равно тот."""
+    наружу). must_exist=False — при загрузке: игру Steam ещё не скачал, префикс ещё не создан — путь всё равно тот.
+    [v5.7] inst: — установщик, который положил помощник двойного щелчка (только при home)."""
     kind, _, rel = str(ident).partition(":")
-    if kind == "game":
+    if kind == "inst":
+        base = Path(home, INST) if home else None
+    elif kind == "game":
         base = _game_dir(root, appid)
     elif kind == "prog":
         base = Path(pd)
@@ -4375,7 +4527,7 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
     now = now or time.time()
     running = games_running()
     for f in Path(sdir, "van").glob("*.pfx.before") if Path(sdir, "van").is_dir() else []:   # [v5.6] установки «в игру»
-        install_done(root, sdir, f.name.split(".")[0], user, running)
+        install_done(root, sdir, f.name.split(".")[0], user, running, home)
     auto = _jload(Path(sdir, "progs.auto"), {})
     stf = Path(sdir, "progs.state")
     state = {k: v for k, v in _jload(stf, {}).items() if k in running.values()}
@@ -4482,7 +4634,7 @@ def install_set(root, pd, home, user, appid, ident, sdir=None):
         return "running"
     if not _game_dir(root, appid):
         return "notinstalled"
-    path = _resolve(root, pd, appid, ident)
+    path = _resolve(root, pd, appid, ident, home=home)
     if not path:
         return "nofile"
     _write_conf(home, user, appid, f"{appid}.once", path, "", ident)

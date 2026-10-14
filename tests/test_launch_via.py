@@ -85,6 +85,42 @@ class TestPrograms(World):
                                "pfx:users/steamuser/AppData/Local/XIVLauncher2/current/XIVLauncher.exe"])
         self.assertTrue((self.pfx / ".vastgame-installed.json").exists())      # список — в «диске C:», едет в облако
 
+    def test_installer_from_double_click(self):
+        # [v5.7] установщик от помощника двойного щелчка: только из ~/.local/share/vastgame/installers; конец установки
+        # не засчитывается, пока запуск ждёт очереди (.once/.next — сначала библиотеки Visual C++); итог — помощнику
+        inst = self.home / ".local/share/vastgame/installers/Vortex"
+        inst.mkdir(parents=True)
+        (inst / "Vortex-setup.exe").write_text("setup")
+        req = self.home / ".local/share/vastgame/requests/install"
+        req.mkdir(parents=True)
+        for bad in ("inst:../../../../etc/passwd", "inst:Vortex/../../launch/x", "inst:"):
+            self.assertEqual(ws.install_set(self.w.root, str(self.w.pd), str(self.home), None, APP, bad, str(self.w.sdir)), "nofile")
+        self.assertIsNone(ws._resolve(self.w.root, str(self.w.pd), APP, "inst:Vortex/Vortex-setup.exe"))   # без home — нет
+        self.assertEqual(ws.install_set(self.w.root, str(self.w.pd), str(self.home), None, APP, "inst:Vortex/Vortex-setup.exe",
+                                        str(self.w.sdir)), "ok")
+        self.assertEqual(self.conf(f"{APP}.once")[0], os.path.realpath(inst / "Vortex-setup.exe"))
+        before = self.w.sdir / "van" / f"{APP}.pfx.before"
+        os.utime(before, (0, 0))
+        (self.pfx / "Program Files/Vortex/Vortex.exe").parent.mkdir(parents=True)
+        (self.pfx / "Program Files/Vortex/Vortex.exe").write_text("x")
+        launch = self.home / ".local/share/vastgame/launch"
+        (launch / f"{APP}.once").rename(launch / f"{APP}.next")             # идут библиотеки, установщик ждёт
+        ws.install_done(self.w.root, str(self.w.sdir), APP, None, {}, str(self.home))
+        self.assertTrue(before.exists())
+        self.assertFalse((req / f"{APP}.done").exists())
+        (launch / f"{APP}.next").unlink()                                      # установщик отработал
+        ws.install_done(self.w.root, str(self.w.sdir), APP, None, {}, str(self.home))
+        self.assertFalse(before.exists())
+        self.assertEqual(json.loads((req / f"{APP}.done").read_text()), {"exes": ["Program Files/Vortex/Vortex.exe"]})
+
+    def test_install_requests_wiring(self):
+        from test_game_select import WOLF, fn
+        f = fn("install_requests")
+        self.assertIn('prog_cmd install "$a" "inst:$p"', f)
+        self.assertIn('[[ $a =~ ^[0-9]+$ ]]', f)
+        self.assertIn('[ ! -L "$f" ]', f)
+        self.assertIn("install_requests", fn("watch_games"))
+
     def test_game_files_from_its_launcher_are_not_programs(self):
         game = self.w.game / "game/ffxiv_dx11.exe"
         game.parent.mkdir(parents=True)

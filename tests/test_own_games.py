@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -405,6 +406,7 @@ class TestProgramsForGames(TestOpenFlows):
         self.proc = self.home / "proc"
         self.proc.mkdir()
         self.env["VG_PROC"] = str(self.proc)
+        self.env["VG_POLL"] = "0.05"
         self.pd = self.home / "Downloads/Programs"
         sa = self.home / ".steam/debian-installation/steamapps"
         for appid, name, d in (("2424420", "Avatar Legends", "Avatar"), ("489830", "Skyrim Special Edition", "Skyrim SE"),
@@ -469,12 +471,52 @@ class TestProgramsForGames(TestOpenFlows):
         self.assertEqual(list((self.home / ".local/share/vastgame/unpack").iterdir()), [])   # временное убрано
         self.assertFalse(any(p.name.endswith(".vgtmp") for p in self.pd.iterdir()))
 
-    def test_installer_goes_to_programs_for_now(self):
+    def machine(self, res="prog: installing", exes=("Program Files/Black Tree Gaming Ltd/Vortex/Vortex.exe",)):
+        """Подставная машина: берёт просьбу из requests/install, отвечает и через миг сообщает итог установки."""
+        import threading
+        req, seen = self.home / ".local/share/vastgame/requests/install", {}
+
+        def run():
+            for _ in range(200):
+                for f in req.glob("*.req") if req.is_dir() else []:
+                    a, path = f.stem, f.read_text().strip()
+                    seen.update(appid=a, path=path, exists=(self.home / ".local/share/vastgame/installers" / path).is_file())
+                    f.unlink()
+                    (req / f"{a}.res").write_text(res + "\n")
+                    if res == "prog: installing":
+                        time.sleep(0.2)
+                        (req / f"{a}.done").write_text(json.dumps({"exes": list(exes)}))
+                    return
+                time.sleep(0.02)
+        threading.Thread(target=run, daemon=True).start()
+        return seen
+
+    def test_installer_into_game(self):
         setup = self.f("Downloads/Vortex-1.12.3-setup.exe")
+        seen = self.machine()
         code, calls = self.run_open(setup, ["0|0", "0|"])                  # Avatar; «понятно»
-        self.assertTrue((self.pd / "Vortex/Vortex-1.12.3-setup.exe").exists())
-        self.assertIn("Install into the game", self.texts(calls))
-        self.assertFalse(any(c.startswith("vg-run") for c in calls))      # не своя игра
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, {"appid": "2424420", "path": "Vortex/Vortex-1.12.3-setup.exe", "exists": True})
+        self.assertIn("Vortex.exe", self.texts(calls))
+        self.assertTrue(setup.exists())                                    # твой файл на месте
+        self.assertEqual(list((self.home / ".local/share/vastgame/installers").iterdir()), [])   # копия убрана
+        self.assertFalse(self.pd.exists() and any(self.pd.iterdir()))
+
+    def test_installer_refused_keeps_file(self):
+        setup = self.f("Downloads/Vortex-1.12.3-setup.exe")
+        self.machine(res="prog: notinstalled")
+        code, calls = self.run_open(setup, ["0|0", "0|"])
+        self.assertIn("hasn't downloaded", self.texts(calls))
+        self.assertTrue(setup.exists())
+        self.assertEqual(list((self.home / ".local/share/vastgame/installers").iterdir()), [])
+
+    def test_installer_while_game_runs_cancel(self):
+        self.run_game("489830")
+        setup = self.f("Downloads/Vortex-1.12.3-setup.exe")
+        code, calls = self.run_open(setup, ["1|"])                         # «закрой игру» → «Отмена»
+        self.assertIn("is running", self.texts(calls))
+        self.assertTrue(setup.exists())
+        self.assertFalse((self.home / ".local/share/vastgame/requests/install").exists())
 
     def test_inside_steam_game_and_already_in_programs(self):
         exe = self.f(".steam/debian-installation/steamapps/common/Skyrim SE/skse64_loader.exe")
