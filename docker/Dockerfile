@@ -10,10 +10,12 @@ FROM ubuntu:24.04 AS vgpad
 RUN apt-get update -qq && apt-get install -yq --no-install-recommends gcc gcc-multilib libc6-dev libc6-dev-i386 \
     && rm -rf /var/lib/apt/lists/*
 COPY vgpad/vgpad.c /src/vgpad.c
+COPY vgpad/vgnv.c /src/vgnv.c
 RUN mkdir -p /out/x86_64 /out/i386 \
     && F="-shared -fPIC -O2 -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0" \
     && gcc $F -o /out/x86_64/libvgpad.so /src/vgpad.c -ldl -lpthread \
-    && gcc -m32 $F -o /out/i386/libvgpad.so /src/vgpad.c -ldl -lpthread
+    && gcc -m32 $F -o /out/i386/libvgpad.so /src/vgpad.c -ldl -lpthread \
+    && gcc $F -o /out/x86_64/libvgnv.so /src/vgnv.c -ldl
 
 # ---------------------------------------------------------------- образ
 FROM ubuntu:24.04
@@ -94,6 +96,8 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor
 
 COPY --from=vgpad /out/x86_64/libvgpad.so /usr/lib/x86_64-linux-gnu/libvgpad.so
 COPY --from=vgpad /out/i386/libvgpad.so /usr/lib/i386-linux-gnu/libvgpad.so
+# [0.5.3] NVENC на многокарточных хостах: драйвер называет все карты хоста — vgnv оставляет в ответе только свою
+COPY --from=vgpad /out/x86_64/libvgnv.so /usr/lib/x86_64-linux-gnu/libvgnv.so
 COPY vgpad/vgpadd.py /opt/vastgame/vgpadd.py
 COPY rootfs/ /
 
