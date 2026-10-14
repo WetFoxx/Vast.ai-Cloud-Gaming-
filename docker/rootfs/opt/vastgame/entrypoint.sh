@@ -182,8 +182,24 @@ fi
 # 2026-09-26, RTX 5060 Ti) — сказать приложению записью «sunshine» на странице wolf: играть здесь нельзя,
 # оно заменит машину. Пишем каждый раз заново: загрузка wolf чистит записи в начале
 xfails=0
+# [0.5.3] Состояние Tailscale — в журнал контейнера (его видно у Vast без Tailscale): раз в минуту 20 минут после старта
+# tailscaled. Живой случай 2026-10-15 (Корея, RTX 2060): узел «в сети», а связи нет — изнутри не было видно почему
+ts_report() {
+  tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin); s = d.get("Self") or {}
+print("tailscale:", d.get("BackendState"), "online" if s.get("Online") else "offline", "DERP", s.get("Relay") or "—",
+      "адрес", (s.get("TailscaleIPs") or ["—"])[0], "здоровье:", ("; ".join(d.get("Health") or []) or "ok")[:300])' 2>/dev/null \
+    | while IFS= read -r l; do log "$l"; done
+  tail -n 3 /var/log/tailscaled.log 2>/dev/null | cut -c1-220 | while IFS= read -r l; do log "tailscaled> $l"; done
+}
+tsr=0
 while :; do
   sleep 10
+  if [ -n "$AGENT" ] && [ "$tsr" -lt 120 ] && pgrep -x tailscaled >/dev/null; then
+    tsr=$((tsr + 1))
+    [ $((tsr % 6)) = 1 ] && ts_report
+  fi
   if ! pgrep -x Xorg >/dev/null; then
     xfails=$((xfails + 1))
     log "Xorg упал — перезапуск ($xfails)"
