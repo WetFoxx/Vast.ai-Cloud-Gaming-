@@ -97,6 +97,25 @@ def call(method, path, body=None, params=None, base=API):
     return r.json()
 
 
+def instance_logs(iid, tail=300):
+    """[2026-10-14] Журнал контейнера машины (её вывод) — у самого Vast, без Tailscale: PUT
+    instances/request_logs/<id>/ {"tail"} → result_url (файл на S3, появляется не сразу) → текст или None.
+    Ничего не стоит. В журнале могут быть секреты машины — показывать только через core.scrub."""
+    r = call("PUT", f"instances/request_logs/{iid}/", body={"tail": str(tail)})
+    url = r.get("result_url") if isinstance(r, dict) else None
+    if not url or not str(url).startswith("https://"):
+        return None
+    for _ in range(8):
+        time.sleep(1)
+        try:
+            g = requests.get(url, timeout=20)
+        except requests.RequestException:
+            continue
+        if g.status_code == 200:
+            return g.text
+    return None
+
+
 TEMPLATE_TTL = 600    # [0.4.5] окну хватает шаблона не старше 10 минут (Vast отвечает на него 2–7 с)
 _templates = {}       # (отпечаток ключа, имя) → (когда, шаблон); сбрасывается при любой правке шаблона через API
 

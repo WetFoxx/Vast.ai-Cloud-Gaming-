@@ -19,6 +19,7 @@ import base64
 import json
 import os
 import re
+import sys
 import threading
 import time
 
@@ -28,7 +29,8 @@ import latency
 import market
 import sshkey
 import wolfnode
-from vastapi import TEMPLATE_NAME, VastgameError, call, list_instances, my_template
+import settings
+from vastapi import TEMPLATE_NAME, VastgameError, call, instance_logs, list_instances, my_template
 from wolfnode import NODE, links, ssh, ssh_run, ts_node, wolf_status
 
 VAST_START_MIN = 10      # сколько ждать, пока Vast запустит машину (обычно 2–5 мин). Дольше — хост завис
@@ -371,6 +373,67 @@ class _Watch:
                                 "Запуск остановлен.", key="core.machine_gone", id=self.iid)
 
 
+# [2026-10-14] Пока ждём узел в Tailscale, машину не видно — а там много шагов (драйвер NVIDIA, экран, скрипт,
+# сетевая личность с Drive). Журнал контейнера есть у Vast без Tailscale: раз в минуту — что машина делает сейчас
+# (на экран запуска), сам журнал без секретов — в machine-logs/<номер>.log (разбор зависших запусков)
+LOG_FIRST, LOG_EVERY, LOG_KEEP = 60, 60, 20
+_STAGE = re.compile(r"этап: (\w+)")
+_SECRET = re.compile(r"(?i)((?:api[_-]?key|token|secret|passw\w*|authkey|bearer|cookie|credential)\w*\s*[=:]\s*)\S+")
+_LONG = re.compile(r"[A-Za-z0-9_\-+/=.]{40,}")
+
+
+def scrub(text):
+    """Журнал машины без ключей: значения после «token=», «password:»… и длинные строки, похожие на ключи, — «…»."""
+    return "\n".join(_LONG.sub("…", _SECRET.sub(r"\1…", ln))[:400] for ln in text.splitlines())
+
+
+def machine_step(text):
+    """(этап образа, последняя строка агента wolf или образа) по журналу контейнера."""
+    stage, last = None, ""
+    for ln in text.splitlines():
+        m = _STAGE.search(ln)
+        if m:
+            stage = m.group(1)
+        if ln.startswith("[wolf] ") or ln.startswith("[vastgame "):
+            last = re.sub(r"^\[wolf\] (\[[^]]*\] )?|^\[vastgame [^]]*\] ", "", ln).strip()
+    return stage, last[:160]
+
+
+class _MachineLog:
+    TESTS = False      # под автотестами — только если тест разрешил (иначе пошли бы к настоящему Vast с настоящим ключом)
+
+    def __init__(self, iid):
+        self.iid, self.next, self.shown = iid, time.time() + LOG_FIRST, None
+
+    def poll(self, ui, force=False):
+        if not force and time.time() < self.next or "unittest" in sys.modules and not self.TESTS:
+            return
+        self.next = time.time() + LOG_EVERY
+        try:
+            text = instance_logs(self.iid)
+        except VastgameError:
+            return
+        if not text:
+            return
+        text = scrub(text)
+        try:
+            d = settings.FILE.parent / "machine-logs"     # тесты подменяют FILE — и журналы уходят во временную папку
+            d.mkdir(exist_ok=True)
+            (d / f"{self.iid}.log").write_text(text + "\n", encoding="utf-8")
+            for old in sorted(d.glob("*.log"), key=lambda f: f.stat().st_mtime)[:-LOG_KEEP]:
+                old.unlink()
+        except OSError:
+            pass
+        stage, last = machine_step(text)
+        if stage and (stage, last) != self.shown:
+            self.shown = (stage, last)
+            ui.say(f"  Машина: этап {stage} — {last}", "detail",
+                   key=f"core.mstage.{stage if stage in MSTAGES else 'other'}", stage=stage, last=last or "—")
+
+
+MSTAGES = ("nvidia", "display", "audio", "desktop", "wolf", "ready", "error")
+
+
 def wait_ready(iid, t0, o, ui, docker=False):
     """Дождаться, пока машина готова к игре: Vast → Tailscale → восстановление из Drive.
     docker — контейнер vastgame-desktop: кодировщик NVENC работает не на всех хостах — такую машину
@@ -434,8 +497,14 @@ def wait_ready(iid, t0, o, ui, docker=False):
     ui.stage("tailscale", "Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
     started = time.time()
     warned, approve_url = False, None
+    mlog = _MachineLog(iid)
     while True:
-        watch.check()
+        try:
+            watch.check()
+        except VastgameError:
+            mlog.poll(ui, force=True)                  # отменили / машину удалили — журнал на разбор
+            raise
+        mlog.poll(ui)
         # Первая машина без личности в облаке и без ключа ждёт одобрения в Tailscale (v3.12):
         # ссылку она кладёт на Drive — показать/открыть её человеку; пока ждём его, таймер заново
         url = drive.ts_login_link(iid)
@@ -456,6 +525,7 @@ def wait_ready(iid, t0, o, ui, docker=False):
             _, ip, dns = node
             break
         if time.time() - started > TAILSCALE_MIN * 60:
+            mlog.poll(ui, force=True)
             raise VastgameError(f"!!! Узел не появился в Tailscale за {TAILSCALE_MIN} минут. "
                                 "Инстанс работает и тратит деньги.\n"
                                 "Посмотри лог в консоли Vast (Open → терминал): /var/log/wolf-setup.log",
