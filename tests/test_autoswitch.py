@@ -181,6 +181,14 @@ class Race(unittest.TestCase):
         self.assertEqual(self.rented, [1, 2])
         self.assertEqual(jobs.MAX_RENTS, 5)
 
+    def test_replacement_internet_not_much_slower(self):
+        # [2026-10-15] выбрана Норвегия 758 Мбит/с — замена Гонконг 17 Мбит/с не годится (70% выбранной и выше — годится)
+        self.over = {1: {"inet_down": 758}, 2: {"inet_down": 17}, 3: {"inet_down": 600}}
+        self.run_after = {2: 30, 3: 30}
+        job = self.play()
+        self.assertIsNone(job.error)
+        self.assertEqual(self.rented, [1, 3])
+
     def test_docker_replacement_traffic_not_higher(self):
         self.over = {1: {"inet_up_cost": 0.001}, 2: {"inet_up_cost": 0.002}, 3: {"inet_down_cost": 0.001}}
         self.run_after = {2: 30, 3: 30}

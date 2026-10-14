@@ -61,6 +61,16 @@ class TestLastMachine(unittest.TestCase):
             ids = {o["id"] for o in market.search(100)}
         self.assertEqual(ids, {2, 3})
 
+    def test_slow_internet_hidden(self):
+        # [2026-10-15] Гонконг, 17 Мбит/с — драйвер, клиент Steam и сохранения качались десятки минут
+        slow = dict(OFFER, id=1, inet_down=17.2)
+        fast = dict(OFFER, id=2, inet_down=758)
+        edge = dict(OFFER, id=3, inet_down=100)
+        unknown = dict(OFFER, id=4)                                      # Vast не сообщил — не прячем
+        with self.fake_call([slow, fast, edge, unknown]):
+            ids = {o["id"] for o in market.search(100)}
+        self.assertEqual(ids, {2, 3, 4})
+
     def test_small_memory_hidden(self):
         # 7.7 ГБ — как у двух машин в Японии, что замолкали при скачивании; 15.5 — это «16-гиговая» (часть у хоста)
         small = dict(OFFER, id=1, cpu_ram=7864)

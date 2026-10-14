@@ -322,7 +322,8 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
                 continue                               # замену заняли или не подходит — дальше по списку
             if not chosen and (o.get("machine_id") in used or str(o.get("machine_id")) in bad
                                or o.get("dph_total", 0) > limit["price"] * SPARE_MARGIN + 1e-6
-                               or docker and _traffic(o) > limit["traffic"] * SPARE_MARGIN + 1e-9):
+                               or docker and _traffic(o) > limit["traffic"] * SPARE_MARGIN + 1e-9
+                               or (o.get("inet_down") or 0) < (limit.get("down") or 0) * 0.7):   # интернет — не медленнее 70%
                 continue
             if not announced:
                 job.stage("vast", "Vast запускает машину")
@@ -340,7 +341,7 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
                 break
             rents += 1
             if chosen:
-                limit = {"price": o.get("dph_total", 0), "traffic": _traffic(o)}
+                limit = {"price": o.get("dph_total", 0), "traffic": _traffic(o), "down": o.get("inet_down") or 0}
             used.add(o.get("machine_id"))
             r = {"iid": iid, "t0": t0, "offer": o, "errors": 0}
             racers.append(r)

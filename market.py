@@ -47,6 +47,10 @@ BLOCKED = {"CN"}
 # Португалия, disk_bw 69 МБ/с (старый SATA SSD) — игра 10 ГБ восстанавливалась 20 МБ/с. У обычных машин
 # 2700–3400 МБ/с; медленнее 200 — 8 из 340 в Docker и ни одной в KVM. Поля нет — скорость неизвестна, не прячем.
 MIN_DISK_BW = 200     # МБ/с, поле Vast disk_bw
+# Интернет медленнее — машину не показываем (решение 2026-10-15): с Google Drive качаются клиент Steam, сохранения и
+# игры, с сайта NVIDIA — драйвер. Живой случай 2026-10-15: Гонконг, RTX 3060, inet_down 17 Мбит/с — драйвер 400 МБ
+# 3 мин, клиент Steam 1.2 ГБ — 10 мин, «долгий Tailscale». Медленнее 100 — 10 из 240 машин в Docker, 0 из 7 в KVM
+MIN_INET_DOWN = 100   # Мбит/с, поле Vast inet_down
 # Памяти меньше — машину не показываем (решение 2026-10-01): в эти ГБ помещается всё сразу — рабочий стол, Sunshine,
 # Steam с его браузером и игра, а подкачки в контейнере нет. Живой случай 2026-10-01: две машины RTX A2000 (Япония)
 # с 7.7 ГБ перестали отвечать (Tailscale, страница статуса, Moonlight) ровно когда Steam начал качать игру. Порог —
@@ -180,6 +184,8 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         if docker and driver_major(o) < DOCKER_DRIVER:     # драйвер 610+ — работает (проверено 2026-10-02, Испания)
             continue
         if (o.get("disk_bw") or MIN_DISK_BW) < MIN_DISK_BW:
+            continue
+        if (o.get("inet_down") or MIN_INET_DOWN) < MIN_INET_DOWN:
             continue
         if (o.get("cpu_ram") or MIN_RAM_GB * 1024) < MIN_RAM_GB * 1024:
             continue
