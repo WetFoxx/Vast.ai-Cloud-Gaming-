@@ -158,6 +158,32 @@ class Race(unittest.TestCase):
         self.assertEqual(job.error["key"], "core.offer_gone")
         self.assertEqual(self.rented, [])
 
+    HINT = {"price": 0.2, "traffic": 0, "down": 0}
+
+    def test_chosen_taken_similar_one_instead(self):
+        # [2026-10-15] выбранную заняли, а свежие данные о ней у окна есть — похожая из списка, не к списку
+        self.run_after = {2: 30}
+        with mock.patch.dict(OFFERS, clear=False):
+            del OFFERS[1]
+            jobs.run_play(self.job, 1, spare=[2, 3], hint=self.HINT)
+        self.assertIsNone(self.job.error)
+        self.assertEqual(self.rented, [2])
+        self.assertIn("core.chosen_gone_next", [e["key"] for e in self.job.events])
+
+    def test_chosen_taken_while_renting_similar_one_instead(self):
+        self.rent_gone, self.run_after = {1}, {2: 30}
+        jobs.run_play(self.job, 1, spare=[2], hint=self.HINT)
+        self.assertIsNone(self.job.error)
+        self.assertEqual(self.rented, [2])
+
+    def test_chosen_taken_no_similar_left(self):
+        self.over = {2: {"dph_total": 0.3}, 3: {"dph_total": 0.25}}     # обе дороже +20%
+        with mock.patch.dict(OFFERS, clear=False):
+            del OFFERS[1]
+            jobs.run_play(self.job, 1, spare=[2, 3], hint=self.HINT)
+        self.assertEqual(self.job.error["key"], "core.chosen_gone_none")
+        self.assertEqual(self.rented, [])
+
     def test_chosen_flagged_host_is_still_rented(self):
         # хост помечен «может не запуститься», но человек видел пометку и подтвердил — арендуем именно её
         market.mark_bad(101, "exited")

@@ -915,6 +915,20 @@ class TestUpdateInstall(unittest.TestCase):
             self.assertEqual(gui.Api().settings()["update"], told)
 
 
+class TestChosenHint(unittest.TestCase):
+    """[2026-10-15] Свежие данные выбранной (из проверки перед «Арендовать») — образец для замены, если её займут."""
+
+    def test_hint_only_for_the_checked_machine(self):
+        got = []
+        api = gui.Api()
+        api._checked = {"id": 7, "price": 0.1, "traffic": 0.001, "down": 758}
+        with mock.patch.object(gui.jobs, "spawn", lambda kind, **a: got.append(a) or True):
+            api._start_play(7, None, 100, "ru", [8, 9], True)
+            api._start_play(8, None, 100, "ru", [9], True)
+        self.assertEqual(got[0]["hint"], {"price": 0.1, "traffic": 0.001, "down": 758})
+        self.assertIsNone(got[1]["hint"])                                   # другая машина — образца нет
+
+
 class TestModsSave(unittest.TestCase):
     """[v5.1] Тумблер «Сохранять моды в облако»: запоминается для следующих машин; работающей — сразу говорим."""
 

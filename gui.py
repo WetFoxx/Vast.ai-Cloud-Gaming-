@@ -241,6 +241,9 @@ class Api:
             o, credit = parallel.run(lambda: core.offer_by_id(int(offer_id), disk, bool(docker)), core.balance)
         except VastgameError as e:
             return {"error": error_data(e)}
+        # [2026-10-15] образец для замены, если выбранную займут, пока она арендуется (_start_play → jobs, hint)
+        self._checked = {"id": int(o["id"]), "price": o.get("dph_total") or 0, "traffic": jobs._traffic(o),
+                         "down": o.get("inet_down") or 0}
         return {"id": o["id"], "gpu": o["gpu_name"], "country": market.country(o), "price": o["dph_total"],
                 "disk": disk, "balance": credit, "hours": credit / o["dph_total"] if o["dph_total"] else None,
                 "bad_reason": core.bad_host_reason(o), **_traffic(o)}
@@ -322,8 +325,10 @@ class Api:
             sync["play"] = play
             settings.applog(f"play: {play['appid']} аккаунтом …{play['account'][-4:]}")
         spare = [int(x) for x in (spare or []) if str(x).isdigit() and int(x) != int(offer_id)][:SPARE]
+        hint = getattr(self, "_checked", None)
+        hint = {k: hint[k] for k in ("price", "traffic", "down")} if hint and hint.get("id") == int(offer_id) else None
         if not jobs.spawn("play", offer_id=int(offer_id), sync=sync, disk=disk, lang=lang, spare=spare,
-                          docker=bool(docker)):
+                          docker=bool(docker), hint=hint):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 

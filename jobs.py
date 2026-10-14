@@ -210,7 +210,7 @@ RACE_POLL = 10       # с: как часто спрашивать Vast о сос
 GONE_WAIT = 60       # с: ждать, пока удалённая машина исчезнет у Vast, прежде чем брать другую
 
 
-def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False):
+def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=False, hint=None):
     """Аренда (человек уже ответил «да» в окне) и ожидание готовности.
 
     На Vast часть KVM-хостов подолгу (или навсегда) висит в Create/Loading: машину, которую Vast не запустил
@@ -236,7 +236,7 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=
             if m.get("iid"):
                 iid, t0, o = m["iid"], m["t0"], m["offer"]
             else:
-                iid, t0, o = _race(job, queue, tpl, size, sync, docker, lang)
+                iid, t0, o = _race(job, queue, tpl, size, sync, docker, lang, hint)
             try:
                 r = core.wait_ready(iid, t0, o, job, docker=docker)
                 break
@@ -274,7 +274,7 @@ def _traffic(o):
     return max(o.get("inet_up_cost") or 0, o.get("inet_down_cost") or 0)
 
 
-def _race(job, queue, tpl, size, sync, docker=False, lang=None):
+def _race(job, queue, tpl, size, sync, docker=False, lang=None, hint=None):
     """Запустить наперегонки до RACE машин из очереди (id предложений); вернуть (iid, t0, offer)
     первой дошедшей до running, остальные удалить. Зависшую дольше VAST_START_MIN или сломанную —
     удалить, пометить хост и поставить вместо неё следующую. Состояние забега — в meta: окно
@@ -304,6 +304,19 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
         if key:
             job.say(key, "warn", key=key, gpu=r["offer"].get("gpu_name"), country=_where(r["offer"]), **params)
 
+    def chosen_gone(oid):
+        """[2026-10-15] Выбранную заняли, пока арендовали (15 из 203 запусков): не к списку, а похожую из списка
+        человека — с теми же ограничениями, что у замены, от свежих данных выбранной (окно взяло их перед «Арендовать»).
+        Без этих данных или без запасных — как раньше (к списку)."""
+        nonlocal limit
+        if not hint or not queue:
+            return False
+        limit = {"price": float(hint.get("price") or 0), "traffic": float(hint.get("traffic") or 0),
+                 "down": float(hint.get("down") or 0)}
+        save()
+        job.say("Эту машину уже заняли — беру похожую", "warn", key="core.chosen_gone_next")
+        return True
+
     def top_up():
         """Добрать машин до RACE из очереди. Первая — выбранная человеком: её и арендуем (даже если хост помечен —
         он видел пометку и подтвердил; заняли — сказать ему, а не подсовывать другую). Дальше — замены: свежие цена
@@ -318,6 +331,8 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
                 o = core.offer_by_id(int(oid), size, docker)
             except (VastgameError, ValueError, TypeError):
                 if chosen:
+                    if chosen_gone(oid):
+                        continue
                     raise                              # выбранную заняли, пока подтверждали
                 continue                               # замену заняли или не подходит — дальше по списку
             if not chosen and (o.get("machine_id") in used or str(o.get("machine_id")) in bad
@@ -331,8 +346,8 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
             try:
                 iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang), o)
             except VastgameError as e:
-                if not chosen and e.key == "core.offer_gone":
-                    continue                           # замену только что заняли — следующая
+                if e.key == "core.offer_gone" and (not chosen or chosen_gone(oid)):
+                    continue                           # замену (или выбранную — тогда похожая) только что заняли
                 if not racers and not added:
                     raise                              # не арендовали ни одной — сказать почему
                 # Например, не хватает баланса на ещё одну — ждём уже запущенные
@@ -366,6 +381,9 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None):
                                     "проблемы с KVM. Попробуй позже или выбери машины в другой стране.",
                                     key="core.tries_exhausted_docker" if docker else "core.tries_exhausted",
                                     n=len(tried))
+            if not rents:                              # ни одной аренды: выбранную заняли, похожих нет
+                raise VastgameError("Машину уже заняли, а похожих в твоём списке нет — выбери другую.",
+                                    key="core.chosen_gone_none")
             raise VastgameError("Машина не запустилась, а машин не хуже неё в списке нет — выбери другую.",
                                 key="core.no_spare")
         try:
