@@ -119,6 +119,20 @@ why_bad() {
   [ -n "$why" ] || why=$(printf '%s\n' "$errs" | tail -1)
   echo "NVENC не работает ($TRIES попытки): $(printf '%s' "${why:-нет строки ошибки в журнале}" | sed 's/^\[[^]]*\]: *//' | cut -c1-150)"
 }
+# [0.5.3] Видео не работает — подробности в журнал контейнера (приложение сохраняет его у себя): режимы видеокарты у
+# хоста, есть ли библиотека кодировщика (её даёт хост), что разрешено контейнеру и последние строки Sunshine о NVENC.
+# Для разбора «Function not implemented» (22 из 43 сломанных хостов, 2026-10-15): предсказуемо ли это по хосту
+video_diag() {
+  echo "диагностика видео:"
+  nvidia-smi --query-gpu=name,driver_version,compute_mode,persistence_mode,display_mode,display_active,pci.bus_id \
+    --format=csv,noheader 2>&1 | sed 's/^/  gpu: /'
+  nvidia-smi -q 2>/dev/null | grep -iE "Virtualization Mode|Host VGPU Mode|MIG Mode|Current *:|Encoder Stats|Session Count|Average FPS" \
+    | head -12 | sed 's/^ */  smi: /'
+  echo "  NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-нет}"
+  ls -1 /usr/lib/x86_64-linux-gnu/libnvidia-encode.so* /usr/lib/x86_64-linux-gnu/libnvcuvid.so* 2>&1 | sed 's/^/  lib: /'
+  grep -iE "nvenc|cuda|encod|driver|api version|codec|capab" "$LOGF" 2>/dev/null | grep -viE "may generate errors" \
+    | tail -25 | cut -c1-220 | sed 's/^/  sunshine> /'
+}
 if [ -n "$PROBE" ]; then
   pkill -u "$DU" -x sunshine                   # проба закончилась — настоящую Sunshine запустит агент
   if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
@@ -128,6 +142,7 @@ if [ -n "$PROBE" ]; then
     echo "видео: проба NVENC не закончилась за 90 с — проверит агент"
   else
     echo no > /run/vastgame/nvenc
+    video_diag
     echo "!!! видео не работает: $(why_bad)"
   fi
   exit 0
@@ -147,6 +162,7 @@ elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
 else
   echo no > /run/vastgame/nvenc
   echo "sunshine: NVENC на этой машине не работает — захват X11, кодирование процессором (медленно)"
+  video_diag
   report err "$(why_bad)"
   start x11 software
 fi
