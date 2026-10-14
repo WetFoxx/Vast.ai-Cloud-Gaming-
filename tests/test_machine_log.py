@@ -145,4 +145,4 @@ class TestWiring(unittest.TestCase):
         src = inspect.getsource(core.wait_ready)
         self.assertIn("mlog = _MachineLog(iid)", src)
         self.assertIn("mlog.poll(ui)", src)
-        self.assertEqual(src.count("mlog.poll(ui, force=True)"), 2)      # отмена/удаление и таймаут — журнал на разбор
+        self.assertEqual(src.count("mlog.poll(ui, force=True)"), 3)      # отмена/удаление, таймаут, видео после Tailscale

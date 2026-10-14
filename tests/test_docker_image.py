@@ -104,10 +104,13 @@ class TestSunshineReport(unittest.TestCase):
         out, nv = self.run_probe("[t]: Error: Could not open codec [h264_nvenc]: Function not implemented\n"
                                  "[t]: Fatal: Couldn't find any working encoder\n")
         self.assertEqual(nv, "no")
-        self.assertEqual(out, "!!! видео не работает: NVENC не работает (3 попытки): Error: Could not open codec "
-                              "[h264_nvenc]: Function not implemented")
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "!!! видео не работает: NVENC не работает (3 попытки): Error: Could not open codec "
+                                    "[h264_nvenc]: Function not implemented")
+        self.assertIn("диагностика видео:", lines)                          # [0.5.3] подробности — перед итогом
+        self.assertIn("  sunshine> [t]: Error: Could not open codec [h264_nvenc]: Function not implemented", lines)
         out, nv = self.run_probe("[t]: Info: Found [0] outputs\n[t]: Fatal: Couldn't find any working encoder\n")
-        self.assertTrue(out.startswith("!!! видео не работает: нет выхода на монитор"), out)
+        self.assertTrue(out.splitlines()[-1].startswith("!!! видео не работает: нет выхода на монитор"), out)
         out, nv = self.run_probe("[t]: Info: still testing\n")              # не закончилась — не браковать
         self.assertEqual((out, nv), ("видео: проба NVENC не закончилась за 90 с — проверит агент", None))
 
