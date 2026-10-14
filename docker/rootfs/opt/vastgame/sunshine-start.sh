@@ -9,8 +9,14 @@
 set -u
 # sunshine-start.sh ensure — только если Sunshine не работает (присмотр: пока он ждал блокировку, её мог поднять wolf;
 # лишний перезапуск оборвал бы начатую связку с Moonlight)
+# [0.5.3] sunshine-start.sh probe — проба кодировщика сразу после экрана, до агента (entrypoint.sh, в фоне): та же
+# проверка, что ниже, но во временной папке — связку с Moonlight не трогает (её агент восстановит из облака позже).
+# Итог — строкой в журнал контейнера: «!!! видео не работает: …» видно у Vast без Tailscale через минуту, и приложение
+# сразу заменяет машину (раньше поломку видео узнавали только после Tailscale — 5–10 минут на машину)
+PROBE=
+[ "${1:-}" = probe ] && PROBE=1
 exec 9>/run/vastgame/sunshine.lock
-flock -w 120 9 || { echo "sunshine: занято другим перезапуском"; exit 1; }
+flock -w 360 9 || { echo "sunshine: занято другим перезапуском"; exit 1; }     # проба — до трёх попыток по 90 с
 DU=user
 [ "${1:-}" = ensure ] && pgrep -u "$DU" -x sunshine >/dev/null && exit 0
 DH=/home/user
@@ -32,7 +38,11 @@ if { { [ -n "$DRV" ] && [ "$DRV" -lt 580 ]; } || { [ -n "$CC" ] && [ "$CC" -lt 7
   [ -s "$STATE" ] || { [ -s "$C/sunshine_state.json" ] && cp "$C/sunshine_state.json" "$STATE" && chown "$DU:" "$STATE"; }
 fi
 LOGF=/tmp/sunshine.log
-mkdir -p "$C" && chown -R "$DU:" "$DH/.config"
+if [ -n "$PROBE" ]; then
+  C=/tmp/sunshine-probe; CONF=$C/probe.conf; STATE=$C/state.json; LOGF=$C/sunshine.log
+  rm -rf "$C"
+fi
+mkdir -p "$C" && chown -R "$DU:" "$DH/.config" "$C"
 [ -f "$C/apps.json" ] || { [ -f /usr/share/sunshine/apps.json ] && cp /usr/share/sunshine/apps.json "$C/apps.json" && chown "$DU:" "$C/apps.json"; }
 # Чистое окружение, как на KVM (env -i): ключи аккаунта Vast из окружения root — не в Sunshine
 XRD=/run/user/$(id -u $DU)
@@ -91,6 +101,37 @@ for try in 1 2 3; do
   grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null && break
   [ "$try" -lt 3 ] && { echo "sunshine: NVENC не нашёлся (попытка $try) — пробую ещё раз через 10 с"; sleep 10; }
 done
+# Почему видео не работает — одной строкой (и пробе, и записи для приложения)
+why_bad() {
+  # [0.4.4] У X-сервера нет ни одного выхода (хост не дал видеокарте экран, разбор 2026-10-02, Техас): Sunshine
+  # пишет «Found [0] outputs» / «Platform failed to initialize» — это не кодировщик, надпись должна говорить правду
+  if grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null; then
+    echo "нет выхода на монитор: хост не дал видеокарте экран (Sunshine: 0 выходов)"
+    return
+  fi
+  # Настоящая причина: строки «Error:»/«Fatal:», без служебной «Testing for available encoders, this may generate
+  # errors» (раньше в отчёт попадала она). Сначала — про NVENC/CUDA/кодирование, иначе последняя ошибка
+  local errs real why
+  errs=$(grep -E '\]: (Error|Fatal): ' "$LOGF" 2>/dev/null | grep -viE 'may generate errors')
+  real=$(printf '%s\n' "$errs" | grep -v "Couldn.t find any working encoder")     # итоговая — без причины
+  why=$(printf '%s\n' "$real" | grep -iE 'nvenc|cuda|encod' | tail -1)
+  [ -n "$why" ] || why=$(printf '%s\n' "$real" | grep . | tail -1)
+  [ -n "$why" ] || why=$(printf '%s\n' "$errs" | tail -1)
+  echo "NVENC не работает ($TRIES попытки): $(printf '%s' "${why:-нет строки ошибки в журнале}" | sed 's/^\[[^]]*\]: *//' | cut -c1-150)"
+}
+if [ -n "$PROBE" ]; then
+  pkill -u "$DU" -x sunshine                   # проба закончилась — настоящую Sunshine запустит агент
+  if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
+    echo ok > /run/vastgame/nvenc
+    echo "видео: NVENC работает (проба)"
+  elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
+    echo "видео: проба NVENC не закончилась за 90 с — проверит агент"
+  else
+    echo no > /run/vastgame/nvenc
+    echo "!!! видео не работает: $(why_bad)"
+  fi
+  exit 0
+fi
 # Итог — и приложению: запись «sunshine» на странице wolf (есть только у агента; архивом не считается).
 # NVENC нет — приложение заменит машину на следующую из списка
 report() { [ -d /var/lib/wolf/st ] && echo "$(date +%s)|$1|$2" > /var/lib/wolf/st/sunshine; }
@@ -106,19 +147,6 @@ elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
 else
   echo no > /run/vastgame/nvenc
   echo "sunshine: NVENC на этой машине не работает — захват X11, кодирование процессором (медленно)"
-  # [0.4.4] У X-сервера нет ни одного выхода (хост не дал видеокарте экран, разбор 2026-10-02, Техас): Sunshine
-  # пишет «Found [0] outputs» / «Platform failed to initialize» — это не кодировщик, надпись должна говорить правду
-  if grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null; then
-    report err "нет выхода на монитор: хост не дал видеокарте экран (Sunshine: 0 выходов)"
-  else
-    # Настоящая причина: строки «Error:»/«Fatal:», без служебной «Testing for available encoders, this may generate
-    # errors» (раньше в отчёт попадала она). Сначала — про NVENC/CUDA/кодирование, иначе последняя ошибка
-    errs=$(grep -E '\]: (Error|Fatal): ' "$LOGF" 2>/dev/null | grep -viE 'may generate errors')
-    real=$(printf '%s\n' "$errs" | grep -v "Couldn.t find any working encoder")     # итоговая — без причины
-    why=$(printf '%s\n' "$real" | grep -iE 'nvenc|cuda|encod' | tail -1)
-    [ -n "$why" ] || why=$(printf '%s\n' "$real" | grep . | tail -1)
-    [ -n "$why" ] || why=$(printf '%s\n' "$errs" | tail -1)
-    report err "NVENC не работает ($TRIES попытки): $(printf '%s' "${why:-нет строки ошибки в журнале}" | sed 's/^\[[^]]*\]: *//' | cut -c1-150)"
-  fi
+  report err "$(why_bad)"
   start x11 software
 fi
