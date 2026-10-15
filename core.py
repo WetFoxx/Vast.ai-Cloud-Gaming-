@@ -795,7 +795,7 @@ def stop(ui, dry_run=False):
     if not boot or boot[1] != "ok":
         ui.say(f"!!! Загрузка ещё не закончена или с ошибкой: boot = {boot[1] if boot else 'нет'} "
                f"{boot[2] if boot else ''}", "warn", key="core.boot_not_ok",
-               state=boot[1] if boot else "—", text=boot[2] if boot else "")
+               state=boot[1] if boot else "—", msg=boot[2] if boot else "")   # не text: это имя первого аргумента say
 
     # Проверка SSH безвредной командой — до того, как что-то запускать.
     # Если Tailscale попросит подтвердить вход — ссылка придёт в ui.tailscale; ждём до 3 минут

@@ -436,7 +436,7 @@ class TestStatus(Base):
 
 
 class TestStop(Base):
-    def setup_machine(self, after, shutdown_code=0, answer=True):
+    def setup_machine(self, after, shutdown_code=0, answer=True, before=None):
         alive = [42]
         self.patch(core, "list_instances", lambda: [{"id": i} for i in alive])
         self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "vastai-gaming.tail.ts.net"))
@@ -447,7 +447,7 @@ class TestStop(Base):
             return (0, "ok\n") if command == "echo ok" else (0, f"{T0 + 2}\n")
         self.patch(core, "ssh_run", ssh_run)
         self.patch(core, "ssh", lambda ip, command: FakeProc(shutdown_code))
-        before = {"boot": (T0 - 900, "ok", "восстановление завершено")}
+        before = before or {"boot": (T0 - 900, "ok", "восстановление завершено")}
         pages = iter([before, after])
         last = {}
 
@@ -466,6 +466,15 @@ class TestStop(Base):
         self.assertTrue(r["deleted"])
         self.assertEqual(self.deleted, [42])
         self.assertEqual(ui.stages, ["shutdown", "verify", "deleted"])
+
+    def test_stop_after_boot_error(self):
+        # [2026-10-15] загрузка с ошибкой (архив не восстановился) — предупредить и всё равно закончить: раньше
+        # предупреждение передавало поле text= и само падало (TypeError) — «Закончить» не работал совсем
+        boot = {"boot": (T0 - 900, "err", "ошибки: pfx--202090")}
+        ui = self.setup_machine({**boot, "steam-state": (T0 + 20, "ok", "")}, before=boot)
+        r = core.stop(ui)
+        self.assertTrue(r["deleted"])
+        self.assertIn("core.boot_not_ok", ui.keys)
 
     def test_failed_upload_not_deleted(self):
         ui = self.setup_machine({"steam-client": (T0 + 20, "err", "ошибка выгрузки")})
