@@ -439,6 +439,37 @@ class TestWolfFunctions(unittest.TestCase):
                            capture_output=True, text=True)
         return r.stdout.strip()
 
+    def unpack_run(self, fails):
+        """[v5.8] unpack с поддельным get: первые fails скачиваний «портятся» (как «не сходится MD5»)."""
+        d = Path(tempfile.mkdtemp())
+        for x in ("v", "m", "h", "p"):
+            (d / x).mkdir()
+        (d / "fails").write_text(str(fails))
+        script = (f'S="{d}"; L="{d}"; B="{d}/b"; K=0\n'
+                  'spec() { return 0; }\n'
+                  'rver() { echo aaaa1111bbbb; }\n'
+                  'rd() { cat "$1" 2>/dev/null; }\n'
+                  'u() { "$@"; }\n'
+                  'man() { echo m; }\n'
+                  'sleep() { :; }\n'
+                  'log() { echo "LOG $*"; }\n'
+                  'st() { echo "ST $1 $2"; }\n'
+                  'flock() { :; }\n'
+                  f'get() {{ local c; c=$(cat "{d}/fails"); echo GET; [ "$c" -gt 0 ] && {{ echo $((c - 1)) > "{d}/fails"; return 1; }}; return 0; }}\n'
+                  + self.fn("unpack") + "\nunpack g\n")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        return r.stdout, (d / "v" / "g").read_text().strip() if (d / "v" / "g").exists() else None
+
+    def test_unpack_retries(self):
+        out, v = self.unpack_run(2)                       # дважды испортилось — третья попытка удалась
+        self.assertEqual(out.count("GET"), 3)
+        self.assertIn("ST g ok", out)
+        self.assertEqual(v, "aaaa1111bbbb")
+        out, v = self.unpack_run(5)                       # всегда портится — после трёх попыток ошибка, версия не записана
+        self.assertEqual(out.count("GET"), 3)
+        self.assertIn("ST g err", out)
+        self.assertIsNone(v)
+
     def test_versions(self):
         single = [("a.tar.zst", "11112222aaaa", "5")]
         chunked = [("a.tar.zst.parts", "33334444bbbb", "1"), ("a.tar.zst.gabcdef01-0000", "x", "9")]
