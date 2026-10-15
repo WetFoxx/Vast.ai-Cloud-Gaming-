@@ -368,6 +368,27 @@ class TestDllOverrides(unittest.TestCase):
         self.assertEqual(ws.dll_overrides(self.root), 0)                  # второй раз — ничего не дописывает
         self.assertEqual(self.reg.read_text(), text)
 
+    def test_steam_tools_and_system_dirs_skipped(self):
+        # [2026-10-15] Proton — тоже «игра» Steam, в его папке все программы и библиотеки Wine
+        sa = self.root / "steamapps"
+        (sa / "appmanifest_1493710.acf").write_text('"AppState"\n{\n\t"appid"\t\t"1493710"\n\t"name"\t\t"Proton Experimental"\n'
+                                                   '\t"installdir"\t\t"Proton - Experimental"\n}\n')
+        tool = sa / "common/Proton - Experimental/files/lib/wine/x86_64-windows"
+        tool.mkdir(parents=True)
+        for n in ("cmd.exe", "steam.exe", "dinput8.dll", "dxgi.dll"):
+            (tool / n).write_text("x")
+        treg = sa / "compatdata/1493710/pfx/user.reg"
+        treg.parent.mkdir(parents=True)
+        treg.write_text("WINE REGISTRY Version 2\n")
+        sysdir = sa / "common/Game/Bin/many"                             # «подменных» много — системная папка
+        sysdir.mkdir()
+        for n in ("Tool.exe", "dinput8.dll", "dxgi.dll", "d3d9.dll", "d3d11.dll", "winmm.dll", "version.dll", "dsound.dll"):
+            (sysdir / n).write_text("x")
+        ws.dll_overrides(self.root)
+        self.assertEqual(treg.read_text(), "WINE REGISTRY Version 2\n")
+        self.assertNotIn("Tool.exe", self.reg.read_text())
+        self.assertIn("Game.exe", self.reg.read_text())
+
     def test_running_game_untouched(self):
         before = self.reg.read_text()
         self.assertEqual(ws.dll_overrides(self.root, skip={APP}), 0)     # Wine этой игры работает — реестр не трогаем

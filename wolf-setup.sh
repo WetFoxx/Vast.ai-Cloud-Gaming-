@@ -4919,16 +4919,24 @@ PROXY_DLLS = {"dinput8", "dinput", "winmm", "version", "xinput1_3", "xinput1_4",
               "dbghelp", "xlive", "binkw32", "d3dcompiler_47"}
 
 
+# Служебное Steam (Proton, Steam Linux Runtime…) Steam тоже ставит «играми» — у Proton в папке все системные программы
+# и библиотеки Wine (живой случай 2026-10-15: в «диск C:» самого Proton записались подмены для 119 программ Wine)
+DLL_SKIP_APPS = re.compile(r"^(proton|steam linux runtime|steamworks|steam controller|steamvr)", re.I)
+DLL_SKIP_DIRS = {"system32", "syswow64", "wine", "drive_c", "pfx"}
+
+
 def _proxies(gd, depth=6):
-    """{exe: {dll, …}}: .exe и «подменные» библиотеки в одной папке игры."""
+    """{exe: {dll, …}}: .exe и «подменные» библиотеки в одной папке игры. Больше 6 «подменных» в одной папке — это
+    системные библиотеки (Wine, Windows), а не мод — мимо."""
     out = {}
     base = len(Path(gd).parts)
     for d, dirs, files in os.walk(gd):
+        dirs[:] = [x for x in dirs if x.lower() not in DLL_SKIP_DIRS]
         if len(Path(d).parts) - base >= depth:
             dirs[:] = []
         low = {f.lower(): f for f in files}
         dlls = {n[:-4] for n in low if n.endswith(".dll") and n[:-4] in PROXY_DLLS}
-        if not dlls:
+        if not dlls or len(dlls) > 6:
             continue
         for n, f in low.items():
             if n.endswith(".exe") and not ALWAYS_SKIP.search(n):
@@ -4965,6 +4973,12 @@ def dll_overrides(root, skip=()):
         reg = Path(root, "steamapps", "compatdata", appid, "pfx", "user.reg")
         gd = _game_dir(Path(root), appid)
         if appid in skip or not gd or not reg.is_file():
+            continue
+        try:
+            name = re.search(r'"name"\s*"([^"]*)"', acf.read_text(errors="replace"))
+        except OSError:
+            continue
+        if name and DLL_SKIP_APPS.match(name.group(1)):
             continue
         want = _proxies(gd)
         if not want:
