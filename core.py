@@ -277,6 +277,7 @@ def rent(offer_id, body, offer=None):
     try:
         r = call("PUT", f"asks/{offer_id}/", body)
     except VastgameError as e:
+        settings.applog(f"аренда {offer_id}: Vast отказал: {str(e)[:300]}")   # сырой ответ — для разбора
         # Предложение сняли между выбором и арендой (заняли или хост ещё не освободил машину):
         # Vast отвечает 400 «no_such_ask … is not available» — сказать это по-человечески
         if "no_such_ask" in str(e) or "not available" in str(e):
