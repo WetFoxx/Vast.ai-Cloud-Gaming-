@@ -95,14 +95,15 @@ function backdrop(g) {
   $("backdrop-art").classList.toggle("on", !!url);
 }
 function renderHeroArt() {
-  const now = playNowGame && playNowGame();
+  // Игра, запущенная на машине, — только пока машина есть (окно помнит прошлую игру и после «Закончить»)
+  const machine = !!(current && current.status && current.status.machine);
+  const now = machine ? playNowGame() : null;
   const recent = heroPick || (libData && libData.games && libData.games[0]);
   const g = now && now.appid ? { ...((libData && libData.games || []).find((x) => String(x.appid) === String(now.appid)) || {}), ...now }
     : recent || null;
   heroGame = g;
   // Имя игры крупно: запущенная на машине — всегда; последняя из библиотеки — только когда машины нет (предложение)
-  const st = current && current.status, none = !(st && st.machine);
-  const suggest = none && g && !(now && now.appid) && g.accounts ? g : null;
+  const suggest = !machine && g && g.accounts ? g : null;
   $("hero-name").hidden = !(g && (now && now.appid || suggest));
   $("hero-name").textContent = g ? g.name || "" : "";
   $("play-game").hidden = !suggest;
@@ -112,7 +113,14 @@ function renderHeroArt() {
   $("machine-card").classList.toggle("suggest", !!suggest);
   const url = artOf(g);
   $("machine-card").classList.toggle("with-art", !!url);
-  $("hero-art").style.backgroundImage = url ? `url("${url}")` : "";
+  // смена игры — картинка гаснет и проявляется новой (без скачка)
+  const art = $("hero-art"), next = url ? `url("${url}")` : "";
+  if (art.dataset.url !== next) {
+    art.dataset.url = next;
+    clearTimeout(art._swap);
+    art.classList.add("swap");
+    art._swap = setTimeout(() => { art.style.backgroundImage = next; art.classList.remove("swap"); }, art.style.backgroundImage ? 140 : 0);
+  }
   const logo = $("hero-logo");
   logo.hidden = true;
   if (g && /^\d+$/.test(String(g.appid))) {

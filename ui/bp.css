@@ -226,3 +226,6 @@ body[data-screen="main"] #top-machine { display: none !important; }
 .lib-top h1 { padding-right: 0; }
 .ml-row #stop { flex: none; padding: 15px 24px; font-size: 16px; background: rgba(255, 255, 255, .1); }
 .foot:not(:has(> :not([hidden]))) { display: none; }
+.hero-art { transition: opacity .2s ease; }
+.hero-art.swap { opacity: .25; }
+.hero-name { transition: opacity .2s ease; }
