@@ -532,6 +532,11 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .progs-box { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px 14px; border-radius: 14px;
   background: var(--card-2); border: 1px solid var(--border); }
 .progs-box .pg-title { font-weight: 600; font-size: 14px; }
+.progs-box .pg-games { display: flex; flex-wrap: wrap; gap: 6px; }
+.progs-box .pg-games .chip { cursor: pointer; border: 1px solid var(--border); background: transparent; color: inherit; font: inherit; width: auto; flex: none; margin: 0;
+                             font-size: 12.5px; padding: 4px 10px; border-radius: 999px; }
+.progs-box .pg-games .chip.on { background: var(--grad); color: #fff; border-color: transparent; }
+.progs-box .pg-launch-label { cursor: help; }
 .progs-box .pg-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); }
 .progs-box .pg-name { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .progs-box .pg-name b { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1039,13 +1039,35 @@ function renderPlay(play, game, streaming, progs) {
 // «Запустить» — рядом с игрой, в её Proton (игра должна быть запущена); «Вместе с игрой» — сама при каждом старте игры,
 // на этой и следующих машинах (выбор запоминается). Ответ кнопки держим 20 с — блок перерисовывается при обновлении.
 const progNotes = {};
+// [2026-10-15] Одна игра за раз (раньше — раздел на каждую игру машины, и программы из Programs повторялись под каждой):
+// запущенная → та, с которой арендована машина → выбранная переключателем → первая
+let progsPick = null;
+function progsGame(games) {
+  const ids = games.map(([a]) => a);
+  const now = playNowGame();
+  return (games.find(([, g]) => g.running) || [])[0]
+    || (now && ids.includes(String(now.appid)) ? String(now.appid) : null)
+    || (ids.includes(progsPick) ? progsPick : null) || ids[0];
+}
+
 function renderProgs(progs) {
   const box = $("progs-box");
-  const games = Object.entries(progs || {});          // игра на машине — блок виден всегда (пустой — с подсказкой)
-  box.hidden = !games.length;
+  const all = Object.entries(progs || {});            // игра на машине — блок виден всегда (пустой — с подсказкой)
+  box.hidden = !all.length;
   box.innerHTML = "";
-  for (const [appid, g] of games) {
-    box.appendChild(el("div", { className: "pg-title" }, g.name ? t("progs.title.game", { name: g.name }) : t("progs.title")));
+  if (!all.length) return;
+  const pick = progsGame(all);
+  if (all.length > 1) {                               // несколько игр на машине — переключатели вместо разделов подряд
+    const tabs = el("div", { className: "pg-games" });
+    for (const [a, g] of all) {
+      const b = el("button", { className: "chip" + (a === pick ? " on" : ""), type: "button" }, g.name || a);
+      b.addEventListener("click", () => { progsPick = a; renderProgs(progs); });
+      tabs.appendChild(b);
+    }
+    box.appendChild(tabs);
+  }
+  for (const [appid, g] of all.filter(([a]) => a === pick)) {
+    box.appendChild(el("div", { className: "pg-title" }, g.name && all.length === 1 ? t("progs.title.game", { name: g.name }) : t("progs.title")));
     if (!(g.progs || []).length) box.appendChild(el("div", { className: "pg-hint" }, t("progs.empty")));
     box.appendChild(launchRow(appid, g, progs));
     for (const p of g.progs || []) {
@@ -1129,12 +1151,11 @@ function launchRow(appid, g, progs) {
   args.addEventListener("input", sync);
   sync();
   const line = el("div", { className: "pg-launch-line" });
-  line.append(el("span", { className: "pg-launch-label", title: t("progs.launch.hint") }, t("progs.launch")), sel, args, save);
+  line.append(el("span", { className: "pg-launch-label", title: t("progs.launch.hint") }, t("progs.launch") + " ⓘ"), sel, args, save);
   wrap.appendChild(line);
   const note = progNotes[appid + ":launch"];
   if (note && Date.now() - note.at < 20000) wrap.appendChild(el("div", { className: "pg-note" }, note.text));
-  else wrap.appendChild(el("div", { className: "pg-hint" }, t("progs.launch.hint")));
-  return wrap;
+  return wrap;                                         // пояснение — подсказкой на «Запуск игры ⓘ» (было абзацем всегда)
 }
 
 // ---------------------------------------------------------------- «Закончить» и аварийное удаление
