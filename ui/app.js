@@ -94,6 +94,18 @@ function backdrop(g) {
   $("backdrop-art").style.backgroundImage = url ? `url("${url}")` : "";
   $("backdrop-art").classList.toggle("on", !!url);
 }
+// Логотип игры поверх картинки; у новых игр Steam логотипа по открытому адресу нет — тогда название крупно (как Big Picture)
+function showLogo(img, textEl, g) {
+  img.hidden = true;
+  textEl.hidden = true;
+  textEl.textContent = (g && g.name) || "";
+  if (!g) return;
+  const fallback = () => { img.hidden = true; textEl.hidden = !textEl.textContent; };
+  if (!/^\d+$/.test(String(g.appid))) { fallback(); return; }
+  img.onload = () => { img.hidden = false; textEl.hidden = true; };
+  img.onerror = fallback;
+  img.src = STEAM_ART(g.appid, "logo.png");
+}
 function renderHeroArt() {
   // Игра, запущенная на машине, — только пока машина есть (окно помнит прошлую игру и после «Закончить»)
   const machine = !!(current && current.status && current.status.machine);
@@ -124,13 +136,7 @@ function renderHeroArt() {
     art.classList.add("swap");
     art._swap = setTimeout(() => { art.style.backgroundImage = next; art.classList.remove("swap"); }, art.style.backgroundImage ? 140 : 0);
   }
-  const logo = $("hero-logo");
-  logo.hidden = true;
-  if (g && /^\d+$/.test(String(g.appid))) {
-    logo.onload = () => (logo.hidden = false);
-    logo.onerror = () => (logo.hidden = true);
-    logo.src = STEAM_ART(g.appid, "logo.png");
-  }
+  if (url) showLogo($("hero-logo"), $("hero-logo-text"), g); else showLogo($("hero-logo"), $("hero-logo-text"), null);
   if ($("screen-main").hidden === false) backdrop(g);
 }
 
@@ -584,7 +590,8 @@ async function openOffers(disk, docker) {
   $("offers-refresh").disabled = true;
   $("offers-summary").textContent = t("offers.loading");
   $("offers-summary").hidden = false;
-  $("offers-table").querySelector("tbody").innerHTML = "";
+  $("offers-grid").innerHTML = "";
+  offerDetail(null);
   showError("offers-error", null);
   const my = ++offersReq;
   showTabs();
@@ -610,7 +617,8 @@ async function openOffers(disk, docker) {
   }
   if (data.error) {
     offersData = null;                       // прошлый список не оставлять: по нему не арендовать
-    $("offers-table").querySelector("tbody").innerHTML = "";
+    $("offers-grid").innerHTML = "";
+  offerDetail(null);
     $("offers-pager").hidden = true;
     $("rent").disabled = true;
     showError("offers-error", data.error);
@@ -627,7 +635,6 @@ async function openOffers(disk, docker) {
 }
 
 function showTabs() {
-  $("offers-table").classList.toggle("kvm", !offersDocker);       // у KVM трафик Vast не списывает — колонки нет
   $("tab-kvm").classList.toggle("active", !offersDocker);
   $("tab-docker").classList.toggle("active", !!offersDocker);
   // [2026-10-15] описание режима — подсказкой на вкладке (было абзацем под вкладками)
@@ -730,14 +737,12 @@ function applyFilters(list) {
   return r;
 }
 
-for (const th of document.querySelectorAll("#offers-table th.sortable")) {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    if (filters.sort === key) filters.dir = filters.dir === "asc" ? "desc" : "asc";
-    else { filters.sort = key; filters.dir = SORT_FIRST[key]; }
-    page = 0; saveFilters(); renderOffers();
-  });
-}
+// [2026-10-15] Сортировка — списком «Сначала: дешёвые / ближние / …» (заголовков таблицы больше нет)
+$("f-sort").addEventListener("change", () => {
+  const [key, dir] = $("f-sort").value.split(":");
+  filters.sort = key; filters.dir = dir;
+  page = 0; saveFilters(); renderOffers();
+});
 
 // Машины в таблице: последняя (если свободна и проходит фильтры) — первой строкой с пометкой
 function offerList(d) {
@@ -766,12 +771,10 @@ function renderFilters(d) {
   $("f-traffic").classList.toggle("on", !!(filters.traffic ?? 1));
   $("f-countries-btn").classList.toggle("on", filters.countries.length > 0);
   $("f-gpus-btn").classList.toggle("on", filters.gpus.length > 0);
-  for (const th of document.querySelectorAll("#offers-table th.sortable")) {
-    const on = th.dataset.sort === (filters.sort || "price");
-    th.classList.toggle("sorted", on);
-    th.title = t("sort.hint") + (th.dataset.sort === "ping" ? "\n" + t("offers.latency") : "");
-    th.querySelector(".arrow").textContent = on ? (filters.dir === "desc" ? "▼" : "▲") : "";
-  }
+  const sorts = ["price:asc", "ping:asc", "net:desc", "gpu:desc"].concat(offersDocker ? ["traffic:asc"] : []);
+  const cur = `${filters.sort || "price"}:${filters.dir || SORT_FIRST[filters.sort] || "asc"}`;
+  if (!sorts.includes(cur)) sorts.push(cur);
+  fillSelect($("f-sort"), sorts, (v) => t("sort." + v.replace(":", ".")), cur);
   const names = filters.countries.map(countryName);
   $("f-countries-btn").textContent = (!names.length ? t("filter.countries.any")
     : names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "")) + " ▾";
@@ -848,12 +851,13 @@ function renderOffers() {
   const L = d.last;
   const lastTip = L && t("offers.last.hint", { date: L.start
     ? new Date(L.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—" });
-  const body = $("offers-table").querySelector("tbody");
-  body.innerHTML = "";
+  const grid = $("offers-grid");
+  grid.innerHTML = "";
   showError("offers-error", null);
   if (!list.length) {
     $("offers-pager").hidden = true;
     $("rent").disabled = true;
+    offerDetail(null);
     showError("offers-error", { key: d.offers.length ? "offers.none_filtered" : "offers.none" });
     return;
   }
@@ -866,41 +870,83 @@ function renderOffers() {
   $("page-prev").disabled = page === 0;
   $("page-next").disabled = page >= pages - 1;
   for (const o of list.slice(page * size, (page + 1) * size)) {
-    const tr = document.createElement("tr");
-    tr.className = o.id === selected ? "selected" : "";
-    tr.innerHTML = `<td><input type="radio" name="offer"></td><td></td><td></td>
-      <td class="num"></td><td class="num"></td><td class="num col-traffic traffic"></td><td class="num"></td>`;
-    const c = tr.children;
-    c[0].firstChild.checked = o.id === selected;
-    c[1].textContent = o.gpu;
-    const addTag = (cls, text, title) => {
-      const tag = document.createElement("span");
-      tag.className = cls; tag.textContent = text; if (title) tag.title = title;
-      c[1].appendChild(tag);
-    };
-    if (o.gpus === 2) addTag("tag", "×2", t("offers.pair.hint"));   // сдаётся только парой: работает одна, цена — за обе
-    if (o.last) addTag("tag", t("offers.last.tag"), lastTip);
-    if (o.start_min && !o.failed) addTag("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
-    if (o.reliability < 0.97) addTag("tag warn", t("offers.rel.tag", { rel: num(o.reliability * 100, 0) }), t("offers.rel.risk"));
-    // раньше не запустилась — причина во всплывающей подсказке, на языке окна (старые записи без ключа — общая фраза)
-    if (o.failed) addTag("tag warn", t("offers.failed.tag"), o.failed_why ? errText(o.failed_why) : t("offers.failed.hint"));
-    betterTags(o, addTag);
-    c[2].textContent = o.country;
-    c[2].title = t("offers.rel.hint", { rel: num(o.reliability * 100) });   // надёжность — подсказкой, колонки больше нет
-    pingCell(c[3], o.ping);
-    c[4].textContent = t("unit.mbps", { n: netSpeed(o) });
-    c[4].title = t("net.both", { down: o.net_down, up: o.net_up });
-    c[5].innerHTML = "";
-    const tt = trafficText(o, "\n");
-    for (const [i, line] of tt.split("\n").entries()) { if (i) c[5].appendChild(el("br")); c[5].append(line); }
-    c[5].classList.toggle("free", tt === t("traffic.free"));
-    c[5].title = t("traffic.hint");
-    c[6].textContent = money(o.price);
-    tr.addEventListener("click", () => { selected = o.id; renderOffers(); });
-    body.appendChild(tr);
+    const tile = el("div", { className: "m-tile" + (o.id === selected ? " selected" : "") });
+    tile.dataset.pad = "1";
+    tile.dataset.id = o.id;
+    const tags = offerTags(o, lastTip);
+    const top = el("div", { className: "m-top" });
+    top.append(el("b", { className: "m-name" }, o.gpus === 2 ? `2× ${o.gpu}` : o.gpu));
+    const first = tags.find((x) => / warn/.test(x.cls)) || tags[0];   // на плитке — одна метка (главная), все — справа
+    if (first) top.appendChild(el("span", { className: first.cls, title: first.title || "" }, first.text));
+    const ping = el("span", { className: "m-ping" });
+    pingCell(ping, o.ping);
+    const bottom = el("div", { className: "m-bottom" });
+    const price = el("span", { className: "m-price" }, money(o.price));
+    price.appendChild(el("small", {}, t("unit.per_hour_short")));
+    bottom.append(price, ping);
+    tile.append(top, el("div", { className: "m-where", title: t("offers.rel.hint", { rel: num(o.reliability * 100) }) }, o.country), bottom);
+    const pick = () => { if (selected !== o.id) { selected = o.id; markSelected(); } };
+    tile.addEventListener("click", () => {
+      pick();
+      if (document.body.classList.contains("pad-mode") && window.padFocus) window.padFocus($("rent"));   // A — к «Арендовать»
+    });
+    tile.addEventListener("padfocus", pick);          // геймпад: рамка на плитке — она и выбрана (подробности справа)
+    grid.appendChild(tile);
   }
   $("rent").disabled = replaceBlocked || offersStale;
+  markSelected();
+}
+
+// Метки машины: пара, последняя, время запуска, надёжность, «может не запуститься», «лучше текущей»
+function offerTags(o, lastTip) {
+  const out = [];
+  const add = (cls, text, title) => out.push({ cls, text, title });
+  if (o.gpus === 2) add("tag", "×2", t("offers.pair.hint"));     // сдаётся только парой: работает одна, цена — за обе
+  if (o.last) add("tag", t("offers.last.tag"), lastTip);
+  if (o.start_min && !o.failed) add("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
+  if (o.reliability < 0.97) add("tag warn", t("offers.rel.tag", { rel: num(o.reliability * 100, 0) }), t("offers.rel.risk"));
+  // раньше не запустилась — причина в подсказке, на языке окна (старые записи без ключа — общая фраза)
+  if (o.failed) add("tag warn", t("offers.failed.tag"), o.failed_why ? errText(o.failed_why) : t("offers.failed.hint"));
+  betterTags(o, add);
+  return out;
+}
+
+// Выбранная плитка — подсветкой, подробности — справа (без перерисовки плиток: рамка геймпада остаётся на месте)
+function markSelected() {
+  for (const tile of $("offers-grid").children) tile.classList.toggle("selected", Number(tile.dataset.id) === selected);
+  const o = offersData && filters && offerList(offersData).find((x) => x.id === selected);
+  offerDetail(o || null);
   rentLabel();
+}
+function offerDetail(o) {
+  $("offers-detail").classList.toggle("empty", !o);
+  $("md-gpu").textContent = o ? (o.gpus === 2 ? `2× ${o.gpu}` : o.gpu) : "";
+  $("md-kick").textContent = o ? `${offersDocker ? "Docker" : "KVM"} · ${o.country}` : "";
+  const tags = $("md-tags");
+  tags.innerHTML = "";
+  if (o) {
+    const L = offersData.last;
+    const lastTip = L && t("offers.last.hint", { date: L.start ? new Date(L.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—" });
+    for (const x of offerTags(o, lastTip)) tags.appendChild(el("span", { className: x.cls, title: x.title || "" }, x.text));
+  }
+  const stats = $("md-stats");
+  stats.innerHTML = "";
+  if (!o) { $("md-note").textContent = ""; return; }
+  const stat = (label, value, title, cls = "") => {
+    const b = el("div", { className: "m-stat " + cls, title: title || "" });
+    b.append(el("span", {}, label), el("b", {}, value));
+    stats.appendChild(b);
+    return b;
+  };
+  stat(t("md.price"), money(o.price) + t("unit.per_hour_short"));
+  pingCell(stat(t("col.ping"), "", t("offers.latency")).lastChild, o.ping);
+  stat(t("col.net"), t("unit.mbps", { n: netSpeed(o) }), t("net.both", { down: o.net_down, up: o.net_up }));
+  stat(t("md.start"), o.start_min ? t("md.start.min", { min: o.start_min }) : "—", t("offers.start.hint"));
+  if (offersDocker) stat(t("col.traffic") + ", " + t("col.traffic.unit"), trafficText(o, " / "), t("traffic.hint"), "wide");
+  const bal = current && current.balance;
+  const parts = [t("offers.rel.hint", { rel: num(o.reliability * 100) })];
+  if (bal != null && o.price) parts.push(t("md.hours", { balance: money(bal), hours: num(bal / o.price, 0) }));
+  $("md-note").textContent = parts.join(" · ");
 }
 
 // «Арендовать RTX 3070 · $0.10/ч» (в замене — «Заменить на …»)
@@ -1037,13 +1083,7 @@ function renderGamePage() {
   $("gp-hero").style.backgroundImage = url ? `url("${url}")` : "";
   $("gp-hero").classList.toggle("no-art", !url);
   backdrop(g);
-  const logo = $("gp-logo");
-  logo.hidden = true;
-  if (/^\d+$/.test(String(g.appid))) {
-    logo.onload = () => (logo.hidden = false);
-    logo.onerror = () => (logo.hidden = true);
-    logo.src = STEAM_ART(g.appid, "logo.png");
-  }
+  showLogo($("gp-logo"), $("gp-logo-text"), url ? g : null);
   const main = $("gp-main"), side = $("gp-side");
   main.innerHTML = side.innerHTML = "";
   // «Играть» и аккаунт
@@ -2457,6 +2497,7 @@ function renderStages(stage, failed) {
     li.lastChild.textContent = t("stage." + s);
     if (i < idx || (s === last && stage === last)) li.className = "done";
     else if (i === idx || (idx < 0 && i === 0)) li.className = failed ? "failed" : "active";
+    li.firstChild.textContent = li.className === "done" ? "✓" : li.className === "failed" ? "!" : String(i + 1);   // как шаги в Big Picture
     list.appendChild(li);
   });
 }

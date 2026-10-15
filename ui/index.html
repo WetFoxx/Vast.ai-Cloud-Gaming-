@@ -48,7 +48,7 @@
 
     <!-- Машина и баланс — одна карточка. Машины нет — крупно баланс и «Играть» (класс empty) -->
     <section class="card hero" id="machine-card">
-      <div class="hero-art" id="hero-art"><img class="hero-logo" id="hero-logo" alt=""></div>
+      <div class="hero-art" id="hero-art"><img class="hero-logo" id="hero-logo" alt=""><div class="hero-logo-text" id="hero-logo-text" hidden></div></div>
       <div class="hero-top">
         <div class="hero-main">
           <div class="hero-status"><span class="dot" id="dot"></span><span class="title" id="status-title">—</span></div>
@@ -160,6 +160,7 @@
       <select class="chip" id="f-ping" data-i18n-title="filter.ping"></select>
       <select class="chip" id="f-rel" data-i18n-title="filter.rel.title"></select>
       <select class="chip" id="f-traffic" hidden data-i18n-title="filter.traffic"></select>
+      <select class="chip" id="f-sort" data-i18n-title="sort.title"></select>
     </div>
     <section class="card pop disk-card" id="f-disk" hidden>
       <input type="range" id="disk" min="50" max="1000" step="10" value="100">
@@ -174,29 +175,24 @@
       <div class="countries-list" id="f-gpus-list"></div>
     </section>
     <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
-    <section class="card table-card">
-      <table id="offers-table">
-        <thead>
-          <tr>
-            <th></th>
-            <th class="sortable" data-sort="gpu"><span data-i18n="col.gpu"></span><span class="arrow"></span></th>
-            <th data-i18n="col.country"></th>
-            <th class="num sortable" data-sort="ping"><span data-i18n="col.ping"></span><span class="arrow"></span></th>
-            <th class="num sortable" data-sort="net"><span data-i18n="col.net"></span><span class="arrow"></span></th>
-            <th class="num sortable col-traffic" data-sort="traffic"><span data-i18n="col.traffic"></span><span class="arrow"></span><span class="unit" data-i18n="col.traffic.unit"></span></th>
-            <th class="num sortable" data-sort="price"><span data-i18n="col.price"></span><span class="arrow"></span></th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <div class="pager" id="offers-pager" hidden>
-        <button id="page-prev">‹</button><span id="page-info"></span><button id="page-next">›</button>
+    <!-- [2026-10-15] Машины плитками (как в Big Picture), справа — подробности выбранной и «Арендовать» -->
+    <div class="m-layout">
+      <div class="m-col">
+        <div class="m-grid" id="offers-grid"></div>
+        <div class="pager" id="offers-pager" hidden>
+          <button id="page-prev">‹</button><span id="page-info"></span><button id="page-next">›</button>
+        </div>
+        <div class="error" id="offers-error" hidden></div>
       </div>
-    </section>
-    <div class="error" id="offers-error" hidden></div>
-    <div class="actions">
-      <button class="primary" id="rent" disabled data-i18n="offers.rent"></button>
-      <button class="cancel" id="offers-cancel" data-i18n="btn.cancel"></button>
+      <aside class="card m-detail" id="offers-detail">
+        <div class="m-kick" id="md-kick"></div>
+        <div class="m-gpu" id="md-gpu"></div>
+        <div class="m-tags" id="md-tags"></div>
+        <div class="m-stats" id="md-stats"></div>
+        <div class="sub" id="md-note"></div>
+        <button class="primary" id="rent" disabled data-i18n="offers.rent"></button>
+        <button class="cancel" id="offers-cancel" data-i18n="btn.cancel"></button>
+      </aside>
     </div>
   </main>
 
@@ -298,7 +294,7 @@
   <!-- ===== Страница игры (как в Big Picture): большая картинка, «Играть», моды, аккаунт, что в облаке ===== -->
   <main id="screen-game" hidden>
     <h1 class="gp-title"><span class="crumb" id="game-crumb"></span><span id="game-title"></span></h1>
-    <section class="gp-hero" id="gp-hero"><img class="gp-logo" id="gp-logo" alt="" hidden></section>
+    <section class="gp-hero" id="gp-hero"><img class="gp-logo" id="gp-logo" alt="" hidden><div class="hero-logo-text gp-logo-text" id="gp-logo-text" hidden></div></section>
     <div class="gp-body">
       <div class="gp-main" id="gp-main"></div>
       <div class="gp-side" id="gp-side"></div>
@@ -341,41 +337,47 @@
 
   <!-- ===== Ход операции (запуск или завершение) ===== -->
   <main id="screen-progress" hidden>
-    <!-- Игра из библиотеки: широкая картинка игры, на ней название и время (вместо заголовка) -->
-    <section class="game-banner" id="progress-banner" hidden>
-      <img id="progress-banner-img" alt="">
-      <div class="shade"></div>
-      <div class="gb-text"><h1 id="progress-banner-title"></h1><div class="sub" id="progress-banner-sub"></div></div>
-    </section>
-    <h1 id="progress-title"></h1>
-    <div class="sub" id="progress-elapsed"></div>
-    <div class="warn-line" id="progress-alert" hidden></div>
-    <section class="card attention" id="tailscale-box" hidden>
-      <div class="title" data-i18n="tailscale.title"></div>
-      <div class="sub" data-i18n="tailscale.text"></div>
-      <button class="primary" id="tailscale-open" data-i18n="tailscale.open"></button>
-    </section>
-    <section class="card attention" id="derp-box" hidden></section>
-    <section class="card">
-      <ol class="stages" id="stages"></ol>
-    </section>
-    <section class="card" id="archives-card" hidden>
-      <ul class="archives" id="archives"></ul>
-    </section>
-    <div class="note" id="progress-note"></div>
-    <section class="card" id="progress-result" hidden></section>
-    <div class="error" id="progress-error" hidden></div>
-    <details class="details">
-      <summary data-i18n="progress.details"></summary>
-      <pre id="progress-log"></pre>
-    </details>
-    <div class="actions">
-      <button class="primary" id="progress-offers" hidden data-i18n="offers.back_to_list"></button>
-      <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
-      <button id="progress-home" hidden data-i18n="progress.home"></button>
-      <button id="progress-replace" hidden data-i18n="task.replace"></button>
-      <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
+    <!-- [2026-10-15] Слева — картинка игры и этапы по шагам, справа — что качается из облака и кнопки (как в Big Picture) -->
+    <div class="p-main">
+      <!-- Игра из библиотеки: широкая картинка игры, на ней название и время (вместо заголовка) -->
+      <section class="game-banner" id="progress-banner" hidden>
+        <img id="progress-banner-img" alt="">
+        <div class="shade"></div>
+        <div class="gb-text"><h1 id="progress-banner-title"></h1><div class="sub" id="progress-banner-sub"></div></div>
+      </section>
+      <h1 id="progress-title"></h1>
+      <div class="sub" id="progress-elapsed"></div>
+      <div class="warn-line" id="progress-alert" hidden></div>
+      <section class="card attention" id="tailscale-box" hidden>
+        <div class="title" data-i18n="tailscale.title"></div>
+        <div class="sub" data-i18n="tailscale.text"></div>
+        <button class="primary" id="tailscale-open" data-i18n="tailscale.open"></button>
+      </section>
+      <section class="card attention" id="derp-box" hidden></section>
+      <section class="card">
+        <ol class="stages" id="stages"></ol>
+      </section>
+      <div class="note" id="progress-note"></div>
+      <section class="card" id="progress-result" hidden></section>
+      <div class="error" id="progress-error" hidden></div>
+      <details class="details">
+        <summary data-i18n="progress.details"></summary>
+        <pre id="progress-log"></pre>
+      </details>
     </div>
+    <aside class="p-side">
+      <section class="card" id="archives-card" hidden>
+        <div class="label" data-i18n="progress.cloud"></div>
+        <ul class="archives" id="archives"></ul>
+      </section>
+      <div class="actions">
+        <button class="primary" id="progress-offers" hidden data-i18n="offers.back_to_list"></button>
+        <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
+        <button id="progress-home" hidden data-i18n="progress.home"></button>
+        <button id="progress-replace" hidden data-i18n="task.replace"></button>
+        <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
+      </div>
+    </aside>
   </main>
 
   <!-- ===== Вопрос (да/нет) ===== -->

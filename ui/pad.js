@@ -66,6 +66,7 @@
     },
   };
   window.sfx = sfx;
+  window.padFocus = (e) => setFocus(e);            // экран может сам перевести рамку (плитка → «Арендовать»)
   window.setSounds = (on) => { soundsOn = !!on; };
 
   // ------------------------------------------------------------ навигация
@@ -151,7 +152,8 @@
     const list = items();
     if (!list.length) return;
     if (!cur || !list.includes(cur)) {               // первый шаг — главная кнопка экрана или первая
-      const main = list.find((e) => e.classList.contains("primary") && !e.closest("#rail")) || list.find((e) => !e.closest("#rail")) || list[0];
+      const main = list.find((e) => e.classList.contains("selected") && e.dataset.pad)          // выбранная плитка (машина)
+        || list.find((e) => e.classList.contains("primary") && !e.closest("#rail")) || list.find((e) => !e.closest("#rail")) || list[0];
       return setFocus(main);
     }
     const r = cur.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
