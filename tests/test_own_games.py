@@ -195,6 +195,22 @@ def load_vgopen(home):
     return m
 
 
+def fake_exe(path, body=b"", tail=b"", size=None):
+    """Похожий на Windows .exe файл: MZ, содержимое; tail — в самом конце (после пустоты до size, файл разреженный)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"MZ" + b"\0" * 62 + body)
+        if size:
+            f.seek(size - len(tail))
+        f.write(tail)
+    return path
+
+
+def vinfo(**kw):
+    """Сведения о версии файла Windows (как в ресурсе VS_VERSION_INFO): имя и значение в UTF-16."""
+    return b"".join(k.encode("utf-16-le") + b"\0\0" + v.encode("utf-16-le") + b"\0\0\0\0" for k, v in kw.items())
+
+
 class OpenBase(unittest.TestCase):
     def setUp(self):
         self.old_home = os.environ.get("HOME")
@@ -214,6 +230,28 @@ class OpenBase(unittest.TestCase):
 
 
 class TestOpenDecisions(OpenBase):
+    def test_installer_by_contents(self):
+        # [2026-10-15] Установщик без «setup» в имени — по содержимому (живой случай: Wand-12.63.0.exe, WeMod, 244 МБ)
+        d = self.home / "Downloads"
+        wand = fake_exe(d / "Wand-12.63.0.exe", b"PK..RELEASES..Update.exe..PK..Wand-12.63.0-full.nupkg",
+                        vinfo(FileDescription="Wand", ProductName="Wand", OriginalFilename="Setup.exe"), size=70 << 20)
+        only_tail = fake_exe(d / "Thing-1.0.exe", b"", vinfo(OriginalFilename="Setup.exe"), size=70 << 20)
+        nsis = fake_exe(d / "Mod Pack 2.exe", b"..NullsoftInst..")
+        inno = fake_exe(d / "game_1.2.exe", b"Inno Setup Setup Data (6.2.0)")
+        desc = fake_exe(d / "Tool.exe", vinfo(FileDescription="Tool Installer"))
+        # готовая программа, которая сама обновляется (Squirrel): «Update.exe» и «--squirrel-firstrun» внутри — не установщик
+        app = fake_exe(d / "Discord.exe", b"--squirrel-firstrun Update.exe Squirrel",
+                       vinfo(FileDescription="Discord", OriginalFilename="Discord.exe"))
+        plain = fake_exe(d / "Celeste.exe", vinfo(ProductName="Celeste"))
+        for f in (wand, only_tail, nsis, inno, desc):
+            self.assertTrue(self.vo.is_installer(str(f)), f.name)
+            self.assertEqual(self.vo.kind(str(f)), "installer", f.name)
+        for f in (app, plain, self.f("Downloads/notexe.txt")):
+            self.assertFalse(self.vo.is_installer(str(f)), f.name)
+        self.assertEqual(self.vo.kind(str(app)), "ask")
+        self.assertEqual(self.vo.product_name(str(wand)), "Wand")      # сведения о версии — в конце большого файла
+        self.assertTrue(self.vo.is_tool(str(wand)))                    # WeMod теперь Wand — программа для игр сама
+
     def test_kind(self):
         self.assertEqual(self.vo.kind(str(self.f("Downloads/Genshin_Impact_setup.exe"))), "installer")
         self.assertEqual(self.vo.kind(str(self.f("Downloads/game.msi"))), "installer")

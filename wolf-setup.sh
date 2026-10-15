@@ -3230,7 +3230,7 @@ KNOWN = {"xivlauncher.exe": "XIVLauncher", "epicgameslauncher.exe": "Epic Games"
          "hoyoplay.exe": "HoYoPlay", "wutheringwaves.exe": "Wuthering Waves", "launcher.exe": None}
 # [v5.7] Программы для игр, которые узнаём сами (по имени файла или «Названию продукта»): менеджеры модов, загрузчики,
 # трейнеры, оверлеи — им не нужна своя игра в Games, они работают с игрой Steam
-MOD_TOOLS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|wemod|reshade|xivlauncher|skse|f4se|sfse|obse|"
+MOD_TOOLS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|wemod|\bwand\b|reshade|xivlauncher|skse|f4se|sfse|obse|"
                        r"nvse|mod ?engine|seamless|\bersc\b|cheat ?engine|trainer|r2modman|thunderstore|bepinex|melonloader|"
                        r"special ?k|flawless ?widescreen|wabbajack|\bxedit\b|sseedit|fo4edit|bodyslide|reframework|"
                        r"cyber ?engine|\bloot\b|wrye", re.I)
@@ -3377,7 +3377,7 @@ def kind(path):
         return "archive"
     if game_of(path):
         return "inside"
-    if low.endswith(".msi") or INSTALLER.search(os.path.basename(path)):
+    if is_installer(path):
         return "installer"
     return "ask"
 
@@ -3513,14 +3513,33 @@ def pe_gui(path):
         return None
 
 
-def product_name(path):
-    """«Название продукта» из сведений о версии файла Windows (то, что видно в его «Свойствах»), или ""."""
+# [2026-10-15] Установщик узнаём по содержимому, а не только по имени: «Wand-12.63.0.exe» (WeMod, 244 МБ) — установщик
+# Squirrel без «setup» в имени — лёг в Programs как готовая программа (живой случай). Признаки: метка сборщика
+# установщиков (NSIS, Inno, InstallShield, WiX), пакет Squirrel внутри («…-full.nupkg» и «RELEASES»), «Исходное имя»
+# или «Описание» файла со словами Setup/Install (у Wand — OriginalFilename «Setup.exe»). Сведения о версии бывают
+# в самом конце файла (у Wand — за 240 МБ данных), поэтому читаем начало и конец
+INSTALLER_MARKS = (b"NullsoftInst", b"Nullsoft.NSIS", b"Inno Setup Setup Data", b"InstallShield", b".wixburn",
+                   b"WixBundleManifest", b"Setup Factory", b"Advanced Installer", b"InstallAware", b"Clickteam Install")
+SETUP_NAME = re.compile(r"setup|install|установ", re.I)
+
+
+def _bytes(path, head=64 << 20, tail=4 << 20):
+    """Начало и конец файла (сведения о версии бывают в конце)."""
     try:
         with open(path, "rb") as f:
-            data = f.read(64 << 20)
+            data = f.read(head)
+            size = os.fstat(f.fileno()).st_size
+            if size > head:
+                f.seek(max(head, size - tail))
+                data += f.read(tail)
+            return data
     except OSError:
-        return ""
-    key = "ProductName".encode("utf-16-le") + b"\0\0"
+        return b""
+
+
+def version_field(data, field):
+    """Поле сведений о версии файла Windows (ProductName, OriginalFilename…) из байтов файла, или ""."""
+    key = field.encode("utf-16-le") + b"\0\0"
     i = data.rfind(key)
     if i < 0:
         return ""
@@ -3530,8 +3549,29 @@ def product_name(path):
     j = i
     while j < len(data) - 1 and data[j:j + 2] != b"\0\0":
         j += 2
-    name = data[i:j].decode("utf-16-le", "replace").strip()
-    return name if 0 < len(name) <= 80 and name.isprintable() else ""
+    v = data[i:j].decode("utf-16-le", "replace").strip()
+    return v if 0 < len(v) <= 80 and v.isprintable() else ""
+
+
+def is_installer(path):
+    """.msi или «setup/install» в имени; .exe — метка сборщика установщиков, пакет Squirrel внутри или «Исходное
+    имя»/«Описание» файла со словами Setup/Install."""
+    low, base = path.lower(), os.path.basename(path)
+    if low.endswith(".msi") or INSTALLER.search(base):
+        return True
+    if not low.endswith(".exe"):
+        return False
+    data = _bytes(path)
+    if data[:2] != b"MZ":
+        return False
+    if any(m in data for m in INSTALLER_MARKS) or (b"-full.nupkg" in data and b"RELEASES" in data):
+        return True
+    return any(SETUP_NAME.search(version_field(data, f)) for f in ("OriginalFilename", "InternalName", "FileDescription"))
+
+
+def product_name(path):
+    """«Название продукта» из сведений о версии файла Windows (то, что видно в его «Свойствах»), или ""."""
+    return version_field(_bytes(path), "ProductName")
 
 
 def lnk_target(path):
@@ -3906,7 +3946,7 @@ def do_program(f, g):
         if not ask(t("prog.unpack", file=os.path.basename(f), name=name), t("ok")):
             return
         unpack(f, os.path.join(PD, name))
-    elif low.endswith(".msi") or INSTALLER.search(os.path.basename(f)):
+    elif is_installer(f):
         if g:                                             # [v5.7] шаг 4б — сразу в «диск C:» игры
             return do_install(f, g)
         name = unique(default_name(f), PD)
@@ -4307,6 +4347,34 @@ ALWAYS_SKIP = re.compile(r"unins|crash|report|update", re.I)
 # установщики, в том числе библиотеки Microsoft (Visual C++, .NET, DirectX): их просят моды и лаунчеры (Dalamud/XIVLauncher —
 # живой случай 2026-10-08), ставятся «в игру»
 SETUP = re.compile(r"setup|install|redist|dotnet|directx|ndp\d|windowsdesktop-runtime", re.I)
+# [2026-10-15] …и по содержимому, как помощник двойного щелчка (vg-open is_installer): «Wand-12.63.0.exe» — установщик
+# Squirrel без «setup» в имени (OriginalFilename «Setup.exe», пакет «…-full.nupkg» внутри); сведения о версии — в конце файла
+SETUP_MARKS = (b"NullsoftInst", b"Nullsoft.NSIS", b"Inno Setup Setup Data", b"InstallShield", b".wixburn",
+               b"WixBundleManifest", b"Setup Factory", b"Advanced Installer", b"InstallAware", b"Clickteam Install")
+
+
+def _setup_like(path):
+    try:
+        with open(path, "rb") as f:
+            data = f.read(64 << 20)
+            size = os.fstat(f.fileno()).st_size
+            if size > 64 << 20:
+                f.seek(max(64 << 20, size - (4 << 20)))
+                data += f.read()
+    except OSError:
+        return False
+    if data[:2] != b"MZ":
+        return False
+    if any(m in data for m in SETUP_MARKS) or (b"-full.nupkg" in data and b"RELEASES" in data):
+        return True
+    for fld in ("OriginalFilename", "InternalName", "FileDescription"):
+        k = fld.encode("utf-16-le") + b"\0\0"
+        i = data.rfind(k)
+        if i >= 0:
+            v = data[i + len(k):i + len(k) + 200].split(b"\0\0\0")[0].replace(b"\0", b"")
+            if re.search(rb"(?i)setup|install", v.lstrip()):
+                return True
+    return False
 # [v5.6] Из «диска C:» — только главные программы установленных приложений: в каждой папке приложения (Program Files/
 # ПРИЛОЖЕНИЕ, AppData/Local/Programs|Local|Roaming/ПРИЛОЖЕНИЕ, C:/ПАПКА) — .exe ближе всего к её верху, а не внутренности
 # (у XIVLauncher — current/XIVLauncher.exe, а не patcher/…, aria2c, Dalamud.Injector: живой случай 2026-10-08)
@@ -4434,7 +4502,8 @@ def programs(root, pd, sdir, appid):
             if os.path.isdir(os.path.join(pd, top)):
                 for rel in sorted(_exes(os.path.join(pd, top), 3, setups=True)):
                     out.append({"id": f"prog:{top}/{rel}", "name": os.path.basename(rel), "where": top,
-                                "setup": bool(SETUP.search(os.path.basename(rel)))})
+                                "setup": bool(SETUP.search(os.path.basename(rel)))
+                                         or _setup_like(os.path.join(pd, top, rel))})
     pfx = _pfx(root, appid)
     if pfx:                                                     # [v5.6] поставленное «в игру» самим человеком
         for rel in sorted(_mine(pfx)):

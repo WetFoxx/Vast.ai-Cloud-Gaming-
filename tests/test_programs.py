@@ -92,6 +92,19 @@ class TestPrograms(Base):
         self.assertEqual(progs[0]["where"], "game")
         self.assertEqual(progs[1]["where"], "WeMod")                     # папка программы — понятная подпись
 
+    def test_installer_without_setup_in_name_gets_install_button(self):
+        # [2026-10-15] Wand-12.63.0.exe (установщик WeMod, Squirrel) — «Установить в игру», а не «Запустить»
+        w = self.w.pd / "Wand" / "Wand-12.63.0.exe"
+        w.parent.mkdir()
+        w.write_bytes(b"MZ" + b"\0" * 62 + b"PK..RELEASES..Wand-12.63.0-full.nupkg")
+        a = self.w.pd / "Tool" / "Tool.exe"
+        a.parent.mkdir()
+        a.write_bytes(b"MZ" + b"\0" * 62 + "OriginalFilename".encode("utf-16-le") + b"\0\0" + "Tool.exe".encode("utf-16-le"))
+        progs = {p["id"]: p for p in ws.programs(self.w.root, str(self.w.pd), str(self.w.sdir), APP)}
+        self.assertTrue(progs["prog:Wand/Wand-12.63.0.exe"]["setup"])
+        self.assertFalse(progs["prog:Tool/Tool.exe"]["setup"])
+        self.assertFalse(progs["prog:WeMod/WeMod.exe"]["setup"])        # не .exe-заголовок — по имени, как раньше
+
     def test_no_clean_snapshot_no_game_exes(self):
         (self.w.sdir / "van" / f"{APP}.tsv").unlink()                    # не знаем, что добавлено, — не гадаем
         self.assertEqual([p["id"] for p in ws.programs(self.w.root, str(self.w.pd), str(self.w.sdir), APP)],
