@@ -501,6 +501,7 @@ class TestProgramsForGames(TestOpenFlows):
     def test_decisions(self):
         vo = self.vo
         for f in ("Vortex-1.12.3-setup.exe", "WeMod-Setup-x64.exe", "skse64_loader.exe", "Fluffy Mod Manager 3.084.zip",
+                  "Mod.Organizer-2.5.2.7z", "Cheat_Engine_7.5.exe",                 # [2026-10-15] точка, подчёркивание
                   "ReShade_Setup_6.3.exe", "Cheat Engine 7.5.exe", "MO2-2.5.2.7z"):
             self.assertTrue(vo.is_tool(str(self.f("Downloads/" + f))), f)
         for f in ("HoYoPlay_setup.exe", "Celeste.exe", "Hollow Knight.zip"):

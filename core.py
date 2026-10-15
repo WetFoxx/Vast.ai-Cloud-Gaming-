@@ -41,6 +41,7 @@ TAILSCALE_MIN = 20       # сколько всего ждать узел в Tail
 # [2026-10-15] Узел «в сети», но не отвечает (живой случай: Корея, RTX 2060 — Tailscale видит узел, а ни ping, ни
 # страница машины не проходят, Mac отправил 8 КБ, получил 0) — столько минут, и машину заменить, а не ждать 20
 UNREACH_MIN = 4
+STATUS_WAIT, STATUS_STEP = 60, 10   # «Закончить»: сколько ждать страницу машины при коротком обрыве связи
 SHUTDOWN_MIN = 30        # сколько ждать wolf shutdown (wolf finish — сколько ждать, пока выгрузка не двигается)
 SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина удалит себя сама (wolf finish ждёт 30 с перед удалением)
 GONE_CHECK_SEC = 60      # пока ждём машину — раз в столько секунд спрашивать Vast, есть ли она ещё
@@ -773,6 +774,12 @@ def stop(ui, dry_run=False):
     iid, ip, dns = _find_machine()
     ui.say(f"Инстанс {iid}, узел {dns or ip}", key="core.stop_machine", id=iid, name=dns or ip)
     before = wolf_status(ip)
+    # [2026-10-15] Короткий обрыв связи (живой случай: страница машины не ответила один раз, через 15 с — ответила) —
+    # не повод сразу сдаваться: до STATUS_WAIT секунд пробуем снова. Машину без ответа по-прежнему не удаляем
+    end = time.time() + STATUS_WAIT
+    while before is None and time.time() < end:
+        time.sleep(STATUS_STEP)
+        before = wolf_status(ip)
     if before is None:
         raise VastgameError("Страница статуса wolf не отвечает — НЕ удаляю. Проверь машину.",
                             key="core.no_status_page")

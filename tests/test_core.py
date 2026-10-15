@@ -492,6 +492,22 @@ class TestStop(Base):
         self.assertEqual(self.deleted, [42])               # вопроса нет — удалено после проверки
         self.assertEqual(ui.questions, [])
 
+    def test_status_page_blip_before_stop_is_waited_out(self):
+        # [2026-10-15] страница машины один раз не ответила (обрыв связи) — подождать и закончить, а не сдаться
+        ui = self.setup_machine({"boot": (T0 - 900, "ok", ""), "steam-state": (T0 + 20, "ok", "выгружено")})
+        real, blips = core.wolf_status, [None, None]
+        self.patch(core, "wolf_status", lambda ip: blips.pop() if blips else real(ip))
+        self.patch(core, "STATUS_STEP", 0)
+        self.assertTrue(core.stop(ui)["deleted"])
+
+    def test_status_page_silent_before_stop_not_deleted(self):
+        ui = self.setup_machine(None)
+        self.patch(core, "wolf_status", lambda ip: None)
+        self.patch(core, "STATUS_WAIT", 0)
+        with self.assertRaises(VastgameError) as e:
+            core.stop(ui)
+        self.assertEqual((e.exception.key, self.deleted), ("core.no_status_page", []))
+
     def test_status_page_gone_not_deleted(self):
         ui = self.setup_machine(None)                      # /json не ответил после выгрузки
         with self.assertRaises(VastgameError) as e:

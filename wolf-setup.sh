@@ -3234,14 +3234,14 @@ KNOWN = {"xivlauncher.exe": "XIVLauncher", "epicgameslauncher.exe": "Epic Games"
          "hoyoplay.exe": "HoYoPlay", "wutheringwaves.exe": "Wuthering Waves", "launcher.exe": None}
 # [v5.7] Программы для игр, которые узнаём сами (по имени файла или «Названию продукта»): менеджеры модов, загрузчики,
 # трейнеры, оверлеи — им не нужна своя игра в Games, они работают с игрой Steam
-MOD_TOOLS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|wemod|\bwand\b|reshade|xivlauncher|skse|f4se|sfse|obse|"
-                       r"nvse|mod ?engine|seamless|\bersc\b|cheat ?engine|trainer|r2modman|thunderstore|bepinex|melonloader|"
+MOD_TOOLS = re.compile(r"vortex|mod[ ._-]?organizer|\bmo2\b|fluffy|mod[ ._-]?manager|wemod|\bwand\b|reshade|xivlauncher|skse|f4se|sfse|obse|"
+                       r"nvse|mod[ ._-]?engine|seamless|\bersc\b|cheat[ ._-]?engine|trainer|r2modman|thunderstore|bepinex|melonloader|"
                        r"special ?k|flawless ?widescreen|wabbajack|\bxedit\b|sseedit|fo4edit|bodyslide|reframework|"
                        r"cyber ?engine|\bloot\b|wrye", re.I)
 STEAM_TOOLS = re.compile(r"^(proton|steam linux runtime|steamworks|steam controller|steamvr)", re.I)
 # [2026-10-15] Менеджеры модов: их запускают в любое время, без игры (готовят моды), — «вместе с игрой» им не нужно.
 # Служебные .exe установленных программ — в итоге установки не показываем (MO2: QtWebEngineProcess, helper, usvfs…)
-MANAGERS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|r2modman|thunderstore|wabbajack|\bloot\b|wrye", re.I)
+MANAGERS = re.compile(r"vortex|mod[ ._-]?organizer|\bmo2\b|fluffy|mod[ ._-]?manager|r2modman|thunderstore|wabbajack|\bloot\b|wrye", re.I)
 NOISE_EXE = re.compile(r"qtwebengineprocess|helper|crashpad|createdump|nxmhandler|usvfs|unins|update|elevat|notification|"
                        r"squirrel|^7z|dotnet|vc_?redist|setup", re.I)
 
@@ -3262,7 +3262,7 @@ T = {
         "purpose.program": "Программа для игры — менеджер модов, загрузчик, трейнер",
         "which": "Для какой игры «{file}»?",
         "prog.done": "Готово: «{name}» — в папке Programs, уедет в облако сама.\nЗапуск — в VastGame, блок «Программы игры»{game}: "
-                     "«Запустить» (когда игра запущена) или «Вместе с игрой».",
+                     "«Запустить» (в любое время; трейнерам нужна запущенная игра) или «Вместе с игрой».",
         "prog.installer": "Установщик «{name}» — в папке Programs.\nПоставь его в игру: VastGame, блок «Программы игры»{game} → "
                           "«Установить в игру» (игра должна быть закрыта).",
         "prog.inside": "«{file}» — программа игры «{game}».",
@@ -3307,7 +3307,7 @@ T = {
         "purpose.program": "A program for a game — mod manager, loader, trainer",
         "which": "Which game is «{file}» for?",
         "prog.done": "Done: «{name}» is in the Programs folder and goes to the cloud by itself.\nStart it in VastGame, "
-                     "«Game programs»{game}: «Start» (while the game runs) or «With the game».",
+                     "«Game programs»{game}: «Start» (any time; trainers need the game running) or «With the game».",
         "prog.installer": "The «{name}» installer is in the Programs folder.\nInstall it into the game: VastGame, «Game "
                           "programs»{game} → «Install into the game» (the game must be closed).",
         "prog.inside": "«{file}» is a program of «{game}».",
@@ -3352,7 +3352,7 @@ T = {
         "purpose.program": "Un programa para un juego: gestor de mods, cargador, trainer",
         "which": "¿Para qué juego es «{file}»?",
         "prog.done": "Listo: «{name}» está en la carpeta Programs y se sube a la nube sola.\nSe inicia en VastGame, "
-                     "«Programas del juego»{game}: «Iniciar» (con el juego abierto) o «Con el juego».",
+                     "«Programas del juego»{game}: «Iniciar» (cuando quieras; los entrenadores necesitan el juego abierto) o «Con el juego».",
         "prog.installer": "El instalador de «{name}» está en la carpeta Programs.\nInstálalo en el juego: VastGame, "
                           "«Programas del juego»{game} → «Instalar en el juego» (el juego debe estar cerrado).",
         "prog.inside": "«{file}» es un programa de «{game}».",
