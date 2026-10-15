@@ -79,6 +79,62 @@ function show(screen) {
   hideTip();
   for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"]) $("screen-" + s).hidden = s !== screen;
   for (const s of ["library", "games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen);
+  $("open-home").classList.toggle("active", ["main", "offers", "progress"].includes(screen));
+  document.body.dataset.screen = screen;               // [2026-10-15] фон и раскладка нового вида — по экрану
+  if (screen !== "main") backdrop(screen === "progress" || screen === "offers" ? heroGame : null);
+}
+
+// [2026-10-15] Картинка игры: на главной — слева в большой карточке и размыто на фоне окна (как Big Picture).
+// Игра — та, что запущена на машине, иначе последняя из библиотеки. Логотип игры — поверх картинки, если есть.
+let heroGame = null, heroPick = null;          // heroPick — обложка, выбранная на главной (машины нет)
+const STEAM_ART = (appid, file) => `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appid}/${file}`;
+function artOf(g) { return g && (g.hero || (g.appid && /^\d+$/.test(String(g.appid)) ? STEAM_ART(g.appid, "library_hero.jpg") : "")); }
+function backdrop(g) {
+  const url = artOf(g);
+  $("backdrop-art").style.backgroundImage = url ? `url("${url}")` : "";
+  $("backdrop-art").classList.toggle("on", !!url);
+}
+function renderHeroArt() {
+  const now = playNowGame && playNowGame();
+  const recent = heroPick || (libData && libData.games && libData.games[0]);
+  const g = now && now.appid ? { ...((libData && libData.games || []).find((x) => String(x.appid) === String(now.appid)) || {}), ...now }
+    : recent || null;
+  heroGame = g;
+  // Имя игры крупно: запущенная на машине — всегда; последняя из библиотеки — только когда машины нет (предложение)
+  const st = current && current.status, none = !(st && st.machine);
+  const suggest = none && g && !(now && now.appid) && g.accounts ? g : null;
+  $("hero-name").hidden = !(g && (now && now.appid || suggest));
+  $("hero-name").textContent = g ? g.name || "" : "";
+  $("play-game").hidden = !suggest;
+  $("play-game").disabled = $("play").disabled;
+  $("play").classList.toggle("primary", !suggest);
+  $("play").textContent = t(suggest ? "home.machine_only" : "btn.play");
+  $("machine-card").classList.toggle("suggest", !!suggest);
+  const url = artOf(g);
+  $("machine-card").classList.toggle("with-art", !!url);
+  $("hero-art").style.backgroundImage = url ? `url("${url}")` : "";
+  const logo = $("hero-logo");
+  logo.hidden = true;
+  if (g && /^\d+$/.test(String(g.appid))) {
+    logo.onload = () => (logo.hidden = false);
+    logo.onerror = () => (logo.hidden = true);
+    logo.src = STEAM_ART(g.appid, "logo.png");
+  }
+  if ($("screen-main").hidden === false) backdrop(g);
+}
+
+// Машина и баланс — справа сверху на всех экранах
+function renderTopstat(data) {
+  const st = data.status || {}, m = st.machine;
+  $("top-machine").hidden = !m;
+  if (m) {
+    $("top-dot").className = "dot " + st.state;
+    $("top-machine-text").textContent = `${m.gpu} · ${m.country}` + (data.session ? " · " + hm(data.session.elapsed) : "");
+  }
+  $("top-balance").hidden = data.balance == null;
+  $("top-balance").classList.toggle("low", !!data.low_balance);
+  $("top-balance-value").textContent = money(data.balance);
+  $("top-balance-sub").textContent = data.hours_left != null ? t("balance.hours.short", { hours: num(data.hours_left, 0) }) : "";
 }
 
 // Вопрос да/нет в окне. Возвращает Promise<boolean>: true — только нажатие «да»
@@ -133,6 +189,7 @@ function render(data) {
   if (data.play_now !== undefined && !playGame) playNow = data.play_now;   // окно открыли заново — что запускали
 
   setBalance(data.balance);
+  renderTopstat(data);
   const st = data.status, m = st.machine;
   // Машины нет — крупно баланс и «Играть»; есть — баланс справа, под состоянием — ярлыки машины и сессии
   $("machine-card").classList.toggle("empty", !m);
@@ -189,6 +246,7 @@ function render(data) {
   // [2026-10-15] «Удалить без выгрузки» — в «Параметрах трансляции», пока они есть; машина без адресов — под карточкой
   const dangerIn = $("links").hidden ? $("foot") : $("params-danger");
   if ($("emergency").parentElement !== dangerIn) dangerIn.prepend($("emergency"));
+  renderHeroArt();
 }
 
 // ---- Живой ход на главном: архивы в работе (с процентами и скоростью) и вопросы машины. Главный экран обновляется
@@ -302,14 +360,74 @@ async function launchMoonlight(btn, note, host, app) {
   btn.disabled = true;
   note.hidden = false;
   note.textContent = t("moonlight.starting");
+  const fx = launchFx();
   try {
-    const r = DEMO ? { ok: true } : await api().open_moonlight(host, app);
-    if (r.busy) { note.textContent = t("moonlight.busy"); return; }
+    const r = DEMO ? await new Promise((ok) => setTimeout(() => ok({ ok: true }), 3500)) : await api().open_moonlight(host, app);
+    if (r.busy) { note.textContent = t("moonlight.busy"); fx.done(true); return; }
     note.textContent = r.error ? errText(r.error) : "";
     note.hidden = !r.error;
+    fx.done(!r.error, r.error ? errText(r.error) : "");
+  } catch (e) {
+    fx.done(false, String(e));
+    throw e;
   } finally {
     btn.disabled = false;
   }
+}
+
+// [2026-10-15] Анимация запуска трансляции (окно VastGame — до того, как Moonlight откроет своё): картинка игры
+// наезжает, кольцо цветов VastGame крутится, этапы сменяются по времени (сам запуск — один вызов Python, до минуты
+// при первой связке); удалось — кольцо раскрывается вспышкой и всё гаснет, не удалось — причина и «Закрыть».
+function launchFx() {
+  const box = $("launch-fx"), g = heroGame || playNowGame();
+  const steps = ["fx.connect", "fx.pair", "fx.open"];
+  let i = 0, over = false;
+  $("lfx-art").style.backgroundImage = artOf(g) ? `url("${artOf(g)}")` : "";
+  $("lfx-name").textContent = (g && g.name) || "VastGame";
+  const logo = $("lfx-logo");
+  logo.hidden = true;
+  $("lfx-name").hidden = false;
+  if (g && /^\d+$/.test(String(g.appid))) {
+    logo.onload = () => { logo.hidden = false; $("lfx-name").hidden = true; };
+    logo.onerror = () => (logo.hidden = true);
+    logo.src = STEAM_ART(g.appid, "logo.png");
+  }
+  $("lfx-err").hidden = $("lfx-close").hidden = true;
+  box.classList.remove("ok", "fail", "out");
+  box.hidden = false;
+  void box.offsetWidth;                                 // перезапуск анимаций
+  box.classList.add("on");
+  const show = () => {
+    $("lfx-step").classList.remove("in"); void $("lfx-step").offsetWidth;
+    $("lfx-step").textContent = t(steps[i]);
+    $("lfx-step").classList.add("in");
+    $("lfx-bar").style.width = Math.min(90, 18 + i * 30) + "%";
+  };
+  show();
+  window.sfx && window.sfx.launch();
+  const timer = setInterval(() => { if (!over && i < steps.length - 1) { i++; show(); } }, 1600);
+  const close = () => { box.classList.add("out"); setTimeout(() => { box.hidden = true; box.classList.remove("on", "out"); }, 450); };
+  $("lfx-close").onclick = close;
+  return {
+    done(ok, why) {
+      over = true;
+      clearInterval(timer);
+      if (ok) {
+        $("lfx-step").textContent = t("fx.go");
+        $("lfx-bar").style.width = "100%";
+        box.classList.add("ok");
+        window.sfx && window.sfx.select();
+        setTimeout(close, 1500);
+      } else {
+        box.classList.add("fail");
+        $("lfx-step").textContent = t("fx.fail");
+        $("lfx-err").textContent = why || "";
+        $("lfx-err").hidden = !why;
+        $("lfx-close").hidden = false;
+        window.sfx && window.sfx.error();
+      }
+    },
+  };
 }
 function startMoonlight(host, app) { return launchMoonlight($("ml-start"), $("ml-note"), host, app); }
 
@@ -1900,7 +2018,7 @@ function gameTile(g) {
 
 // Карточка «Твои игры» на главном: обложки последних игр из запомненного списка (Steam не спрашиваем — это делает
 // сама библиотека); Steam не привязан — приглашение войти. Обновляется не чаще раза в минуту и после библиотеки.
-const LIB_STRIP = 7;
+const LIB_STRIP = 12;                                 // [2026-10-15] полка в ряд, лишнее — прокруткой
 let libCardAt = 0;
 $("lib-card").addEventListener("click", (e) => {
   if (e.target.closest("button") && e.target.id !== "lib-card-open") return;
@@ -1926,8 +2044,13 @@ async function renderMainLibrary(force = false) {
   for (const g of d.games.slice(0, LIB_STRIP)) {
     const tile = gameTile(g);
     tile.addEventListener("click", (e) => { e.stopPropagation(); startGame(g); });
+    // [2026-10-15] машины нет — выбранная обложка становится большой карточкой («Играть» — в неё)
+    const pick = () => { if (!(current && current.status && current.status.machine) && heroPick !== g) { heroPick = g; renderHeroArt(); } };
+    tile.addEventListener("mouseenter", pick);
+    tile.addEventListener("padfocus", pick);
     strip.appendChild(tile);
   }
+  renderHeroArt();
 }
 
 // Войти в Steam: окно со страницей самой Steam (QR или логин с паролем). msgEl — где писать ход (может не быть)
@@ -2491,6 +2614,8 @@ $("progress-back").addEventListener("click", () => { if (!DEMO) api().session_se
 
 // Логотип и надпись VastGame — на главный экран. Тем же путём, что кнопка «Назад» открытого экрана: она же
 // прибирает за собой (таймеры, «просмотрено»). Кнопка скрыта или неактивна (идёт аренда) — остаёмся.
+$("open-home").addEventListener("click", () => $("brand").click());
+$("play-game").addEventListener("click", () => { if (heroGame && heroGame.accounts) startGame(heroGame); });
 $("brand").addEventListener("click", () => {
   if (!$("modal").hidden) return;
   const cur = ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"].find((s) => !$("screen-" + s).hidden);
@@ -2763,13 +2888,17 @@ function demoUpdate() {
 
 // ---------------------------------------------------------------- старт
 async function start() {
-  let saved = null, version = "0.2.0", notice = null;
+  let saved = null, version = "0.2.0", notice = null, sounds = true;
   if (DEMO) {
     const q = new URLSearchParams(location.search);
     saved = q.get("lang");
     PLATFORM = q.get("platform") || "";                         // ?platform=win32 — тексты для Windows
     if (q.get("updated")) notice = q.get("updated") === "failed" ? { failed: "0.2.1" } : { updated: { from: "0.2.0", to: q.get("updated") } };
-  } else ({ language: saved, version, update: notice, platform: PLATFORM = "" } = await api().settings());
+  } else ({ language: saved, version, update: notice, platform: PLATFORM = "", sounds = true } = await api().settings());
+  // [2026-10-15] звуки окна — переключатель в «Настройке» (pad.js)
+  window.setSounds(sounds);
+  $("ui-sounds").checked = sounds;
+  $("ui-sounds").addEventListener("change", () => { window.setSounds($("ui-sounds").checked); if (!DEMO) api().set_sounds($("ui-sounds").checked); });
   // Окно открылось в конце обновления — сказать итог (минуту, потом надпись живёт как обычно)
   if (notice) { updateNotice = notice; setTimeout(() => { updateNotice = null; renderUpdate(updateInfo); }, 60 * 1000); }
   LANG = I18N[saved] ? saved : detectLanguage();

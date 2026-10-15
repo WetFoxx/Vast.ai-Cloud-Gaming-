@@ -5,18 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VastGame</title>
   <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="bp.css">
 </head>
 <body>
-  <header>
-    <div class="brand" id="brand" data-i18n-title="app.home"><img class="brand-mark" src="logo-mark.png" alt=""><img class="brand-word" src="logo-word.png" alt="VastGame"><span class="version" id="app-version"></span></div>
-    <!-- Разделы — значками справа (подписи — во всплывающих подсказках) -->
-    <nav class="header-right icons">
-      <button class="icon-btn labeled" id="open-library"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h4v16h-4zM16.5 4.5l3.8 1-4 15-3.8-1z"/></svg><span data-i18n="library.open"></span></button>
-      <button class="icon-btn" id="open-games" data-i18n-title="games.open"><svg viewBox="0 0 24 24"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg></button>
-      <button class="icon-btn" id="open-history" data-i18n-title="history.open"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></button>
-      <button class="icon-btn" id="open-setup" data-i18n-title="setup.open"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
-    </nav>
-  </header>
+  <!-- [2026-10-15] Вид «как Big Picture»: разделы — колонкой значков слева (подписи — при наведении и фокусе), справа
+       сверху — машина и баланс, снизу — подсказки кнопок геймпада. Управление стрелками и геймпадом — pad.js -->
+  <nav class="rail" id="rail">
+    <div class="brand" id="brand" data-i18n-title="app.home"><img class="brand-mark" src="logo-mark.png" alt=""></div>
+    <button class="rail-btn" id="open-home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg><span class="lbl" data-i18n="nav.home"></span></button>
+    <button class="rail-btn" id="open-library"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h4v16h-4zM16.5 4.5l3.8 1-4 15-3.8-1z"/></svg><span class="lbl" data-i18n="library.open"></span></button>
+    <button class="rail-btn" id="open-games"><svg viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.1 9.1 4.5 4.5 0 0 0 7 18z"/></svg><span class="lbl" data-i18n="games.open"></span></button>
+    <button class="rail-btn" id="open-history"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span class="lbl" data-i18n="history.open"></span></button>
+    <div class="rail-space"></div>
+    <button class="rail-btn" id="open-setup"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="lbl" data-i18n="setup.open"></span></button>
+    <span class="version" id="app-version"></span>
+  </nav>
+  <div class="topstat" id="topstat">
+    <span class="pill" id="top-machine" hidden><span class="dot" id="top-dot"></span><span id="top-machine-text"></span></span>
+    <span class="pill" id="top-balance" hidden><span class="money-text" id="top-balance-value"></span><span id="top-balance-sub"></span></span>
+  </div>
+  <div class="backdrop"><div class="backdrop-art" id="backdrop-art"></div></div>
 
   <!-- ===== Главный экран ===== -->
   <main id="screen-main">
@@ -40,9 +48,11 @@
 
     <!-- Машина и баланс — одна карточка. Машины нет — крупно баланс и «Играть» (класс empty) -->
     <section class="card hero" id="machine-card">
+      <div class="hero-art" id="hero-art"><img class="hero-logo" id="hero-logo" alt=""></div>
       <div class="hero-top">
         <div class="hero-main">
           <div class="hero-status"><span class="dot" id="dot"></span><span class="title" id="status-title">—</span></div>
+          <div class="hero-name" id="hero-name" hidden></div>
           <div class="sub" id="status-text"></div>
           <div class="facts" id="facts" hidden></div>
           <div class="slow-capture" id="slow-capture" hidden></div>
@@ -106,6 +116,8 @@
         <div class="label" data-i18n="live.title"></div>
         <ul class="archives" id="live-archives"></ul>
       </div>
+      <!-- [2026-10-15] Машины нет — последняя игра крупно и «Играть» сразу в неё; «Машина без игры» — прежняя «Играть» -->
+      <button class="primary" id="play-game" hidden data-i18n="btn.play"></button>
       <button class="primary" id="play" disabled hidden data-i18n="btn.play"></button>
     </section>
 
@@ -215,6 +227,10 @@
     <section class="card lang-card">
       <span class="label">Language · Язык · Idioma</span>
       <select id="lang" aria-label="Language"></select>
+    </section>
+    <section class="card lang-card">
+      <span class="label" data-i18n="setup.sounds"></span>
+      <input type="checkbox" id="ui-sounds" checked>
     </section>
     <section class="card reset-card">
       <div class="label" data-i18n="setup.reset.title"></div>
@@ -361,7 +377,29 @@
     </div>
   </div>
 
+  <!-- [2026-10-15] Запуск трансляции — на весь экран: картинка игры, кольцо VastGame, этапы; при успехе — вспышка -->
+  <div class="launch-fx" id="launch-fx" hidden>
+    <div class="lfx-art" id="lfx-art"></div>
+    <div class="lfx-shade"></div>
+    <div class="lfx-center">
+      <div class="lfx-ring"><div class="lfx-spin"></div><div class="lfx-core"><img src="logo-mark.png" alt=""></div></div>
+      <img class="lfx-logo" id="lfx-logo" alt="" hidden>
+      <div class="lfx-name" id="lfx-name"></div>
+      <div class="lfx-step" id="lfx-step"></div>
+      <div class="lfx-bar"><i id="lfx-bar"></i></div>
+      <div class="lfx-err" id="lfx-err" hidden></div>
+      <button class="lfx-close" id="lfx-close" data-i18n="fx.close" hidden></button>
+    </div>
+    <div class="lfx-flash"></div>
+  </div>
+
+  <div class="pad-hints" id="pad-hints">
+    <span><i class="k a">A</i><span data-i18n="pad.select"></span></span>
+    <span><i class="k b">B</i><span data-i18n="pad.back"></span></span>
+  </div>
+
   <script src="i18n.js"></script>
+  <script src="pad.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

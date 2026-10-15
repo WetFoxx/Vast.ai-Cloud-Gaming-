@@ -115,7 +115,12 @@ class Api:
         открылось в конце обновления, что сказать («обновлено» / «не встало»). Страница спрашивает это первым —
         тут же новая версия ставит сторожу знак «я открылась» (updater.after_start)."""
         return {"language": settings.get("language"), "version": updater.VERSION, "update": updater.after_start(),
-                "platform": sys.platform}
+                "platform": sys.platform, "sounds": settings.get("ui_sounds", True) is not False}
+
+    def set_sounds(self, on):
+        """[2026-10-15] Звуки окна (наведение, нажатие, запуск трансляции) — вкл/выкл."""
+        settings.set("ui_sounds", bool(on))
+        return {"ok": True}
 
     def set_language(self, lang, remember=False):
         """Запомнить язык, выбранный человеком (иначе окно следует за языком системы)."""
@@ -1465,7 +1470,7 @@ def main():
         return
     api = Api()
     window = webview.create_window("VastGame", str(HERE / "ui" / "index.html"), js_api=api,
-                                   width=620, height=760, min_size=(520, 600))
+                                   width=1180, height=780, min_size=(760, 600))   # [2026-10-15] шире — вид «как Big Picture»
     api._window = window
     window.events.closing += api._on_closing
     if sys.platform == "win32":
