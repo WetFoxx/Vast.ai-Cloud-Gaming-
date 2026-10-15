@@ -1518,6 +1518,13 @@ function showSetupCat(cat) {
   for (const sec of document.querySelectorAll("#set-panes > [data-cat]")) sec.classList.toggle("set-off", sec.dataset.cat !== cat);
 }
 for (const b of document.querySelectorAll(".set-cat")) b.addEventListener("click", () => showSetupCat(b.dataset.cat));
+// Посмотреть анимацию запуска трансляции без машины: те же картинки и звуки, через 3.5 с — «Поехали!»
+$("fx-preview").addEventListener("click", async () => {
+  if (!libData) { try { const d = DEMO ? demoLibrary() : await api().library(false); if (d && !d.error) libData = d; } catch (e) { /* без картинки */ } }
+  if (!heroGame) renderHeroArt();
+  const fx = launchFx();
+  setTimeout(() => fx.done(true), 3500);
+});
 showSetupCat("ready");
 $("setup-banner-open").addEventListener("click", () => openWizard());
 $("setup-recheck").addEventListener("click", openSetup);
