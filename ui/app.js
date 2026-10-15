@@ -1008,16 +1008,6 @@ function machineBusy() {
   ask({ title: t("play.busy.title"), text: t("play.busy.text"), yes: t("btn.back"), no: t("btn.cancel") });
   return true;
 }
-// «Играть» сразу (большая карточка главного): выбор машины с этой игрой
-function startGame(g) {
-  if (machineBusy()) return;
-  const pg = prepareGame(g);
-  if (!pg) return;
-  playGame = pg;
-  replaceMode = false; replaceBlocked = false;
-  openOffers();
-}
-
 // [2026-10-15] Страница игры (обложка в библиотеке или на полке главного): картинка, «Играть», аккаунт, «С модами |
 // Без модов», «Хранить игру в облаке», программы и что лежит в облаке. «Играть» — выбор машины с этой игрой.
 let gameFrom = "library";
@@ -2714,7 +2704,7 @@ $("progress-back").addEventListener("click", () => { if (!DEMO) api().session_se
 // Логотип и надпись VastGame — на главный экран. Тем же путём, что кнопка «Назад» открытого экрана: она же
 // прибирает за собой (таймеры, «просмотрено»). Кнопка скрыта или неактивна (идёт аренда) — остаёмся.
 $("open-home").addEventListener("click", () => $("brand").click());
-$("play-game").addEventListener("click", () => { if (heroGame && heroGame.accounts) startGame(heroGame); });
+$("play-game").addEventListener("click", () => { if (heroGame && heroGame.accounts) openGame(heroGame); });   // сначала страница игры
 $("brand").addEventListener("click", () => {
   if (!$("modal").hidden) return;
   const cur = ["main", "offers", "progress", "games", "setup", "history", "wizard", "library", "game"].find((s) => !$("screen-" + s).hidden);
