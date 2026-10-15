@@ -197,6 +197,19 @@ class TestAutoAndReport(Base):
         self.assertEqual(rep["auto"], ["game:Dawnwalker/Binaries/Win64/treiner.exe"])
         self.assertEqual(len(rep["progs"]), 2)
 
+    def test_installer_never_starts_with_game(self):
+        # [2026-10-15] Wand-12.63.0.exe был отмечен «вместе с игрой», пока его не узнавали как установщик
+        w = self.w.pd / "Wand" / "Wand-12.63.0.exe"
+        w.parent.mkdir()
+        w.write_bytes(b"MZ" + b"\0" * 62 + b"PK..RELEASES..Wand-12.63.0-full.nupkg")
+        ws.set_auto(str(self.w.sdir), APP, "prog:Wand/Wand-12.63.0.exe", True)
+        ws.set_auto(str(self.w.sdir), APP, "prog:WeMod/WeMod.exe", True)
+        self.w.game_running()
+        self.tick(1000)
+        self.tick(1000 + ws.AUTO_DELAY)
+        started = [cmd[-1] for cmd, kw in self.started]
+        self.assertEqual([os.path.basename(x) for x in started], ["WeMod.exe"])    # установщик — нет, программа — да
+
     def test_auto_off_and_report_for_library_game(self):
         ws.set_auto(str(self.w.sdir), APP, "prog:WeMod/WeMod.exe", True)
         ws.set_auto(str(self.w.sdir), APP, "prog:WeMod/WeMod.exe", False)

@@ -4727,6 +4727,12 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
         for ident in ids:
             if ident not in rec["done"]:
                 rec["done"].append(ident)
+                # [2026-10-15] Установщик «вместе с игрой» не запускаем: его ставят «в игру» один раз (живой случай —
+                # Wand-12.63.0.exe, пока его не узнавали по содержимому, был отмечен «вместе с игрой»)
+                path = _resolve(root, pd, appid, ident)
+                if path and (SETUP.search(os.path.basename(path)) or _setup_like(path)):
+                    print(f"программа {ident} для {appid}: установщик — вместе с игрой не запускаю")
+                    continue
                 print(f"программа {ident} для {appid}: {launch(root, pd, appid, ident, user)}")
     _jsave(stf, state)
     show = dict.fromkeys(running)
