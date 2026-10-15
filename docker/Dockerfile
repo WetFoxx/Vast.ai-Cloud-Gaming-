@@ -8,14 +8,17 @@
 # ---------------------------------------------------------------- vgpad (64 и 32 бита)
 FROM ubuntu:24.04 AS vgpad
 RUN apt-get update -qq && apt-get install -yq --no-install-recommends gcc gcc-multilib libc6-dev libc6-dev-i386 \
+      libx11-dev libxrandr-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY vgpad/vgpad.c /src/vgpad.c
 COPY vgpad/vgnv.c /src/vgnv.c
+COPY vgpad/vgrr.c /src/vgrr.c
 RUN mkdir -p /out/x86_64 /out/i386 \
     && F="-shared -fPIC -O2 -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0" \
     && gcc $F -o /out/x86_64/libvgpad.so /src/vgpad.c -ldl -lpthread \
     && gcc -m32 $F -o /out/i386/libvgpad.so /src/vgpad.c -ldl -lpthread \
-    && gcc $F -o /out/x86_64/libvgnv.so /src/vgnv.c -ldl
+    && gcc $F -o /out/x86_64/libvgnv.so /src/vgnv.c -ldl \
+    && gcc $F -Wl,-soname,libXrandr.so.2 -o /out/x86_64/libvgrr.so /src/vgrr.c -ldl
 
 # ---------------------------------------------------------------- образ
 FROM ubuntu:24.04
@@ -98,6 +101,9 @@ COPY --from=vgpad /out/x86_64/libvgpad.so /usr/lib/x86_64-linux-gnu/libvgpad.so
 COPY --from=vgpad /out/i386/libvgpad.so /usr/lib/i386-linux-gnu/libvgpad.so
 # [0.5.3] NVENC на многокарточных хостах: драйвер называет все карты хоста — vgnv оставляет в ответе только свою
 COPY --from=vgpad /out/x86_64/libvgnv.so /usr/lib/x86_64-linux-gnu/libvgnv.so
+# [2026-10-15] Экран без монитора (выходом видеокарты владеет хост): «монитор» для Sunshine — не в общей папке
+# библиотек (иначе его нашли бы все программы вместо настоящей libXrandr), подгружается только к Sunshine
+COPY --from=vgpad /out/x86_64/libvgrr.so /opt/vgrr/libvgrr.so
 COPY vgpad/vgpadd.py /opt/vastgame/vgpadd.py
 COPY rootfs/ /
 

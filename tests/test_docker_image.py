@@ -121,7 +121,11 @@ class TestSunshineReport(unittest.TestCase):
         ep = (D / "rootfs/opt/vastgame/entrypoint.sh").read_text()
         self.assertIn('"$V/sunshine-start.sh" probe', ep)
         self.assertLess(ep.index('"$V/sunshine-start.sh" probe'), ep.index("stage wolf"))      # до агента
-        self.assertIn('log "!!! видео не работает: экран не запускается:', ep)
+        self.assertIn('log "!!! видео не работает: экран не запускается даже без монитора:', ep)
+        # [2026-10-15] сначала — экран без монитора (выходом видеокарты владеет хост), и только потом «не работает»
+        self.assertLess(ep.index('"$V/display-setup.sh" "$RES" headless'), ep.index("экран не запускается даже без монитора"))
+        self.assertLess(ep.index("touch /run/vastgame/headless"), ep.index("stage audio"))
+        self.assertIn("{stage,nvenc,capture,headless,ts-login.url}", ep)       # перезапуск контейнера — заново
         self.assertIn("ts_report", ep)                                      # [0.5.3] Tailscale — в журнал Vast
         self.assertLess(ep.index("ts_report() {"), ep.index("while :; do\n  sleep 10"))
 
@@ -169,6 +173,39 @@ class TestSunshineReport(unittest.TestCase):
                              "[t]: Error: Could not open codec [h264_nvenc]: Operation not permitted\n"
                              "[t]: Fatal: Couldn't find any working encoder\n")
         self.assertTrue(out.startswith("err|у хоста нет библиотеки кодировщика NVIDIA"), out)
+
+    def test_headless_sunshine_setup(self):
+        # Экран без монитора: Sunshine — с vgrr и обычным захватом, даже если NvFBC подготовлен
+        text = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
+        a = text.index("PRE=libvgpad.so\n")
+        b = text.index("CAP=x11;", a)
+        b = text.index("\n", b) + 1
+        d = Path(tempfile.mkdtemp())
+        (d / "capture").write_text("fbc\n")
+        (d / "vgrr.so").write_text("")
+        for headless in (True, False):
+            (d / "headless").unlink(missing_ok=True)
+            if headless:
+                (d / "headless").write_text("")
+            body = (text[a:b].replace("/run/vastgame/", f"{d}/").replace("/opt/vgrr/libvgrr.so", f"{d}/vgrr.so")
+                    .replace("/usr/lib/x86_64-linux-gnu/libvgnv.so", f"{d}/vgrr.so"))
+            out = sh("bash", "-c", "NVKEEP=x\n" + body + 'echo "$CAP|$PRE"').stdout.strip()
+            self.assertEqual(out, f"x11|libvgpad.so libvgnv.so {d}/vgrr.so" if headless else "nvfbc|libvgpad.so libvgnv.so")
+
+    def test_headless_xorg_conf(self):
+        ds = (D / "rootfs/opt/vastgame/display-setup.sh").read_text()
+        a = ds.index('if [ "${2:-}" = headless ]; then')
+        block = ds[a:ds.index("\nfi\n", a)]
+        self.assertIn('Option     "UseDisplayDevice" "none"', block)
+        self.assertIn("Virtual ${RES%x*} ${RES#*x}", block)
+        self.assertNotIn("ConnectedMonitor", block)                      # без монитора — его права и не нужны
+        self.assertLess(ds.index("IFS=:. read -r _ b1 b2 b3"), a)        # шина видеокарты уже известна
+
+    def test_vgrr_built_into_image(self):
+        df = (D / "Dockerfile").read_text()
+        self.assertIn("gcc $F -Wl,-soname,libXrandr.so.2 -o /out/x86_64/libvgrr.so /src/vgrr.c -ldl", df)
+        self.assertIn("COPY --from=vgpad /out/x86_64/libvgrr.so /opt/vgrr/libvgrr.so", df)   # не в общей папке
+        self.assertIn("libxrandr-dev", df)
 
     def test_driver_libraries_supplied_run(self):
         # Настоящий кусок nvidia-setup.sh: хост дал декодер, но не кодировщик — подкладывается только кодировщик
