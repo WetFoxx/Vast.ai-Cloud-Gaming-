@@ -246,6 +246,9 @@ function render(data) {
   // [2026-10-15] «Удалить без выгрузки» — в «Параметрах трансляции», пока они есть; машина без адресов — под карточкой
   const dangerIn = $("links").hidden ? $("foot") : $("params-danger");
   if ($("emergency").parentElement !== dangerIn) dangerIn.prepend($("emergency"));
+  // «Закончить» — рядом с «Запустить Moonlight» (как «Играть | Закончить» в Big Picture); без адресов — под карточкой
+  const stopIn = $("links").hidden ? $("foot") : document.querySelector("#links .ml-row");
+  if ($("stop").parentElement !== stopIn) stopIn.append($("stop"));
   renderHeroArt();
 }
 
@@ -2586,7 +2589,7 @@ function renderResult(r) {
   const links = $("links").cloneNode(true);
   const part = (id) => links.querySelector("#" + id);
   links.hidden = false;
-  for (const id of ["ml-app", "params-row", "params"]) part(id).remove();   // выбор и параметры — на главном
+  for (const id of ["ml-app", "params-row", "params", "stop"]) { const x = part(id); if (x) x.remove(); }   // выбор и параметры — на главном
   const btn = part("ml-start"), note = part("ml-note");
   btn.onclick = async () => {
     btn.disabled = true;

@@ -88,30 +88,40 @@ button.link { background: none; }
 button.link:hover:not(:disabled) { background: none; text-decoration: underline; }
 .chip { background: var(--card); border: 0; }
 
-/* Большая карточка главного: картинка игры слева, всё прочее справа */
-.hero { padding: 0; gap: 0; overflow: hidden; }
+/* Большая карточка главного: картинка игры — на всю карточку, справа она плавно уходит в темноту под кнопками
+   (без шва), логотип игры — слева внизу на картинке */
+.hero { padding: 0; gap: 0; overflow: hidden; position: relative; }
 .hero > * { margin-left: 24px; margin-right: 24px; }
 .hero > :nth-child(2) { margin-top: 22px; }
 .hero > :last-child { margin-bottom: 22px; }
 .hero-art { display: none; }
-.hero.with-art { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(340px, 1fr); column-gap: 0; align-content: start; }
-.hero.with-art > * { grid-column: 2; }
+.hero.with-art { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(340px, 1fr); align-content: center;
+  min-height: 300px; background: #0e1219; }
+.hero.with-art > * { grid-column: 2; position: relative; z-index: 1; }
 .hero.with-art > * + * { margin-top: 14px; }
-.hero.with-art .hero-art { display: block; grid-column: 1; grid-row: 1 / span 30; margin: 0; min-height: 250px;
-  background-size: cover; background-position: center; position: relative; }
-.hero-art::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 60%, rgba(20, 25, 33, .9)); }
-.hero-logo { position: absolute; left: 26px; bottom: 22px; max-width: 55%; max-height: 90px; z-index: 1;
-  filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .6)); }
-.hero.with-art { background: rgba(20, 25, 33, .9); }
+.hero.with-art > :nth-child(2) { margin-top: 26px; }
+.hero.with-art > :last-child { margin-bottom: 26px; }
+.hero.with-art .hero-art { display: block; position: absolute; inset: 0; margin: 0; z-index: 0; grid-area: auto;  /* auto — вся карточка, не колонка */
+  background-size: cover; background-position: center 30%; }
+.hero-art::after { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(90deg, rgba(14, 18, 25, 0) 28%, rgba(14, 18, 25, .72) 50%, rgba(14, 18, 25, .93) 66%, #0e1219 82%),
+    linear-gradient(0deg, rgba(14, 18, 25, .55), transparent 40%); }
+.hero-logo { position: absolute; left: 28px; bottom: 24px; max-width: 34%; max-height: 96px; z-index: 1;
+  filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .7)); }
 .hero #balance-card { display: none; }               /* баланс — справа сверху (topstat) */
 .hero-status .title { font-size: 24px; }
 .hero.empty { text-align: left; padding: 0; }
 .hero.empty .hero-top, .hero.empty .hero-main { align-items: flex-start; }
 .hero.empty .hero-status .title { font-size: 24px; font-weight: 700; color: var(--text); font-family: var(--round); }
-.hero #play { font-size: 18px; padding: 15px 22px; }
+.hero-acts { display: flex; gap: 12px; }
+.hero-acts > button { flex: 1; }
+.hero-acts:not(:has(button:not([hidden]))) { display: none; }
+.hero #play, .hero #play-game { font-size: 18px; padding: 15px 22px; }
+.hero.suggest #play { flex: none; background: rgba(255, 255, 255, .1); box-shadow: none; font-size: 15px; padding: 15px 20px; }
+.hero.suggest #play:hover:not(:disabled) { background: rgba(255, 255, 255, .16); }
 #ml-start { font-size: 17px; padding: 15px 22px; }
-.progs-box { background: rgba(255, 255, 255, .05); border: 0; }
-.params { background: rgba(255, 255, 255, .05); }
+.progs-box { background: rgba(255, 255, 255, .06); border: 0; }
+.params { background: rgba(255, 255, 255, .06); }
 .foot { margin-top: -4px; }
 
 /* Полка «Твои игры» — обложки в ряд, как «Недавние игры» */
@@ -163,13 +173,9 @@ input.pad-focus, textarea.pad-focus { transform: none; }
 
 /* Имя игры крупно, состояние машины — строкой над ним (как «Продолжить игру» в Big Picture) */
 .hero-name { font-family: var(--round); font-size: 30px; font-weight: 800; line-height: 1.12; letter-spacing: -.3px; margin-top: 2px; }
-.hero.with-art .hero-name:not([hidden]) ~ * { }
 .hero.with-art:has(.hero-name:not([hidden])) .hero-status .title { font-size: 13px; letter-spacing: 1.3px; text-transform: uppercase;
   color: var(--muted); font-family: inherit; font-weight: 700; }
 .hero.with-art:has(.hero-name:not([hidden])) .hero-status .dot.ready + .title { color: var(--ready); }
-#play-game { font-size: 18px; padding: 15px 22px; }
-.hero.suggest #play { background: var(--card-2); box-shadow: none; font-size: 15px; padding: 12px 18px; }
-.hero.suggest #play:hover:not(:disabled) { background: rgba(255, 255, 255, .13); }
 body[data-screen="main"] #top-machine { display: none !important; }
 
 /* Запуск трансляции — на весь экран (launchFx в app.js) */
@@ -214,3 +220,9 @@ body[data-screen="main"] #top-machine { display: none !important; }
   .lfx-spin, .lfx-core, .launch-fx.ok .lfx-ring, .launch-fx.ok .lfx-flash { animation: none !important; }
   .lfx-art { transition: opacity .3s; }
 }
+
+/* Заголовок экрана и кнопка рядом (библиотека: «Обновить») — кнопка сразу за заголовком, не под балансом справа */
+.lib-top { justify-content: flex-start; gap: 16px; padding-right: 380px; }
+.lib-top h1 { padding-right: 0; }
+.ml-row #stop { flex: none; padding: 15px 24px; font-size: 16px; background: rgba(255, 255, 255, .1); }
+.foot:not(:has(> :not([hidden]))) { display: none; }
