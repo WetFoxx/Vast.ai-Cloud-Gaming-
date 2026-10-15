@@ -389,3 +389,12 @@ body.pad-mode, body.pad-mode * { cursor: none !important; }
 .setup-steps li { padding: 14px 4px; }
 .lang-card { padding: 16px 20px; }
 @media (max-width: 980px) { .set-layout { grid-template-columns: 1fr; } .set-cats { flex-direction: row; flex-wrap: wrap; position: static; } .set-cat { width: auto; } }
+/* Трансляция машины без игры — вместо картинки переливаются цвета VastGame */
+.launch-fx.desk .lfx-art { opacity: .9 !important; filter: blur(60px) !important; inset: -20%;
+  background: radial-gradient(40% 50% at 30% 40%, rgba(255, 106, 0, .55), transparent 70%),
+    radial-gradient(45% 55% at 70% 60%, rgba(214, 15, 99, .55), transparent 70%),
+    radial-gradient(35% 45% at 55% 30%, rgba(122, 12, 184, .55), transparent 70%);
+  animation: lfx-drift 7s ease-in-out infinite alternate; }
+@keyframes lfx-drift { from { transform: rotate(0deg) scale(1); } to { transform: rotate(25deg) scale(1.15); } }
+.lfx-sub { font-size: 16px; color: rgba(255, 255, 255, .7); margin-top: -8px; }
+@media (prefers-reduced-motion: reduce) { .launch-fx.desk .lfx-art { animation: none; } }

@@ -398,12 +398,24 @@ async function launchMoonlight(btn, note, host, app) {
 // [2026-10-15] Анимация запуска трансляции (окно VastGame — до того, как Moonlight откроет своё): картинка игры
 // наезжает, кольцо цветов VastGame крутится, этапы сменяются по времени (сам запуск — один вызов Python, до минуты
 // при первой связке); удалось — кольцо раскрывается вспышкой и всё гаснет, не удалось — причина и «Закрыть».
-function launchFx() {
-  const box = $("launch-fx"), g = heroGame || playNowGame();
+// Игра из библиотеки по номеру — с её настоящими картинками (у новых игр Steam адреса с хешем)
+function libGame(g) {
+  if (!g || !g.appid) return g || null;
+  const lib = libData && (libData.games || []).find((x) => String(x.appid) === String(g.appid));
+  return lib ? { ...lib, ...g, hero: g.hero || lib.hero, cap: g.cap || lib.cap } : g;
+}
+// preview — «Посмотреть» в настройке (машины может не быть): последняя игра
+function launchFx(preview = false) {
+  const box = $("launch-fx"), m = current && current.status && current.status.machine;
+  // Трансляция машины: игра, с которой её арендовали; машина без игры — рабочий стол (без картинки чужой игры)
+  const g = preview ? heroGame : m ? libGame(playNowGame()) : heroGame;
   const steps = ["fx.connect", "fx.pair", "fx.open"];
   let i = 0, over = false;
+  box.classList.toggle("desk", !g);
   $("lfx-art").style.backgroundImage = artOf(g) ? `url("${artOf(g)}")` : "";
-  $("lfx-name").textContent = (g && g.name) || "VastGame";
+  $("lfx-name").textContent = g ? g.name || "" : t("fx.desktop");
+  $("lfx-sub").textContent = !g && m ? `${m.gpu} · ${m.country}` : "";
+  $("lfx-sub").hidden = !$("lfx-sub").textContent;
   const logo = $("lfx-logo");
   logo.hidden = true;
   $("lfx-name").hidden = false;
@@ -1522,7 +1534,7 @@ for (const b of document.querySelectorAll(".set-cat")) b.addEventListener("click
 $("fx-preview").addEventListener("click", async () => {
   if (!libData) { try { const d = DEMO ? demoLibrary() : await api().library(false); if (d && !d.error) libData = d; } catch (e) { /* без картинки */ } }
   if (!heroGame) renderHeroArt();
-  const fx = launchFx();
+  const fx = launchFx(true);
   setTimeout(() => fx.done(true), 3500);
 });
 showSetupCat("ready");
