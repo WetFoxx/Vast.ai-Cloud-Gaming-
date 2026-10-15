@@ -252,6 +252,18 @@ class TestRangedRead(PartsBase):
         name, size, _ = self.single(b"", "e.tar.zst")                # пустой — кусков нет, но сверка есть
         self.assertEqual(self.cat(name, size, "0" * 32)[0], 1)
 
+    def test_trickling_range_is_cut_and_retried(self):
+        # [2026-10-15] кусок идёт по капле (данные есть — rclone не считает зависанием): срок вышел — заново
+        data = os.urandom(RANGE * 2 + 5)
+        mark = self.d / "slow-once"
+        self.fake_sh = (f'[[ " $* " == *" cat "* && " $* " == *"--offset=0 "* && ! -e "{mark}" ]] '
+                        f'&& {{ : > "{mark}"; printf x; exec sleep 30; }}')   # один процесс, как rclone
+        self.extra.update({"WOLF_SLOW_MIN_SEC": "1", "WOLF_SLOW_KBPS": "100000"})
+        t = time.time()
+        self.assertEqual(self.cat(*self.single(data)), (0, data))
+        self.assertTrue(mark.exists())
+        self.assertLess(time.time() - t, 20)                           # не ждали 30 с медленного куска
+
     def test_failed_range_is_retried(self):
         data = os.urandom(RANGE * 3 + 5)
         mark = self.d / "failed-once"

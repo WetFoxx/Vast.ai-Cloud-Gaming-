@@ -5879,6 +5879,11 @@ RANGE = int(os.environ.get("WOLF_RANGE_BYTES") or int(os.environ.get("WOLF_RANGE
 WINDOW = max(1, int(os.environ.get("WOLF_RANGE_PAR") or 8))      # кусков одного архива в пути одновременно
 RSLOTS = max(1, int(os.environ.get("WOLF_RANGE_SLOTS") or 12))   # кусков в памяти у всех процессов вместе
 RC_READ = ["--timeout=60s", "--contimeout=15s"]   # соединение зависло — ошибка через минуту и повтор куска
+# [2026-10-15] …а если данные идут по капле, rclone не считает это зависанием (живой случай, Корея RTX 2060: 27 МБ первого
+# куска за 7.5 минуты, остальные куски давно готовы и ждут его — машина не готова). Кусок не успел быстрее
+# SLOW_KBPS — оборвать и взять заново (новое соединение обычно быстрое); последняя попытка — без срока
+SLOW_RATE = int(os.environ.get("WOLF_SLOW_KBPS") or 512) * 1024
+SLOW_MIN = float(os.environ.get("WOLF_SLOW_MIN_SEC") or 60)
 RC = ["rclone", "--retries=5", "--low-level-retries=20", "--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200",
       "--drive-chunk-size=64M"]         # куски выгрузки: по умолчанию 8 МБ — медленно
 HEAD = "vastgame-parts 1"
@@ -6217,6 +6222,15 @@ def fetch(remote, name, off, cnt):
     for i in range(TRIES):
         p = subprocess.Popen(argv("cat", *RC_READ, f"--offset={off}", f"--count={cnt}", f"{remote}/{name}"),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        slow = threading.Event()
+        timer = None
+        if i < TRIES - 1:                                   # последняя попытка — без срока: медленно, но докачать
+            def cut(p=p):
+                slow.set()
+                p.kill()
+            timer = threading.Timer(max(SLOW_MIN, cnt / SLOW_RATE), cut)
+            timer.daemon = True
+            timer.start()
         view, n = memoryview(buf), 0
         while n < cnt and (k := p.stdout.readinto(view[n:])):
             n += k
@@ -6224,9 +6238,12 @@ def fetch(remote, name, off, cnt):
         extra = p.stdout.read(1)
         err = p.stderr.read().decode("utf-8", "replace").strip()
         code = p.wait()
-        if code == 0 and n == cnt and not extra:
+        if timer:
+            timer.cancel()
+        if code == 0 and n == cnt and not extra and not slow.is_set():
             return buf
-        log(f"{name} [{off}+{cnt}]: " + (err.splitlines()[-1][-300:] if err else f"код {code}, байт {n}"))
+        log(f"{name} [{off}+{cnt}]: " + (f"слишком медленно ({n} байт) — беру заново" if slow.is_set() else
+                                         err.splitlines()[-1][-300:] if err else f"код {code}, байт {n}"))
         time.sleep(WAIT * (i + 1))
     return None
 
