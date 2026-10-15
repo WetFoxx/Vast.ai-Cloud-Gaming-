@@ -1,6 +1,7 @@
 # Вкладка «Docker» (шаг 3; основная с 0.3.1): поиск машин без KVM, но с драйвером от 580, аренда из образа
 # vastgame-desktop тем же скриптом, замена машины без NVENC. Без денег и сети — Vast и машина поддельные.
 
+import os
 import sys
 import time
 import unittest
@@ -207,3 +208,21 @@ class TestNvenc(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKvmTestScript(unittest.TestCase):
+    """[2026-10-15] Проверка скрипта на KVM до публикации: разовый загрузчик со ссылкой из переменной (только GitHub WetFoxx)."""
+
+    def test_onstart_override_only_with_variable(self):
+        import setup
+        tpl = {"hash_id": "h", "env": ""}
+        url = "https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/abc/wolf-setup.sh"
+        with mock.patch.dict(os.environ, {"VASTGAME_KVM_SCRIPT_URL": url}):
+            body = core.rental_body(tpl, 100)
+        self.assertIn(f"URL='{url}'", body["onstart"])
+        self.assertEqual(body["template_hash_id"], "h")
+        with mock.patch.dict(os.environ, {"VASTGAME_KVM_SCRIPT_URL": "https://evil.example/x.sh"}):
+            self.assertNotIn("onstart", core.rental_body(tpl, 100))
+        env = {k: v for k, v in os.environ.items() if k != "VASTGAME_KVM_SCRIPT_URL"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertNotIn("onstart", core.rental_body(tpl, 100))

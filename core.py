@@ -232,6 +232,13 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     else:
         body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
         env = {}
+        # [2026-10-15] Проверка скрипта на KVM до публикации (только запуск из папки проекта; у людей переменной нет):
+        # VASTGAME_KVM_SCRIPT_URL=https://raw.githubusercontent.com/…/<коммит>/wolf-setup.sh — разовый загрузчик вместо
+        # шаблонного (сам шаблон не меняется)
+        kvm_url = os.environ.get("VASTGAME_KVM_SCRIPT_URL") or ""
+        if kvm_url.startswith("https://raw.githubusercontent.com/WetFoxx/"):
+            import setup
+            body["onstart"] = setup.ONSTART.replace(setup.SCRIPT_URL, kvm_url)
     sl = steam_lang(tpl, lang)
     # KVM: свой язык шаблона машина и так получает из шаблона; Docker шаблона не видит — передаём всегда
     if sl and (docker or not setup_env(tpl, "STEAM_LANG")):
