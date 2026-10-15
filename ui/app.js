@@ -416,7 +416,7 @@ function launchFx(preview = false) {
     const m2 = current && current.status && current.status.machine;
     const data = { lang: LANG, desk: !g, name: g ? g.name || "" : t("fx.desktop"), sub: !g && m2 ? `${m2.gpu} · ${m2.country}` : "",
                    art: artOf(g) || "", logo: g && /^\d+$/.test(String(g.appid)) ? STEAM_ART(g.appid, "logo.png") : "",
-                   texts: { steps: steps.map((k) => t(k)), go: t("fx.go"), fail: t("fx.fail"), close: t("fx.close") } };
+                   texts: { steps: steps.map((k) => t(k)), go: t("fx.go"), fail: t("fx.fail"), close: t("fx.close"), wait: t("fx.wait") } };
     let native = null;
     try { native = api().fx_show(data); } catch (e) { native = null; }
     if (native) {

@@ -39,7 +39,7 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const api = () => window.pywebview.api;
-    let tx = {}, step = 0, over = false, closing = false, stepTimer = null, poll = null;
+    let tx = {}, step = 0, over = false, closing = false, stepTimer = null, poll = null, waiting = false;
 
     function showStep() {
       $("lfx-step").classList.remove("in"); void $("lfx-step").offsetWidth;
@@ -81,7 +81,7 @@
         $("lfx-step").textContent = tx.go || "";
         $("lfx-bar").style.width = "100%";
         $("launch-fx").classList.add("ok");
-        setTimeout(close, 1500);
+        setTimeout(close, 700);                              // вспышка — и сразу Moonlight
       } else {
         $("launch-fx").classList.add("fail");
         $("lfx-step").textContent = tx.fail || "";
@@ -101,7 +101,17 @@
       poll = setInterval(async () => {
         const s = await api().fx_state();
         if (!s || s.closed) { close(); return; }
-        if (s.done !== null && s.done !== undefined && !over) finish(s.done, s.why);
+        if (over || s.done === null || s.done === undefined) return;
+        if (s.done === false) { finish(false, s.why); return; }
+        if (s.video) { finish(true); return; }               // первый кадр пришёл — Moonlight показывает игру
+        if (!waiting) {                                      // Moonlight запущен, грузит картинку — держим экран
+          waiting = true;
+          clearInterval(stepTimer);
+          $("lfx-step").classList.remove("in"); void $("lfx-step").offsetWidth;
+          $("lfx-step").textContent = tx.wait || "";
+          $("lfx-step").classList.add("in");
+          $("lfx-bar").style.width = "94%";
+        }
       }, 200);
     });
   </script>

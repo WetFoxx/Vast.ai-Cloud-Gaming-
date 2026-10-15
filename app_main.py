@@ -4,6 +4,7 @@
 #   job play|stop '<json>'     фоновая операция (её запускает окно — см. jobs.py)
 #   resume                     служба автозапуска: продолжить прерванное, проверить баланс
 #   ask                        карточка вопроса машины поверх всех окон (окно закрыто; запускает служба)
+#   fx                         анимация запуска трансляции на весь экран (Mac; запускает окно)
 #   balance                    напечатать баланс
 #   selftest                   проверить сборку: всё ли внутри на месте (без сети и без ключей)
 #
@@ -43,6 +44,9 @@ def main(argv):
     if cmd == "ask":
         import gui
         return gui.card_main()
+    if cmd == "fx":                       # [2026-10-15] анимация запуска трансляции на весь экран (Mac)
+        import fxwin
+        return fxwin.main()
     if cmd == "selftest":
         return selftest()
     if cmd == "balance":
@@ -64,7 +68,7 @@ def selftest():
     own = (("webview.platforms.winforms", "clr", "tzlocal", "tzdata", "keyring.backends.Windows")
            if sys.platform == "win32" else ("webview.platforms.cocoa", "Quartz"))
     for m in ("gui", "jobs", "core", "drive", "setup", "setupcheck", "autostart", "notify", "webview",
-              "keystore", "keyring", "requests", "updater", "asks", "geo", "filelock",
+              "keystore", "keyring", "requests", "updater", "asks", "geo", "filelock", "fxwin",
               "cryptography.hazmat.primitives.asymmetric.ed25519", *own):
         try:
             importlib.import_module(m)
@@ -104,7 +108,7 @@ def selftest():
     except Exception:                            # noqa: BLE001 — нет ключа, не base64, не 32 байта
         problems.append("нет открытого ключа выпусков (updater.PUBLIC_KEY) — обновления не будут приниматься")
     here = paths.HERE
-    for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css", "ui/ask.html"):
+    for f in ("ui/index.html", "ui/app.js", "ui/i18n.js", "ui/app.css", "ui/ask.html", "ui/launch.html", "ui/launch.css", "ui/pad.js", "ui/bp.css"):
         if not (here / f).is_file():
             problems.append(f"нет файла {f}")
     import json
