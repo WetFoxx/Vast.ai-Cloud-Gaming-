@@ -392,6 +392,15 @@ class TestStatus(Base):
         self.assertEqual(self.machine(page=dict(ok, x=(3, "up", "")))["kind"], "syncing")
         self.assertEqual(self.machine(page=ok)["kind"], "ready")
 
+    def test_slow_capture_flag(self):
+        # [2026-10-15] образ запустил видео на запасном захвате X11 — главный экран предупреждает; NvFBC / KVM — нет
+        ok = {"boot": (1, "ok", ""), "steam-state": (2, "ok", "")}
+        slow = self.machine(page=dict(ok, sunshine=(3, "ok", "NVENC, захват x11, драйвер 595")))
+        self.assertEqual((slow["state"], slow["slow_capture"]), (core.READY, True))
+        self.assertFalse(self.machine(page=dict(ok, sunshine=(3, "ok", "NVENC, захват nvfbc, драйвер 580")))["slow_capture"])
+        self.assertFalse(self.machine(page=ok)["slow_capture"])                       # KVM: записи sunshine нет
+        self.assertFalse(self.machine(page=dict(ok, sunshine=(3, "err", "захват x11")))["slow_capture"])
+
     def test_library_game_record_is_not_an_archive(self):
         # [v4.8] play — ход игры из библиотеки (Steam качает): не архив, машина готова, ход — отдельно
         ok = {"boot": (1, "ok", ""), "steam-state": (2, "ok", ""), "play": (3, "down", "download")}

@@ -107,6 +107,9 @@ function render(data) {
   const task0 = data.task && data.task.active;
   $("status-text").hidden = ["ready", "syncing"].includes(st.state) || !!task0 || !m;
   $("status-text").textContent = statusText(st);
+  // Видео на запасном захвате — честно сказать, что картинка может подтормаживать (лучше другая машина)
+  $("slow-capture").hidden = !(m && st.slow_capture);
+  $("slow-capture").textContent = t("status.slow_capture");
   const facts = $("facts");
   facts.hidden = !m;
   facts.innerHTML = "";

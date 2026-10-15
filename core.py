@@ -700,6 +700,10 @@ def status():
     s = {n: v for n, v in s.items() if not ASK.match(n)}
     out.update(asks=asks, progress={n: v.progress for n, v in s.items() if getattr(v, "progress", None)})
     out["progs"] = progs_of(s)                                             # [v5.4] программы игр
+    # [2026-10-15] Образ запустил видео на запасном захвате (X11): быстрый (NvFBC) экран не видит — картинка медленнее
+    # (живой замер, RTX 3060 laptop Вашингтон: 50 к/с вместо 60, обработка на машине ~28 мс, всплески до 83)
+    sun = s.get(SUNSHINE)
+    out["slow_capture"] = bool(sun and sun[1] == "ok" and "захват x11" in (sun[2] or ""))
     if PLAY in s:                                                          # [v4.8] ход игры из библиотеки
         v = s[PLAY]
         out["play"] = {"state": v[1], "text": v[2], "ts": v[0], "progress": getattr(v, "progress", None)}

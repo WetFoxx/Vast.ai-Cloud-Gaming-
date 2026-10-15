@@ -96,6 +96,7 @@ main { padding: 8px 22px 26px; display: flex; flex-direction: column; gap: 14px;
   width: max-content; }
 .sub { color: var(--muted); font-size: 13px; }
 .card.low { background: var(--warn-bg); }
+.slow-capture { margin-top: 8px; padding: 8px 12px; border-radius: 10px; background: var(--warn-bg); font-size: 13px; line-height: 1.4; }
 .card.low .sub { color: var(--text); }
 
 .status-row { display: flex; gap: 12px; align-items: flex-start; }
