@@ -9,6 +9,10 @@
 # Steam приезжают из общего облака, — заплатки ведут себя как оригинал.
 ME=$(id -u)
 export LD_PRELOAD="libvgpad.so${LD_PRELOAD:+:$LD_PRELOAD}" SDL_JOYSTICK_DISABLE_UDEV=1 VG=
+# [2026-10-15] Экран без монитора (/run/vastgame/headless — выходом видеокарты владеет хост): у X-сервера нет выходов
+# RandR, и Steam не открывал ни одного окна («CreateOutputWindow: Could not find display info», GTX 1660 S Вьетнам).
+# SDL без XRandR берёт размер экрана целиком — окна открываются (проверено вживую); игры наследуют то же
+[ -e /run/vastgame/headless ] && export SDL_VIDEO_X11_XRANDR=0
 # Steam уже работает — передать ему команду (steam://…) и выйти
 if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
 exec 9>"/tmp/steam-run-$ME.lock"

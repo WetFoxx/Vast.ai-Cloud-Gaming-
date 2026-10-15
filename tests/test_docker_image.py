@@ -201,6 +201,19 @@ class TestSunshineReport(unittest.TestCase):
         self.assertNotIn("ConnectedMonitor", block)                      # без монитора — его права и не нужны
         self.assertLess(ds.index("IFS=:. read -r _ b1 b2 b3"), a)        # шина видеокарты уже известна
 
+    def test_steam_without_xrandr_on_headless(self):
+        # Steam на экране без монитора: SDL без XRandR, иначе ни одного окна; на обычном экране — как было
+        w = D / "rootfs/usr/bin/steam"
+        d = Path(tempfile.mkdtemp())
+        for headless in (True, False):
+            (d / "headless").unlink(missing_ok=True)
+            if headless:
+                (d / "headless").write_text("")
+            text = w.read_text().replace("/run/vastgame/headless", f"{d}/headless")
+            head = text[:text.index("# Steam уже работает")]
+            out = sh("bash", "-c", head + 'echo "x${SDL_VIDEO_X11_XRANDR-unset}"').stdout.strip()
+            self.assertEqual(out, "x0" if headless else "xunset")
+
     def test_vgrr_built_into_image(self):
         df = (D / "Dockerfile").read_text()
         self.assertIn("gcc $F -Wl,-soname,libXrandr.so.2 -o /out/x86_64/libvgrr.so /src/vgrr.c -ldl", df)
