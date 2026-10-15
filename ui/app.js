@@ -1510,6 +1510,15 @@ let setupData = null;   // последний ответ setup_status: {steps, r
 const SETUP_ICON = { ok: "✓", warn: "!", missing: "✗" };
 
 $("open-setup").addEventListener("click", openSetup);
+// [2026-10-15] Разделы «Настройки»: показывать только выбранный (ошибка проверки — всегда, она про «Готовность»)
+let setupCat = "ready";
+function showSetupCat(cat) {
+  setupCat = cat;
+  for (const b of document.querySelectorAll(".set-cat")) b.classList.toggle("on", b.dataset.cat === cat);
+  for (const sec of document.querySelectorAll("#set-panes > [data-cat]")) sec.classList.toggle("set-off", sec.dataset.cat !== cat);
+}
+for (const b of document.querySelectorAll(".set-cat")) b.addEventListener("click", () => showSetupCat(b.dataset.cat));
+showSetupCat("ready");
 $("setup-banner-open").addEventListener("click", () => openWizard());
 $("setup-recheck").addEventListener("click", openSetup);
 $("setup-back").addEventListener("click", () => { show("main"); refresh(); });
@@ -1546,6 +1555,10 @@ function renderSetup() {
   const d = setupData;
   if (!d) return;
   $("setup-summary").textContent = t(d.ready ? "setup.ready" : "setup.not_ready");
+  const bad = d.steps.filter((x) => x.state !== "ok").length;     // сколько пунктов просят внимания — цифрой у раздела
+  $("set-badge").hidden = !bad;
+  $("set-badge").textContent = bad;
+  $("set-badge").classList.toggle("missing", d.steps.some((x) => x.state === "missing"));
   const ul = $("setup-steps");
   ul.innerHTML = "";
   for (const st of d.steps) {
@@ -2246,7 +2259,7 @@ async function openHistory(days) {
   }
   $("history-summary").hidden = false;
   $("history-summary").textContent = t("history.loading");
-  $("history-stats").hidden = $("history-card").hidden = true;
+  $("history-stats").hidden = $("history-card").hidden = $("history-chart-card").hidden = true;
   $("history-breakdown").textContent = "";
   $("history-other").hidden = true;
   showError("history-error", null);
@@ -2265,7 +2278,7 @@ async function openHistory(days) {
   setStale("screen-history", false);
   if (d.error) {
     $("history-summary").hidden = true;
-    $("history-stats").hidden = $("history-card").hidden = true;    // прошлые цифры не оставлять
+    $("history-stats").hidden = $("history-card").hidden = $("history-chart-card").hidden = true;    // прошлые цифры не оставлять
     $("history-other").hidden = true;
     showError("history-error", d.error);
     return;
@@ -2289,24 +2302,55 @@ function renderHistory() {
   $("h-per-hour").textContent = tt.per_hour != null ? money(tt.per_hour) : "—";
   $("history-breakdown").textContent = tt.count ? t("history.breakdown", { gpu: money(tt.gpu), disk: money(tt.disk), traffic: money(tt.traffic) }) : "";
   $("history-card").hidden = !tt.count;
-  const body = $("history-table").querySelector("tbody");
-  body.innerHTML = "";
+  const list = $("history-card");
+  list.innerHTML = "";
   for (const x of d.sessions) {
-    const tr = document.createElement("tr");
-    tr.style.cursor = "default";
-    tr.innerHTML = '<td></td><td></td><td class="num"></td><td class="num"></td>';
-    const c = tr.children;
-    c[0].textContent = x.start ? new Date(x.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—";
-    c[1].textContent = x.gpu ? `${x.gpu} · ${x.country || "?"}` : t("history.unknown_machine", { id: x.iid });
-    c[2].textContent = num(x.hours);
-    c[3].textContent = money(x.amount);
-    body.appendChild(tr);
+    const row = el("div", { className: "c-item h-item" });
+    const thumb = el("div", { className: "c-thumb" + (x.game ? "" : " machine") });
+    const cover = x.game && cloudCover({ appid: x.game.appid });
+    if (cover) { const img = el("img", { alt: "", loading: "lazy", src: cover }); img.onerror = () => img.remove(); thumb.appendChild(img); }
+    thumb.appendChild(el("span", {}, x.game ? "🎮" : "🖥"));
+    const when = x.start ? new Date(x.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—";
+    const machine = x.gpu ? `${x.gpu} · ${x.country || "?"}` : t("history.unknown_machine", { id: x.iid });
+    const txt = el("div", { className: "c-text" });
+    txt.append(el("b", {}, x.game ? x.game.name : t("history.no_game")),
+               el("span", { className: "sub" }, `${when} · ${t("history.hours_n", { h: num(x.hours) })}`));
+    const amount = el("div", { className: "c-size" });
+    amount.append(el("b", {}, money(x.amount)), el("span", { className: "sub" }, ""));
+    row.append(thumb, txt, el("div", { className: "sub h-machine" }, machine), amount);
+    list.appendChild(row);
   }
+  renderHistoryChart(d);
   // Неигровые машины аккаунта (без метки vastgame) по умолчанию не смешиваются с играми — но и не прячутся молча
   const o = d.other || { count: 0 };
   $("history-other").hidden = !o.count && !d.all;
   $("history-other").firstElementChild.textContent = d.all ? t("history.all_shown") : t("history.other", { count: o.count, amount: money(o.amount) });
   $("history-other-toggle").textContent = t(d.all ? "history.other_hide" : "history.other_show");
+}
+
+// Траты по дням за период: столбик на день (пустые дни — серой полоской), подсказка — дата и сумма
+function renderHistoryChart(d) {
+  const box = $("history-chart");
+  box.innerHTML = "";
+  const days = Math.min(d.days || 30, 90), per = {};
+  for (const x of d.sessions) {
+    if (!x.start) continue;
+    const k = new Date(x.start * 1000).toDateString();
+    per[k] = (per[k] || 0) + x.amount;
+  }
+  const now = new Date();
+  const vals = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+    vals.push([day, per[day.toDateString()] || 0]);
+  }
+  const max = Math.max(...vals.map(([, v]) => v), 0.01);
+  $("history-chart-card").hidden = !d.sessions.length;
+  for (const [day, v] of vals) {
+    const bar = el("i", { className: v ? "" : "z", title: `${day.toLocaleDateString(LANG, { day: "numeric", month: "short" })} · ${money(v)}` });
+    bar.style.height = (v ? Math.max(6, (v / max) * 100) : 3) + "%";
+    box.appendChild(bar);
+  }
 }
 
 // ---------------------------------------------------------------- игры в облаке
@@ -2368,48 +2412,53 @@ function renderGames() {
   const shown = d.games
     .filter((g) => !q || gameTitle(g).toLowerCase().includes(q) || g.name.toLowerCase().includes(q))
     .sort((a, b) => order[grp(a)] - order[grp(b)] || b.bytes - a.bytes);
-  const body = $("games-table").querySelector("tbody");
-  body.innerHTML = "";
-  if (!shown.length) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="5" class="sub"></td>';
-    tr.firstChild.textContent = t("games.nothing_found");
-    body.appendChild(tr);
-  }
+  const list = $("games-card");
+  list.innerHTML = "";
+  if (!shown.length) list.appendChild(el("div", { className: "sub" }, t("games.nothing_found")));
   let group = null;
   for (const g of shown) {
     if (grp(g) !== group) {                                  // заголовок группы: тип, сколько, сколько места
       group = grp(g);
       const same = shown.filter((x) => grp(x) === group);
-      const tr = document.createElement("tr");
-      tr.className = "group";
-      tr.innerHTML = '<td colspan="5"></td>';
-      tr.firstChild.textContent = t("games.group", { kind: t("games.kind." + group), count: same.length,
-        size: size(same.reduce((a, x) => a + x.bytes, 0)) });
+      const head = el("div", { className: "c-group" }, t("games.group", { kind: t("games.kind." + group), count: same.length,
+        size: size(same.reduce((a, x) => a + x.bytes, 0)) }));
       if (group === "system") {                              // свёрнута, пока не раскроют (или не ищут)
-        tr.classList.add("system");
-        tr.firstChild.textContent = (gamesSystemOpen || q ? "▾ " : "▸ ") + tr.firstChild.textContent + " — " + t("games.system.hint");
-        tr.style.cursor = "pointer";
-        tr.addEventListener("click", () => { gamesSystemOpen = !gamesSystemOpen; renderGames(); });
+        const open = gamesSystemOpen || q;
+        head.textContent = (open ? "▾ " : "▸ ") + head.textContent + " — " + t("games.system.hint");
+        head.classList.add("system");
+        head.dataset.pad = "1";
+        head.addEventListener("click", () => { gamesSystemOpen = !gamesSystemOpen; renderGames(); });
       }
-      body.appendChild(tr);
+      list.appendChild(head);
     }
     if (g.system && !gamesSystemOpen && !q) continue;
-    const tr = document.createElement("tr");
-    tr.style.cursor = "default";
-    tr.innerHTML = '<td><span class="kind"></span></td><td></td><td class="num"></td><td class="num"></td><td class="act"><button></button></td>';
-    const c = tr.children;
-    c[0].firstChild.textContent = t("games.kind." + (g.system ? "system" : g.kind));
-    c[0].firstChild.classList.add(g.system ? "system" : g.kind);
-    c[1].textContent = gameTitle(g);
-    c[2].textContent = size(g.bytes);
-    c[3].textContent = g.mtime;
-    const b = c[4].firstChild;
-    b.textContent = t("games.remove");
+    const row = el("div", { className: "c-item" });
+    const thumb = el("div", { className: "c-thumb " + (g.system ? "system" : g.kind) });
+    const cover = cloudCover(g);
+    if (cover) {
+      const img = el("img", { alt: "", loading: "lazy", src: cover });
+      img.onerror = () => img.remove();
+      thumb.appendChild(img);
+    }
+    thumb.appendChild(el("span", {}, KIND_ICON[g.system ? "system" : g.kind] || "📦"));
+    const txt = el("div", { className: "c-text" });
+    txt.append(el("b", {}, gameTitle(g)), el("span", { className: "sub" }, t("games.kind." + (g.system ? "system" : g.kind))));
+    const sz = el("div", { className: "c-size" });
+    sz.append(el("b", {}, size(g.bytes)), el("span", { className: "sub" }, g.mtime || ""));
+    const b = button(t("games.remove"), () => removeGame(g));
+    b.classList.add("small", "c-remove");
     b.disabled = !!d.removing;
-    b.addEventListener("click", () => removeGame(g));
-    body.appendChild(tr);
+    row.append(thumb, txt, sz, b);
+    list.appendChild(row);
   }
+}
+// Обложка архива: игра из библиотеки (её картинка) или картинка Steam по номеру; своих игр и программ — значок
+const KIND_ICON = { sgame: "🎮", game: "🕹", lgame: "🎮", pfx: "💾", mod: "🧩", prog: "🛠", system: "⚙" };
+function cloudCover(g) {
+  const id = g.appid && String(g.appid);
+  if (!id || !/^\d+$/.test(id) || Number(id) >= 2 ** 31 || g.system) return "";
+  const lib = libData && (libData.games || []).find((x) => String(x.appid) === id);
+  return (lib && (lib.cap || lib.header)) || STEAM_ART(id, "library_600x900.jpg");
 }
 
 async function removeGame(g) {
@@ -2950,7 +2999,7 @@ function demoHistory(days, all) {
   const now = Date.now() / 1000;
   const sessions = Array.from({ length: 8 }, (_, i) => ({ iid: 52264565 - i, start: now - i * 86400 * 1.5,
     gpu: i % 3 ? "RTX 3060" : "RTX 3090", country: i % 3 ? "Pennsylvania, US" : "Latvia, LV", hours: 1 + (i % 4) * 0.7,
-    amount: 0.12 + i * 0.05 }));
+    amount: 0.12 + i * 0.05, game: [{ appid: "1245620", name: "ELDEN RING" }, { appid: "1086940", name: "Baldur's Gate 3" }, null][i % 3] }));
   return { days, all, other: all ? { count: 0, amount: 0 } : { count: 3, amount: 1.27 }, sessions, first: sessions[sessions.length - 1].start, now, totals: { amount: 3.64, hours: 17.2, count: 8, per_hour: 0.212, gpu: 2.9, disk: 0.73, traffic: 0.01 } };
 }
 

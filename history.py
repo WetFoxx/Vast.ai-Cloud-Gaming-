@@ -33,12 +33,15 @@ def _save(rows):
     FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=1))
 
 
-def started(iid, offer, t0=None):
-    """Запомнить начало сессии: машина арендована."""
+def started(iid, offer, t0=None, game=None):
+    """Запомнить начало сессии: машина арендована. game — игра, с которой арендовали ({"appid", "name"}), для истории."""
     rows = _load()
-    rows.append({"iid": iid, "start": int(t0 or time.time()), "end": None,
-                 "gpu": offer.get("gpu_name"), "country": (offer.get("geolocation") or "").strip(", "),
-                 "price": offer.get("dph_total"), "machine_id": offer.get("machine_id")})
+    row = {"iid": iid, "start": int(t0 or time.time()), "end": None,
+           "gpu": offer.get("gpu_name"), "country": (offer.get("geolocation") or "").strip(", "),
+           "price": offer.get("dph_total"), "machine_id": offer.get("machine_id")}
+    if game and game.get("appid"):
+        row["game"] = {"appid": str(game["appid"]), "name": game.get("name") or ""}
+    rows.append(row)
     _save(rows)
 
 
@@ -182,7 +185,7 @@ def summary(days=30, all_machines=False):
             continue
         s = local.get(iid, {})
         sessions.append({"iid": iid, "start": s.get("start") or c["first"], "end": s.get("end"),
-                         "gpu": s.get("gpu"), "country": s.get("country"), "price": s.get("price"),
+                         "gpu": s.get("gpu"), "country": s.get("country"), "price": s.get("price"), "game": s.get("game"),
                          "hours": round(c["hours"], 2), "amount": round(c["amount"], 3),
                          "gpu_cost": round(c["gpu"], 3), "disk_cost": round(c["disk"], 3),
                          "traffic_cost": round(c["traffic"], 3)})

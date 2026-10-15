@@ -94,9 +94,12 @@ class TestHistory(unittest.TestCase):
         self.assertNotIn("ключ", history._charges_file().read_text())     # в памяти — отпечаток, не ключ
 
     def test_summary_merges_charges(self):
-        history.started(7, {"gpu_name": "RTX 3090", "geolocation": "Latvia, LV", "dph_total": 0.2}, t0=900)
+        history.started(7, {"gpu_name": "RTX 3090", "geolocation": "Latvia, LV", "dph_total": 0.2}, t0=900,
+                        game={"appid": 1245620, "name": "ELDEN RING", "account": "7656"})
         with mock.patch.object(history, "call", lambda *a, **k: TREE):
             s = history.summary(30)
+        self.assertEqual(s["sessions"][1]["game"], {"appid": "1245620", "name": "ELDEN RING"})   # без аккаунта
+        self.assertIsNone(s["sessions"][0]["game"])                                           # не знаем — None
         self.assertEqual([x["iid"] for x in s["sessions"]], [9, 7])       # свежие сверху, пустая скрыта
         seven = s["sessions"][1]
         self.assertEqual((seven["gpu"], seven["hours"], seven["traffic_cost"]), ("RTX 3090", 1.2, 0.001))

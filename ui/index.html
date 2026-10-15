@@ -214,27 +214,38 @@
     <h1 data-i18n="setup.title"></h1>
     <div class="stale-note" data-i18n="app.updating"></div>
     <div class="sub" id="setup-summary" data-i18n="setup.loading"></div>
-    <section class="card">
-      <ul class="setup-steps" id="setup-steps"></ul>
-    </section>
-    <div class="error" id="setup-error" hidden></div>
-    <section class="card steam-card">
-      <div class="label" data-i18n="steam.accounts"></div>
-      <div class="steam-accounts" id="setup-steam"></div>
-    </section>
-    <section class="card lang-card">
-      <span class="label">Language · Язык · Idioma</span>
-      <select id="lang" aria-label="Language"></select>
-    </section>
-    <section class="card lang-card">
-      <span class="label" data-i18n="setup.sounds"></span>
-      <input type="checkbox" id="ui-sounds" checked>
-    </section>
-    <section class="card reset-card">
-      <div class="label" data-i18n="setup.reset.title"></div>
-      <div class="sub" data-i18n="setup.reset.text"></div>
-      <button class="small danger" id="setup-reset" data-i18n="setup.reset.button"></button>
-    </section>
+    <!-- [2026-10-15] Разделы слева (как настройки Big Picture), справа — выбранный -->
+    <div class="set-layout">
+      <nav class="set-cats" id="set-cats">
+        <button class="set-cat on" data-cat="ready"><span data-i18n="setup.cat.ready"></span><i class="set-badge" id="set-badge" hidden></i></button>
+        <button class="set-cat" data-cat="steam" data-i18n="setup.cat.steam"></button>
+        <button class="set-cat" data-cat="window" data-i18n="setup.cat.window"></button>
+        <button class="set-cat" data-cat="reset" data-i18n="setup.cat.reset"></button>
+      </nav>
+      <div class="set-panes" id="set-panes">
+        <section class="card" data-cat="ready">
+          <ul class="setup-steps" id="setup-steps"></ul>
+        </section>
+        <div class="error" id="setup-error" hidden></div>
+        <section class="card steam-card" data-cat="steam">
+          <div class="label" data-i18n="steam.accounts"></div>
+          <div class="steam-accounts" id="setup-steam"></div>
+        </section>
+        <section class="card lang-card" data-cat="window">
+          <span class="label">Language · Язык · Idioma</span>
+          <select id="lang" aria-label="Language"></select>
+        </section>
+        <section class="card lang-card" data-cat="window">
+          <span class="label" data-i18n="setup.sounds"></span>
+          <input type="checkbox" id="ui-sounds" checked>
+        </section>
+        <section class="card reset-card" data-cat="reset">
+          <div class="label" data-i18n="setup.reset.title"></div>
+          <div class="sub" data-i18n="setup.reset.text"></div>
+          <button class="small danger" id="setup-reset" data-i18n="setup.reset.button"></button>
+        </section>
+      </div>
+    </div>
     <div class="actions">
       <button id="setup-wizard" data-i18n="wizard.open"></button>
       <button id="setup-recheck" data-i18n="setup.recheck"></button>
@@ -255,15 +266,12 @@
       <div><div class="label" data-i18n="history.per_hour"></div><div class="big" id="h-per-hour"></div></div>
     </section>
     <div class="sub" id="history-breakdown"></div>
-    <section class="card table-card" id="history-card" hidden>
-      <table id="history-table">
-        <thead><tr>
-          <th data-i18n="col.date"></th><th data-i18n="col.machine"></th>
-          <th class="num" data-i18n="col.hours"></th><th class="num" data-i18n="col.cost"></th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
+    <!-- [2026-10-15] Траты по дням — столбиками; сессии — списком с обложкой игры (как в Big Picture) -->
+    <section class="card h-chart-card" id="history-chart-card" hidden>
+      <div class="label" data-i18n="history.by_day"></div>
+      <div class="h-chart" id="history-chart"></div>
     </section>
+    <div class="c-list" id="history-card" hidden></div>
     <div class="note" id="history-other" hidden><span></span> <a href="#" id="history-other-toggle"></a></div>
     <div class="note" data-i18n="history.note"></div>
     <div class="error" id="history-error" hidden></div>
@@ -313,20 +321,8 @@
       <button class="primary" id="games-ts-open" data-i18n="tailscale.open"></button>
     </section>
     <input type="search" id="games-search" data-i18n-placeholder="games.search" hidden>
-    <section class="card table-card" id="games-card" hidden>
-      <table id="games-table">
-        <thead>
-          <tr>
-            <th data-i18n="col.kind"></th>
-            <th data-i18n="col.title"></th>
-            <th class="num" data-i18n="col.size"></th>
-            <th class="num" data-i18n="col.changed"></th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </section>
+    <!-- [2026-10-15] Списком с обложками (как в Big Picture): игра, что это, размер, дата, «Убрать» -->
+    <div class="c-list" id="games-card" hidden></div>
     <div class="note" id="games-service"></div>
     <div class="note" id="games-status" hidden></div>
     <div class="error" id="games-error" hidden></div>

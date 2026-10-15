@@ -288,7 +288,7 @@ def rent(offer_id, body, offer=None):
     if not r.get("success") or not iid:
         why = r.get("msg") or r.get("error") or ""
         raise VastgameError(f"Vast не арендовал машину: {why or 'без объяснения'}", key="core.rent_failed", msg=why)
-    history.started(iid, offer or {}, t0)
+    history.started(iid, offer or {}, t0, settings.get("play_now"))   # [2026-10-15] с какой игрой — для истории
     return iid, t0
 
 
