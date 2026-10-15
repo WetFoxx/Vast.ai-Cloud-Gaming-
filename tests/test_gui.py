@@ -618,6 +618,8 @@ class TestPlay(unittest.TestCase):
         wait_done(self.api, session=True)
         self.assertNotIn("VG_PLAY", self.body.get("env") or {})
         self.assertIsNone(gui.settings.get("play_now"))
+        # [2026-10-15] а последняя запущенная игра помнится — главная показывает её и без машины
+        self.assertEqual(gui.settings.get("last_game"), {"appid": "10", "name": "Ten"})
 
     def test_game_selection_goes_to_rental(self):
         # [v5.7] выбора игр нет: сохранения — всегда (прежний выбор «не синхронизировать» не действует), свои игры из

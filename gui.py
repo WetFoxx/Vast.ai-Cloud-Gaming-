@@ -165,7 +165,8 @@ class Api:
         return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session, "task": task,
                 "hours_left": credit / price if price else None, "status": {**st, "progs": self._progs(st.get("progs"))},
                 "game_names": self._game_names(st["archives"]), "busy": self._busy(),
-                "play_now": settings.get("play_now") if st["machine"] or task else None}
+                "play_now": settings.get("play_now") if st["machine"] or task else None,
+                "last_game": settings.get("last_game") or settings.get("play_now")}
 
     def _game_names(self, archive_names):
         missing = [n for n in archive_names if n.startswith("pfx--") and n[5:] not in self._names]
@@ -339,6 +340,8 @@ class Api:
         settings.set("sync", sync)
         sync["select"] = chosen
         settings.set("play_now", play)       # что запускаем — экрану хода и главному (окно могут закрыть и открыть)
+        if play:                             # [2026-10-15] последняя запущенная игра — главная показывает её и без машины
+            settings.set("last_game", {"appid": str(play.get("appid")), "name": play.get("name") or ""})
         if play:
             sync["play"] = play
             settings.applog(f"play: {play['appid']} аккаунтом …{play['account'][-4:]}")

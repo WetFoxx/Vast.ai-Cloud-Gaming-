@@ -98,7 +98,10 @@ function renderHeroArt() {
   // Игра, запущенная на машине, — только пока машина есть (окно помнит прошлую игру и после «Закончить»)
   const machine = !!(current && current.status && current.status.machine);
   const now = machine ? playNowGame() : null;
-  const recent = heroPick || (libData && libData.games && libData.games[0]);
+  // Машины нет: выбранная на полке обложка → последняя запущенная через VastGame игра → первая в библиотеке
+  const games = (libData && libData.games) || [];
+  const last = current && current.last_game && games.find((x) => String(x.appid) === String(current.last_game.appid));
+  const recent = heroPick || last || games[0];
   const g = now && now.appid ? { ...((libData && libData.games || []).find((x) => String(x.appid) === String(now.appid)) || {}), ...now }
     : recent || null;
   heroGame = g;
