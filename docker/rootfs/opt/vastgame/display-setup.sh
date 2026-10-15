@@ -25,6 +25,34 @@ sys.stdout.buffer.write(e + bytes([(-sum(e)) & 0xFF]))
 PY
 IFS=:. read -r _ b1 b2 b3 <<< "$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | head -1)"
 [ -n "${b3:-}" ] || { echo "экран: не узнать шину видеокарты"; exit 1; }
+# [2026-10-15] display-setup.sh RES headless — экран без монитора: на части хостов выходом видеокарты владеет хост
+# (Xorg: «Failed to acquire modesetting permission»), а рисовать на ней можно (проверено: GTX 1660 S Вьетнам, OpenGL и
+# Vulkan на видеокарте, X11-захват 60 к/с). Размер экрана — базовый режим; wolf-res его не меняет (выходов нет)
+if [ "${2:-}" = headless ]; then
+  cat > /etc/X11/xorg.conf <<XORG
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+EndSection
+Section "Device"
+    Identifier "wolfGPU"
+    Driver     "nvidia"
+    BusID      "PCI:$((16#$b1)):$((16#$b2)):$((16#$b3))"
+    Option     "UseDisplayDevice" "none"
+    Option     "AllowEmptyInitialConfiguration" "true"
+EndSection
+Section "Screen"
+    Identifier   "wolfScreen"
+    Device       "wolfGPU"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth   24
+        Virtual ${RES%x*} ${RES#*x}
+    EndSubSection
+EndSection
+XORG
+  echo "экран: без монитора, $RES"
+  exit 0
+fi
 cat > /etc/X11/xorg.conf <<XORG
 Section "ServerFlags"
     Option "AutoAddDevices" "false"

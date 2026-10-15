@@ -52,7 +52,7 @@ trap 'log "остановка"; pkill -TERM -u "$DU"; pkill -TERM sunshine; pkil
 log "=== vastgame-desktop: старт ($(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null))${AGENT:+, агент wolf}"
 # Перезапуск контейнера (Stop → Start на Vast): /tmp и /run здесь не tmpfs — старые замок X, сокет шины,
 # метки прошлой загрузки wolf и номер его процесса (теперь это мог бы быть чужой процесс) помешали бы запуску
-rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 "$XRD/bus" /run/vastgame/{stage,nvenc,capture,ts-login.url} \
+rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 "$XRD/bus" /run/vastgame/{stage,nvenc,capture,headless,ts-login.url} \
       /run/wolf/boot-done /run/wolf/boot-started /run/wolf/supervise.pid 2>/dev/null
 mkdir -p "$XRD" && chown "$DU:" "$XRD" && chmod 700 "$XRD"
 
@@ -87,11 +87,22 @@ for args in "vt7 -novtswitch -sharevts" "-novtswitch -sharevts -keeptty" "-keept
   log "Xorg не запустился с ($args)"; xerr 6 | tee -a "$LOG"
   pkill Xorg; sleep 1
 done
+# [2026-10-15] Не поднялся — экран без монитора (выходом видеокарты владеет хост: «Failed to acquire modesetting
+# permission»): рисует та же видеокарта, Sunshine снимает его обычным захватом (sunshine-start.sh, /opt/vgrr)
+if ! DISPLAY=:0 xrandr >/dev/null 2>&1; then
+  log "экран: с монитором не поднялся ($(xerr 1 | tr '\n' ' ' | cut -c1-120)) — пробую без монитора"
+  grep -E "NVIDIA|\(EE\)|\(WW\)" /var/log/Xorg.0.log 2>/dev/null | grep -v "Please consult" | tail -45 > /tmp/xorg-monitor.log
+  "$V/display-setup.sh" "$RES" headless 2>&1 | tee -a "$LOG"
+  setsid Xorg :0 -config /etc/X11/xorg.conf -noreset -nolisten tcp vt7 -novtswitch -sharevts >/var/log/xorg.out 2>&1 &
+  for i in $(seq 1 20); do DISPLAY=:0 xrandr >/dev/null 2>&1 && break; sleep 0.5; done
+  DISPLAY=:0 xrandr >/dev/null 2>&1 && { log "Xorg запущен без монитора"; touch /run/vastgame/headless; }
+fi
 # [0.3.1] Экран так и не поднялся — в журнал строки Xorg о видеокарте (разбор причины: какой вход, какой режим)
 DISPLAY=:0 xrandr >/dev/null 2>&1 || { log "журнал Xorg (NVIDIA, ошибки):"
-  grep -E "NVIDIA|\(EE\)|\(WW\)" /var/log/Xorg.0.log 2>/dev/null | grep -v "Please consult" | tail -45 | tee -a "$LOG"
+  tee -a "$LOG" < /tmp/xorg-monitor.log
+  grep -E "NVIDIA|\(EE\)|\(WW\)" /var/log/Xorg.0.log 2>/dev/null | grep -v "Please consult" | tail -20 | tee -a "$LOG"
   # [0.5.3] метка для приложения: оно читает журнал контейнера у Vast и сразу заменяет машину (до Tailscale)
-  log "!!! видео не работает: экран не запускается: $(xerr 2 | tr '\n' ' ' | cut -c1-200)"; }
+  log "!!! видео не работает: экран не запускается даже без монитора: $(xerr 2 | tr '\n' ' ' | cut -c1-200)"; }
 u /usr/local/bin/wolf-res >/dev/null 2>&1              # базовый режим, экран в 0,0
 DISPLAY=:0 xset s off -dpms 2>/dev/null
 log "экран: $(DISPLAY=:0 xrandr 2>/dev/null | grep ' connected' | cut -d' ' -f1-3)"

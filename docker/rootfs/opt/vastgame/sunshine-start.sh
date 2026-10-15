@@ -76,6 +76,10 @@ CONF
 NVKEEP=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | tr -d ' ' | paste -sd, -)
 PRE=libvgpad.so
 [ -f /usr/lib/x86_64-linux-gnu/libvgnv.so ] && [ -n "$NVKEEP" ] && PRE="libvgpad.so libvgnv.so"
+# [2026-10-15] Экран без монитора (entrypoint.sh, /run/vastgame/headless): у X-сервера нет ни одного выхода —
+# vgrr показывает Sunshine один «монитор» во весь экран; захват — обычный (NvFBC без выхода не работает)
+HEADLESS=
+if [ -e /run/vastgame/headless ] && [ -f /opt/vgrr/libvgrr.so ]; then HEADLESS=1; PRE="$PRE /opt/vgrr/libvgrr.so"; fi
 
 start() {  # $1 захват  $2 кодировщик
   pkill -u "$DU" -x sunshine; sleep 1
@@ -96,7 +100,7 @@ start() {  # $1 захват  $2 кодировщик
 # (identity), а задаёт его приложение (wolf sunshine-creds)
 [ -z "${WOLF_SCRIPT_URL:-}" ] && [ -n "${SUNSHINE_PASSWORD:-}" ] && u sunshine --creds vastgame "$SUNSHINE_PASSWORD" >/dev/null 2>&1
 
-CAP=x11; [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ] && CAP=nvfbc
+CAP=x11; [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ] && [ -z "$HEADLESS" ] && CAP=nvfbc
 # [0.4.7] Кодировщик на части хостов не находится только иногда (хост 152580: 12 удачных сессий, 2026-10-08 — «не
 # работает»): прежде чем браковать машину, ещё две попытки. Не повторяем, если у видеокарты нет экрана (не лечится)
 # или проверка просто не закончилась
@@ -177,7 +181,7 @@ report() { [ -d /var/lib/wolf/st ] && echo "$(date +%s)|$1|$2" > /var/lib/wolf/s
 if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
   echo ok > /run/vastgame/nvenc
   echo "sunshine: NVENC, захват $(sed -n 's/^capture = //p' "$CONF"), драйвер $DRV, ${SUN##*/opt/}"
-  report ok "NVENC, захват $(sed -n 's/^capture = //p' "$CONF"), драйвер $DRV$([ "$SUN" = sunshine ] || echo ', Sunshine CUDA 12')"
+  report ok "NVENC, захват $(sed -n 's/^capture = //p' "$CONF"), драйвер $DRV$([ "$SUN" = sunshine ] || echo ', Sunshine CUDA 12')$([ -z "$HEADLESS" ] || echo ', экран без монитора')"
 elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
   # Ни «нашла», ни «не нашла» за 90 с — не браковать машину: без явной ошибки это просто медленная проверка
   echo ok > /run/vastgame/nvenc
