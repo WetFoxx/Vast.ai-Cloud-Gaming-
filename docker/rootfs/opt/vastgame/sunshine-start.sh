@@ -100,12 +100,22 @@ CAP=x11; [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ] && CAP=nvfbc
 # [0.4.7] Кодировщик на части хостов не находится только иногда (хост 152580: 12 удачных сессий, 2026-10-08 — «не
 # работает»): прежде чем браковать машину, ещё две попытки. Не повторяем, если у видеокарты нет экрана (не лечится)
 # или проверка просто не закончилась
+# [2026-10-15] Быстрый захват (NvFBC) на части хостов не видит экран («Found [0] outputs», «Failed to create session»),
+# хотя у X-сервера выход есть (RTX 3060 laptop, Вашингтон: DP-0 connected) — тогда обычный захват (X11) с тем же
+# кодировщиком NVIDIA: проверено вживую, 60 к/с и под 3D-нагрузкой. Машину бракуем, только если и он не снимает экран
+NOCAP="Found \[0\] outputs|Platform failed to initialize|Failed to create session|Unable to initialize capture method"
 TRIES=0
 for try in 1 2 3; do
   TRIES=$try
   start "$CAP" nvenc
   grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null && break
   grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null || break
+  if [ "$CAP" = nvfbc ] && grep -qE "$NOCAP" "$LOGF" 2>/dev/null; then
+    echo "sunshine: быстрый захват (NvFBC) не видит экран — пробую обычный (X11)"
+    CAP=x11
+    { echo x11 > /run/vastgame/capture; } 2>/dev/null
+    continue
+  fi
   grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null && break
   [ "$try" -lt 3 ] && { echo "sunshine: NVENC не нашёлся (попытка $try) — пробую ещё раз через 10 с"; sleep 10; }
 done
@@ -114,7 +124,11 @@ why_bad() {
   # [0.4.4] У X-сервера нет ни одного выхода (хост не дал видеокарте экран, разбор 2026-10-02, Техас): Sunshine
   # пишет «Found [0] outputs» / «Platform failed to initialize» — это не кодировщик, надпись должна говорить правду
   if grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null; then
-    echo "нет выхода на монитор: хост не дал видеокарте экран (Sunshine: 0 выходов)"
+    echo "нет выхода на монитор: обычный захват тоже не видит экран (Sunshine: 0 выходов)"
+    return
+  fi
+  if grep -q "Cannot load libnvidia-encode" "$LOGF" 2>/dev/null; then
+    echo "у хоста нет библиотеки кодировщика NVIDIA (libnvidia-encode), и в драйвере её не нашлось"
     return
   fi
   # Настоящая причина: строки «Error:»/«Fatal:», без служебной «Testing for available encoders, this may generate

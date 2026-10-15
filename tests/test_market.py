@@ -61,14 +61,16 @@ class TestLastMachine(unittest.TestCase):
         old = (today - datetime.timedelta(days=market.HIDE_DAYS)).isoformat()
         bad = {"1": {"reason": "На этой машине не работает видео: экран не запускается: Screen(s) found, but none "
                                "have a usable configuration. no screens found", "date": today.isoformat()},
-               "2": {"reason": "видео: нет выхода на монитор: хост не дал видеокарте экран", "date": today.isoformat()},
-               "3": {"reason": "нет выхода на монитор", "date": old},
+               "2": {"reason": "видео: нет выхода на монитор: обычный захват тоже не видит экран", "date": today.isoformat()},
+               "3": {"reason": "нет выхода на монитор: обычный захват тоже не видит экран", "date": old},
+               # прежняя надпись образа — бывала и без библиотеки кодировщика (152536), это образ теперь лечит
+               "6": {"reason": "нет выхода на монитор: хост не дал видеокарте экран", "date": today.isoformat()},
                "4": {"reason": "NVENC не работает: unsupported device", "date": today.isoformat()}}
-        offers = [dict(OFFER, id=i, machine_id=i) for i in (1, 2, 3, 4, 5)]
+        offers = [dict(OFFER, id=i, machine_id=i) for i in (1, 2, 3, 4, 5, 6)]
         with mock.patch.object(market, "bad_hosts", lambda: bad), self.fake_call(offers):
             rows = {o["id"]: o for o in market.search(100)}
-        self.assertEqual(sorted(rows), [3, 4, 5])
-        self.assertTrue(rows[3]["_failed"] and rows[4]["_failed"])       # срок вышел / временный сбой — с пометкой
+        self.assertEqual(sorted(rows), [3, 4, 5, 6])
+        self.assertTrue(rows[3]["_failed"] and rows[4]["_failed"] and rows[6]["_failed"])       # срок вышел / временный сбой — с пометкой
 
     def test_slow_disk_hidden(self):
         slow = dict(OFFER, id=1, disk_bw=69.2)                             # как у хоста в Португалии

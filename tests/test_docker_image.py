@@ -138,17 +138,61 @@ class TestSunshineReport(unittest.TestCase):
         self.assertTrue(out.startswith("err|NVENC не работает (3 попытки): Error: NvEnc: OpenEncodeSessionEx failed: "
                                        "unsupported device"), out)          # настоящая причина, не служебная строка
 
-    def run_loop(self, attempts):
-        """Цикл попыток из sunshine-start.sh: start() по очереди «пишет» журналы attempts."""
+    def run_loop(self, attempts, cap="x11"):
+        """Цикл попыток из sunshine-start.sh: start() по очереди «пишет» журналы attempts (и запоминает захват)."""
         text = (D / "rootfs/opt/vastgame/sunshine-start.sh").read_text()
-        a = text.index("TRIES=0\n")
+        a = text.index("NOCAP=")
         b = text.index("done\n", a) + 5
         d = Path(tempfile.mkdtemp())
         for i, log in enumerate(attempts, 1):
             (d / f"a{i}").write_text(log)
-        script = (f'LOGF={d}/log\nCAP=x11\nN=0\nstart() {{ N=$((N+1)); cp {d}/a$N $LOGF; }}\nsleep() {{ :; }}\n'
-                  + text[a:b] + 'echo "tries=$TRIES"')
+        script = (f'LOGF={d}/log\nCAP={cap}\nN=0\nstart() {{ N=$((N+1)); echo "$1" >> {d}/caps; cp {d}/a$N $LOGF; }}\n'
+                  'sleep() { :; }\n' + text[a:b].replace("/run/vastgame/capture", f"{d}/capture") + 'echo "tries=$TRIES"')
+        self.caps = d / "caps"
         return sh("bash", "-c", script).stdout.strip().splitlines()[-1]
+
+    def test_fast_capture_blind_then_plain_capture(self):
+        # [2026-10-15] RTX 3060 laptop (Вашингтон): NvFBC «Failed to create session», X11 + NVENC — работает
+        blind = "[t]: Error: Failed to create session: \n[t]: Error: Platform failed to initialize\n" \
+                "[t]: Fatal: Couldn't find any working encoder\n"
+        self.assertEqual(self.run_loop([blind, "[t]: Info: Found H.264 encoder: h264_nvenc\n"], cap="nvfbc"), "tries=2")
+        self.assertEqual(self.caps.read_text().split(), ["nvfbc", "x11"])
+        self.assertEqual((self.caps.parent / "capture").read_text().strip(), "x11")      # агент не пробует NvFBC заново
+
+    def test_plain_capture_blind_too_stops(self):
+        blind = "[t]: Info: Found [0] outputs\n[t]: Fatal: Couldn't find any working encoder\n"
+        self.assertEqual(self.run_loop([blind, blind, blind], cap="nvfbc"), "tries=2")
+        self.assertEqual(self.caps.read_text().split(), ["nvfbc", "x11"])
+
+    def test_missing_encoder_library_named(self):
+        out = self.run_block("[t]: Error: [h264_nvenc @ 0x1] Cannot load libnvidia-encode.so.1\n"
+                             "[t]: Error: Could not open codec [h264_nvenc]: Operation not permitted\n"
+                             "[t]: Fatal: Couldn't find any working encoder\n")
+        self.assertTrue(out.startswith("err|у хоста нет библиотеки кодировщика NVIDIA"), out)
+
+    def test_driver_libraries_supplied_run(self):
+        # Настоящий кусок nvidia-setup.sh: хост дал декодер, но не кодировщик — подкладывается только кодировщик
+        nv = (D / "rootfs/opt/vastgame/nvidia-setup.sh").read_text()
+        a = nv.index('add=""\n')
+        b = nv.index("\nldconfig\n", a)
+        d = Path(tempfile.mkdtemp())
+        (d / "T").mkdir(); (d / "lib").mkdir()
+        for n in ("libnvidia-encode", "libnvcuvid"):
+            (d / "T" / f"{n}.so.595.91.07").write_text(n)
+        script = (f'VER=595.91.07\nT={d}/T\nldconfig() {{ echo "\tlibnvcuvid.so.1 (libc6,x86-64) => /x"; }}\n'
+                  + nv[a:b].replace("/usr/lib/x86_64-linux-gnu", f"{d}/lib"))
+        out = sh("bash", "-c", script).stdout
+        self.assertEqual(sorted(p.name for p in (d / "lib").iterdir()),
+                         ["libnvidia-encode.so.1", "libnvidia-encode.so.595.91.07"])
+        self.assertIn("взяты из драйвера 595.91.07: nvidia-encode", out)
+
+    def test_driver_libraries_supplied(self):
+        # Хост не дал libnvidia-encode / libnvcuvid — берутся из .run той же версии, до ldconfig, свои не трогаются
+        nv = (D / "rootfs/opt/vastgame/nvidia-setup.sh").read_text()
+        self.assertIn("for l in libnvidia-encode libnvcuvid; do", nv)
+        self.assertIn('ldconfig -p | grep -qE "[[:space:]]$l\\.so\\.1 " && continue', nv)
+        self.assertLess(nv.index("for l in libnvidia-encode"), nv.index("\nldconfig\n"))
+        self.assertLess(nv.index("for l in libnvidia-encode"), nv.rindex('rm -rf "$T" /tmp/nv.run'))     # до уборки .run
 
     def test_encoder_retried_then_found(self):
         bad = "[t]: Fatal: Couldn't find any working encoder\n"
