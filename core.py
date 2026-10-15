@@ -325,8 +325,18 @@ def _failed_start(iid, why, o, ui, bad_host, key, **params):
 
 
 def _still_there(iid):
-    """Есть ли машина у Vast (True/False, None — не узнать). Отдельно от _alive — для тестов."""
-    return _alive(iid)
+    """Есть ли машина у Vast: её состояние (actual_status, строка — «есть»; тесты дают True), False — нет, None — не
+    узнать. Отдельно от _alive — для тестов."""
+    try:
+        for i in list_instances():
+            if i.get("id") == iid:
+                return i.get("actual_status") or True
+        return False
+    except VastgameError:
+        return None
+
+
+STOPPED = ("exited", "offline")   # [2026-10-15] машина остановилась у Vast (сама не продолжит)
 
 
 def _delete_quietly(iid):
@@ -348,10 +358,10 @@ class _Watch:
     она ещё у Vast (её могли удалить на сайте — тогда ждать нечего; раньше запуск висел до 20 минут
     на Tailscale и бесконечно на восстановлении, а после перезапуска окна — снова)."""
 
-    def __init__(self, iid, ui):
-        self.iid, self.ui = iid, ui
+    def __init__(self, iid, ui, o=None):
+        self.iid, self.ui, self.o = iid, ui, o
         self.next = time.time() + GONE_CHECK_SEC      # сразу после аренды машины может ещё не быть в списке
-        self.missing = 0
+        self.missing = self.stopped = 0
 
     def check(self):
         if getattr(self.ui, "cancelled", lambda: False)():
@@ -370,7 +380,14 @@ class _Watch:
             return
         self.next = time.time() + GONE_CHECK_SEC
         # Нет в списке два раза подряд (минута между проверками) — машину удалили; сбой связи (None) не считается
-        self.missing = self.missing + 1 if _still_there(self.iid) is False else 0
+        there = _still_there(self.iid)
+        self.missing = self.missing + 1 if there is False else 0
+        # [2026-10-15] Машина остановилась у Vast (exited) уже после запуска — живой случай: GTX 1660 S Вьетнам, контейнер
+        # встал через 1.5 мин посреди восстановления, а запуск ждал бы Tailscale до 20 минут. Два раза подряд — заменить
+        self.stopped = self.stopped + 1 if there in STOPPED else 0
+        if self.stopped >= 2 and self.o is not None:
+            _failed_start(self.iid, f"Машина остановилась у Vast («{there}») и сама не продолжит.", self.o, self.ui,
+                          bad_host=True, key="core.fail_stopped", state=there)
         if self.missing >= 2:
             history.ended(self.iid)
             raise VastgameError(f"Машины {self.iid} больше нет — её удалили (например, на сайте Vast). "
@@ -460,7 +477,7 @@ def wait_ready(iid, t0, o, ui, docker=False):
     ui.stage("vast", f"Арендовано: инстанс {iid}. Жду запуска (обычно 3–15 минут: машина качает образ).")
     last, errors = None, 0
     deadline = time.time() + VAST_START_MIN * 60
-    watch = _Watch(iid, ui)
+    watch = _Watch(iid, ui, o)
     while True:
         watch.check()
         # Разовый сбой API не должен обрывать ожидание: машина уже платная, следим дальше

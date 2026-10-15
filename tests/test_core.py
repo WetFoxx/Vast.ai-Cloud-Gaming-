@@ -22,6 +22,9 @@ def _no_page():
     return p
 
 
+REAL_STILL_THERE = core._still_there      # до подмены в setUpModule
+
+
 def setUpModule():
     unittest.addModuleCleanup(_no_page().stop)
     """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
@@ -131,6 +134,27 @@ class TestWaitReady(Base):
             core.wait_ready(42, T0, OFFER, ui)
         self.assertEqual(e.exception.key, "core.machine_gone")
         self.assertEqual(self.deleted, [])                          # удалять нечего — её уже нет
+
+    def test_stopped_at_vast_after_start_is_replaced(self):
+        # [2026-10-15] Вьетнам: контейнер встал (exited) через 1.5 мин, узел пропал — раньше ждали Tailscale 20 минут.
+        # Два «остановлена» подряд — хост помечен, машина удалена, берём другую; одно (или сбой связи) — ждём дальше
+        self.running_machine()
+        self.patch(core, "GONE_CHECK_SEC", 0)
+        self.patch(core, "ts_node", lambda: None)
+        answers = iter(["running", "exited", None, "exited", "exited"])
+        self.patch(core, "_still_there", lambda iid: next(answers))
+        self.patch(core, "delete_instance", self.fake_delete([42]))
+        ui = FakeUI()
+        with self.assertRaises(VastgameError) as e:
+            core.wait_ready(42, T0, OFFER, ui)
+        self.assertEqual((e.exception.key, self.deleted), ("core.try_another", [42]))
+        self.assertIn("core.fail_stopped", ui.keys)
+        self.assertEqual(core.market.bad_hosts()[str(OFFER["machine_id"])]["key"], "core.fail_stopped")
+
+    def test_still_there_reports_state(self):
+        self.patch(core, "list_instances", lambda: [{"id": 42, "actual_status": "exited"}, {"id": 7}])
+        real = REAL_STILL_THERE                                         # модульная подмена — для остальных тестов
+        self.assertEqual([real(42), real(7), real(1)], ["exited", True, False])
 
     def test_one_missing_answer_is_not_enough(self):
         # Сразу после аренды машины может не быть в списке — одного «нет» мало

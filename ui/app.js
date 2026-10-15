@@ -2245,7 +2245,7 @@ function renderArchives(archives) {
 
 const TO_LIST = ["core.offer_gone", "core.chosen_gone_none", "core.no_spare", "core.tries_exhausted", "core.tries_exhausted_docker"];
 const RACE_KEYS = ["core.race_start", "core.race_added", "core.race_slow", "core.race_broken", "core.race_won",
-                   "core.race_rent_failed", "core.fail_timeout", "core.fail_host", "core.fail_state"];
+                   "core.race_rent_failed", "core.fail_timeout", "core.fail_host", "core.fail_state", "core.fail_stopped"];
 function eventText(ev) { return ev.key ? t(ev.key, ev.params || {}) : ev.text; }
 
 // Интернет блокирует серверы-посредники Tailscale: готовый блок для настроек сети, «Копировать» и инструкция
