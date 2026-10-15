@@ -252,6 +252,15 @@ class TestOpenDecisions(OpenBase):
         self.assertEqual(self.vo.product_name(str(wand)), "Wand")      # сведения о версии — в конце большого файла
         self.assertTrue(self.vo.is_tool(str(wand)))                    # WeMod теперь Wand — программа для игр сама
 
+    def test_known_bad_programs(self):
+        # [2026-10-15] Wand 12+ (и загрузчик WeMod-Setup, который ставит тот же Wand) под Linux висит с чёрным окном
+        d = self.home / "Downloads"
+        wand = fake_exe(d / "Wand-12.63.0.exe", b"", vinfo(ProductName="Wand", FileVersion="12.63.0"), size=70 << 20)
+        stub = fake_exe(d / "WeMod-Setup.exe", b"")
+        old = fake_exe(d / "WeMod.exe", vinfo(ProductName="WeMod", FileVersion="11.6.0"))
+        other = fake_exe(d / "Celeste.exe", vinfo(ProductName="Celeste"))
+        self.assertEqual([self.vo.known_bad(str(f)) for f in (wand, stub, old, other)], ["bad.wand", "bad.wand", None, None])
+
     def test_kind(self):
         self.assertEqual(self.vo.kind(str(self.f("Downloads/Genshin_Impact_setup.exe"))), "installer")
         self.assertEqual(self.vo.kind(str(self.f("Downloads/game.msi"))), "installer")
@@ -408,6 +417,17 @@ class TestOpenFlows(OpenBase):
         self.assertTrue(any(c.startswith("mark ") for c in calls))         # во время установки — метка «добавляется»
         self.assertEqual(list((self.home / ".local/share/vastgame/adding").iterdir()), [])   # после — убрана
         self.assertTrue((self.home / ".local/share/vastgame/requests/shortcuts").exists())   # ярлык Steam — wolf
+
+    def test_wand_warned_before_install(self):
+        # Предупреждение до любых вопросов; «Отмена» — файл остаётся, где был, ничего не ставится
+        w = fake_exe(self.home / "Downloads/Wand-12.63.0.exe", b"PK..RELEASES..Wand-12.63.0-full.nupkg",
+                     vinfo(ProductName="Wand", OriginalFilename="Setup.exe"))
+        code, calls = self.run_open(w, ["1|"])                                  # «Отмена»
+        self.assertEqual(code, 0)
+        self.assertEqual(len([c for c in calls if c.startswith("zenity ")]), 1)   # одно окно (текст — в несколько строк)
+        self.assertIn("doesn't work on Linux", calls[0])                      # язык машины по умолчанию — английский
+        self.assertTrue(w.exists())
+        self.assertFalse((self.home / "Downloads/Programs").exists())
 
     def test_portable_moved_with_its_folder(self):
         exe = self.f("Downloads/Hollow Knight/hollow_knight.exe")

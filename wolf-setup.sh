@@ -3265,6 +3265,8 @@ T = {
         "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?",
         "inst.close": "«{game}» сейчас запущена. Ставить можно только в закрытую игру — закрой её и нажми «Поставить».",
         "inst.go": "Поставить",
+        "bad.wand": "«{name}» — это Wand (бывший WeMod). Под Linux он не работает: окно остаётся чёрным, и Wand зависает. Это известная проблема самого Wand: его разработчики Linux не поддерживают.\n\nВместо него подойдут отдельные трейнеры FLiNG (flingtrainer.com): скачай трейнер для своей игры, положи его в Programs и запускай кнопкой «Запустить» рядом с игрой в окне VastGame.",
+        "bad.anyway": "Всё равно поставить",
         "inst.prepare": "Готовлю установку «{name}» в «{game}»…",
         "inst.wait": "Ставлю «{name}» в «{game}».\nОкно установщика откроется само (в первый раз — через пару минут: "
                      "сначала ставятся библиотеки Visual C++). Пройди его шаги как обычно, путь не меняй.",
@@ -3304,6 +3306,8 @@ T = {
         "prog.unpack": "Unpack «{file}» into Programs as «{name}»?",
         "inst.close": "«{game}» is running. Programs can only be installed into a closed game — close it and press «Install».",
         "inst.go": "Install",
+        "bad.wand": "«{name}» is Wand (formerly WeMod). It doesn't work on Linux: the window stays black and Wand hangs. This is a known issue of Wand itself: its developers don't support Linux.\n\nStandalone FLiNG trainers (flingtrainer.com) work instead: download the trainer for your game, put it into Programs and start it with «Start» next to the game in the VastGame window.",
+        "bad.anyway": "Install anyway",
         "inst.prepare": "Preparing to install «{name}» into «{game}»…",
         "inst.wait": "Installing «{name}» into «{game}».\nThe installer window opens by itself (the first time — in a couple "
                      "of minutes: Visual C++ libraries go first). Go through it as usual, don't change the path.",
@@ -3343,6 +3347,8 @@ T = {
         "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?",
         "inst.close": "«{game}» está abierto. Solo se puede instalar con el juego cerrado: ciérralo y pulsa «Instalar».",
         "inst.go": "Instalar",
+        "bad.wand": "«{name}» es Wand (antes WeMod). No funciona en Linux: la ventana se queda negra y Wand se cuelga. Es un problema conocido del propio Wand: sus desarrolladores no dan soporte a Linux.\n\nEn su lugar sirven los entrenadores independientes de FLiNG (flingtrainer.com): descarga el de tu juego, ponlo en Programs y ábrelo con «Iniciar» junto al juego en la ventana de VastGame.",
+        "bad.anyway": "Instalar de todos modos",
         "inst.prepare": "Preparando la instalación de «{name}» en «{game}»…",
         "inst.wait": "Instalando «{name}» en «{game}».\nLa ventana del instalador se abre sola (la primera vez, en un par de "
                      "minutos: antes se instalan las bibliotecas Visual C++). Síguela como siempre, sin cambiar la ruta.",
@@ -3380,6 +3386,24 @@ def kind(path):
     if is_installer(path):
         return "installer"
     return "ask"
+
+
+# [2026-10-15] Программы, которые под Linux/Proton не работают у всех (проблема самой программы) — сказать до установки,
+# а не после двадцати минут чёрного окна. Wand 12+ (бывший WeMod; его загрузчик WeMod-Setup ставит тот же Wand) — висит с
+# чёрным окном, --disable-gpu не помогает (форум WeMod: «Wand 12.1.0 hangs with black window on startup»; проверено вживую)
+def known_bad(path):
+    """Ключ текста предупреждения или None."""
+    if not path.lower().endswith(".exe"):
+        return None
+    data = _bytes(path)
+    prod = version_field(data, "ProductName").lower()
+    base = os.path.basename(path).lower()
+    if prod in ("wand", "wemod") or re.match(r"(wand|wemod)[-_ ]", base):
+        ver = re.match(r"(\d+)", version_field(data, "FileVersion") or "")
+        if prod == "wemod" and ver and int(ver.group(1)) < 12 and "setup" not in base:
+            return None                                   # старый WeMod 11 (не загрузчик) под Linux работал
+        return "bad.wand"
+    return None
 
 
 def is_tool(path):
@@ -4059,6 +4083,9 @@ def main(a):
                 return 0
             if under(f, PD):
                 info(t("prog.already", file=os.path.basename(f)))
+                return 0
+            bad = known_bad(f)
+            if bad and not ask(t(bad, name=os.path.basename(f)), t("bad.anyway")):
                 return 0
             p = "program" if is_tool(f) else pick(t("purpose", file=os.path.basename(f)), ["game", "program"],
                                                   [t("purpose.game"), t("purpose.program")])
