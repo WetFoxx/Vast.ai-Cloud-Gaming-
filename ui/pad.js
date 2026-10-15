@@ -100,8 +100,52 @@
     e.dispatchEvent(new CustomEvent("padfocus", { bubbles: true }));   // экран может показать выбранное (картинка игры)
     if (["INPUT", "TEXTAREA"].includes(e.tagName) && !["checkbox", "radio", "range"].includes(e.type)) e.focus({ preventScroll: true });
     else if (document.activeElement && document.activeElement !== document.body && document.activeElement !== e) document.activeElement.blur();
-    e.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    reveal(e);
     if (sound) sfx.move();
+  }
+  // Своя плавная прокрутка (scrollBy smooth в окне не всегда едет, а прерванная оставляла страницу на полпути).
+  // Новая — сначала доводит прежнюю до конца, потом считает от честного положения.
+  const anims = new Map();
+  function glide(el, prop, to) {
+    const prev = anims.get(el);
+    if (prev) { cancelAnimationFrame(prev.raf); setPos(el, prop, prev.to); }
+    const from = getPos(el, prop);
+    to = Math.max(0, Math.min(to, maxPos(el, prop)));
+    if (Math.abs(to - from) < 1) { anims.delete(el); return; }
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) { setPos(el, prop, to); return; }
+    const t0 = performance.now(), ms = 230, a = { to };
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - k, 3);
+      setPos(el, prop, from + (to - from) * e);
+      if (k < 1) a.raf = requestAnimationFrame(step); else anims.delete(el);
+    };
+    a.raf = requestAnimationFrame(step);
+    anims.set(el, a);
+  }
+  const page = () => document.scrollingElement;
+  function getPos(el, prop) { return el === window ? page().scrollTop : el[prop]; }
+  function setPos(el, prop, v) { if (el === window) page().scrollTop = v; else el[prop] = v; }
+  function maxPos(el, prop) { return el === window ? page().scrollHeight - innerHeight : el.scrollWidth - el.clientWidth; }
+  function settle() { for (const [el, a] of anims) { cancelAnimationFrame(a.raf); setPos(el, el === window ? "" : "scrollLeft", a.to); } anims.clear(); }
+
+  // Показать выбранное: у верхних кнопок экрана — страница до самого верха (заголовок и фильтры видны), у нижних — до
+  // низа, иначе — чтобы не пряталось под машиной/балансом сверху и подсказками снизу. Полка в ряд — своей прокруткой.
+  function reveal(e) {
+    if (e.closest("#rail, #modal, #launch-fx")) return;
+    settle();
+    const row = e.closest(".lib-strip");
+    if (row && row.scrollWidth > row.clientWidth) {
+      const q = e.getBoundingClientRect(), w = row.getBoundingClientRect();
+      if (q.left < w.left + 10) glide(row, "scrollLeft", row.scrollLeft + q.left - w.left - 30);
+      else if (q.right > w.right - 10) glide(row, "scrollLeft", row.scrollLeft + q.right - w.right + 30);
+    }
+    const r = e.getBoundingClientRect(), y0 = page().scrollTop, full = page().scrollHeight;
+    const hints = (document.getElementById("pad-hints") || {}).offsetHeight || 0;
+    const top = 90, bottom = innerHeight - hints - 24;
+    if (r.top + y0 < innerHeight * 0.4) glide(window, "", 0);
+    else if (full - (r.bottom + y0) < innerHeight * 0.3) glide(window, "", full);
+    else if (r.top < top) glide(window, "", y0 + r.top - top - 16);
+    else if (r.bottom > bottom) glide(window, "", y0 + r.bottom - bottom + 16);
   }
   function move(dx, dy) {
     const list = items();
@@ -111,6 +155,13 @@
       return setFocus(main);
     }
     const r = cur.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    // Рамка ушла за край (листали стиком или колесом) — начать с того, что сейчас на экране, ближе к середине
+    if (!cur.closest("#rail") && !anims.size && (r.bottom < 40 || r.top > innerHeight - 20)) {
+      const mid = innerHeight / 2;
+      const seen = list.filter((e) => { const q = e.getBoundingClientRect(); return !e.closest("#rail") && q.bottom > 80 && q.top < innerHeight - 60; });
+      const near = seen.sort((a, b) => Math.abs(a.getBoundingClientRect().top - mid) - Math.abs(b.getBoundingClientRect().top - mid))[0];
+      if (near) return setFocus(near);
+    }
     let best = null, bs = Infinity;
     const inRail = !!cur.closest("#rail");
     for (const e of list) {
@@ -222,6 +273,13 @@
       if (first || t > repeatAt) { padOn(); move(dx, dy); repeatAt = t + (first ? 380 : 120); }
       held.dir = true;
     } else held.dir = false;
+    // Правый стик — плавно листать страницу (скорость — от наклона)
+    const ry = pad.axes[3] || 0, dz = 0.18;
+    if (Math.abs(ry) > dz && last) {
+      const k = (Math.abs(ry) - dz) / (1 - dz), dt = Math.min(0.05, (t - last) / 1000);
+      settle();
+      page().scrollTop += Math.sign(ry) * k * k * 1600 * dt;
+    }
     if (b(0) && !held[0]) { padOn(); press(); }
     if (b(1) && !held[1]) { padOn(); back(); }
     held[0] = b(0); held[1] = b(1);
