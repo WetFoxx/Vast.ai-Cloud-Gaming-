@@ -21,6 +21,17 @@ n=0
 if [ -d "$T/32" ]; then
   for f in "$T"/32/*.so."$VER"; do install -m755 "$f" /usr/lib/i386-linux-gnu/ && n=$((n + 1)); done
 fi
+# [2026-10-15] Часть хостов не даёт контейнеру библиотеки видео: кодировщик NVENC и декодер (живой случай — RTX 3060
+# laptop, Вашингтон, 152536: «Cannot load libnvidia-encode.so.1», Sunshine без кодировщика). Берём их из .run той же
+# версии — с драйвером хоста они совпадают; свои библиотеки хоста не трогаем
+add=""
+for l in libnvidia-encode libnvcuvid; do
+  ldconfig -p | grep -qE "[[:space:]]$l\.so\.1 " && continue          # строки ldconfig -p начинаются с табуляции
+  [ -f "$T/$l.so.$VER" ] || continue
+  install -m755 "$T/$l.so.$VER" /usr/lib/x86_64-linux-gnu/ && ln -sfn "$l.so.$VER" "/usr/lib/x86_64-linux-gnu/$l.so.1" \
+    && add="$add ${l#lib}"
+done
+[ -n "$add" ] && echo "nvidia: хост не дал библиотеки видео — взяты из драйвера $VER:$add"
 ldconfig
 mkdir -p /opt/fbc
 if [ -f "$T/libnvidia-fbc.so.$VER" ]; then
