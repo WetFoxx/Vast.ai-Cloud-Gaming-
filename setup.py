@@ -278,6 +278,12 @@ def step_tailscale():
 SCRIPT_VERSION = "v5.7"
 SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
               "eac124d3fd80a05ebb101c2519a18a1f6575f293/wolf-setup.sh")
+# [2026-10-15] Docker — свой адрес: v5.8 проверена вживую только в Docker (KVM-машин на рынке почти нет, три попытки
+# аренды упали на стороне хостов). KVM (шаблон выше) остаётся на v5.7, пока v5.8 не проверят на KVM
+# (core.rental_body: VASTGAME_KVM_SCRIPT_URL — разовая проверка без смены шаблона). Проверили — один адрес на оба.
+DOCKER_SCRIPT_VERSION = "v5.8"
+DOCKER_SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
+                     "15b8f3cfc2bee85c60524ccbb67d0d845fa067a1/wolf-setup.sh")
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
 # Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
 # Tailscale (41641/udp, 3478/udp — STUN)

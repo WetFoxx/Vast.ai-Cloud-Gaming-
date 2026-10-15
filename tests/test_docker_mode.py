@@ -35,7 +35,7 @@ class TestRentalBody(unittest.TestCase):
         self.assertNotIn("template_hash_id", b)
         self.assertEqual((b["runtype"], b["args"], b["label"], b["disk"]), ("args", ["start"], "vastgame", 60))
         e = b["env"]
-        self.assertEqual(e["WOLF_SCRIPT_URL"], setup.SCRIPT_URL)              # тот же скрипт, что у KVM
+        self.assertEqual(e["WOLF_SCRIPT_URL"], setup.DOCKER_SCRIPT_URL)       # свой адрес (KVM — шаблон)
         self.assertEqual(e["-p 41641:41641/udp"], "1")                        # порт Tailscale — прямая связь
         self.assertEqual((e["RES"], e["STEAM_LANG"]), ("2560x1440", "russian"))
         self.assertEqual((e["SYNC_STEAM_GAMES"], e["SYNC_OTHER_GAMES"], e["SYNC_SAVES"]), ("0", "1", "1"))

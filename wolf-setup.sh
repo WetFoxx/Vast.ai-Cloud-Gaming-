@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.7 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.8 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -289,9 +289,9 @@ for _ in {1..60}; do getent hosts github.com >/dev/null && break; sleep 2; done
 # ничего не ставим: apt здесь только потерял бы время
 if [ "$WM" != docker ]; then
 # xrandr/xhost/xset — x11-xserver-utils, cvt — xserver-xorg-core
-hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables zenity 2>/dev/null || {
+hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables zenity 7z bsdtar 2>/dev/null || {
   apt-get update -q
-  apt-get install -yq curl zstd unzip x11-xserver-utils xserver-xorg-core libnotify-bin python3 iptables zenity
+  apt-get install -yq curl zstd unzip x11-xserver-utils xserver-xorg-core libnotify-bin python3 iptables zenity p7zip-full libarchive-tools
 }
 hash rclone 2>/dev/null    || curl -fsSL https://rclone.org/install.sh | bash
 hash tailscale 2>/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
