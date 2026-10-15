@@ -231,3 +231,48 @@ body[data-screen="main"] #top-machine { display: none !important; }
 .hero-name { transition: opacity .2s ease; }
 /* Управляют геймпадом — без указателя мыши (на Mac ещё и системно, до движения мыши: Api.hide_cursor) */
 body.pad-mode, body.pad-mode * { cursor: none !important; }
+
+/* ---- Библиотека: обложки без лишних надписей (как в Big Picture). Имя — при наведении и фокусе, аккаунты — фильтрами
+   сверху (на обложке только «моды», «семья», «демо») */
+.lib-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 20px 18px; padding: 4px 2px 20px; }
+.game-tile { border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+.game-tile .badge:not(.mods):not(.family):not(.demo) { display: none; }
+.game-tile .badge.mods { background: rgba(122, 12, 184, .9); }
+.game-tile .badge.family { background: rgba(214, 15, 99, .85); }
+.game-tile .name { opacity: 0; transition: opacity .15s ease; }
+.game-tile:hover .name, .game-tile.pad-focus .name { opacity: 1; }
+.game-tile:hover { transform: scale(1.05); box-shadow: 0 12px 30px rgba(0, 0, 0, .5); }
+.game-tile:hover img { transform: none; }
+.game-tile::after { display: none; }
+.lib-chips { gap: 10px; }
+.lib-chips .chip { font-size: 14px; padding: 8px 15px; border-radius: 999px; background: var(--card); color: var(--text); }
+.lib-chips .chip.on { background: var(--grad); }
+#library-search, #games-search { background: var(--card); border: 0; border-radius: 999px; padding: 10px 18px; font-size: 15px; color: var(--text); }
+
+/* ---- Страница игры */
+.gp-title { display: flex; align-items: baseline; gap: 12px; }
+.gp-title .crumb { color: var(--muted); font-weight: 600; font-size: 22px; }
+.gp-hero { position: relative; height: 300px; border-radius: 18px; overflow: hidden; background: #121722 center 25% / cover no-repeat; flex: none; }
+.gp-hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 45%, rgba(11, 15, 21, .85)); }
+.gp-hero.no-art { height: 120px; background-image: var(--grad); }
+.gp-logo { position: absolute; left: 30px; bottom: 24px; max-width: 40%; max-height: 110px; z-index: 1; filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .7)); }
+.gp-body { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.gp-main, .gp-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.gp-acts { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.gp-play { flex: none; min-width: 220px; font-size: 19px; padding: 16px 28px; }
+.gp-accounts { display: flex; gap: 6px; flex-wrap: wrap; background: var(--card); border-radius: 12px; padding: 4px; }
+.gp-accounts .chip { width: auto; flex: none; margin: 0; font-size: 14px; padding: 8px 14px; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
+.gp-accounts .chip.on { background: rgba(255, 255, 255, .14); }
+.gp-account { color: var(--text); padding: 11px 16px; }
+.gp-hint { margin-top: -4px; }
+.gp-card { display: flex; flex-direction: column; gap: 12px; }
+.gp-line { display: flex; justify-content: space-between; gap: 12px; font-size: 15px; }
+.gp-line b { font-weight: 600; text-align: right; color: var(--text); }
+.gp-line span { color: var(--muted); }
+.og-links { display: flex; gap: 18px; }
+.og-links .link { padding-left: 0; width: auto; flex: none; }
+@media (max-width: 980px) { .gp-body { grid-template-columns: 1fr; } .gp-hero { height: 220px; } }
+.gp-card .mods-choice { display: flex; flex-direction: column; gap: 8px; }
+.gp-card .mods-choice .seg { display: inline-flex; align-self: flex-start; gap: 4px; background: var(--card); border-radius: 12px; padding: 4px; }
+.gp-card .mods-choice .seg .chip { width: auto; flex: none; margin: 0; font-size: 15px; padding: 9px 18px; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
+.gp-card .mods-choice .seg .chip.on { background: var(--grad); }

@@ -77,11 +77,11 @@ for (const name of ["scroll", "mousedown", "keydown"]) document.addEventListener
 
 function show(screen) {
   hideTip();
-  for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"]) $("screen-" + s).hidden = s !== screen;
-  for (const s of ["library", "games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen);
+  for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard", "library", "game"]) $("screen-" + s).hidden = s !== screen;
+  for (const s of ["library", "games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen || (s === "library" && screen === "game"));
   $("open-home").classList.toggle("active", ["main", "offers", "progress"].includes(screen));
   document.body.dataset.screen = screen;               // [2026-10-15] фон и раскладка нового вида — по экрану
-  if (screen !== "main") backdrop(screen === "progress" || screen === "offers" ? heroGame : null);
+  if (screen !== "main") backdrop(screen === "game" ? playGame : screen === "progress" || screen === "offers" ? heroGame : null);
 }
 
 // [2026-10-15] Картинка игры: на главной — слева в большой карточке и размыто на фоне окна (как Big Picture).
@@ -989,22 +989,130 @@ $("rent").addEventListener("click", async () => {
 let playGame = null;      // выбранная игра: {appid, name, cap, account, choices: [{id, family}]}
 const playOpened = {};    // авто-открытие Moonlight: состояние → уже открывали
 
-function startGame(g) {
-  if (current && current.status && current.status.machine) {
-    ask({ title: t("play.busy.title"), text: t("play.busy.text"), yes: t("btn.back"), no: t("btn.cancel") });
-    return;
-  }
+// Игра → то, что нужно для аренды с ней: аккаунт (свой или семья, без истёкших), моды, «Хранить игру в облаке», рецепт.
+// Нет живого аккаунта с этой игрой — войти в Steam (null).
+function prepareGame(g) {
   const choices = g.accounts.map((id) => ({ id, family: false }))
     .concat(g.family.filter((id) => !g.accounts.includes(id)).map((id) => ({ id, family: true })))
     .filter((c) => !((libData && libData.accounts) || []).find((a) => a.id === c.id && a.expired));
-  if (!choices.length) { steamLogin(null); return; }
+  if (!choices.length) { steamLogin(null); return null; }
   const mods = (libData && libData.mods && libData.mods[g.appid]) || null;
-  playGame = { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
-               header: g.header || "", account: choices[0].id, choices, modsInfo: mods, mods: modsSaveOn(g.appid),
-               gdataInfo: (libData && libData.lgame && libData.lgame[g.appid]) || null, gdata: gdataOn(g.appid),
-               recipe: recipeOn(g.appid) };
+  const keep = playGame && playGame.appid === g.appid && choices.some((c) => c.id === playGame.account) ? playGame.account : null;
+  return { appid: g.appid, name: g.name || "#" + g.appid, cap: g.cap || g.header || "", hero: g.hero || "",
+           header: g.header || "", account: keep || choices[0].id, choices, modsInfo: mods, mods: modsSaveOn(g.appid),
+           gdataInfo: (libData && libData.lgame && libData.lgame[g.appid]) || null, gdata: gdataOn(g.appid),
+           recipe: recipeOn(g.appid), minutes: g.minutes || 0, last: g.last || 0, accounts: g.accounts, family: g.family };
+}
+function machineBusy() {
+  if (!(current && current.status && current.status.machine)) return false;
+  ask({ title: t("play.busy.title"), text: t("play.busy.text"), yes: t("btn.back"), no: t("btn.cancel") });
+  return true;
+}
+// «Играть» сразу (большая карточка главного): выбор машины с этой игрой
+function startGame(g) {
+  if (machineBusy()) return;
+  const pg = prepareGame(g);
+  if (!pg) return;
+  playGame = pg;
   replaceMode = false; replaceBlocked = false;
   openOffers();
+}
+
+// [2026-10-15] Страница игры (обложка в библиотеке или на полке главного): картинка, «Играть», аккаунт, «С модами |
+// Без модов», «Хранить игру в облаке», программы и что лежит в облаке. «Играть» — выбор машины с этой игрой.
+let gameFrom = "library";
+function openGame(g) {
+  const pg = prepareGame(g);
+  if (!pg) return;
+  playGame = pg;
+  gameFrom = $("screen-main").hidden ? "library" : "main";
+  show("game");
+  scrollTo(0, 0);
+  renderGamePage();
+}
+$("game-back").addEventListener("click", () => {
+  if (gameFrom === "main") { show("main"); refresh(); }
+  else if (gameFrom === "offers") { show("offers"); renderOffersGame(); }
+  else { show("library"); renderLibrary(); }
+});
+function renderGamePage() {
+  const g = playGame;
+  if (!g) return;
+  $("game-crumb").textContent = t(gameFrom === "main" ? "nav.home" : gameFrom === "offers" ? "offers.title" : "library.title") + " ›";
+  $("game-title").textContent = g.name;
+  const url = artOf(g);
+  $("gp-hero").style.backgroundImage = url ? `url("${url}")` : "";
+  $("gp-hero").classList.toggle("no-art", !url);
+  backdrop(g);
+  const logo = $("gp-logo");
+  logo.hidden = true;
+  if (/^\d+$/.test(String(g.appid))) {
+    logo.onload = () => (logo.hidden = false);
+    logo.onerror = () => (logo.hidden = true);
+    logo.src = STEAM_ART(g.appid, "logo.png");
+  }
+  const main = $("gp-main"), side = $("gp-side");
+  main.innerHTML = side.innerHTML = "";
+  // «Играть» и аккаунт
+  const acts = el("div", { className: "gp-acts" });
+  const play = button("▶  " + t("game.play"), () => { if (machineBusy()) return; replaceMode = false; replaceBlocked = false; openOffers(); }, true);
+  play.classList.add("gp-play");
+  acts.appendChild(play);
+  if (g.choices.length > 1) {
+    const seg = el("div", { className: "seg gp-accounts", title: t("play.offers.account") });
+    for (const c of g.choices) {
+      const label = c.family ? t("play.offers.family", { name: accName(c.id) }) : accName(c.id);
+      const b = el("button", { className: "chip" + (c.id === g.account ? " on" : "") }, label);
+      b.addEventListener("click", () => { g.account = c.id; renderGamePage(); });
+      seg.appendChild(b);
+    }
+    acts.appendChild(seg);
+  } else {
+    acts.appendChild(el("span", { className: "pill gp-account" }, "👤 " + (g.choices[0].family
+      ? t("play.offers.family", { name: accName(g.choices[0].id) }) : accName(g.choices[0].id))));
+  }
+  main.appendChild(acts);
+  main.appendChild(el("div", { className: "sub gp-hint" }, t("play.offers.sub")));
+  // Моды, игра в облаке, рецепт — как было на выборе машины
+  const card = el("section", { className: "card gp-card" });
+  card.appendChild(el("div", { className: "label" }, t("game.how")));
+  const via = ((libData && libData.launch_sel) || {})[g.appid];
+  const recipeBox = el("div");
+  const drawRecipe = () => {
+    recipeBox.innerHTML = "";
+    if (recipeOf(g.appid) && g.mods) recipeBox.appendChild(recipeBlock(g.appid, (on) => { g.recipe = on; }));
+  };
+  if (g.modsInfo || (via && via.id) || recipeOf(g.appid)) {
+    card.appendChild(modsChoiceBlock(g.appid, g.modsInfo, via, (on) => { g.mods = on; drawRecipe(); renderGameSide(); }));
+  } else {
+    card.appendChild(el("div", { className: "sub" }, t("game.mods_none")));
+  }
+  card.appendChild(gdataBlock(g.appid, g.gdataInfo, (on) => { g.gdata = on; }));
+  drawRecipe();
+  card.appendChild(recipeBox);
+  const auto = ((libData && libData.progs_sel) || {})[g.appid] || [];
+  if (auto.length) card.appendChild(el("div", { className: "og-progs" },
+    t("progs.with_game", { list: auto.map((i) => i.split("/").pop()).join(", ") })));
+  main.appendChild(card);
+  renderGameSide();
+}
+// Справа: что в облаке и сколько наиграно
+function renderGameSide() {
+  const g = playGame, side = $("gp-side");
+  if (!g) return;
+  side.innerHTML = "";
+  const cloud = el("section", { className: "card gp-card" });
+  cloud.appendChild(el("div", { className: "label" }, t("game.cloud")));
+  const line = (name, value) => { const r = el("div", { className: "gp-line" }); r.append(el("span", {}, name), el("b", {}, value)); cloud.appendChild(r); };
+  if (g.modsInfo) line(t("game.cloud.mods"), `${size(g.modsInfo.bytes)} · ${g.modsInfo.mtime || ""}`);
+  if (g.gdataInfo) line(t("game.cloud.lgame"), `${size(g.gdataInfo.bytes)} · ${g.gdataInfo.mtime || ""}`);
+  line(t("game.cloud.game"), t("game.cloud.steam"));
+  if (!g.modsInfo && !g.gdataInfo) cloud.appendChild(el("div", { className: "sub" }, t("game.cloud.empty")));
+  side.appendChild(cloud);
+  const facts = [];
+  if (g.minutes) facts.push(t("game.played", { h: num(g.minutes / 60, g.minutes < 600 ? 1 : 0) }));
+  if (g.last > 1e9) facts.push(t("game.last", { date: new Date(g.last * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short", year: "numeric" }) }));
+  if (facts.length) side.appendChild(el("section", { className: "card gp-card sub" }, facts.join(" · ")));
 }
 
 function renderOffersGame() {
@@ -1017,41 +1125,21 @@ function renderOffersGame() {
     img.onerror = () => img.remove();
     box.appendChild(img);
   }
+  // [2026-10-15] коротко: игра, аккаунт, с модами или без; всё это меняется на странице игры («Изменить ›»)
   const main = el("div", { className: "og-main" });
-  main.append(el("div", { className: "title" }, t("play.offers.title", { name: playGame.name })),
-              el("div", { className: "sub" }, t("play.offers.sub")));
-  if (playGame.choices.length > 1) {
-    const seg = el("div", { className: "seg" });
-    seg.appendChild(el("span", { className: "sub" }, t("play.offers.account")));
-    for (const c of playGame.choices) {
-      const label = c.family ? t("play.offers.family", { name: accName(c.id) }) : accName(c.id);
-      const b = el("button", { className: "chip" + (c.id === playGame.account ? " on" : "") }, label);
-      b.addEventListener("click", () => { playGame.account = c.id; renderOffersGame(); });
-      seg.appendChild(b);
-    }
-    main.appendChild(seg);
-  }
-  // [v5.7] «С модами | Без модов» — когда у игры есть что выбирать: моды в облаке, запуск через программу, рецепт (перевод
-  // FF14 — часть «С модами»). Иначе блока нет: игра «с модами» — поставишь мод при закрытой игре, он сохранится сам
+  const parts = [accName(playGame.account)];
   const via = ((libData && libData.launch_sel) || {})[playGame.appid];
-  const recipeBox = el("div");
-  const drawRecipe = () => {
-    recipeBox.innerHTML = "";
-    if (recipeOf(playGame.appid) && playGame.mods) recipeBox.appendChild(recipeBlock(playGame.appid, (on) => { playGame.recipe = on; }));
-  };
-  if (playGame.modsInfo || (via && via.id) || recipeOf(playGame.appid)) {
-    main.appendChild(modsChoiceBlock(playGame.appid, playGame.modsInfo, via, (on) => { playGame.mods = on; drawRecipe(); }));
-  }
-  main.appendChild(gdataBlock(playGame.appid, playGame.gdataInfo, (on) => { playGame.gdata = on; }));
-  drawRecipe();
-  main.appendChild(recipeBox);
-  // [v5.4] программы, которые запустятся вместе с игрой (выбраны раньше на главном)
-  const auto = ((libData && libData.progs_sel) || {})[playGame.appid] || [];
-  if (auto.length) main.appendChild(el("div", { className: "og-progs" },
-    t("progs.with_game", { list: auto.map((i) => i.split("/").pop()).join(", ") })));
+  if (playGame.modsInfo || (via && via.id) || recipeOf(playGame.appid)) parts.push(t(playGame.mods ? "mods.with" : "mods.without"));
+  if (playGame.gdata) parts.push(t("gdata.toggle"));
+  main.append(el("div", { className: "title" }, t("play.offers.title", { name: playGame.name })),
+              el("div", { className: "sub" }, parts.join(" · ")));
+  const row = el("div", { className: "og-links" });
+  const change = el("button", { className: "link" }, t("offers.game.change"));
+  change.addEventListener("click", () => { gameFrom = "offers"; show("game"); scrollTo(0, 0); renderGamePage(); });
   const none = el("button", { className: "link" }, t("play.offers.none"));
   none.addEventListener("click", () => { playGame = null; renderOffersGame(); });
-  main.appendChild(none);
+  row.append(change, none);
+  main.appendChild(row);
   box.appendChild(main);
 }
 
@@ -2000,7 +2088,7 @@ function renderLibrary() {
   if (!shown.length) { grid.appendChild(el("div", { className: "note" }, t("library.nothing"))); return; }
   for (const g of shown) {
     const tile = gameTile(g);
-    tile.addEventListener("click", () => startGame(g));
+    tile.addEventListener("click", () => openGame(g));
     grid.appendChild(tile);
   }
 }
@@ -2054,7 +2142,7 @@ async function renderMainLibrary(force = false) {
   strip.hidden = none || !d.games.length;
   for (const g of d.games.slice(0, LIB_STRIP)) {
     const tile = gameTile(g);
-    tile.addEventListener("click", (e) => { e.stopPropagation(); startGame(g); });
+    tile.addEventListener("click", (e) => { e.stopPropagation(); openGame(g); });
     // [2026-10-15] машины нет — выбранная обложка становится большой карточкой («Играть» — в неё)
     const pick = () => { if (!(current && current.status && current.status.machine) && heroPick !== g) { heroPick = g; renderHeroArt(); } };
     tile.addEventListener("mouseenter", pick);
@@ -2629,9 +2717,9 @@ $("open-home").addEventListener("click", () => $("brand").click());
 $("play-game").addEventListener("click", () => { if (heroGame && heroGame.accounts) startGame(heroGame); });
 $("brand").addEventListener("click", () => {
   if (!$("modal").hidden) return;
-  const cur = ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"].find((s) => !$("screen-" + s).hidden);
+  const cur = ["main", "offers", "progress", "games", "setup", "history", "wizard", "library", "game"].find((s) => !$("screen-" + s).hidden);
   if (cur === "main" || cur === "wizard") { show("main"); refresh(); return; }
-  const back = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back",
+  const back = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back", game: "game-back",
                  games: "games-back", progress: $("progress-home").hidden ? "progress-back" : "progress-home" }[cur];
   const b = back && $(back);
   if (b && !b.hidden && !b.disabled) b.click();

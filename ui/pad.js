@@ -192,7 +192,7 @@
     if (e.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "range"].includes(e.type)) { e.focus(); return; }
     e.click();
   }
-  const BACK = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back", games: "games-back" };
+  const BACK = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back", games: "games-back", game: "game-back" };
   function back() {
     const modal = document.getElementById("modal");
     if (modal && !modal.hidden) { document.getElementById("modal-no").click(); return; }
