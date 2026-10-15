@@ -410,6 +410,19 @@ function launchFx(preview = false) {
   // Трансляция машины: игра, с которой её арендовали; машина без игры — рабочий стол (без картинки чужой игры)
   const g = preview ? heroGame : m ? libGame(playNowGame()) : heroGame;
   const steps = ["fx.connect", "fx.pair", "fx.open"];
+  window.sfx && window.sfx.launch();
+  // Mac: на весь экран — отдельным окном (Api.fx_show), даже если окно приложения не развёрнуто
+  if (!DEMO && PLATFORM === "darwin") {
+    const m2 = current && current.status && current.status.machine;
+    const data = { lang: LANG, desk: !g, name: g ? g.name || "" : t("fx.desktop"), sub: !g && m2 ? `${m2.gpu} · ${m2.country}` : "",
+                   art: artOf(g) || "", logo: g && /^\d+$/.test(String(g.appid)) ? STEAM_ART(g.appid, "logo.png") : "",
+                   texts: { steps: steps.map((k) => t(k)), go: t("fx.go"), fail: t("fx.fail"), close: t("fx.close") } };
+    let native = null;
+    try { native = api().fx_show(data); } catch (e) { native = null; }
+    if (native) {
+      return { done(ok, why) { Promise.resolve(native).then((r) => { if (r && r.ok) api().fx_done(ok, why || ""); }); if (ok) window.sfx && window.sfx.select(); else window.sfx && window.sfx.error(); } };
+    }
+  }
   let i = 0, over = false;
   box.classList.toggle("desk", !g);
   $("lfx-art").style.backgroundImage = artOf(g) ? `url("${artOf(g)}")` : "";
@@ -436,7 +449,6 @@ function launchFx(preview = false) {
     $("lfx-bar").style.width = Math.min(90, 18 + i * 30) + "%";
   };
   show();
-  window.sfx && window.sfx.launch();
   const timer = setInterval(() => { if (!over && i < steps.length - 1) { i++; show(); } }, 1600);
   const close = () => { box.classList.add("out"); setTimeout(() => { box.hidden = true; box.classList.remove("on", "out"); }, 450); };
   $("lfx-close").onclick = close;

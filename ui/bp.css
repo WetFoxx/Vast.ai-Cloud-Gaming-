@@ -178,48 +178,6 @@ input.pad-focus, textarea.pad-focus { transform: none; }
 .hero.with-art:has(.hero-name:not([hidden])) .hero-status .dot.ready + .title { color: var(--ready); }
 body[data-screen="main"] #top-machine { display: none !important; }
 
-/* Запуск трансляции — на весь экран (launchFx в app.js) */
-.launch-fx { position: fixed; inset: 0; z-index: 200; background: #05070b; display: grid; place-items: center; overflow: hidden;
-  opacity: 0; transition: opacity .35s ease; }
-.launch-fx.on { opacity: 1; }
-.launch-fx.out { opacity: 0; }
-.lfx-art { position: absolute; inset: -4%; background-size: cover; background-position: center; filter: blur(14px) saturate(1.2);
-  transform: scale(1.12); opacity: .0; transition: filter 2.6s ease, transform 6s ease-out, opacity 1s ease; }
-.launch-fx.on .lfx-art { filter: blur(2px) saturate(1.15); transform: scale(1.0); opacity: .55; }
-.lfx-shade { position: absolute; inset: 0; background: radial-gradient(circle at 50% 46%, rgba(5, 7, 11, .25), rgba(5, 7, 11, .92) 70%); }
-.lfx-center { position: relative; display: flex; flex-direction: column; align-items: center; gap: 16px; text-align: center; padding: 0 30px; }
-.lfx-ring { position: relative; width: 132px; height: 132px; margin-bottom: 8px; }
-.lfx-spin { position: absolute; inset: 0; border-radius: 50%;
-  background: conic-gradient(from 0deg, #ff6a00, #f5162f, #d60f63, #7a0cb8, transparent 72%, #ff6a00);
-  -webkit-mask: radial-gradient(circle, transparent 57px, #000 59px); mask: radial-gradient(circle, transparent 57px, #000 59px);
-  animation: lfx-spin 1.1s linear infinite; filter: drop-shadow(0 0 18px rgba(245, 22, 47, .55)); }
-.lfx-core { position: absolute; inset: 14px; border-radius: 50%; background: #fff; display: grid; place-items: center;
-  box-shadow: 0 0 40px rgba(245, 22, 47, .45); animation: lfx-breathe 1.8s ease-in-out infinite; }
-.lfx-core img { width: 64px; }
-.lfx-logo { max-width: 340px; max-height: 110px; filter: drop-shadow(0 6px 20px rgba(0, 0, 0, .7)); animation: lfx-rise .7s .15s both ease-out; }
-.lfx-name { font-family: var(--round); font-size: 34px; font-weight: 800; letter-spacing: -.3px; animation: lfx-rise .7s .15s both ease-out; }
-.lfx-step { font-size: 18px; color: rgba(255, 255, 255, .85); min-height: 26px; }
-.lfx-step.in { animation: lfx-rise .45s both ease-out; }
-.lfx-bar { width: 260px; height: 4px; border-radius: 4px; background: rgba(255, 255, 255, .12); overflow: hidden; }
-.lfx-bar i { display: block; height: 100%; width: 0; background: var(--grad); border-radius: 4px; transition: width 1.4s ease; }
-.lfx-err { max-width: 520px; color: #ffb4b4; font-size: 14.5px; line-height: 1.45; }
-.lfx-close { flex: none; width: auto; padding: 11px 26px; margin-top: 4px; }
-.lfx-flash { position: absolute; inset: 0; background: radial-gradient(circle at 50% 46%, rgba(255, 255, 255, .95), rgba(255, 106, 0, .4) 30%, transparent 60%);
-  opacity: 0; pointer-events: none; }
-.launch-fx.ok .lfx-ring { animation: lfx-burst .9s cubic-bezier(.3, .0, .2, 1) forwards; }
-.launch-fx.ok .lfx-flash { animation: lfx-flash 1s ease-out forwards; }
-.launch-fx.ok .lfx-step { color: #fff; font-weight: 700; font-size: 22px; }
-.launch-fx.fail .lfx-spin { animation: none; filter: grayscale(1) brightness(.7); }
-.launch-fx.fail .lfx-core { animation: none; }
-@keyframes lfx-spin { to { transform: rotate(360deg); } }
-@keyframes lfx-breathe { 50% { transform: scale(.94); box-shadow: 0 0 60px rgba(245, 22, 47, .7); } }
-@keyframes lfx-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-@keyframes lfx-burst { 40% { transform: scale(.9); } to { transform: scale(7); opacity: 0; } }
-@keyframes lfx-flash { 0% { opacity: 0; } 25% { opacity: .9; } to { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) {
-  .lfx-spin, .lfx-core, .launch-fx.ok .lfx-ring, .launch-fx.ok .lfx-flash { animation: none !important; }
-  .lfx-art { transition: opacity .3s; }
-}
 
 /* Заголовок экрана и кнопка рядом (библиотека: «Обновить») — кнопка сразу за заголовком, не под балансом справа */
 .lib-top { justify-content: flex-start; gap: 16px; padding-right: 380px; }
@@ -389,12 +347,3 @@ body.pad-mode, body.pad-mode * { cursor: none !important; }
 .setup-steps li { padding: 14px 4px; }
 .lang-card { padding: 16px 20px; }
 @media (max-width: 980px) { .set-layout { grid-template-columns: 1fr; } .set-cats { flex-direction: row; flex-wrap: wrap; position: static; } .set-cat { width: auto; } }
-/* Трансляция машины без игры — вместо картинки переливаются цвета VastGame */
-.launch-fx.desk .lfx-art { opacity: .9 !important; filter: blur(60px) !important; inset: -20%;
-  background: radial-gradient(40% 50% at 30% 40%, rgba(255, 106, 0, .55), transparent 70%),
-    radial-gradient(45% 55% at 70% 60%, rgba(214, 15, 99, .55), transparent 70%),
-    radial-gradient(35% 45% at 55% 30%, rgba(122, 12, 184, .55), transparent 70%);
-  animation: lfx-drift 7s ease-in-out infinite alternate; }
-@keyframes lfx-drift { from { transform: rotate(0deg) scale(1); } to { transform: rotate(25deg) scale(1.15); } }
-.lfx-sub { font-size: 16px; color: rgba(255, 255, 255, .7); margin-top: -8px; }
-@media (prefers-reduced-motion: reduce) { .launch-fx.desk .lfx-art { animation: none; } }

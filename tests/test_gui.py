@@ -123,6 +123,46 @@ class TestSnapshots(unittest.TestCase):
         self.assertTrue(api.snapshot("setup")["ready"])
 
 
+class TestLaunchFx(unittest.TestCase):
+    """[2026-10-15] Анимация запуска трансляции на весь экран (Mac): окно создаётся, итог доходит до его страницы."""
+
+    def test_window_and_result(self):
+        api = gui.Api()
+        made = []
+
+        class Win:
+            def __init__(self):
+                self.events = mock.MagicMock()   # events.loaded += … как у pywebview
+                self.destroyed = False
+
+            def destroy(self):
+                self.destroyed = True
+
+        def create(*a, **k):
+            made.append(k)
+            return Win()
+
+        with mock.patch.object(gui.sys, "platform", "darwin"), mock.patch.object(gui.webview, "create_window", create):
+            self.assertEqual(api.fx_show({"name": "ELDEN RING"}), {"ok": True})
+            self.assertEqual(api.fx_show({"name": "ELDEN RING"}), {"ok": True})     # уже открыто — второго окна нет
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0]["frameless"] and made[0]["on_top"])
+        self.assertIsNone(api.fx_state()["done"])
+        api.fx_done(False, "нет связи")
+        self.assertEqual((api.fx_state()["done"], api.fx_state()["why"]), (False, "нет связи"))
+        win = api._fx_win
+        api.fx_close()
+        import time as _t
+        _t.sleep(0.2)
+        self.assertTrue(win.destroyed)
+        api._fx_closed(win)
+        self.assertTrue(api.fx_state()["closed"])
+
+    def test_other_systems_draw_inside_window(self):
+        with mock.patch.object(gui.sys, "platform", "win32"):
+            self.assertEqual(gui.Api().fx_show({}), {"ok": False})
+
+
 class TestPrograms(unittest.TestCase):
     """[v5.4] Программы игр: запуск рядом с игрой и «вместе с игрой» — через страницу машины."""
 

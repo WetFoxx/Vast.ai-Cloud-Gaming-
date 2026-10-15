@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VastGame</title>
+  <!-- [2026-10-15] Анимация запуска трансляции — окно на весь экран (gui.Api.fx_show, только Mac). Что показать (игра,
+       машина, тексты на языке окна) — от главной страницы через fx_state; итог (получилось / нет) — оттуда же. -->
+  <link rel="stylesheet" href="launch.css">
+  <style>
+    :root {
+      --grad: linear-gradient(115deg, #ff6a00 0%, #f5162f 38%, #d60f63 68%, #7a0cb8 100%);
+      --round: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color-scheme: dark;
+    }
+    html, body { margin: 0; height: 100%; background: #05070b; overflow: hidden; color: #f3f2f7; cursor: default;
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none; }
+    [hidden] { display: none !important; }
+    .launch-fx { position: fixed; inset: 0; }
+    .lfx-close { font: inherit; font-weight: 650; font-size: 15px; color: #fff; background: var(--grad); border: 0; border-radius: 12px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="launch-fx" id="launch-fx">
+    <div class="lfx-art" id="lfx-art"></div>
+    <div class="lfx-shade"></div>
+    <div class="lfx-center">
+      <div class="lfx-ring"><div class="lfx-spin"></div><div class="lfx-core"><img src="logo-mark.png" alt=""></div></div>
+      <img class="lfx-logo" id="lfx-logo" alt="" hidden>
+      <div class="lfx-name" id="lfx-name"></div>
+      <div class="lfx-sub" id="lfx-sub" hidden></div>
+      <div class="lfx-step" id="lfx-step"></div>
+      <div class="lfx-bar"><i id="lfx-bar"></i></div>
+      <div class="lfx-err" id="lfx-err" hidden></div>
+      <button class="lfx-close" id="lfx-close" hidden></button>
+    </div>
+    <div class="lfx-flash"></div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const api = () => window.pywebview.api;
+    let tx = {}, step = 0, over = false, closing = false, stepTimer = null, poll = null;
+
+    function showStep() {
+      $("lfx-step").classList.remove("in"); void $("lfx-step").offsetWidth;
+      $("lfx-step").textContent = (tx.steps || [])[step] || "";
+      $("lfx-step").classList.add("in");
+      $("lfx-bar").style.width = Math.min(90, 18 + step * 30) + "%";
+    }
+    function close() {
+      if (closing) return;
+      closing = true;
+      clearInterval(poll); clearInterval(stepTimer);
+      $("launch-fx").classList.add("out");
+      setTimeout(() => api().fx_close(), 420);
+    }
+    function start(d) {
+      tx = d.texts || {};
+      document.documentElement.lang = d.lang || "ru";
+      const box = $("launch-fx");
+      box.classList.toggle("desk", !!d.desk);
+      $("lfx-art").style.backgroundImage = d.art ? `url("${d.art}")` : "";
+      $("lfx-name").textContent = d.name || "";
+      $("lfx-sub").textContent = d.sub || "";
+      $("lfx-sub").hidden = !d.sub;
+      $("lfx-close").textContent = tx.close || "OK";
+      if (d.logo) {
+        const logo = $("lfx-logo");
+        logo.onload = () => { logo.hidden = false; $("lfx-name").hidden = true; };
+        logo.src = d.logo;
+      }
+      void box.offsetWidth;
+      box.classList.add("on");
+      showStep();
+      stepTimer = setInterval(() => { if (!over && step < (tx.steps || []).length - 1) { step++; showStep(); } }, 1600);
+    }
+    function finish(ok, why) {
+      over = true;
+      clearInterval(stepTimer);
+      if (ok) {
+        $("lfx-step").textContent = tx.go || "";
+        $("lfx-bar").style.width = "100%";
+        $("launch-fx").classList.add("ok");
+        setTimeout(close, 1500);
+      } else {
+        $("launch-fx").classList.add("fail");
+        $("lfx-step").textContent = tx.fail || "";
+        $("lfx-err").textContent = why || "";
+        $("lfx-err").hidden = !why;
+        $("lfx-close").hidden = false;
+      }
+    }
+    $("lfx-close").addEventListener("click", close);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" || e.key === "Enter") close(); });
+    document.addEventListener("click", (e) => { if (over || e.target.closest(".lfx-center")) return; close(); });   // клик мимо — закрыть
+    setTimeout(close, 90000);                                                // не держать экран, если ответа нет
+    window.addEventListener("pywebviewready", async () => {
+      const st = await api().fx_state();
+      if (!st || !st.data) { close(); return; }
+      start(st.data);
+      poll = setInterval(async () => {
+        const s = await api().fx_state();
+        if (!s || s.closed) { close(); return; }
+        if (s.done !== null && s.done !== undefined && !over) finish(s.done, s.why);
+      }, 200);
+    });
+  </script>
+</body>
+</html>

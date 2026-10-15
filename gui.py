@@ -108,6 +108,9 @@ class Api:
         self._front = None                  # приложение, которое было впереди до карточки (Moonlight) — вернуть
         self._answer_lock = threading.Lock()  # ответы машине — по одному (второй сразу мог бы потеряться)
         self._steam_lock = threading.Lock()   # окно входа Steam — одно
+        self._fx = None                       # [2026-10-15] анимация запуска трансляции: {data, done, why} (окно fx)
+        self._fx_win = None
+        self._fx_lock = threading.Lock()
 
     # ---- настройки
     def settings(self):
@@ -1043,6 +1046,43 @@ class Api:
             threading.Timer(0.3, self.card_close).start()   # ждёт сама карточка, вешал её (живой случай 2026-10-09)
         return {"ok": True, "left": len(items)}
 
+    # ---- анимация запуска трансляции на весь экран (Mac): отдельное окно без рамки поверх всего, и когда окно
+    # приложения не развёрнуто. Его страница (ui/launch.html) сама крутит этапы и спрашивает fx_state; главная
+    # страница сообщает итог (fx_done). Клик, Esc или 90 с — закрыть (не держать экран, если что-то пошло не так).
+    def fx_show(self, data):
+        if sys.platform != "darwin":
+            return {"ok": False}                 # другие системы — анимация внутри окна (страница сама)
+        with self._fx_lock:
+            self._fx = {"data": data if isinstance(data, dict) else {}, "done": None, "why": "", "at": time.time()}
+            if self._fx_win:
+                return {"ok": True}
+            w = webview.create_window("VastGame", str(HERE / "ui" / "launch.html"), js_api=self, width=900, height=600,
+                                      frameless=True, easy_drag=False, on_top=True, hidden=True, background_color="#05070B")
+            self._fx_win = w
+        w.events.loaded += lambda: _cover(w, self._window)
+        w.events.closed += lambda: self._fx_closed(w)
+        return {"ok": True}
+
+    def fx_state(self):
+        return self._fx or {"done": None, "closed": True}
+
+    def fx_done(self, ok, why=""):
+        if self._fx:
+            self._fx["done"], self._fx["why"] = bool(ok), str(why or "")[:400]
+        return {"ok": True}
+
+    def fx_close(self):
+        """Закрыть окно анимации. destroy() — не изнутри вызова, которого ждёт сама страница (вешало карточку)."""
+        w = self._fx_win
+        if w:
+            threading.Timer(0.05, w.destroy).start()
+        return {"ok": True}
+
+    def _fx_closed(self, w):
+        if self._fx_win is w:
+            self._fx_win = None
+            self._fx = None
+
     def card_close(self):
         """Закрыть карточку (ответили на всё или закрыли без ответа) и вернуть впереди то, что было (Moonlight)."""
         card, self._card = self._card, None
@@ -1423,6 +1463,30 @@ def _front_windows(window):
         form.Invoke(Action(front))
     except Exception:                                  # noqa: BLE001 — не вышло: карточка просто показана
         settings.applog("карточка: не удалось вывести на передний план")
+
+
+def _cover(window, main=None):
+    """Mac: окно анимации — на весь экран того монитора, где окно приложения: выше строки меню и Dock (уровень строки
+    состояния), но ниже системных вопросов (пароль, Связка ключей), на текущем рабочем столе и в полноэкранном."""
+    import AppKit
+    from PyObjCTools import AppHelper
+
+    def go():
+        w = window.native
+        if w is None:
+            return
+        mw = main.native if main is not None else None
+        screen = (mw.screen() if mw is not None else None) or AppKit.NSScreen.mainScreen()
+        w.setLevel_(AppKit.NSStatusWindowLevel)
+        w.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                                 | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+                                 | AppKit.NSWindowCollectionBehaviorIgnoresCycle)
+        w.setHidesOnDeactivate_(False)
+        w.setFrame_display_(screen.frame(), True)
+        w.makeKeyAndOrderFront_(None)
+        w.orderFrontRegardless()
+
+    AppHelper.callAfter(go)
 
 
 def _float(window):
