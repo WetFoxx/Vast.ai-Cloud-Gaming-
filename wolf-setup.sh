@@ -4735,6 +4735,14 @@ def tick(root, pd, sdir, user=None, now=None, home=None):
     running = games_running()
     for f in Path(sdir, "van").glob("*.pfx.before") if Path(sdir, "van").is_dir() else []:   # [v5.6] установки «в игру»
         install_done(root, sdir, f.name.split(".")[0], user, running, home)
+    dlt = Path(sdir, "dll.tick")                              # [2026-10-15] моды-подмены библиотек — раз в минуту
+    try:
+        last = dlt.stat().st_mtime
+    except OSError:
+        last = 0
+    if now - last >= 60:
+        dlt.touch()
+        dll_overrides(root, skip=set(running))
     auto = _jload(Path(sdir, "progs.auto"), {})
     stf = Path(sdir, "progs.state")
     state = {k: v for k, v in _jload(stf, {}).items() if k in running.values()}
@@ -4897,7 +4905,82 @@ def pfx_tweaks(root):
         os.replace(tmp, reg)
         done += 1
     print(f"скрытые папки в окнах выбора: включено в {done}")
+    dll_overrides(root)
     return 0
+
+
+# [2026-10-15] Моды-«подмены» библиотек (ReShade — dxgi/d3d9/opengl32, ASI Loader — dinput8/winmm/version/dsound, BepInEx —
+# winhttp, SpecialK, плагины в папке игры): на Windows библиотека из папки программы важнее системной, а в Proton для этих
+# имён по умолчанию берётся встроенная Wine — мод молча не работает. Как на Windows: для .exe из той же папки — «сначала
+# своя, потом встроенная» (native,builtin) в реестре «диска C:» игры: Software\Wine\AppDefaults\ИГРА.exe\DllOverrides.
+# Без файла мода «своей» нет — Wine берёт встроенную, так что лишняя запись ничего не ломает. Пишем, пока игра закрыта
+PROXY_DLLS = {"dinput8", "dinput", "winmm", "version", "xinput1_3", "xinput1_4", "xinput9_1_0", "dsound", "d3d8", "d3d9",
+              "d3d10", "d3d10_1", "d3d11", "dxgi", "ddraw", "opengl32", "winhttp", "wininet", "msacm32", "msvfw32",
+              "dbghelp", "xlive", "binkw32", "d3dcompiler_47"}
+
+
+def _proxies(gd, depth=6):
+    """{exe: {dll, …}}: .exe и «подменные» библиотеки в одной папке игры."""
+    out = {}
+    base = len(Path(gd).parts)
+    for d, dirs, files in os.walk(gd):
+        if len(Path(d).parts) - base >= depth:
+            dirs[:] = []
+        low = {f.lower(): f for f in files}
+        dlls = {n[:-4] for n in low if n.endswith(".dll") and n[:-4] in PROXY_DLLS}
+        if not dlls:
+            continue
+        for n, f in low.items():
+            if n.endswith(".exe") and not ALWAYS_SKIP.search(n):
+                out.setdefault(f, set()).update(dlls)
+    return out
+
+
+def _reg_overrides(text, want):
+    """user.reg с записями native,builtin для {exe: {dll}} — (текст, сколько добавлено)."""
+    added = 0
+    for exe, dlls in sorted(want.items()):
+        key = "Software\\\\Wine\\\\AppDefaults\\\\" + exe.replace("\\", "") + "\\\\DllOverrides"
+        m = re.search(r"^\[" + re.escape(key) + r"\][^\n]*\n", text, re.M | re.I)
+        if not m:
+            text = text.rstrip("\n") + f"\n\n[{key}] {int(time.time())}\n"
+            m = re.search(r"^\[" + re.escape(key) + r"\][^\n]*\n", text, re.M | re.I)
+        end = text.find("\n\n", m.end())
+        end = len(text) if end < 0 else end
+        block = text[m.end():end]
+        for dll in sorted(dlls):
+            if re.search(r'^"' + re.escape(dll) + r'"=', block, re.M | re.I):
+                continue
+            block += f'"{dll}"="native,builtin"\n'
+            added += 1
+        text = text[:m.end()] + block + text[end:]
+    return text, added
+
+
+def dll_overrides(root, skip=()):
+    """Записи «сначала своя библиотека» для модов-подмен во всех играх Steam с «диском C:» (кроме запущенных)."""
+    total = 0
+    for acf in sorted(Path(root, "steamapps").glob("appmanifest_*.acf")):
+        appid = acf.name[12:-4]
+        reg = Path(root, "steamapps", "compatdata", appid, "pfx", "user.reg")
+        gd = _game_dir(Path(root), appid)
+        if appid in skip or not gd or not reg.is_file():
+            continue
+        want = _proxies(gd)
+        if not want:
+            continue
+        try:
+            text = reg.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            continue
+        new, added = _reg_overrides(text, want)
+        if added:
+            tmp = reg.with_suffix(".reg.tmp")
+            tmp.write_text(new, encoding="utf-8", errors="surrogateescape")
+            os.replace(tmp, reg)
+            total += added
+            print(f"моды-подмены библиотек: {appid} — " + ", ".join(f"{e}: {'/'.join(sorted(d))}" for e, d in want.items()))
+    return total
 
 
 def launch_choice(home, appid):

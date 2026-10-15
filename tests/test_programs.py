@@ -336,3 +336,39 @@ prog_scan
     def test_wiring(self):
         self.assertIn("scan_games; prog_scan;", fn("watch_games"))
         self.assertIn("prog_scan", fn("bk"))
+
+
+class TestDllOverrides(unittest.TestCase):
+    """[2026-10-15] Моды-«подмены» библиотек (ReShade, ASI Loader, BepInEx): в реестре «диска C:» игры — native,builtin
+    для .exe из той же папки (как на Windows: библиотека из папки программы важнее системной)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(dir=TMP))
+        sa = self.root / "steamapps"
+        (sa / "common/Game/Bin").mkdir(parents=True)
+        (sa / f"appmanifest_{APP}.acf").write_text(f'"AppState"\n{{\n\t"appid"\t\t"{APP}"\n\t"installdir"\t\t"Game"\n}}\n')
+        for rel in ("Game.exe", "dinput8.dll", "unins000.exe", "Bin/Game-Shipping.exe", "Bin/dxgi.dll", "Bin/Other.dll"):
+            (sa / "common/Game" / rel).write_text("x")
+        self.reg = sa / f"compatdata/{APP}/pfx/user.reg"
+        self.reg.parent.mkdir(parents=True)
+        self.reg.write_text('WINE REGISTRY Version 2\n;; All keys relative to \\\\User\\\\S-1-5-21\n\n'
+                            '[Software\\\\Wine] 1700000000\n"ShowDotFiles"="Y"\n')
+
+    def test_native_first_for_mod_dlls(self):
+        self.assertEqual(ws.dll_overrides(self.root), 2)
+        text = self.reg.read_text()
+        self.assertIn('[Software\\\\Wine\\\\AppDefaults\\\\Game.exe\\\\DllOverrides]', text)
+        self.assertIn('[Software\\\\Wine\\\\AppDefaults\\\\Game-Shipping.exe\\\\DllOverrides]', text)
+        game = text.split("Game.exe\\\\DllOverrides]")[1].split("\n\n")[0]
+        self.assertIn('"dinput8"="native,builtin"', game)
+        self.assertNotIn("dxgi", game)                                    # dxgi — в другой папке, у другого .exe
+        self.assertNotIn("unins000.exe", text)                            # служебные .exe — мимо
+        self.assertNotIn("other", text.lower())                           # своя библиотека игры — не «подмена»
+        self.assertIn('"ShowDotFiles"="Y"', text)                         # прежнее содержимое цело
+        self.assertEqual(ws.dll_overrides(self.root), 0)                  # второй раз — ничего не дописывает
+        self.assertEqual(self.reg.read_text(), text)
+
+    def test_running_game_untouched(self):
+        before = self.reg.read_text()
+        self.assertEqual(ws.dll_overrides(self.root, skip={APP}), 0)     # Wine этой игры работает — реестр не трогаем
+        self.assertEqual(self.reg.read_text(), before)
