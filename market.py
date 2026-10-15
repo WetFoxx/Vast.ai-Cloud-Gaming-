@@ -63,6 +63,7 @@ MIN_RAM_GB = 15       # ГБ, поле Vast cpu_ram (МБ)
 
 # Хосты, которые не смогли запустить машину: {machine_id: {"reason": ..., "date": ...}}. Их НЕ прячем —
 # сбой бывает временным, — а помечаем в списке; пометка снимается, когда машина на этом хосте запустилась.
+# Исключение — постоянные сбои (PERMANENT, ниже): такие хосты не показываются.
 BAD_HOSTS = config_dir() / "bad_hosts.json"
 STARTS = config_dir() / "starts.json"     # за сколько секунд хосты доходили до running: {machine_id: [с, …]}
 
@@ -72,6 +73,24 @@ def bad_hosts():
         return json.loads(BAD_HOSTS.read_text())
     except (OSError, ValueError):
         return {}
+
+
+# [2026-10-15] Сбои, которые хост не исправит сам (повторялись на тех же хостах: 68380 Вьетнам, 152536 Вашингтон):
+# экраном видеокарты владеет хост («Failed to acquire modesetting permission» → Xorg «no screens found») и у экрана
+# нет выхода, который видит захват Sunshine («нет выхода на монитор»). Такие хосты не показываем HIDE_DAYS дней —
+# потом снова с пометкой (хозяин мог что-то поменять). Остальные сбои бывают временными — только пометка
+PERMANENT = ("no screens found", "нет выхода на монитор")
+HIDE_DAYS = 30
+
+
+def hidden(b):
+    """Пометка хоста (из bad_hosts) — постоянный сбой не старше HIDE_DAYS дней: не показывать."""
+    if not any(m in (b.get("reason") or "") for m in PERMANENT):
+        return False
+    try:
+        return (datetime.date.today() - datetime.date.fromisoformat(b.get("date") or "")).days < HIDE_DAYS
+    except ValueError:
+        return True
 
 
 def mark_bad(machine_id, reason, key=None, **params):
@@ -190,6 +209,8 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         if (o.get("cpu_ram") or MIN_RAM_GB * 1024) < MIN_RAM_GB * 1024:
             continue
         b = bad.get(str(o.get("machine_id"))) or {}
+        if hidden(b):
+            continue
         o["_failed"] = b.get("reason")                                     # раньше не запустилась
         o["_failed_why"] = {"key": b["key"], "params": b.get("params") or {}} if b.get("key") else None
         o["_start_min"] = start_minutes(o.get("machine_id"), starts, docker)           # обычно запускается за N мин

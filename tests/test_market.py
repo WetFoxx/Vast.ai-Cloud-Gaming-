@@ -53,6 +53,23 @@ class TestLastMachine(unittest.TestCase):
         self.assertEqual(len(rows), 1)                                   # не спрятан
         self.assertEqual(rows[0]["_failed"], "exited")                   # а помечен
 
+    def test_permanent_failure_hidden_for_a_while(self):
+        # [2026-10-15] экраном владеет хост (68380, дважды) / нет выхода для захвата (152536, дважды) — не показывать;
+        # через HIDE_DAYS дней — снова с пометкой; прочие сбои — только пометка
+        import datetime
+        today = datetime.date.today()
+        old = (today - datetime.timedelta(days=market.HIDE_DAYS)).isoformat()
+        bad = {"1": {"reason": "На этой машине не работает видео: экран не запускается: Screen(s) found, but none "
+                               "have a usable configuration. no screens found", "date": today.isoformat()},
+               "2": {"reason": "видео: нет выхода на монитор: хост не дал видеокарте экран", "date": today.isoformat()},
+               "3": {"reason": "нет выхода на монитор", "date": old},
+               "4": {"reason": "NVENC не работает: unsupported device", "date": today.isoformat()}}
+        offers = [dict(OFFER, id=i, machine_id=i) for i in (1, 2, 3, 4, 5)]
+        with mock.patch.object(market, "bad_hosts", lambda: bad), self.fake_call(offers):
+            rows = {o["id"]: o for o in market.search(100)}
+        self.assertEqual(sorted(rows), [3, 4, 5])
+        self.assertTrue(rows[3]["_failed"] and rows[4]["_failed"])       # срок вышел / временный сбой — с пометкой
+
     def test_slow_disk_hidden(self):
         slow = dict(OFFER, id=1, disk_bw=69.2)                             # как у хоста в Португалии
         fast = dict(OFFER, id=2, disk_bw=2743.0)
