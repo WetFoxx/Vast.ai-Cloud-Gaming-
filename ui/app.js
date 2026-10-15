@@ -1050,8 +1050,13 @@ function progsGame(games) {
     || (ids.includes(progsPick) ? progsPick : null) || ids[0];
 }
 
+const launchDraft = {};                               // несохранённый выбор «Запуск игры»: {appid: {id, args}}
 function renderProgs(progs) {
   const box = $("progs-box");
+  // [2026-10-15] Блок перерисовывается раз в 3 с — пока человек выбирает в списке или пишет параметры, не трогать
+  // (раньше выбор программы сам возвращался на «Как обычно», не дождавшись «Сохранить»)
+  const act = document.activeElement;
+  if (act && box.contains(act) && ["SELECT", "INPUT"].includes(act.tagName) && act.type !== "checkbox") return;
   const all = Object.entries(progs || {});            // игра на машине — блок виден всегда (пустой — с подсказкой)
   box.hidden = !all.length;
   box.innerHTML = "";
@@ -1126,6 +1131,7 @@ function progWhere(p) {
 function launchRow(appid, g, progs) {
   const wrap = el("div", { className: "pg-launch" });
   const cur = (g.launch && g.launch.id) || "-";
+  const draft = launchDraft[appid];
   const sel = el("select", {});
   sel.appendChild(el("option", { value: "-" }, t("progs.launch.normal")));
   const choices = (g.progs || []).filter((p) => !p.setup);
@@ -1133,20 +1139,26 @@ function launchRow(appid, g, progs) {
   const short = (p) => p.where === "pfx" ? t("progs.where.pfx_short") : p.where === "game" ? t("progs.where.game_short")
     : t("progs.where.folder", { folder: p.where });
   for (const p of choices) sel.appendChild(el("option", { value: p.id }, p.where ? `${p.name} (${short(p)})` : p.name));
-  sel.value = cur;
-  const args = el("input", { type: "text", placeholder: t("progs.launch.args"), value: (g.launch && g.launch.args) || "" });
+  sel.value = draft ? draft.id : cur;
+  const args = el("input", { type: "text", placeholder: t("progs.launch.args"),
+                             value: draft ? draft.args : (g.launch && g.launch.args) || "" });
   const save = button(t("progs.launch.save"), async () => {
     save.disabled = true;
     progNotes[appid + ":launch"] = { at: Date.now() + 60000, text: t("progs.launch.saving") };
     renderProgs(progs);
     const id = sel.value, a = id === "-" ? "" : args.value.trim();
     const r = DEMO ? { result: "ok" } : await api().prog_launch(appid, id, a);
-    if (!r.error) g.launch = id === "-" ? null : { id, args: a };
+    if (!r.error) { g.launch = id === "-" ? null : { id, args: a }; delete launchDraft[appid]; }
     progNotes[appid + ":launch"] = { at: Date.now(), text: r.error ? errText(r.error) : t("progs.launch.result." + (r.result || "failed")) };
     renderProgs(progs);
   }, true);
   save.classList.add("small");
-  const sync = () => { args.hidden = sel.value === "-"; save.disabled = sel.value === cur && (args.value.trim() === ((g.launch && g.launch.args) || "")); };
+  const sync = () => {
+    args.hidden = sel.value === "-";
+    save.disabled = sel.value === cur && (args.value.trim() === ((g.launch && g.launch.args) || ""));
+    if (save.disabled) delete launchDraft[appid];
+    else launchDraft[appid] = { id: sel.value, args: args.value };
+  };
   sel.addEventListener("change", sync);
   args.addEventListener("input", sync);
   sync();
