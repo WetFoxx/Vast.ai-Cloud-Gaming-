@@ -1325,6 +1325,18 @@ function setupActions(st, li) {
   const id = st.id, key = st.key;
   if (key.endsWith(".needs_vast")) return;
 
+  if (id === "derp") {
+    if (st.state !== "warn") return;
+    const how = el("div", { className: "derp" });
+    how.hidden = true;
+    box.appendChild(button(t("setup.act.derp_fix"), () => {
+      how.hidden = !how.hidden;
+      if (!how.hidden) fillDerp(how, st.params.names, st.params.block, st.params.url);
+    }, true));
+    li.querySelector(".body").appendChild(how);
+    return;
+  }
+
   if (id === "autostart" || id === "open_at_login") {
     const name = id === "autostart" ? "resume" : "app";
     const on = id === "autostart" ? st.state === "ok" : key === "setup.open_at_login.on";
@@ -2113,6 +2125,7 @@ function startProgress(kind = "play") {
   renderBanner(kind);
   $("progress-note").textContent = t(kind === "stop" ? "progress.background_stop" : "progress.background");
   $("tailscale-box").hidden = true;
+  $("derp-box").hidden = true;
   $("progress-alert").hidden = true;
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
@@ -2211,6 +2224,27 @@ const RACE_KEYS = ["core.race_start", "core.race_added", "core.race_slow", "core
                    "core.race_rent_failed", "core.fail_timeout", "core.fail_host", "core.fail_state"];
 function eventText(ev) { return ev.key ? t(ev.key, ev.params || {}) : ev.text; }
 
+// Интернет блокирует серверы-посредники Tailscale: готовый блок для настроек сети, «Копировать» и инструкция
+function fillDerp(box, names, block, url) {
+  box.innerHTML = "";
+  box.classList.add("derp");
+  box.append(el("div", { className: "title" }, t("derp.title")), el("div", { className: "sub" }, t("derp.text", { names })),
+             el("div", { className: "sub steps" }, t("derp.steps")));
+  const pre = el("pre", {}, block);
+  const copy = button(t("btn.copy"), async () => {
+    try { await navigator.clipboard.writeText(block); } catch (e) {
+      const r = document.createRange(); r.selectNodeContents(pre);
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand("copy");
+    }
+    copy.textContent = t("btn.copied");
+    setTimeout(() => (copy.textContent = t("btn.copy")), 1500);
+  }, true);
+  const row = el("div", { className: "row" });
+  row.append(copy, button(t("derp.open"), () => openUrl(url)));
+  box.append(pre, row, el("div", { className: "sub" }, t("derp.after")));
+  return box;
+}
+
 async function pollProgress() {
   // Опросы не накладываются: пока ждём ответа Python или человека (вопрос), новый не начинаем
   if (prog.polling) return;
@@ -2243,6 +2277,11 @@ async function pollOnce() {
       $("tailscale-box").hidden = false;
     }
     if (ev.key === "core.tailscale_online") $("tailscale-box").hidden = true;
+    if (ev.key === "core.ts_blocked") {
+      const q = ev.params || {};
+      fillDerp($("derp-box"), q.names, q.block, q.url).hidden = false;
+    }
+    if (ev.key === "core.tailscale_online") $("derp-box").hidden = true;
     // Забег машин: какие запущены, какая первой дошла, какие убраны — на видном месте, а не только
     // в «Подробностях»
     if (RACE_KEYS.includes(ev.key)) {
@@ -2279,6 +2318,7 @@ async function pollOnce() {
     // К списку машин: выбранную заняли, или она не запустилась, а замены «не хуже» нет — выбирает человек
     $("progress-offers").hidden = !(p.error && TO_LIST.includes(p.error.key));
     $("tailscale-box").hidden = true;
+    if (!p.error) $("derp-box").hidden = true;          // запуск не удался — инструкция ещё нужна
     if (p.result) (prog.kind === "stop" ? renderStopResult : renderResult)(p.result);
   }
 }

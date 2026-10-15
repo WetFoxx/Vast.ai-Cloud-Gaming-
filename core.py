@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 
+import derpcheck
 import drive
 import history
 import latency
@@ -511,6 +512,7 @@ def wait_ready(iid, t0, o, ui, docker=False):
     ui.stage("tailscale", "Машина запущена. Жду узел vastai-gaming в Tailscale (обычно 5–7 минут).")
     started = time.time()
     warned, approve_url, reach_since, mac_warned = False, None, None, False
+    derp_seen = None
     mlog = _MachineLog(iid)
     while True:
         try:
@@ -543,6 +545,19 @@ def wait_ready(iid, t0, o, ui, docker=False):
             _, ip, dns = node
             break
         reach_since = (reach_since or time.time()) if node else None
+        if mlog.ts_ok and mlog.ts_ok != derp_seen:
+            # Машина выбрала посредника — доступен ли он с этого компьютера (2026-10-15: из России закрыты Токио,
+            # Нюрнберг, Хельсинки — корейская машина «в сети», но не отвечает). Закрыт — сразу подсказать, как
+            # убрать такие города в настройках сети Tailscale; машину не менять: исправят — она переподключится
+            derp_seen = mlog.ts_ok
+            bad = derpcheck.blocked() or []
+            if any(b["code"] == mlog.ts_ok for b in bad):
+                mac_warned = True
+                names = ", ".join(b["name"] for b in bad)
+                ui.say(f"Твой интернет блокирует серверы Tailscale ({names}), а машина выбрала один из них. "
+                       f"Убери их в настройках сети Tailscale: {derpcheck.POLICY_URL}", "warn", key="core.ts_blocked",
+                       names=names, derp=mlog.ts_ok, block=derpcheck.policy_block([b["id"] for b in bad]),
+                       url=derpcheck.POLICY_URL)
         if reach_since and time.time() - reach_since > UNREACH_MIN * 60:
             mlog.poll(ui, force=True)
             if mlog.ts_ok:

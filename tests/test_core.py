@@ -221,6 +221,31 @@ class TestWaitReady(Base):
         self.assertEqual(ui.keys.count("core.mac_cant_reach"), 1)        # один раз, не на каждом круге
         self.assertNotIn(str(OFFER["machine_id"]), core.market.bad_hosts())
 
+    def test_machine_relay_blocked_here_shows_fix(self):
+        # [2026-10-15] машина выбрала посредника, который с этого интернета закрыт (Токио из России) — сразу дать
+        # блок для настроек сети Tailscale; машину не менять, «выключи VPN» не говорить
+        self.running_machine()
+        self.patch(core, "ts_node", lambda: (True, "100.1.1.1", "h"))
+        pages = iter([None, None, None, {"boot": (T0 + 60, "ok", "готово")}])
+        self.patch(core, "wolf_status", lambda ip: next(pages, {"boot": (T0 + 60, "ok", "готово")}))
+        self.patch(core, "UNREACH_MIN", -1)
+        checks = []
+        self.patch(core.derpcheck, "blocked", lambda: checks.append(1) or [
+            {"id": 7, "code": "tok", "name": "Tokyo"}, {"id": 28, "code": "hel", "name": "Helsinki"}])
+
+        class Log:
+            def __init__(self, iid):
+                self.broken, self.ts_ok = None, "tok"
+
+            def poll(self, ui, force=False):
+                pass
+        self.patch(core, "_MachineLog", Log)
+        ui = FakeUI()
+        self.assertEqual(core.wait_ready(42, T0, OFFER, ui)["boot"][1], "ok")
+        self.assertEqual(ui.keys.count("core.ts_blocked"), 1)
+        self.assertNotIn("core.mac_cant_reach", ui.keys)
+        self.assertEqual((self.deleted, len(checks)), ([], 1))           # проверка — один раз на посредника
+
     def test_node_gone_resets_silence_timer(self):
         # узел пропал из сети и вернулся — отсчёт «не отвечает» заново (это не та же тишина)
         self.running_machine()

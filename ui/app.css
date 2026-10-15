@@ -271,6 +271,12 @@ button.link:hover:not(:disabled) { transform: none; box-shadow: none; text-decor
 button.danger { color: var(--error); }
 .card.attention { background: var(--warn-bg); display: flex; flex-direction: column; gap: 8px; }
 .card.attention button { align-self: flex-start; }
+/* Серверы Tailscale блокируются — блок для настроек сети и инструкция */
+.derp .steps { white-space: pre-line; }
+.derp pre { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--card, rgba(0,0,0,.25));
+            font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; tab-size: 4;
+            user-select: text; -webkit-user-select: text; }
+.derp .row { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ---- Доступна новая версия */
 .card.update { display: flex; align-items: center; justify-content: space-between; gap: 12px;

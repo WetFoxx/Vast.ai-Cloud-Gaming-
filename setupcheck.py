@@ -17,6 +17,7 @@ import keystore
 import autostart
 import drive
 import moonlight
+import derpcheck
 import paths
 import setup   # функции мастера: при import он НЕ запускается (защищён __main__)
 import sshkey
@@ -191,6 +192,17 @@ def autostart_steps():
     return [resume, app]
 
 
+def derp():
+    """Серверы-посредники Tailscale, которые не открываются с этого интернета (derpcheck); None — не проверить."""
+    bad = derpcheck.blocked()
+    if bad is None:
+        return None
+    if not bad:
+        return _step("derp", "ok", "setup.derp.ok")
+    return _step("derp", "warn", "setup.derp.blocked", names=", ".join(b["name"] for b in bad),
+                 block=derpcheck.policy_block([b["id"] for b in bad]), url=derpcheck.POLICY_URL)
+
+
 def status():
     """Все шаги по порядку и общий итог: ready — можно арендовать (нет ни одного missing).
     [0.4.5] Проверки — одновременно (по очереди было ~10 с: Drive 4.5, шаблон Vast 2–7, остальное по ~1 с). Ключ
@@ -201,9 +213,11 @@ def status():
             fs = ex.submit(_vast_secrets)
             return [ex.submit(ssh_key), ex.submit(google, fs.result),
                     ex.submit(lambda: tailscale_key(fs.result())), ex.submit(template)]
-        ft, fa, fv = ex.submit(tools), ex.submit(autostart_steps), ex.submit(vast_key)
+        ft, fa, fv, fd = ex.submit(tools), ex.submit(autostart_steps), ex.submit(vast_key), ex.submit(derp)
         rest = account() if keystore.get("VAST_API_KEY") else None
         steps = ft.result()
+        if fd.result():
+            steps.append(fd.result())
         v = fv.result()
         steps.append(v)
         if v["state"] == "missing":
