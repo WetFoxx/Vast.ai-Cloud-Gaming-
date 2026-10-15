@@ -229,11 +229,13 @@
     if (padMode) return;
     padMode = true;
     document.body.classList.add("pad-mode");
+    try { window.pywebview && window.pywebview.api.hide_cursor(); } catch (e) { /* в браузере (демо) — только стилем */ }
     if (cur && visible(cur)) cur.classList.add("pad-focus"); else cur = null;
   }
   // Мышь — обычный режим: рамку убрать, при наведении на кнопку — тихий звук
-  addEventListener("mousemove", () => {
-    if (!padMode) return;
+  addEventListener("mousemove", (ev) => {
+    // прокрутка под неподвижной мышью тоже даёт mousemove — без сдвига; его не считаем
+    if (!padMode || (!ev.movementX && !ev.movementY)) return;
     padMode = false;
     document.body.classList.remove("pad-mode");
     if (cur) cur.classList.remove("pad-focus");

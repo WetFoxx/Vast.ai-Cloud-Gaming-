@@ -117,6 +117,19 @@ class Api:
         return {"language": settings.get("language"), "version": updater.VERSION, "update": updater.after_start(),
                 "platform": sys.platform, "sounds": settings.get("ui_sounds", True) is not False}
 
+    def hide_cursor(self):
+        """[2026-10-15] Управляют геймпадом — спрятать указатель мыши, пока мышь или тачпад не сдвинут (macOS сама
+        покажет его при движении). На других системах — ничего (страница прячет курсор стилем)."""
+        if sys.platform != "darwin":
+            return {"ok": False}
+        try:
+            import AppKit
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(lambda: AppKit.NSCursor.setHiddenUntilMouseMoves_(True))   # AppKit — из главного потока
+            return {"ok": True}
+        except Exception:     # noqa: BLE001 — курсор не главное, окно работает и без этого
+            return {"ok": False}
+
     def set_sounds(self, on):
         """[2026-10-15] Звуки окна (наведение, нажатие, запуск трансляции) — вкл/выкл."""
         settings.set("ui_sounds", bool(on))

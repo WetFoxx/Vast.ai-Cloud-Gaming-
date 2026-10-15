@@ -229,3 +229,5 @@ body[data-screen="main"] #top-machine { display: none !important; }
 .hero-art { transition: opacity .2s ease; }
 .hero-art.swap { opacity: .25; }
 .hero-name { transition: opacity .2s ease; }
+/* Управляют геймпадом — без указателя мыши (на Mac ещё и системно, до движения мыши: Api.hide_cursor) */
+body.pad-mode, body.pad-mode * { cursor: none !important; }
