@@ -66,11 +66,9 @@
       <div class="links" id="links" hidden>
         <div class="ml-row">
           <button class="primary" id="ml-start" data-i18n="moonlight.start"></button>
-          <select id="ml-app" aria-label="Sunshine app" data-i18n-title="moonlight.app"></select>
         </div>
         <div class="sub" id="ml-note" hidden></div>
         <div class="row-link" id="params-row">
-          <span id="stream-summary"></span>
           <button class="link" id="params-toggle" data-i18n="params.open"></button>
         </div>
         <!-- Параметры: разрешение и битрейт; ручное подключение (обычно не нужно — связывает VastGame сам) -->
@@ -78,6 +76,7 @@
           <div class="stream-set" id="stream-set" hidden>
             <label><span class="label" data-i18n="stream.resolution"></span><select id="stream-res"></select></label>
             <label><span class="label" data-i18n="stream.bitrate"></span><select id="stream-bitrate"></select></label>
+            <label><span class="label" data-i18n="stream.app"></span><select id="ml-app" data-i18n-title="moonlight.app"></select></label>
           </div>
           <div class="sub" id="stream-hint" hidden></div>
           <div class="label params-cap" data-i18n="params.manual"></div>
@@ -99,6 +98,8 @@
             </div>
             <button class="small" id="show-login" data-i18n="params.login.show"></button>
           </div>
+          <!-- [2026-10-15] Редкое и опасное — здесь, а не на виду (без адресов машины кнопка остаётся под карточкой) -->
+          <div class="params-danger" id="params-danger"></div>
         </div>
       </div>
       <div class="live" id="live" hidden>
@@ -134,7 +135,6 @@
       <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
       <button class="tabs-refresh" id="offers-refresh" data-i18n="offers.refresh"></button>
     </div>
-    <div class="note" id="offers-docker-note" data-i18n="offers.mode.docker_note" hidden></div>
     <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->
     <section class="card attention replace-card" id="offers-current" hidden></section>
     <!-- Фильтры — одной строкой; включённый подсвечен. Диск, страны, видеокарты — панелью под строкой -->
@@ -160,7 +160,6 @@
       <div class="countries-list" id="f-gpus-list"></div>
     </section>
     <div class="sub" id="offers-summary" data-i18n="offers.loading"></div>
-    <div class="note" id="offers-last" hidden></div>
     <section class="card table-card">
       <table id="offers-table">
         <thead>

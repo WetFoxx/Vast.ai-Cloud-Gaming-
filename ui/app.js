@@ -34,7 +34,49 @@ function duration(sec) {
   return t("unit.min_sec", { m, s });
 }
 
+// [2026-10-15] Своя подсказка вместо встроенной (атрибут title): окно приложения на Mac (WebKit в pywebview) встроенные
+// подсказки не показывало — пояснения у «ⓘ», пинга, надёжности, программ были не видны. Любой title на странице
+// (и тот, что код ставит позже) переезжает в data-tip; при наведении — облачко под элементом через 0.3 с.
+const tipBox = el("div", { className: "tip", role: "tooltip" });
+let tipTimer = null, tipFor = null;
+function tipsFrom(root) {
+  if (root.nodeType !== 1) return;
+  const all = root.hasAttribute("title") ? [root] : [];
+  all.push(...root.querySelectorAll("[title]"));
+  for (const e of all) {
+    const v = e.getAttribute("title");
+    e.removeAttribute("title");
+    if (v) e.dataset.tip = v; else delete e.dataset.tip;
+  }
+}
+new MutationObserver((list) => {
+  for (const m of list) {
+    if (m.type === "attributes") tipsFrom(m.target);
+    else m.addedNodes.forEach(tipsFrom);
+  }
+}).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["title"] });
+tipsFrom(document.documentElement);                  // то, что уже на странице (тексты из i18n.js)
+function hideTip() { clearTimeout(tipTimer); tipFor = null; tipBox.classList.remove("on"); }
+document.addEventListener("mouseover", (ev) => {
+  const e = ev.target.closest && ev.target.closest("[data-tip]");
+  if (e === tipFor) return;
+  hideTip();
+  if (!e || !e.dataset.tip) return;
+  tipFor = e;
+  tipTimer = setTimeout(() => {
+    if (!tipBox.isConnected) document.body.appendChild(tipBox);
+    tipBox.textContent = e.dataset.tip;
+    tipBox.classList.add("on");
+    const r = e.getBoundingClientRect(), b = tipBox.getBoundingClientRect();
+    const below = r.bottom + 8 + b.height < innerHeight;
+    tipBox.style.left = Math.max(8, Math.min(r.left, innerWidth - b.width - 8)) + "px";
+    tipBox.style.top = (below ? r.bottom + 8 : Math.max(8, r.top - 8 - b.height)) + "px";
+  }, 300);
+});
+for (const name of ["scroll", "mousedown", "keydown"]) document.addEventListener(name, hideTip, true);
+
 function show(screen) {
+  hideTip();
   for (const s of ["main", "offers", "progress", "games", "setup", "history", "wizard", "library"]) $("screen-" + s).hidden = s !== screen;
   for (const s of ["library", "games", "history", "setup"]) $("open-" + s).classList.toggle("active", s === screen);
 }
@@ -144,6 +186,9 @@ function render(data) {
   $("foot").hidden = !m;
   $("stop").disabled = !m || !["ready", "syncing", "error"].includes(st.state) || !!data.busy;
   $("emergency").hidden = !m || !!data.busy;
+  // [2026-10-15] «Удалить без выгрузки» — в «Параметрах трансляции», пока они есть; машина без адресов — под карточкой
+  const dangerIn = $("links").hidden ? $("foot") : $("params-danger");
+  if ($("emergency").parentElement !== dangerIn) dangerIn.prepend($("emergency"));
 }
 
 // ---- Живой ход на главном: архивы в работе (с процентами и скоростью) и вопросы машины. Главный экран обновляется
@@ -301,20 +346,11 @@ async function loadStreamSettings() {
   showStreamHint();
 }
 let streamOptions = [];
-// «Трансляция: 2560 × 1600 · авто» — выбор одной строкой; сами списки — в «Параметрах»
-function streamSummary() {
-  const o = streamOptions.find((x) => x.value === $("stream-res").value);
-  const res = !o ? "—" : o.value === "moonlight" ? t("stream.res.moonlight") : `${o.w} × ${o.h}`;
-  const br = Number($("stream-bitrate").value);
-  $("stream-summary").innerHTML = "";
-  $("stream-summary").append(t("stream.summary") + " ", el("b", {}, res + " · " + (br ? t("stream.bitrate.mbps", { n: br }) : t("stream.bitrate.auto.short"))));
-}
 function showStreamHint() {
   const native = $("stream-res").value === "native";
   $("stream-res").classList.toggle("native", native);
   $("stream-hint").hidden = false;
   $("stream-hint").textContent = t(native ? "stream.hint.native" : "stream.hint.other");
-  streamSummary();
 }
 for (const id of ["stream-res", "stream-bitrate"]) {
   $(id).addEventListener("change", () => {
@@ -415,6 +451,7 @@ async function openOffers(disk, docker) {
   $("rent").disabled = true;
   $("offers-refresh").disabled = true;
   $("offers-summary").textContent = t("offers.loading");
+  $("offers-summary").hidden = false;
   $("offers-table").querySelector("tbody").innerHTML = "";
   showError("offers-error", null);
   const my = ++offersReq;
@@ -461,8 +498,9 @@ function showTabs() {
   $("offers-table").classList.toggle("kvm", !offersDocker);       // у KVM трафик Vast не списывает — колонки нет
   $("tab-kvm").classList.toggle("active", !offersDocker);
   $("tab-docker").classList.toggle("active", !!offersDocker);
-  $("offers-docker-note").textContent = t(offersDocker ? "offers.mode.docker_note" : "offers.mode.kvm_note");
-  $("offers-docker-note").hidden = false;
+  // [2026-10-15] описание режима — подсказкой на вкладке (было абзацем под вкладками)
+  $("tab-docker").title = t("offers.mode.docker_note");
+  $("tab-kvm").title = t("offers.mode.kvm_note");
   $("f-traffic").hidden = !offersDocker;
 }
 // Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
@@ -599,7 +637,7 @@ function renderFilters(d) {
   for (const th of document.querySelectorAll("#offers-table th.sortable")) {
     const on = th.dataset.sort === (filters.sort || "price");
     th.classList.toggle("sorted", on);
-    th.title = t("sort.hint");
+    th.title = t("sort.hint") + (th.dataset.sort === "ping" ? "\n" + t("offers.latency") : "");
     th.querySelector(".arrow").textContent = on ? (filters.dir === "desc" ? "▼" : "▲") : "";
   }
   const names = filters.countries.map(countryName);
@@ -671,19 +709,13 @@ function renderOffers() {
   if (!SORT_VALUE[filters.sort]) filters.sort = "price";
   renderFilters(d);
   const list = offerList(d);
-  // «Подходящих» — с выбранной надёжностью (машины ниже порога приходят, но без фильтра не показываются)
-  $("offers-summary").textContent = t("offers.summary", { count: d.offers.filter((o) => relOk(o, filters.rel)).length,
-                                                        rel: filters.rel || 97, disk: d.disk })
-    + (filtersActive() ? " · " + t("offers.filtered", { shown: list.length }) : "") + " · " + t("offers.latency.short");
-  $("offers-summary").title = t("offers.latency");
+  // [2026-10-15] Сводка «Подходящих: 34 · …» и абзац о последней машине убраны (перегружали экран): строка видна только
+  // во время загрузки и проверки перед арендой; «≈» — подсказкой у «Пинг», последняя машина — подсказкой у метки
+  $("offers-summary").hidden = true;
   $("disk-value").textContent = t("disk.value", { gb: d.disk });
   const L = d.last;
-  $("offers-last").hidden = !L;
-  if (L) {
-    const when = L.start ? new Date(L.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—";
-    $("offers-last").textContent = t(L.offer ? "offers.last.free" : "offers.last.busy",
-      { machine: `${L.gpu || "?"} · ${L.country || "?"}`, date: when });
-  }
+  const lastTip = L && t("offers.last.hint", { date: L.start
+    ? new Date(L.start * 1000).toLocaleDateString(LANG, { day: "numeric", month: "short" }) : "—" });
   const body = $("offers-table").querySelector("tbody");
   body.innerHTML = "";
   showError("offers-error", null);
@@ -715,7 +747,7 @@ function renderOffers() {
       c[1].appendChild(tag);
     };
     if (o.gpus === 2) addTag("tag", "×2", t("offers.pair.hint"));   // сдаётся только парой: работает одна, цена — за обе
-    if (o.last) addTag("tag", t("offers.last.tag"));
+    if (o.last) addTag("tag", t("offers.last.tag"), lastTip);
     if (o.start_min && !o.failed) addTag("tag", t("offers.start.tag", { min: o.start_min }), t("offers.start.hint"));
     if (o.reliability < 0.97) addTag("tag warn", t("offers.rel.tag", { rel: num(o.reliability * 100, 0) }), t("offers.rel.risk"));
     // раньше не запустилась — причина во всплывающей подсказке, на языке окна (старые записи без ключа — общая фраза)
@@ -752,6 +784,7 @@ $("rent").addEventListener("click", async () => {
   if (selected == null) return;
   $("rent").disabled = true;
   $("offers-summary").textContent = t("confirm.rent.checking");
+  $("offers-summary").hidden = false;
   const disk = offersData.disk;
   const docker = !!offersData.docker;
   const o = DEMO ? demoCheck() : await api().check_offer(selected, disk, docker);   // свежая цена прямо перед «да»
@@ -797,6 +830,7 @@ $("rent").addEventListener("click", async () => {
     const r = await api().replace(o.id, disk, LANG, spare, docker, select, null);
     if (r.error) { showError("offers-error", r.error); $("rent").disabled = false; return; }
     $("offers-cancel").disabled = true;
+    $("offers-summary").hidden = false;
     const p = await waitJob((ev) => ($("offers-summary").textContent = eventText(ev)));
     $("offers-cancel").disabled = false;
     if (p.error) {
@@ -1050,11 +1084,14 @@ function progsGame(games) {
     || (ids.includes(progsPick) ? progsPick : null) || ids[0];
 }
 
-const launchDraft = {};                               // несохранённый выбор «Запуск игры»: {appid: {id, args}}
+const launchDraft = {};                               // несохранённые параметры запуска: {appid: {id, args}}
+// [2026-10-15] Блок программ свёрнут в одну строку («treiner.exe запустится вместе с игрой ›»); раскрытый — список
+// программ (название, «С игрой», «Запустить»), пояснения — подсказками, «Запуск игры» — внизу, сохраняется сразу
+let progsOpen = false;
 function renderProgs(progs) {
   const box = $("progs-box");
   // [2026-10-15] Блок перерисовывается раз в 3 с — пока человек выбирает в списке или пишет параметры, не трогать
-  // (раньше выбор программы сам возвращался на «Как обычно», не дождавшись «Сохранить»)
+  // (раньше выбор программы сам возвращался на «Как обычно»)
   const act = document.activeElement;
   if (act && box.contains(act) && ["SELECT", "INPUT"].includes(act.tagName) && act.type !== "checkbox") return;
   const all = Object.entries(progs || {});            // игра на машине — блок виден всегда (пустой — с подсказкой)
@@ -1062,64 +1099,80 @@ function renderProgs(progs) {
   box.innerHTML = "";
   if (!all.length) return;
   const pick = progsGame(all);
+  const [appid, g] = all.find(([a]) => a === pick);
+  const list = g.progs || [];
+  box.classList.toggle("open", progsOpen);
+  const head = el("button", { className: "pg-head", type: "button" });
+  head.append(el("b", {}, t("progs.title")), el("span", { className: "pg-sum" }, progsOpen ? "" : progsSummary(g)),
+              el("span", { className: "pg-chev" }, progsOpen ? t("progs.collapse") : "›"));
+  head.addEventListener("click", () => { progsOpen = !progsOpen; renderProgs(progs); });
+  box.appendChild(head);
+  if (!progsOpen) return;
   if (all.length > 1) {                               // несколько игр на машине — переключатели вместо разделов подряд
     const tabs = el("div", { className: "pg-games" });
-    for (const [a, g] of all) {
-      const b = el("button", { className: "chip" + (a === pick ? " on" : ""), type: "button" }, g.name || a);
+    for (const [a, x] of all) {
+      const b = el("button", { className: "chip" + (a === pick ? " on" : ""), type: "button" }, x.name || a);
       b.addEventListener("click", () => { progsPick = a; renderProgs(progs); });
       tabs.appendChild(b);
     }
     box.appendChild(tabs);
   }
-  for (const [appid, g] of all.filter(([a]) => a === pick)) {
-    box.appendChild(el("div", { className: "pg-title" }, g.name && all.length === 1 ? t("progs.title.game", { name: g.name }) : t("progs.title")));
-    if (!(g.progs || []).length) box.appendChild(el("div", { className: "pg-hint" }, t("progs.empty")));
-    box.appendChild(launchRow(appid, g, progs));
-    for (const p of g.progs || []) {
-      const row = el("div", { className: "pg-row" });
-      const nm = el("div", { className: "pg-name" });
-      nm.append(el("b", { title: p.name }, p.name), p.where === "pfx"     // [v5.6] коротко; подробности — подсказкой
-        ? el("span", { className: "sub", title: progWhere(p) }, t("progs.where.pfx_short")) : el("span", { className: "sub" }, progWhere(p)));
-      const note = progNotes[appid + p.id];
-      if (note && Date.now() - note.at < 20000) nm.appendChild(el("span", { className: "pg-note" }, note.text));
-      if (p.setup) {                                       // [v5.6] установщик — «Установить в игру», один раз
-        const inst = button(t("progs.install"), async () => {
-          inst.disabled = true;
-          progNotes[appid + p.id] = { at: Date.now(), text: t("progs.install.starting") };
-          renderProgs(progs);
-          const r = DEMO ? { result: "installing" } : await api().prog_install(appid, p.id);
-          progNotes[appid + p.id] = { at: Date.now() + 40000, text: r.error ? errText(r.error) : t("progs.result." + (r.result || "failed")) };
-          renderProgs(progs);
-        }, true);
-        inst.classList.add("small");
-        inst.disabled = g.running || !g.installed;
-        inst.title = g.running ? t("progs.install.need_closed") : !g.installed ? t("progs.install.need_installed") : t("progs.install.hint");
-        row.append(nm, inst);
-        box.appendChild(row);
-        continue;
-      }
-      const auto = el("label", { className: "pg-auto", title: t("progs.auto.hint") });
-      const cb = el("input", { type: "checkbox", checked: (g.auto || []).includes(p.id) });
-      cb.addEventListener("change", async () => {
-        g.auto = cb.checked ? [...(g.auto || []), p.id] : (g.auto || []).filter((x) => x !== p.id);
-        if (!DEMO) await api().prog_auto(appid, p.id, cb.checked);
-      });
-      auto.append(cb, t("progs.auto"));
-      const run = button(t("progs.run"), async () => {
-        run.disabled = true;
-        progNotes[appid + p.id] = { at: Date.now(), text: t("progs.starting") };
+  if (!list.length) box.appendChild(el("div", { className: "pg-hint" }, t("progs.empty")));
+  for (const p of list) {
+    const row = el("div", { className: "pg-row" });
+    const nm = el("div", { className: "pg-name" });
+    const where = progWhere(p);                          // где лежит и что сохраняется — подсказкой
+    nm.appendChild(el("b", { title: where.charAt(0).toUpperCase() + where.slice(1) }, p.name));
+    const note = progNotes[appid + p.id];
+    if (note && Date.now() - note.at < 20000) nm.appendChild(el("span", { className: "pg-note" }, note.text));
+    if (p.setup) {                                       // [v5.6] установщик — «Установить в игру», один раз
+      const inst = button(t("progs.install"), async () => {
+        inst.disabled = true;
+        progNotes[appid + p.id] = { at: Date.now(), text: t("progs.install.starting") };
         renderProgs(progs);
-        const r = DEMO ? { result: "ok" } : await api().prog_run(appid, p.id);
-        progNotes[appid + p.id] = { at: Date.now(), text: r.error ? errText(r.error) : t("progs.result." + (r.result || "failed")) };
+        const r = DEMO ? { result: "installing" } : await api().prog_install(appid, p.id);
+        progNotes[appid + p.id] = { at: Date.now() + 40000, text: r.error ? errText(r.error) : t("progs.result." + (r.result || "failed")) };
         renderProgs(progs);
       }, true);
-      run.classList.add("small");
-      // [2026-10-15] и без игры — в её «диске C:» (менеджеры модов запускают до игры); трейнеру нужна запущенная игра
-      if (!g.running) run.title = t("progs.no_game_hint");
-      row.append(nm, auto, run);
+      inst.classList.add("small");
+      inst.disabled = g.running || !g.installed;
+      inst.title = g.running ? t("progs.install.need_closed") : !g.installed ? t("progs.install.need_installed") : t("progs.install.hint");
+      row.append(nm, inst);
       box.appendChild(row);
+      continue;
     }
+    const auto = el("label", { className: "pg-auto", title: t("progs.auto.hint") });
+    const cb = el("input", { type: "checkbox", checked: (g.auto || []).includes(p.id) });
+    cb.addEventListener("change", async () => {
+      g.auto = cb.checked ? [...(g.auto || []), p.id] : (g.auto || []).filter((x) => x !== p.id);
+      if (!DEMO) await api().prog_auto(appid, p.id, cb.checked);
+    });
+    auto.append(cb, t("progs.auto"));
+    const run = button(t("progs.run"), async () => {
+      run.disabled = true;
+      progNotes[appid + p.id] = { at: Date.now(), text: t("progs.starting") };
+      renderProgs(progs);
+      const r = DEMO ? { result: "ok" } : await api().prog_run(appid, p.id);
+      progNotes[appid + p.id] = { at: Date.now(), text: r.error ? errText(r.error) : t("progs.result." + (r.result || "failed")) };
+      renderProgs(progs);
+    }, true);
+    run.classList.add("small");
+    // [2026-10-15] и без игры — в её «диске C:» (менеджеры модов запускают до игры); трейнеру нужна запущенная игра
+    if (!g.running) run.title = t("progs.no_game_hint");
+    row.append(nm, auto, run);
+    box.appendChild(row);
   }
+  box.appendChild(launchRow(appid, g, progs));
+}
+
+// Свёрнутый блок одной строкой: что запустится с игрой / через что запускается игра / сколько программ
+function progsSummary(g) {
+  const list = g.progs || [];
+  const name = (id) => (list.find((p) => p.id === id) || { name: id.split("/").pop() }).name;
+  const auto = (g.auto || []).filter((id) => list.some((p) => p.id === id)).map(name);
+  if (g.launch && g.launch.id) return t("progs.sum.launch", { name: name(g.launch.id) });
+  if (auto.length) return t("progs.sum.auto", { names: auto.join(", ") });
+  return list.length ? t("progs.sum.count", { n: list.length }) : t("progs.sum.empty");
 }
 
 function progWhere(p) {
@@ -1127,7 +1180,8 @@ function progWhere(p) {
 }
 
 // [v5.6] «Запуск игры»: как обычно или через программу (загрузчик модов, лаунчер) — Steam запускает её вместо .exe игры
-// тем же Proton. Выбор запоминается (уходит машинам при аренде) и сразу передаётся этой машине.
+// тем же Proton. Выбор запоминается (уходит машинам при аренде) и сразу передаётся этой машине — без кнопки «Сохранить»
+// (выбрал в списке — сохранено; параметры — когда поле теряет фокус или нажат Enter).
 function launchRow(appid, g, progs) {
   const wrap = el("div", { className: "pg-launch" });
   const cur = (g.launch && g.launch.id) || "-";
@@ -1142,32 +1196,29 @@ function launchRow(appid, g, progs) {
   sel.value = draft ? draft.id : cur;
   const args = el("input", { type: "text", placeholder: t("progs.launch.args"),
                              value: draft ? draft.args : (g.launch && g.launch.args) || "" });
-  const save = button(t("progs.launch.save"), async () => {
-    save.disabled = true;
-    progNotes[appid + ":launch"] = { at: Date.now() + 60000, text: t("progs.launch.saving") };
-    renderProgs(progs);
+  args.hidden = sel.value === "-";
+  const save = async () => {
     const id = sel.value, a = id === "-" ? "" : args.value.trim();
+    if (id === cur && a === ((g.launch && g.launch.args) || "")) { delete launchDraft[appid]; return; }
+    launchDraft[appid] = { id, args: args.value };
+    progNotes[appid + ":launch"] = { at: Date.now() + 60000, text: t("progs.launch.saving") };
+    sel.blur(); args.blur();
+    renderProgs(progs);
     const r = DEMO ? { result: "ok" } : await api().prog_launch(appid, id, a);
-    if (!r.error) { g.launch = id === "-" ? null : { id, args: a }; delete launchDraft[appid]; }
+    if (!r.error) g.launch = id === "-" ? null : { id, args: a };
+    delete launchDraft[appid];
     progNotes[appid + ":launch"] = { at: Date.now(), text: r.error ? errText(r.error) : t("progs.launch.result." + (r.result || "failed")) };
     renderProgs(progs);
-  }, true);
-  save.classList.add("small");
-  const sync = () => {
-    args.hidden = sel.value === "-";
-    save.disabled = sel.value === cur && (args.value.trim() === ((g.launch && g.launch.args) || ""));
-    if (save.disabled) delete launchDraft[appid];
-    else launchDraft[appid] = { id: sel.value, args: args.value };
   };
-  sel.addEventListener("change", sync);
-  args.addEventListener("input", sync);
-  sync();
+  sel.addEventListener("change", () => { args.hidden = sel.value === "-"; save(); });
+  args.addEventListener("change", save);
+  args.addEventListener("input", () => (launchDraft[appid] = { id: sel.value, args: args.value }));
   const line = el("div", { className: "pg-launch-line" });
-  line.append(el("span", { className: "pg-launch-label", title: t("progs.launch.hint") }, t("progs.launch") + " ⓘ"), sel, args, save);
+  line.append(el("span", { className: "pg-launch-label", title: t("progs.launch.hint") }, t("progs.launch") + " ⓘ"), sel, args);
   wrap.appendChild(line);
   const note = progNotes[appid + ":launch"];
   if (note && Date.now() - note.at < 20000) wrap.appendChild(el("div", { className: "pg-note" }, note.text));
-  return wrap;                                         // пояснение — подсказкой на «Запуск игры ⓘ» (было абзацем всегда)
+  return wrap;
 }
 
 // ---------------------------------------------------------------- «Закончить» и аварийное удаление

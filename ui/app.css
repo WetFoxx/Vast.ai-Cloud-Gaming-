@@ -531,7 +531,16 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 /* [v5.4] Программы игры: трейнеры и программы для модов рядом с игрой */
 .progs-box { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px 14px; border-radius: 14px;
   background: var(--card-2); border: 1px solid var(--border); }
-.progs-box .pg-title { font-weight: 600; font-size: 14px; }
+.progs-box .pg-head { display: flex; align-items: center; gap: 10px; width: 100%; margin: 0; padding: 0; border: 0;
+  background: none; color: inherit; font: inherit; font-size: 14px; text-align: left; cursor: pointer; box-shadow: none; }
+.progs-box .pg-head:hover { transform: none; background: none; }
+.progs-box .pg-head::after { display: none; }
+.progs-box .pg-sum { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.progs-box .pg-chev { color: var(--muted); font-weight: 600; font-size: 13px; }
+.progs-box:not(.open) { cursor: pointer; }
+.progs-box:not(.open):hover { border-color: rgba(255, 255, 255, .16); }
+.progs-box .pg-launch { margin: 0; padding-top: 10px; border-top: 1px solid var(--border); }
 .progs-box .pg-games { display: flex; flex-wrap: wrap; gap: 6px; }
 .progs-box .pg-games .chip { cursor: pointer; border: 1px solid var(--border); background: transparent; color: inherit; font: inherit; width: auto; flex: none; margin: 0;
                              font-size: 12.5px; padding: 4px 10px; border-radius: 999px; }
@@ -558,6 +567,7 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .row-link { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px;
   color: var(--muted); }
 .row-link b { color: var(--text); font-weight: 600; }
+#params-row { justify-content: flex-end; }
 .row-link button.link { padding: 2px 0; color: var(--text); font-weight: 600; }
 .params { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 14px;
   background: var(--card-2); }
@@ -567,7 +577,16 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .live { border-top: 1px solid var(--border); padding-top: 12px; display: flex; flex-direction: column; gap: 4px; }
 .foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .foot #stop { flex: none; padding: 12px 30px; }
-.foot #emergency[hidden] + #stop { margin-left: auto; }
+.foot #stop { margin-left: auto; }
+.params-danger { display: flex; justify-content: flex-end; padding-top: 6px; border-top: 1px solid var(--border); }
+.params-danger:empty { display: none; }
+/* [2026-10-15] Своя подсказка (встроенные title окно приложения не показывает) — см. app.js, tipBox */
+.tip { position: fixed; z-index: 1000; max-width: 300px; padding: 9px 12px; border-radius: 10px; pointer-events: none;
+  background: #2b2a34; color: #f3f2f7; border: 1px solid rgba(255, 255, 255, .14); box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
+  font-size: 12.5px; font-weight: 400; line-height: 1.42; white-space: pre-line; text-align: left; letter-spacing: 0;
+  text-transform: none; opacity: 0; visibility: hidden; transition: opacity .12s ease; }
+.tip.on { opacity: 1; visibility: visible; }
+[data-tip]:not(button):not(select):not(input):not(label):not(th):not(td):not(tr) { cursor: help; }
 
 /* Выбор машины: фильтры одной строкой; включённый — цветом; диск, страны, видеокарты — панелью под строкой */
 .filter-chips { display: flex; flex-wrap: wrap; gap: 8px; }
