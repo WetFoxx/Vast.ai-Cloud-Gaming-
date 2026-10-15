@@ -3199,7 +3199,7 @@ VGRUN
 # что запускать; ярлык в Steam обновляет wolf (запрос в ~/.local/share/vastgame/requests).
 w /usr/local/bin/vg-open <<'VGOPEN'
 #!/usr/bin/env python3
-import json, os, re, shutil, subprocess, sys, time, zipfile
+import json, os, re, shutil, subprocess, sys, threading, time, zipfile
 
 HOME = os.path.expanduser("~")
 GD = os.environ.get("VG_GAMES") or os.path.join(HOME, "Downloads", "Games")
@@ -3235,6 +3235,11 @@ MOD_TOOLS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|wemod
                        r"special ?k|flawless ?widescreen|wabbajack|\bxedit\b|sseedit|fo4edit|bodyslide|reframework|"
                        r"cyber ?engine|\bloot\b|wrye", re.I)
 STEAM_TOOLS = re.compile(r"^(proton|steam linux runtime|steamworks|steam controller|steamvr)", re.I)
+# [2026-10-15] Менеджеры модов: их запускают в любое время, без игры (готовят моды), — «вместе с игрой» им не нужно.
+# Служебные .exe установленных программ — в итоге установки не показываем (MO2: QtWebEngineProcess, helper, usvfs…)
+MANAGERS = re.compile(r"vortex|mod ?organizer|\bmo2\b|fluffy|mod ?manager|r2modman|thunderstore|wabbajack|\bloot\b|wrye", re.I)
+NOISE_EXE = re.compile(r"qtwebengineprocess|helper|crashpad|createdump|nxmhandler|usvfs|unins|update|elevat|notification|"
+                       r"squirrel|^7z|dotnet|vc_?redist|setup", re.I)
 
 T = {
  "ru": {"title": "VastGame", "what": "Что это за файл?\n{file}", "kind.installer": "Установщик игры или лаунчера",
@@ -3265,6 +3270,10 @@ T = {
         "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?",
         "inst.close": "«{game}» сейчас запущена. Ставить можно только в закрытую игру — закрой её и нажми «Поставить».",
         "inst.go": "Поставить",
+        "unpack.go": "Распаковать",
+        "prog.manager": "«{exe}» — менеджер модов: запускай его кнопкой «Запустить» в VastGame («Программы игры») в любое время, и без игры — он работает в «диске C:» «{game}».",
+        "inst.unpacking": "Ставлю «{name}» в «{game}»…\nУстановщик этой программы под Linux спотыкается — достаю программу из него сам.",
+        "inst.unpack_failed": "Не получилось достать «{name}» из установщика: {why}",
         "bad.wand": "«{name}» — это Wand (бывший WeMod). Под Linux он не работает: окно остаётся чёрным, и Wand зависает. Это известная проблема самого Wand: его разработчики Linux не поддерживают.\n\nВместо него подойдут отдельные трейнеры FLiNG (flingtrainer.com): скачай трейнер для своей игры, положи его в Programs и запускай кнопкой «Запустить» рядом с игрой в окне VastGame.",
         "bad.anyway": "Всё равно поставить",
         "inst.prepare": "Готовлю установку «{name}» в «{game}»…",
@@ -3306,6 +3315,10 @@ T = {
         "prog.unpack": "Unpack «{file}» into Programs as «{name}»?",
         "inst.close": "«{game}» is running. Programs can only be installed into a closed game — close it and press «Install».",
         "inst.go": "Install",
+        "unpack.go": "Unpack",
+        "prog.manager": "«{exe}» is a mod manager: start it with «Start» in VastGame («Game programs») any time, even without the game — it works in the «C: drive» of «{game}».",
+        "inst.unpacking": "Installing «{name}» into «{game}»…\nThis program's installer trips up on Linux — taking the program out of it myself.",
+        "inst.unpack_failed": "Couldn't take «{name}» out of its installer: {why}",
         "bad.wand": "«{name}» is Wand (formerly WeMod). It doesn't work on Linux: the window stays black and Wand hangs. This is a known issue of Wand itself: its developers don't support Linux.\n\nStandalone FLiNG trainers (flingtrainer.com) work instead: download the trainer for your game, put it into Programs and start it with «Start» next to the game in the VastGame window.",
         "bad.anyway": "Install anyway",
         "inst.prepare": "Preparing to install «{name}» into «{game}»…",
@@ -3347,6 +3360,10 @@ T = {
         "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?",
         "inst.close": "«{game}» está abierto. Solo se puede instalar con el juego cerrado: ciérralo y pulsa «Instalar».",
         "inst.go": "Instalar",
+        "unpack.go": "Descomprimir",
+        "prog.manager": "«{exe}» es un gestor de mods: ábrelo con «Iniciar» en VastGame («Programas del juego») cuando quieras, incluso sin el juego; funciona en el «disco C:» de «{game}».",
+        "inst.unpacking": "Instalando «{name}» en «{game}»…\nEl instalador de este programa falla en Linux: saco el programa de él yo mismo.",
+        "inst.unpack_failed": "No pude sacar «{name}» de su instalador: {why}",
         "bad.wand": "«{name}» es Wand (antes WeMod). No funciona en Linux: la ventana se queda negra y Wand se cuelga. Es un problema conocido del propio Wand: sus desarrolladores no dan soporte a Linux.\n\nEn su lugar sirven los entrenadores independientes de FLiNG (flingtrainer.com): descarga el de tu juego, ponlo en Programs y ábrelo con «Iniciar» junto al juego en la ventana de VastGame.",
         "bad.anyway": "Instalar de todos modos",
         "inst.prepare": "Preparando la instalación de «{name}» en «{game}»…",
@@ -3564,7 +3581,7 @@ def _bytes(path, head=64 << 20, tail=4 << 20):
 def version_field(data, field):
     """Поле сведений о версии файла Windows (ProductName, OriginalFilename…) из байтов файла, или ""."""
     key = field.encode("utf-16-le") + b"\0\0"
-    i = data.rfind(key)
+    i = data.find(key)                   # первые сведения — самой программы (дальше бывают встроенных модулей NSIS)
     if i < 0:
         return ""
     i += len(key)
@@ -3948,6 +3965,9 @@ def after_add(g, ident, text):
         send("launch", g, ident, "")
         info(text + "\n\n" + t("prog.via", game=g["name"], exe=exe))
         return
+    if MANAGERS.search(exe) or MANAGERS.search(ident):
+        info(text + "\n\n" + t("prog.manager", exe=exe, game=g["name"]))
+        return
     running = g["appid"] in running_appids()
     q = text + "\n\n" + t("prog.auto", exe=exe, game=g["name"]) + ("\n" + t("prog.auto.now", game=g["name"], exe=exe) if running else "")
     if ask(q, t("prog.auto.yes"), t("prog.auto.no")):
@@ -3967,7 +3987,7 @@ def do_program(f, g):
     low = f.lower()
     if low.endswith(ARCHIVES):
         name = unique(clean_name(os.path.basename(f)), PD)
-        if not ask(t("prog.unpack", file=os.path.basename(f), name=name), t("ok")):
+        if not ask(t("prog.unpack", file=os.path.basename(f), name=name), t("unpack.go")):
             return
         unpack(f, os.path.join(PD, name))
     elif is_installer(f):
@@ -4018,9 +4038,71 @@ def read(path):
         return None
 
 
+def electron_payload(f):
+    """Установщик electron-builder (NSIS): путь к готовой программе внутри («$PLUGINSDIR/app-64.7z») или None. Их проверка
+    «программа уже запущена» под Wine всегда «да» (cmd «tasklist | find» возвращает 0 и без совпадений — живой случай
+    2026-10-15, r2modman: «cannot be closed», установка прерывается) — программу достаём сами."""
+    if not shutil.which("7z") or not f.lower().endswith(".exe"):
+        return None
+    try:
+        r = subprocess.run(["7z", "l", "-slt", f], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    paths = re.findall(r"^Path = (\$PLUGINSDIR/app-(?:64|32)\.7z)$", r.stdout, re.M)
+    return next((p for p in paths if "app-64" in p), paths[0] if paths else None)
+
+
+def game_drive(g):
+    """«Диск C:» игры Steam (compatdata/НОМЕР/pfx/drive_c) или None — Proton ещё не создал его."""
+    root = steam_root()
+    d = root and os.path.join(root, "steamapps", "compatdata", g["appid"], "pfx", "drive_c")
+    return d if d and os.path.isdir(d) else None
+
+
+def do_unpack_app(f, g, payload, drive):
+    """Готовая программа из установщика electron-builder — в AppData/Local/Programs/НАЗВАНИЕ «диска C:» игры (туда же
+    ставит сам установщик «только для меня»)."""
+    name = clean_name(re.sub(r"[-_ ]?(setup|installer?)([-_ ]?v?[\d.]+)?$", "", os.path.splitext(os.path.basename(f))[0],
+                             flags=re.I)) or default_name(f)
+    dest = os.path.join(drive, "users", "steamuser", "AppData", "Local", "Programs", name)
+    tmp = os.path.join(STATE, "unpack", f"{os.getpid()}-app")
+    box = {}
+
+    def work():
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp)
+            subprocess.run(["7z", "e", "-y", f"-o{tmp}", f, payload], check=True, capture_output=True, timeout=1800)
+            os.makedirs(dest, exist_ok=True)
+            subprocess.run(["7z", "x", "-y", f"-o{dest}", os.path.join(tmp, os.path.basename(payload))], check=True,
+                           capture_output=True, timeout=1800)
+            box["ok"] = True
+        except (OSError, subprocess.SubprocessError) as e:
+            box["err"] = f"{type(e).__name__}"
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    waiting(t("inst.unpacking", name=name, game=g["name"]), lambda: True if not th.is_alive() else None, 3600)
+    th.join()
+    if not box.get("ok"):
+        info(t("inst.unpack_failed", name=name, why=box.get("err") or "?"))
+        return
+    exes = sorted((e for e in os.listdir(dest) if e.lower().endswith(".exe") and not NOISE_EXE.search(e)),
+                  key=lambda e: (e.lower() != name.lower() + ".exe", -os.path.getsize(os.path.join(dest, e))))
+    if not exes:
+        info(t("inst.none"))
+        return
+    rel = os.path.relpath(os.path.join(dest, exes[0]), drive).replace(os.sep, "/")
+    after_add(g, "pfx:" + rel, t("inst.done", name=name, game=g["name"], exes=exes[0]))
+
+
 def do_install(f, g):
     """[v5.7] Установщик программы — в «диск C:» игры Steam: машина (wolf, раз в 5 с) запускает его через Steam вместо
     игры, как «Установить в игру» в окне VastGame. Ставить можно только в закрытую игру."""
+    payload, drive = electron_payload(f), game_drive(g)
+    if payload and drive:
+        return do_unpack_app(f, g, payload, drive)
     while g["appid"] in running_appids():
         if not ask(t("inst.close", game=g["name"]), t("inst.go")):
             return
@@ -4065,8 +4147,9 @@ def do_install(f, g):
     if not new:
         info(t("inst.none"))
         return
-    main_ = next((x for x in new if MOD_TOOLS.search(os.path.basename(x))), new[0])
-    after_add(g, "pfx:" + main_, t("inst.done", name=name, game=g["name"], exes=", ".join(os.path.basename(x) for x in new)))
+    shown = [x for x in new if not NOISE_EXE.search(os.path.basename(x))] or new[:1]
+    main_ = next((x for x in shown if MOD_TOOLS.search(os.path.basename(x))), shown[0])
+    after_add(g, "pfx:" + main_, t("inst.done", name=name, game=g["name"], exes=", ".join(os.path.basename(x) for x in shown)))
 
 
 def main(a):
@@ -4135,6 +4218,7 @@ if [ -n "$app" ] && [ -f "$dir/$app.env" ]; then
 fi
 args=("$@")
 if [ -n "$conf" ]; then
+  export PROTON_USE_XALIA=0     # [2026-10-15] помощник Xalia рисовал чёрные прямоугольники поверх кнопок установщиков
   { IFS= read -r target; IFS= read -r extra; } < "$conf"
   at=-1
   for i in "${!args[@]}"; do case ${args[$i]} in */proton) at=$((i + 2)) ;; esac; done
@@ -4460,6 +4544,51 @@ def _launch_parts(pid):
     return head, args[-1], env
 
 
+def _offline_parts(root, appid):
+    """[2026-10-15] Команда и окружение, чтобы запустить программу в «диске C:» игры, когда сама игра не запущена:
+    менеджеры модов (MO2, Vortex, r2modman, Fluffy) запускают до игры — готовят моды. Proton — выбранный для этой игры
+    (CompatToolMapping НОМЕР), иначе «для всех игр» ("0"), иначе Proton Experimental; вход Steam Linux Runtime — по его
+    require_tool_appid (как vg-run). None — Proton не найден."""
+    root = Path(root)
+    try:
+        cfg = (root / "config" / "config.vdf").read_text(errors="replace")
+    except OSError:
+        cfg = ""
+    names = []
+    for key in (str(appid), "0"):
+        m = re.search(r'"CompatToolMapping"[\s\S]*?"' + key + r'"\s*\{[^}]*?"name"\s*"([^"]+)"', cfg)
+        if m:
+            names.append(m.group(1))
+    common = root / "steamapps" / "common"
+    dirs = []
+    for n in names:
+        known = {"proton_experimental": "Proton - Experimental", "proton_hotfix": "Proton Hotfix"}.get(n)
+        v = re.fullmatch(r"proton_(\d+)", n)
+        dirs += [common / known] if known else [common / f"Proton {v.group(1)}.0"] if v else [root / "compatibilitytools.d" / n]
+    dirs.append(common / "Proton - Experimental")
+    d = next((x for x in dirs if (x / "proton").is_file()), None)
+    if not d:
+        return None
+    try:
+        tool = (d / "toolmanifest.vdf").read_text(errors="replace")
+    except OSError:
+        tool = ""
+    m = re.search(r'"require_tool_appid"\s*"(\d+)"', tool)
+    slr = _game_dir(root, m.group(1)) if m else None
+    entry = slr / "_v2-entry-point" if slr else None
+    head = ([str(entry), "--verb=run", "--"] if entry and entry.is_file() else []) + [str(d / "proton")]
+    home = os.path.expanduser("~")
+    uid = os.getuid()
+    env = {"HOME": home, "USER": os.environ.get("USER") or os.path.basename(home), "LANG": "C.UTF-8",
+           "PATH": "/usr/local/bin:/usr/bin:/bin", "DISPLAY": ":0", "XAUTHORITY": os.path.join(home, ".Xauthority"),
+           "XDG_RUNTIME_DIR": f"/run/user/{uid}", "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
+           "STEAM_COMPAT_DATA_PATH": str(root / "steamapps" / "compatdata" / str(appid)),
+           "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(root), "SteamAppId": str(appid), "SteamGameId": str(appid)}
+    if os.path.exists("/opt/vastgame/real/steam"):            # Docker: вход Runtime — наша пропускающая заплатка
+        env["VG"] = "1"
+    return head, None, env
+
+
 def app_name(root, appid):
     """[v5.7] Название игры: из паспорта Steam, у сторонних игр — из shortcuts.vdf (AppName рядом с её appid)."""
     try:
@@ -4647,9 +4776,12 @@ def launch(root, pd, appid, ident, user=None):
     if not path:
         return "nofile"
     pid = games_running().get(str(appid))
-    if not pid:
+    if pid:
+        parts = _launch_parts(pid)
+    elif _game_dir(Path(root), appid):
+        parts = _offline_parts(root, appid)                 # [2026-10-15] игра закрыта — в её «диске C:» без неё
+    else:
         return "nogame"
-    parts = _launch_parts(pid)
     if not parts:
         return "noproton"
     if _running(path):

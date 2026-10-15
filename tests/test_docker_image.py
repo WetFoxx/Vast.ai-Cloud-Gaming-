@@ -214,6 +214,10 @@ class TestSunshineReport(unittest.TestCase):
             out = sh("bash", "-c", head + 'echo "x${SDL_VIDEO_X11_XRANDR-unset}"').stdout.strip()
             self.assertEqual(out, "x0" if headless else "xunset")
 
+    def test_archive_tools_in_image(self):
+        df = (D / "Dockerfile").read_text()
+        self.assertIn("7zip libarchive-tools", df)                     # .7z, .rar и установщики electron-builder
+
     def test_vgrr_built_into_image(self):
         df = (D / "Dockerfile").read_text()
         self.assertIn("gcc $F -Wl,-soname,libXrandr.so.2 -o /out/x86_64/libvgrr.so /src/vgrr.c -ldl", df)

@@ -1114,8 +1114,8 @@ function renderProgs(progs) {
         renderProgs(progs);
       }, true);
       run.classList.add("small");
-      run.disabled = !g.running;
-      if (!g.running) run.title = t("progs.need_game");
+      // [2026-10-15] и без игры — в её «диске C:» (менеджеры модов запускают до игры); трейнеру нужна запущенная игра
+      if (!g.running) run.title = t("progs.no_game_hint");
       row.append(nm, auto, run);
       box.appendChild(row);
     }

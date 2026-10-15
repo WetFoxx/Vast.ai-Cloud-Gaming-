@@ -252,6 +252,12 @@ class TestOpenDecisions(OpenBase):
         self.assertEqual(self.vo.product_name(str(wand)), "Wand")      # сведения о версии — в конце большого файла
         self.assertTrue(self.vo.is_tool(str(wand)))                    # WeMod теперь Wand — программа для игр сама
 
+    def test_product_name_is_the_programs_own(self):
+        # [2026-10-15] у NSIS-установщика дальше в файле — сведения встроенного модуля («NSIS StdUtils plug-in»)
+        f = fake_exe(self.home / "Downloads/r2modman-Setup-3.2.20.exe",
+                     vinfo(ProductName="r2modman") + b"..." + vinfo(ProductName="NSIS StdUtils plug-in"))
+        self.assertEqual(self.vo.product_name(str(f)), "r2modman")
+
     def test_known_bad_programs(self):
         # [2026-10-15] Wand 12+ (и загрузчик WeMod-Setup, который ставит тот же Wand) под Linux висит с чёрным окном
         d = self.home / "Downloads"
@@ -561,14 +567,45 @@ class TestProgramsForGames(TestOpenFlows):
         threading.Thread(target=run, daemon=True).start()
         return seen
 
+    def test_electron_installer_unpacked_into_game(self):
+        # [2026-10-15] установщик electron-builder (r2modman): его проверка «уже запущен» под Wine всегда «да» —
+        # программу достаём сами в AppData/Local/Programs «диска C:» игры, установщик не запускаем
+        drive = self.sa / "compatdata/2424420/pfx/drive_c"
+        drive.mkdir(parents=True)
+        bin_ = self.home / "bin"
+        (bin_ / "7z").write_text('#!/bin/sh\necho "7z $*" >> "$VG_CALLS"\ncase "$1" in\n'
+                                 '  l) echo "Path = r2modman-Setup-3.2.20.exe"; echo "Path = \\$PLUGINSDIR/app-64.7z";'
+                                 ' echo "Path = \\$R0/Uninstall r2modman.exe" ;;\n'
+                                 '  e) d=${3#-o}; touch "$d/app-64.7z" ;;\n'
+                                 '  x) d=${3#-o}; printf MZ > "$d/r2modman.exe"; printf MZ > "$d/Update.exe"; '
+                                 'printf x > "$d/chrome_100_percent.pak" ;;\nesac\n')
+        (bin_ / "7z").chmod(0o755)
+        setup = fake_exe(self.home / "Downloads/r2modman-Setup-3.2.20.exe", b"..NullsoftInst..")
+        code, calls = self.run_open(setup, ["0|0", "0|", "0|"])           # Avatar; окно «идёт…»; итог
+        self.assertEqual(code, 0)
+        app = drive / "users/steamuser/AppData/Local/Programs/r2modman"
+        self.assertTrue((app / "r2modman.exe").exists())
+        self.assertFalse((self.home / ".local/share/vastgame/requests/install").exists())   # установщик не запускали
+        self.assertIn("r2modman.exe", self.texts(calls))
+        self.assertNotIn("Update.exe", [c for c in calls if " --info " in c][-1])         # служебное — не показываем
+        self.assertIn("mod manager", self.texts(calls))                  # менеджер модов — без «вместе с игрой»
+
+    def test_install_result_lists_main_programs_only(self):
+        noise = ["Modding/MO2/ModOrganizer.exe", "Modding/MO2/QtWebEngineProcess.exe", "Modding/MO2/helper.exe",
+                 "Modding/MO2/nxmhandler.exe", "Modding/MO2/usvfs_proxy_x64.exe"]
+        self.assertEqual([x for x in noise if not self.vo.NOISE_EXE.search(os.path.basename(x))],
+                         ["Modding/MO2/ModOrganizer.exe"])
+
     def test_installer_into_game(self):
         setup = self.f("Downloads/Vortex-1.12.3-setup.exe")
         seen = self.machine()
-        code, calls = self.run_open(setup, ["0|0", "0|", "0|", "0|"])      # Avatar; два окна «идёт…»; «вместе с игрой» — да
+        code, calls = self.run_open(setup, ["0|0", "0|", "0|", "0|"])      # Avatar; два окна «идёт…»; итог
         self.assertEqual(code, 0)
         self.assertEqual(seen, {"appid": "2424420", "path": "Vortex/Vortex-1.12.3-setup.exe", "exists": True})
-        self.assertEqual(self.asked(), [("auto", "2424420", "pfx:Program Files/Black Tree Gaming Ltd/Vortex/Vortex.exe", "on")])
+        # [2026-10-15] Vortex — менеджер модов: «вместе с игрой» не спрашиваем — запускают его в любое время
+        self.assertEqual(self.asked(), [])
         self.assertIn("Vortex.exe", self.texts(calls))
+        self.assertIn("mod manager", self.texts(calls))
         self.assertTrue(setup.exists())                                    # твой файл на месте
         self.assertEqual(list((self.home / ".local/share/vastgame/installers").iterdir()), [])   # копия убрана
         self.assertFalse(self.pd.exists() and any(self.pd.iterdir()))

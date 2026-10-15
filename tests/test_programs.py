@@ -128,9 +128,27 @@ class TestPrograms(Base):
         self.assertEqual(ws.launch(self.w.root, str(self.w.pd), APP, "prog:WeMod/WeMod.exe"), "ok")
         self.assertEqual(self.started[0][0][-1], os.path.realpath(self.w.pd / "WeMod/WeMod.exe"))
 
+    def test_without_game_in_its_prefix(self):
+        # [2026-10-15] менеджеры модов запускают до игры: Proton этой игры (или Experimental) и его Runtime, её «диск C:»
+        sa = self.w.root / "steamapps"
+        pr = sa / "common/Proton - Experimental"
+        pr.mkdir(parents=True)
+        (pr / "proton").write_text("#!/bin/sh\n")
+        (pr / "toolmanifest.vdf").write_text('"manifest"\n{\n\t"require_tool_appid"\t"1628350"\n}\n')
+        (sa / "appmanifest_1628350.acf").write_text('"AppState"\n{\n\t"appid"\t\t"1628350"\n'
+                                                   '\t"installdir"\t\t"SteamLinuxRuntime_sniper"\n}\n')
+        (sa / "common/SteamLinuxRuntime_sniper").mkdir(parents=True)
+        (sa / "common/SteamLinuxRuntime_sniper/_v2-entry-point").write_text("#!/bin/sh\n")
+        self.assertEqual(ws.launch(self.w.root, str(self.w.pd), APP, "prog:WeMod/WeMod.exe"), "ok")
+        cmd, kw = self.started[0]
+        self.assertEqual(cmd, [str(sa / "common/SteamLinuxRuntime_sniper/_v2-entry-point"), "--verb=run", "--",
+                               str(pr / "proton"), "run", os.path.realpath(self.w.pd / "WeMod/WeMod.exe")])
+        self.assertEqual(kw["env"]["STEAM_COMPAT_DATA_PATH"], str(sa / "compatdata" / APP))
+        self.assertEqual((kw["env"]["SteamAppId"], kw["env"]["PROTON_USE_XALIA"]), (APP, "0"))
+
     def test_refusals(self):
         launch = lambda i: ws.launch(self.w.root, str(self.w.pd), APP, i)
-        self.assertEqual(launch("prog:WeMod/WeMod.exe"), "nogame")               # игра не запущена
+        self.assertEqual(launch("prog:WeMod/WeMod.exe"), "noproton")             # игра закрыта, а Proton на машине нет
         self.w.game_running()
         self.assertEqual(launch("prog:../steam/steamapps/common/x.exe"), "nofile")  # наружу из папки — нет
         self.assertEqual(launch("prog:WeMod/нет.exe"), "nofile")

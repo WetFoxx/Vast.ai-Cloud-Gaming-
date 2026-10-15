@@ -28,7 +28,9 @@ ARG SUNSHINE_VERSION=2026.914.233613
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 \
     NVIDIA_DRIVER_CAPABILITIES=all NVIDIA_VISIBLE_DEVICES=all
 
-# Рабочий стол, звук, 32-битные библиотеки для Steam, инструменты (без хранителя экрана и блокировки)
+# Рабочий стол, звук, 32-битные библиотеки для Steam, инструменты (без хранителя экрана и блокировки).
+# [2026-10-15] 7zip и bsdtar (libarchive-tools): помощник двойного щелчка распаковывает .7z и .rar (моды, Fluffy, MO2)
+# и достаёт программы из установщиков electron-builder — без них архивы молча не открывались
 RUN dpkg --add-architecture i386 && apt-get update -qq && apt-get install -yq --no-install-recommends \
       xserver-xorg-core x11-xserver-utils x11-utils x11-apps xauth mesa-utils netpbm \
       xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfce4-terminal thunar xfconf \
@@ -36,6 +38,7 @@ RUN dpkg --add-architecture i386 && apt-get update -qq && apt-get install -yq --
       libnotify-bin xfce4-notifyd \
       pulseaudio pulseaudio-utils \
       curl ca-certificates gnupg python3 procps iproute2 pciutils psmisc less nano zstd unzip xz-utils file \
+      7zip libarchive-tools \
       zenity xdg-utils libibus-1.0-5 libevdev2 libsdl2-2.0-0 evtest \
       libc6:i386 libgl1:i386 libgl1-mesa-dri:i386 libegl1:i386 libgbm1:i386 \
     && rm -rf /var/lib/apt/lists/*
