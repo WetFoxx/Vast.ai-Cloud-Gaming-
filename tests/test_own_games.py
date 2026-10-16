@@ -145,6 +145,53 @@ class TestVgRun(unittest.TestCase):
         own(self.game, "link/evil.exe")
         self.assertEqual(self.run_vg(str(self.game))[0], 1)
 
+    def test_runtime_found_in_hidden_acf(self):
+        # [2026-10-16] Без синхронизации Steam манифесты прячутся в .vastgame-hidden — vg-run всё равно находит рантайм
+        acf = self.root / "steamapps/appmanifest_4183110.acf"
+        hidden = self.root / "steamapps/.vastgame-hidden"
+        hidden.mkdir(parents=True, exist_ok=True)
+        acf.rename(hidden / acf.name)
+        own(self.game, ".prefix/pfx/drive_c/Program Files/HoYoPlay/launcher.exe")
+        code, out, err = self.run_vg(str(self.game))
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"pfx={self.game}/.prefix", out)
+        self.assertIn("arg=--verb=waitforexitandrun", out)
+
+    def sc_game(self):
+        g = self.home / "Downloads/Games/RSI Launcher"
+        (g / "RSI Launcher.exe").parent.mkdir(parents=True)
+        (g / "RSI Launcher.exe").write_text("x")
+        own(g, "RSI Launcher.exe")
+        drive = g / ".prefix/pfx/drive_c"
+        (drive / "windows").mkdir(parents=True)                  # «диск C:» уже создан Proton
+        return g, drive / "Program Files/Roberts Space Industries/StarCitizen"
+
+    def test_star_citizen_software_cursor(self):
+        # [2026-10-16] Star Citizen под Wine: курсор расходится с игрой — USER.cfg с программным курсором
+        g, sc = self.sc_game()
+        (sc / "PTU").mkdir(parents=True)
+        (sc / "PTU/USER.cfg").write_text("r_DisplayInfo = 1")    # своё — сохраняем, строку дописываем
+        code, out, err = self.run_vg(str(g))
+        self.assertEqual(code, 0, err)
+        self.assertEqual((sc / "LIVE/USER.cfg").read_text(), "pl_pit.forceSoftwareCursor = 1\n")
+        self.assertEqual((sc / "PTU/USER.cfg").read_text(), "r_DisplayInfo = 1\npl_pit.forceSoftwareCursor = 1\n")
+        self.assertFalse((sc / "EPTU").exists())                 # не скачанный канал не создаём
+        self.run_vg(str(g))                                      # второй запуск — без повторов
+        self.assertEqual((sc / "LIVE/USER.cfg").read_text().count("forceSoftwareCursor"), 1)
+
+    def test_star_citizen_keeps_own_choice(self):
+        g, sc = self.sc_game()
+        (sc / "LIVE").mkdir(parents=True)
+        (sc / "LIVE/USER.cfg").write_text("pl_pit.forceSoftwareCursor = 0\n")
+        self.assertEqual(self.run_vg(str(g))[0], 0)
+        self.assertEqual((sc / "LIVE/USER.cfg").read_text(), "pl_pit.forceSoftwareCursor = 0\n")
+
+    def test_other_games_untouched(self):
+        own(self.game, ".prefix/pfx/drive_c/Program Files/HoYoPlay/launcher.exe")
+        (self.game / ".prefix/pfx/drive_c/windows").mkdir(parents=True)
+        self.run_vg(str(self.game))
+        self.assertFalse((self.game / ".prefix/pfx/drive_c/Program Files/Roberts Space Industries").exists())
+
 
 class TestWolfSide(unittest.TestCase):
     def test_prefix_temp_not_archived(self):
@@ -460,6 +507,26 @@ class TestOpenFlows(OpenBase):
                 break
             time.sleep(0.1)
         self.assertIn(f"vg-run {self.gd}/Celeste", calls)
+
+    def test_electron_installer_game_unpacked(self):
+        # [2026-10-16] RSI Launcher (Star Citizen) — установщик electron-builder: под Wine закрывается с «cannot be
+        # closed». Программу достаём сами прямо в Games/Название, установщик не запускаем
+        bin_ = self.home / "bin"
+        (bin_ / "7z").write_text('#!/bin/sh\necho "7z $*" >> "$VG_CALLS"\ncase "$1" in\n'
+                                 '  l) echo "Path = \\$PLUGINSDIR/app-64.7z" ;;\n'
+                                 '  e) d=${3#-o}; touch "$d/app-64.7z" ;;\n'
+                                 '  x) d=${3#-o}; printf MZ > "$d/RSI Launcher.exe"; printf x > "$d/resources.pak" ;;\n'
+                                 'esac\n')
+        (bin_ / "7z").chmod(0o755)
+        setup = fake_exe(self.home / "Downloads/RSI Launcher-Setup-2.18.1.exe", b"..NullsoftInst..")
+        code, calls = self.run_open(setup, ["0|0", "0|RSI Launcher", "0|", "1|"])   # игра; название; «идёт…»; «Готово»
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manifest("RSI Launcher")["exe"], "RSI Launcher.exe")
+        self.assertEqual(self.manifest("RSI Launcher")["kind"], "portable")
+        self.assertFalse([c for c in calls if c.startswith("vg-run") and "--exe" in c])   # установщик не запускали
+        self.assertIn("--entry-text=RSI Launcher", " ".join(calls))                   # название — без «Setup» и версии
+        self.assertEqual(list((self.home / ".local/share/vastgame/adding").iterdir()), [])
+        self.assertTrue((self.home / ".local/share/vastgame/requests/shortcuts").exists())
 
 
 class TestProgramsForGames(TestOpenFlows):
