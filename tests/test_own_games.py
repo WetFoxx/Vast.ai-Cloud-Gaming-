@@ -236,6 +236,12 @@ ldg
         # [живой случай 2026-10-09] своя игра из Steam: выход → «выгружаю pfx--<номер ярлыка>», а «диска C:» от Steam нет
         self.assertIn('wants "pfx--$a" && [ -d "$DH/$SR/steamapps/compatdata/$a" ] && arr+=("pfx--$a")', fn("watch_games"))
 
+    def test_large_game_safety_threshold(self):
+        # [2026-10-17] тяжёлые игры (>= 15 ГБ) защищены от автоматической выгрузки без согласия
+        self.assertIn('game_size_mb()', WOLF)
+        self.assertIn('GAME_MAX_AUTO_MB:-15000', fn("want"))
+        self.assertIn('GAME_MAX_AUTO_MB:-15000', fn("gsync"))
+
 
 
 # ---------------------------------------------------------------- помощник двойного щелчка (vg-open)

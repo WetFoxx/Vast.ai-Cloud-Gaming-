@@ -33,7 +33,8 @@ GAMES_PY = TMP / "wolf-games.py"
 GAMES_PY.write_text(heredoc("wolf-games.py", "GAMES"))
 SHORT_PY = TMP / "wolf-shortcuts.py"
 SHORT_PY.write_text(heredoc("wolf-shortcuts.py", "SHORTCUTS"))
-FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "store", "tool", "inlist", "addline", "rmline", "want", "wants",
+FUNCS = "\n".join(fn(n) for n in ("sel_init", "selon", "store", "tool", "inlist", "addline", "rmline",
+                                   "game_size_mb", "want", "wants",
                                    "ondisk", "askable", "running_archives", "aname", "ask", "unask", "scan_games", "answer",
                                    "gsync", "idirs", "flags_ready", "steam_ready", "incloud", "ldg"))
 FUNCS += "\n" + re.search(r"^HID=.*$", WOLF, re.M).group(0)
@@ -167,6 +168,41 @@ class TestOwnGamesAll(unittest.TestCase):
                     'for g in game--Mine game--Skipped game--Plain; do want "$g" && echo "YES $g"; done; true',
                     env=f'VG_SYNC="{vg}"')
         self.assertEqual(out.split(), ["YES", "game--Mine"])
+
+    def test_large_own_game_requires_consent(self):
+        # [2026-10-17] тяжёлая игра (Star Citizen и др., >= 15 ГБ) не выгружается молча,
+        # а спрашивает человека и без ответа «да» не забивает Google Диск
+        m = Machine()
+        (m.d / "home/Games/StarCitizen").mkdir(parents=True)
+        (m.d / "home/Games/StarCitizen/.vastgame.json").write_text('{"exe": "starcitizen.exe"}')
+        vg = base64.b64encode(json.dumps({"games": [], "steam": "store", "own": "all"}).encode()).decode()
+        # GAME_MAX_AUTO_MB=0 имитирует превышение порога размера 15 ГБ
+        env = f'VG_SYNC="{vg}"; GAME_MAX_AUTO_MB=0'
+        # 1. want без ответа человека возвращает 1 (не хотим выгружать молча)
+        out = m.run('sel_init; want game--StarCitizen && echo YES || echo NO', env=env)
+        self.assertEqual(out.strip(), "NO")
+        # 2. scan_games задаёт вопрос человеку
+        m.run('scan_games; scan_games', env=env)
+        self.assertEqual(m.asks(), ["ask--new--game--StarCitizen"])
+        # 3. при выключении (NOW=1) без ответа не выгружается, пишется предупреждение в лог
+        out = m.run('NOW=1 gsync', env=env)
+        uploaded = [line for line in out.splitlines() if not line.startswith("LOG ")]
+        self.assertNotIn("game--StarCitizen", uploaded)
+        self.assertIn("без явного согласия человека не выгружаю", out)
+        # 4. ответ человека «да» -> выгружается
+        m.run('answer new game--StarCitizen yes', env=env)
+        out = m.run('want game--StarCitizen && echo YES', env=env)
+        self.assertEqual(out.strip(), "YES")
+        out = m.run('NOW=1 gsync', env=env)
+        self.assertIn("game--StarCitizen", out)
+        # 5. если игра уже в облаке — выгружается без вопроса даже при большом размере
+        m2 = Machine(cloud=["game--StarCitizen.tar.zst.parts"])
+        (m2.d / "home/Games/StarCitizen").mkdir(parents=True)
+        (m2.d / "home/Games/StarCitizen/.vastgame.json").write_text('{"exe": "starcitizen.exe"}')
+        out = m2.run('sel_init; want game--StarCitizen && echo INCLOUD', env=env)
+        self.assertEqual(out.strip(), "INCLOUD")
+        m2.run('scan_games', env=env)
+        self.assertEqual(m2.asks(), [])
 
 
 class TestSteamReady(unittest.TestCase):

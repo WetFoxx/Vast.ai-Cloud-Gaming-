@@ -691,6 +691,18 @@ inlist() { grep -qxF -- "$1" "$S/$2" 2>/dev/null; }
 modson() { inlist "$1" sel.mods_yes || { [ -e "$S/sel.mods_all" ] && ! inlist "$1" sel.mods_no; }; }
 addline() { inlist "$1" "$2" || printf '%s\n' "$1" >> "$S/$2"; }
 rmline() { [ -e "$S/$2" ] || return 0; grep -vxF -- "$1" "$S/$2" > "$S/$2.new"; mv -f "$S/$2.new" "$S/$2"; }
+# Размер игры на диске в мегабайтах (для sgame-- и game--)
+game_size_mb() {
+  local p s
+  case $1 in
+    sgame--*) [ -n "$SR" ] || sr; p="$DH/$SR/steamapps/common/${1#sgame--}" ;;
+    game--*)  p="$GD/${1#game--}" ;;
+    *)        echo 0; return ;;
+  esac
+  [ -d "$p" ] || { echo 0; return; }
+  s=$(du -sm "$p" 2>/dev/null | awk '{print $1}')
+  echo "${s:-0}"
+}
 # Синхронизировать ли архив игры (sgame--/game--) и сохранения (pfx--)
 want() {
   tool "$1" && return 0
@@ -699,8 +711,16 @@ want() {
     # [v5.7] «все свои игры»: игра из Games, которая уже есть в облаке и на которую не отвечали «не синхронизировать»;
     # новая на диске — по-прежнему с вопросом (её нет в облаке)
     case $1 in game--*) [ -e "$S/sel.own_all" ] && ! inlist "$1" sel.skip && incloud "$1" && return 0 ;; esac
-    # [v5.7] своя игра, добавленная через окно VastGame (паспорт .vastgame.json), — без вопроса: человек сам её добавил
-    case $1 in game--*) [ -f "$GD/${1#game--}/.vastgame.json" ] && ! inlist "$1" sel.skip && return 0 ;; esac
+    # [v5.7] своя игра с паспортом .vastgame.json: если меньше 15 ГБ — синхронизируется без вопроса;
+    # тяжёлая игра (>= 15 ГБ, Star Citizen и др.) — только с явного согласия человека (sel.games),
+    # чтобы не забить бесплатный Google Диск (15 ГБ) и не зависать на выгрузке
+    case $1 in game--*)
+      if [ -f "$GD/${1#game--}/.vastgame.json" ] && ! inlist "$1" sel.skip; then
+        incloud "$1" && return 0
+        [ "$(game_size_mb "$1")" -lt "${GAME_MAX_AUTO_MB:-15000}" ] && return 0
+      fi
+      ;;
+    esac
     inlist "$1" sel.games; return
   fi
   case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
@@ -781,8 +801,10 @@ scan_games() {
     awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" && ask del "$n" "$(aname "$n")"
   done <<< "$old"
   while IFS= read -r n; do
-    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$old" || continue
-    want "$n" || inlist "$n" sel.skip || ask new "$n" "$(aname "$n")"
+    [ -n "$n" ] || continue
+    if ! grep -qxF -- "$n" <<< "$old" || { ! want "$n" && ! inlist "$n" sel.skip; }; then
+      want "$n" || inlist "$n" sel.skip || ask new "$n" "$(aname "$n")"
+    fi
   done <<< "$cur"
   printf '%s\n' "$cur" > "$S/present"
 }
@@ -1933,7 +1955,7 @@ boot() {
 # ответил, — только при выключении (NOW: ничего не теряем); запущенные сейчас — после выхода (иначе игра, которая
 # всё время пишет в свою папку, выгружалась бы по кругу — живой случай 2026-09-28, Dawnwalker раз в минуту).
 gsync() {
-  local n run=""
+  local n run="" sz
   [ -n "$SR" ] || sr
   [ -n "${NOW:-}" ] || run=$(running_archives)
   { ldg; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; ld "$PD" prog--; } | while IFS= read -r n; do
@@ -1945,7 +1967,13 @@ gsync() {
       continue
     fi
     if want "$n"; then echo "$n"
-    elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then echo "$n"
+    elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then
+      sz=$(game_size_mb "$n")
+      if [ "${sz:-0}" -ge "${GAME_MAX_AUTO_MB:-15000}" ]; then
+        log "$n: размер ${sz} МБ (>= 15 ГБ) — без явного согласия человека не выгружаю, чтобы не забить бесплатный Google Диск"
+      else
+        echo "$n"
+      fi
     fi
   done
 }
