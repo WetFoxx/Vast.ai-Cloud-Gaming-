@@ -6,7 +6,7 @@
  * «мониторов» не находит («Platform failed to initialize»). Sunshine загружает libXrandr.so.2 сама (dlopen) — эта
  * библиотека (имя внутри — libXrandr.so.2) подгружена в Sunshine заранее (LD_PRELOAD, только в режиме «без
  * монитора»), и dlopen отдаёт её: функции экрана — настоящей библиотеке, а когда выходов нет — один подключённый
- * выход во весь экран. Из LD_PRELOAD детей Sunshine (игры, xrandr) она себя убирает: им нужна настоящая. */
+ * выход во весь экран (нынешнего размера: wolf-res меняет его под клиента Moonlight). Из LD_PRELOAD детей Sunshine (игры, xrandr) она себя убирает: им нужна настоящая. */
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <string.h>
@@ -87,8 +87,13 @@ XRRCrtcInfo *XRRGetCrtcInfo(Display *d, XRRScreenResources *res, RRCrtc c) {
         return f ? f(d, res, c) : NULL;
     }
     memset(&fake_crtc, 0, sizeof fake_crtc);
-    fake_crtc.width = (unsigned) DisplayWidth(d, DefaultScreen(d));
-    fake_crtc.height = (unsigned) DisplayHeight(d, DefaultScreen(d));
+    /* размер экрана — у X-сервера, а не из Display (там — на момент подключения): wolf-res меняет его под клиента */
+    Window root; int x, y; unsigned w = 0, h = 0, bw, dep;
+    if (!XGetGeometry(d, DefaultRootWindow(d), &root, &x, &y, &w, &h, &bw, &dep) || !w || !h) {
+        w = (unsigned) DisplayWidth(d, DefaultScreen(d)); h = (unsigned) DisplayHeight(d, DefaultScreen(d));
+    }
+    fake_crtc.width = w;
+    fake_crtc.height = h;
     fake_crtc.noutput = 1; fake_crtc.outputs = outs;
     return &fake_crtc;
 }

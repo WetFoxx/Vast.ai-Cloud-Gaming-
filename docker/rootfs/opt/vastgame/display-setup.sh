@@ -27,7 +27,8 @@ IFS=:. read -r _ b1 b2 b3 <<< "$(nvidia-smi --query-gpu=pci.bus_id --format=csv,
 [ -n "${b3:-}" ] || { echo "экран: не узнать шину видеокарты"; exit 1; }
 # [2026-10-15] display-setup.sh RES headless — экран без монитора: на части хостов выходом видеокарты владеет хост
 # (Xorg: «Failed to acquire modesetting permission»), а рисовать на ней можно (проверено: GTX 1660 S Вьетнам, OpenGL и
-# Vulkan на видеокарте, X11-захват 60 к/с). Размер экрана — базовый режим; wolf-res его не меняет (выходов нет)
+# Vulkan на видеокарте, X11-захват 60 к/с). Virtual — наибольший экран, как с монитором; размер под клиента
+# Moonlight (и базовый при запуске) wolf-res задаёт xrandr --fb [2026-10-16; раньше экран был всегда RES]
 if [ "${2:-}" = headless ]; then
   cat > /etc/X11/xorg.conf <<XORG
 Section "ServerFlags"
@@ -46,11 +47,11 @@ Section "Screen"
     DefaultDepth 24
     SubSection "Display"
         Depth   24
-        Virtual ${RES%x*} ${RES#*x}
+        Virtual 3840 3840
     EndSubSection
 EndSection
 XORG
-  echo "экран: без монитора, $RES"
+  echo "экран: без монитора, базовый $RES"
   exit 0
 fi
 cat > /etc/X11/xorg.conf <<XORG

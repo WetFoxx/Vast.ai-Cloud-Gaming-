@@ -17,6 +17,7 @@
 #   SUNSHINE_PASSWORD  только рабочий стол: логин кабинета Sunshine vastgame/<пароль>
 #   STEAM_AUTOSTART  только рабочий стол: 1 (по умолчанию) — запустить Steam после входа
 #   VASTGAME_DEBUG_TOKEN  необязательно: канал команд для отладки (порт 8788, только через Tailscale)
+#   VG_FORCE_HEADLESS  1 — сразу экран без монитора (проверка этого режима на любом хосте)
 # Ход — /var/log/vastgame.log (и вывод контейнера), этап — /run/vastgame/stage.
 set -u
 DU=user
@@ -81,6 +82,7 @@ stage nvidia
 stage display
 "$V/display-setup.sh" "$RES" 2>&1 | tee -a "$LOG"
 for args in "vt7 -novtswitch -sharevts" "-novtswitch -sharevts -keeptty" "-keeptty"; do
+  [ "${VG_FORCE_HEADLESS:-}" = 1 ] && { log "экран: с монитором не пробую (VG_FORCE_HEADLESS)"; break; }
   setsid Xorg :0 -config /etc/X11/xorg.conf -noreset -nolisten tcp $args >/var/log/xorg.out 2>&1 &
   for i in $(seq 1 20); do DISPLAY=:0 xrandr >/dev/null 2>&1 && break; sleep 0.5; done
   DISPLAY=:0 xrandr >/dev/null 2>&1 && { log "Xorg запущен ($args)"; break; }

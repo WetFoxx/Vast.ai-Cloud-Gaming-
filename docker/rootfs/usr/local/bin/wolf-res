@@ -17,6 +17,16 @@ case "$HZ" in ''|*[!0-9]*) HZ=60 ;; esac
 [ "$HZ" -ge 24 ] || HZ=60
 if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then TARGET="${W}x${H}"; else TARGET=$BASE; W=${BASE%x*}; H=${BASE#*x}; HZ=60; fi
 xr() { xrandr "$@" 2>/dev/null; }
+# [2026-10-16] Экран без монитора (/run/vastgame/headless): выходов нет — меняем сам размер экрана X (--fb) в пределах
+# Virtual (display-setup.sh); Sunshine видит «монитор» нынешнего размера (vgrr), частота не нужна. Не вышло — базовый
+if [ -e /run/vastgame/headless ]; then
+  scr() { xr | sed -nE 's/^Screen 0:.* current ([0-9]+) x ([0-9]+),.*/\1x\2/p' | head -1; }
+  [ "$(scr)" = "$TARGET" ] && { log "без монитора: $TARGET уже активно"; exit 0; }
+  if xr --fb "$TARGET"; then log "без монитора: экран $(scr) (запрос $TARGET)"
+  elif [ "$TARGET" != "$BASE" ] && xr --fb "$BASE"; then log "без монитора: $TARGET не вышло — базовый $(scr)"
+  else log "без монитора: не удалось $TARGET (экран $(scr))"; fi
+  exit 0
+fi
 OUT=$(xr | awk '/ connected/{print $1; exit}')
 [ -n "$OUT" ] || { log "нет подключённого выхода"; exit 0; }
 cur() { xr | sed -nE "s/^$OUT connected (primary )?([0-9]+x[0-9]+)\+.*/\2/p" | head -1; }
