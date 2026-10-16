@@ -283,7 +283,7 @@ SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
 # (core.rental_body: VASTGAME_KVM_SCRIPT_URL — разовая проверка без смены шаблона). Проверили — один адрес на оба.
 DOCKER_SCRIPT_VERSION = "v5.10"
 DOCKER_SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-                     "3b33173b5e3380402fd8fa6d8eea3a2f4874dcd8/wolf-setup.sh")
+                     "c55c6cc0d4a7e99a859a42e7cd38cb6cfc918d7d/wolf-setup.sh")
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
 # Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
 # Tailscale (41641/udp, 3478/udp — STUN)
