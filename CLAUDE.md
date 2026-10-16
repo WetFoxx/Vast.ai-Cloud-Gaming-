@@ -784,3 +784,10 @@
   сохранения): `Api.archive_retry` → страница машины `/cmd restore` (архивы игр/сохранений + steam-state/client/cache, не
   identity; в фоне) → `wolf restore`. Скрипт v5.10 = `3b33173` → `setup.DOCKER_SCRIPT_URL`; KVM — v5.7 (там кнопка ответит
   `archive.retry_old`). Вживую не проверено.
+- **Разрешение под клиента на экране без монитора (образ `88370fd`, 2026-10-16, закреплён; в следующем выпуске):** раньше
+  такой экран был всегда RES (1920×1200). Теперь `display-setup.sh … headless` — Virtual 3840 3840 (предел), `wolf-res`
+  без выходов меняет размер экрана `xrandr --fb WxH` (больше предела — базовый), `vgrr` берёт размер у X-сервера
+  (XGetGeometry корня, а не из Display). Проверка из папки проекта: `VASTGAME_IMAGE` (другая сборка образа),
+  `VASTGAME_FORCE_HEADLESS=1` → `VG_FORCE_HEADLESS=1` (сразу без монитора на любом хосте). **Проверено вживую:**
+  подключение Moonlight → экран 2560×1600, Sunshine «VIRTUAL-0 with res 2560x1600 offset by 0x0»; у NVIDIA без монитора
+  RandR «maximum 32767 x 32767». Тест `test_wolf_res_headless_resizes_screen`.
