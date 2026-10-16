@@ -10,7 +10,8 @@ import cloudgames
 from cliui import ask
 from vastapi import list_instances
 
-KIND_RU = {"sgame": "игра Steam", "game": "не из Steam", "pfx": "сохранения", "mod": "моды"}
+KIND_RU = {"sgame": "игра Steam", "game": "не из Steam", "lgame": "игра (лаунчер)",
+           "pfx": "сохранения", "mod": "моды", "prog": "программа"}
 
 p = argparse.ArgumentParser(description="Игры и сохранения в облаке")
 sub = p.add_subparsers(dest="cmd")
