@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.10 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -2427,6 +2427,7 @@ ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,2
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
 MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
+RESTORABLE = ('steam-state', 'steam-client', 'steam-cache')   # [v5.10] служебные — тоже можно повторить (не identity)
 PROG = re.compile(r'^(game|prog|pfx):[^\x00-\x1f]{1,400}$')   # [v5.4] программа игры (путь проверяет wolf-steam.py)
 ARGS = re.compile(r'^[^\x00-\x1f]{0,300}$')                     # [v5.6] параметры программы-загрузчика
 def command(c, a):
@@ -2437,6 +2438,8 @@ def command(c, a):
             'finish': ([WOLF, 'finish'], False),                  # сам уходит в фон службой (v3.11)
             'push-identity': ([WOLF, 'push', 'identity'], True),
             'forget': ([WOLF, 'forget', arg], False) if ARCHIVE.match(arg) else None,
+            # [v5.10] «Повторить» у архива с ошибкой восстановления — скачать заново (в фоне: может идти минуты)
+            'restore': ([WOLF, 'restore', arg], True) if ARCHIVE.match(arg) or arg in RESTORABLE else None,
             # [v4.6] ответ на вопрос о новой / удалённой игре: [new|del, архив игры, yes|no]
             'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and isinstance(a[1], str) and a[2] in ('yes', 'no')
                       and ((a[0] in ('new', 'del') and GAME.match(a[1])) or (a[0] == 'mod' and MOD.match(a[1]))) else None,
