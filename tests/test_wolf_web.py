@@ -145,6 +145,19 @@ class TestWolfWeb(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(self.calls(), ["push identity"])
 
+    def test_restore_in_background_name_checked(self):
+        # [v5.10] «Повторить» у архива с ошибкой: архивы игр/сохранений и служебные Steam — да, identity и чужое — нет
+        for bad in ("identity", "../x", "pfx--1\nfinish", "-rf"):
+            self.assertIsNone(wolfnode.post_cmd("127.0.0.1", "restore", [bad])[0], bad)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.run_cmd("restore", ["pfx--202090"]), (0, "started"))
+        self.assertEqual(self.run_cmd("restore", ["steam-client"]), (0, "started"))
+        for _ in range(50):
+            if len(self.calls()) == 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(sorted(self.calls()), ["restore pfx--202090", "restore steam-client"])
+
     def test_unknown_command_refused(self):
         r = wolfnode.post_cmd("127.0.0.1", "rm -rf /")
         self.assertEqual(r[0], None)

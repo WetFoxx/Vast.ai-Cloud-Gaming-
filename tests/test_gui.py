@@ -123,6 +123,25 @@ class TestSnapshots(unittest.TestCase):
         self.assertTrue(api.snapshot("setup")["ready"])
 
 
+class TestArchiveRetry(unittest.TestCase):
+    """[v5.10] «Повторить» у архива с ошибкой восстановления: имя проверяется, команда уходит машине."""
+
+    def test_retry(self):
+        api, sent = gui.Api(), []
+        with mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "vastai-gaming")), \
+             mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args, **k: (sent.append((cmd, args)), (0, "started"))[1]):
+            self.assertEqual(api.archive_retry("pfx--202090"), {"ok": True})
+            self.assertEqual(api.archive_retry("steam-client"), {"ok": True})
+            for bad in ("identity", "../x", "pfx--1/2", "boot"):
+                self.assertEqual(api.archive_retry(bad)["error"]["key"], "archive.retry_bad")
+        self.assertEqual(sent, [("restore", ["pfx--202090"]), ("restore", ["steam-client"])])
+
+    def test_old_script(self):
+        with mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "vastai-gaming")), \
+             mock.patch.object(gui.wolfnode, "run", lambda *a, **k: (None, "нет такой команды")):
+            self.assertEqual(gui.Api().archive_retry("pfx--1")["error"]["key"], "archive.retry_old")
+
+
 class TestLaunchFx(unittest.TestCase):
     """[2026-10-15] Анимация запуска трансляции на весь экран — отдельным процессом (fxwin), только на Mac."""
 

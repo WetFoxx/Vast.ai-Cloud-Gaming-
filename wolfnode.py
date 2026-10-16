@@ -61,7 +61,8 @@ SHELL = {"ping": lambda a: "echo ok", "time": lambda a: "date +%s", "finish": la
          "sunshine-creds": lambda a: f"wolf sunshine-creds {shlex.quote(a[0])}",
          "answer": lambda a: "wolf answer " + " ".join(shlex.quote(x) for x in a),
          "prog-run": lambda a: "wolf prog run " + " ".join(shlex.quote(x) for x in a),          # [v5.4]
-         "prog-auto": lambda a: "wolf prog auto " + " ".join(shlex.quote(x) for x in a)}
+         "prog-auto": lambda a: "wolf prog auto " + " ".join(shlex.quote(x) for x in a),
+         "restore": lambda a: f"(wolf restore {shlex.quote(a[0])} </dev/null >/dev/null 2>&1 &)"}   # [v5.10] «Повторить»
 
 
 def post_cmd(ip, cmd, args=(), stdin=None, timeout=120):

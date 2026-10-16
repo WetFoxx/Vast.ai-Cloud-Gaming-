@@ -351,3 +351,5 @@ body.pad-mode, body.pad-mode * { cursor: none !important; }
 /* [2026-10-16] Большая карточка постоянной высоты: картинка не прыгает, пока на машине что-то качается/выгружается */
 .hero.with-art { min-height: 340px; }
 #live.card { border-top: 0; padding: 16px 20px; gap: 6px; }
+.arch-head .arch-retry { margin-left: 10px; padding: 4px 12px; font-size: 12.5px; }
+.arch-head .arch-retry:disabled { opacity: .8; background: transparent; color: var(--muted); }

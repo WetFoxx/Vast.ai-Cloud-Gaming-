@@ -281,7 +281,7 @@ function renderLive(archives) {
   const ul = $("live-archives");
   $("live").hidden = !names.length;
   ul.innerHTML = "";
-  for (const n of names) ul.appendChild(archiveRow(n, archives[n][0], archives[n][2]));
+  for (const n of names) ul.appendChild(archiveRow(n, archives[n][0], archives[n][2], archives[n][1]));
 }
 let liveTimer = null;
 function liveLoop(on) {
@@ -2609,10 +2609,30 @@ function leftText(sec) {
 
 // Строка архива: имя и состояние; пока он качается или выгружается (wolf-setup.sh v4.6) — полоса,
 // «45% · 12,3 из 27 ГБ» и средняя скорость с «осталось ~N мин»
-function archiveRow(name, state, pg) {
+// [v5.10] «Повторить» у архива, который не восстановился (машина сама пробует 3 раза): скачать заново без новой аренды.
+// Только у ошибки восстановления — при ошибке выгрузки скачивание из облака затёрло бы новые сохранения на машине.
+const retryNotes = {};       // имя архива → {at, text}: строку перерисовывают раз в секунду, ответ держим 20 с
+function canRetry(name, state, text) {
+  return state === "err" && /восстановлен/.test(text || "")
+    && (/^(game|sgame|pfx|mod|prog|lgame|gsave)--/.test(name) || ["steam-state", "steam-client", "steam-cache"].includes(name));
+}
+function archiveRow(name, state, pg, text) {
   const li = el("li", { className: "arch " + state });
   const head = el("div", { className: "arch-head" });
   head.append(el("span", { className: "arch-name" }, archiveName(name)), el("span", { className: "st " + state }, t("arch." + state)));
+  if (canRetry(name, state, text)) {
+    const note = retryNotes[name];
+    const b = button(t("archive.retry"), async () => {
+      b.disabled = true;
+      retryNotes[name] = { at: Date.now(), text: t("archive.retrying") };
+      const r = DEMO ? { ok: true } : await api().archive_retry(name);
+      retryNotes[name] = { at: Date.now(), text: r.error ? errText(r.error) : t("archive.retrying") };
+      b.textContent = retryNotes[name].text;
+    });
+    b.classList.add("small", "arch-retry");
+    if (note && Date.now() - note.at < 20000) { b.disabled = true; b.textContent = note.text; }
+    head.appendChild(b);
+  }
   li.append(head);
   if (pg && (state === "down" || state === "up") && pg.total > 0) {
     const pct = Math.min(100, Math.floor((pg.done / pg.total) * 100));
@@ -2637,8 +2657,8 @@ function renderArchives(archives) {
   const ul = $("archives");
   ul.innerHTML = "";
   for (const n of names) {
-    const [state, , pg] = archives[n];
-    ul.appendChild(archiveRow(n, state, pg));
+    const [state, text, pg] = archives[n];
+    ul.appendChild(archiveRow(n, state, pg, text));
   }
 }
 

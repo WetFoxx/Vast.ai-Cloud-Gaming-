@@ -67,6 +67,7 @@ TRAFFIC_LIMITS = (0, 0.1, 0.5, 1, 2, 5)   # $ за ТБ, не дороже (0 �
 OFFER_SORTS = ("price", "ping", "net", "traffic", "gpu")   # колонки, по которым сортирует страница
 DISK_MIN, DISK_MAX = jobs.DISK_MIN, jobs.DISK_MAX   # пределы ползунка диска, ГБ
 SPARE = 10          # машин из списка человека на замену, если Vast не запустит выбранную
+RETRY_NAME = re.compile(r"^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,200}$")   # [v5.10] как на машине
 PROG_ID = re.compile(r"^(game|prog|pfx):[^\x00-\x1f]{1,400}$")   # [v5.4] программа игры (путь проверяет машина)
 PROG_ARGS = re.compile(r"^[^\x00-\x1f]{0,300}$")                  # [v5.6] параметры программы-загрузчика
 SHORTCUT_APPID = 2147483648   # номера ярлыков Steam (игры не из магазина) — от него; обложек у них нет
@@ -832,6 +833,21 @@ class Api:
         m = re.search(r"prog: (\w+)", out or "")
         settings.applog(f"программа {ident} для {appid}: {m.group(1) if m else (out or '').strip()[-120:]}")
         return {"result": m.group(1) if m else "failed"}
+
+    def archive_retry(self, name):
+        """[v5.10] «Повторить» у архива с ошибкой восстановления: машина скачивает его заново (в фоне), ход — на её
+        странице, как обычно. {"ok"} или ошибка (старый скрипт машины такой команды не знает)."""
+        name = str(name)
+        if not (RETRY_NAME.match(name) or name in ("steam-state", "steam-client", "steam-cache")):
+            return {"error": {"key": "archive.retry_bad", "params": {}, "text": "bad archive"}}
+        node = wolfnode.ts_node()
+        if not node:
+            return {"error": {"key": "ask.no_machine", "params": {}, "text": "no machine"}}
+        code, out = wolfnode.run(node[1], "restore", [name], timeout=30, on_notice=self._ssh_notice)
+        settings.applog(f"повторить {name}: код {code} {(out or '').strip()[-120:]}")
+        if code != 0:
+            return {"error": {"key": "archive.retry_old", "params": {}, "text": (out or "").strip()[-200:]}}
+        return {"ok": True}
 
     def prog_auto(self, appid, ident, on):
         """Тумблер «Вместе с игрой»: запомнить (уйдёт машинам при аренде) и сразу передать работающей машине."""
