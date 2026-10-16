@@ -691,16 +691,36 @@ inlist() { grep -qxF -- "$1" "$S/$2" 2>/dev/null; }
 modson() { inlist "$1" sel.mods_yes || { [ -e "$S/sel.mods_all" ] && ! inlist "$1" sel.mods_no; }; }
 addline() { inlist "$1" "$2" || printf '%s\n' "$1" >> "$S/$2"; }
 rmline() { [ -e "$S/$2" ] || return 0; grep -vxF -- "$1" "$S/$2" > "$S/$2.new"; mv -f "$S/$2.new" "$S/$2"; }
+# Размер игры на диске в мегабайтах (для sgame-- и game--)
+game_size_mb() {
+  local p s
+  case $1 in
+    sgame--*) [ -n "$SR" ] || sr; p="$DH/$SR/steamapps/common/${1#sgame--}" ;;
+    game--*)  p="$GD/${1#game--}" ;;
+    *)        echo 0; return ;;
+  esac
+  [ -d "$p" ] || { echo 0; return; }
+  s=$(du -sm "$p" 2>/dev/null | awk '{print $1}')
+  echo "${s:-0}"
+}
 # Синхронизировать ли архив игры (sgame--/game--) и сохранения (pfx--)
 want() {
+  tool "$1" && return 0
   if selon; then
-    tool "$1" && return 0
     case $1 in sgame--*) store && return 1 ;; esac
     # [v5.7] «все свои игры»: игра из Games, которая уже есть в облаке и на которую не отвечали «не синхронизировать»;
     # новая на диске — по-прежнему с вопросом (её нет в облаке)
     case $1 in game--*) [ -e "$S/sel.own_all" ] && ! inlist "$1" sel.skip && incloud "$1" && return 0 ;; esac
-    # [v5.7] своя игра, добавленная через окно VastGame (паспорт .vastgame.json), — без вопроса: человек сам её добавил
-    case $1 in game--*) [ -f "$GD/${1#game--}/.vastgame.json" ] && ! inlist "$1" sel.skip && return 0 ;; esac
+    # [v5.7] своя игра с паспортом .vastgame.json: если меньше 15 ГБ — синхронизируется без вопроса;
+    # тяжёлая игра (>= 15 ГБ, Star Citizen и др.) — только с явного согласия человека (sel.games),
+    # чтобы не забить бесплатный Google Диск (15 ГБ) и не зависать на выгрузке
+    case $1 in game--*)
+      if [ -f "$GD/${1#game--}/.vastgame.json" ] && ! inlist "$1" sel.skip; then
+        incloud "$1" && return 0
+        [ "$(game_size_mb "$1")" -lt "${GAME_MAX_AUTO_MB:-15000}" ] && return 0
+      fi
+      ;;
+    esac
     inlist "$1" sel.games; return
   fi
   case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
@@ -781,8 +801,10 @@ scan_games() {
     awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" && ask del "$n" "$(aname "$n")"
   done <<< "$old"
   while IFS= read -r n; do
-    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$old" || continue
-    want "$n" || inlist "$n" sel.skip || ask new "$n" "$(aname "$n")"
+    [ -n "$n" ] || continue
+    if ! grep -qxF -- "$n" <<< "$old" || { ! want "$n" && ! inlist "$n" sel.skip; }; then
+      want "$n" || inlist "$n" sel.skip || ask new "$n" "$(aname "$n")"
+    fi
   done <<< "$cur"
   printf '%s\n' "$cur" > "$S/present"
 }
@@ -1863,7 +1885,7 @@ boot() {
           if store; then :                                         # [v4.8] игры Steam качает Steam — архив не трогаем
           elif selon; then st "$k" ok "не выбрана — не скачиваю"
           else st "$k" ok "синхронизация игр Steam выключена — не восстанавливаю"; fi
-        elif printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
+        elif tool "$k" || printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
           g+=("$k")
         else
           echo "?" > "$S/v/$k"
@@ -1933,7 +1955,7 @@ boot() {
 # ответил, — только при выключении (NOW: ничего не теряем); запущенные сейчас — после выхода (иначе игра, которая
 # всё время пишет в свою папку, выгружалась бы по кругу — живой случай 2026-09-28, Dawnwalker раз в минуту).
 gsync() {
-  local n run=""
+  local n run="" sz
   [ -n "$SR" ] || sr
   [ -n "${NOW:-}" ] || run=$(running_archives)
   { ldg; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; ld "$PD" prog--; } | while IFS= read -r n; do
@@ -1945,7 +1967,13 @@ gsync() {
       continue
     fi
     if want "$n"; then echo "$n"
-    elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then echo "$n"
+    elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then
+      sz=$(game_size_mb "$n")
+      if [ "${sz:-0}" -ge "${GAME_MAX_AUTO_MB:-15000}" ]; then
+        log "$n: размер ${sz} МБ (>= 15 ГБ) — без явного согласия человека не выгружаю, чтобы не забить бесплатный Google Диск"
+      else
+        echo "$n"
+      fi
     fi
   done
 }
@@ -3142,12 +3170,15 @@ def steam_root():
 
 
 def _acf_dir(root, appid):
-    try:
-        m = re.search(r'"installdir"\s*"([^"]+)"', open(os.path.join(root, "steamapps", f"appmanifest_{appid}.acf"),
-                                                         encoding="utf-8", errors="replace").read())
-    except OSError:
-        return None
-    return m and os.path.join(root, "steamapps", "common", m.group(1))
+    for sub in ("", ".vastgame-hidden"):
+        try:
+            m = re.search(r'"installdir"\s*"([^"]+)"', open(os.path.join(root, "steamapps", sub, f"appmanifest_{appid}.acf"),
+                                                             encoding="utf-8", errors="replace").read())
+            if m:
+                return os.path.join(root, "steamapps", "common", m.group(1))
+        except OSError:
+            pass
+    return None
 
 
 def proton(root):
@@ -3198,6 +3229,13 @@ def command(game, exe=None, args=()):
     env = dict(os.environ)
     prefix = os.path.join(game, ".prefix")
     os.makedirs(prefix, exist_ok=True)
+    link = os.path.join(prefix, "drive_c")
+    pfx_drive = os.path.join(prefix, "pfx", "drive_c")
+    if os.path.isdir(pfx_drive) and not os.path.exists(link):
+        try:
+            os.symlink("pfx/drive_c", link)
+        except OSError:
+            pass
     env.update(STEAM_COMPAT_DATA_PATH=prefix, STEAM_COMPAT_CLIENT_INSTALL_PATH=root)
     env.setdefault("SteamAppId", "0")
     env.setdefault("SteamGameId", "0")
@@ -3206,6 +3244,99 @@ def command(game, exe=None, args=()):
     proton_cmd = [pr, "waitforexitandrun", exe, *args]
     argv = [entry, "--verb=waitforexitandrun", "--", *proton_cmd] if entry else proton_cmd
     return (argv, env, os.path.dirname(exe), exe), None
+
+
+# [2026-10-16] Star Citizen под Wine/Proton:
+# 1) системный курсор расходится с игрой (режим «F», mobiGlas, меню) — форсируем программный курсор (USER.cfg).
+# 2) Vulkan падает при создании логического устройства (ошибка 60101) — форсируем Direct3D 11 (USER.cfg и GraphicsSettings.json).
+# 3) RSI Launcher ищет $WINEPREFIX/drive_c напрямую (без pfx/) — делаем симлинк drive_c -> pfx/drive_c в корне .prefix.
+SC_EXES = ("rsi launcher.exe", "starcitizen.exe", "starcitizen_launcher.exe")
+SC_CHANNELS = ("LIVE", "PTU", "EPTU", "TECH-PREVIEW", "HOTFIX")
+SC_LINES = (
+    ("pl_pit.forceSoftwareCursor", "pl_pit.forceSoftwareCursor = 1"),
+    ("r.GraphicsRenderer", "r.GraphicsRenderer = 0"),
+)
+
+
+def sc_cursor(drive):
+    """Строки SC_LINES в USER.cfg каналов Star Citizen (LIVE — всегда, остальные — если скачаны). Своё значение человека
+    не трогаем. Также переключаем GraphicsRenderer на 0 (DirectX 11 / DXVK) в GraphicsSettings.json, если там стоит 1."""
+    base = os.path.join(drive, "Program Files", "Roberts Space Industries", "StarCitizen")
+    done = []
+    for ch in SC_CHANNELS:
+        d = os.path.join(base, ch)
+        if ch != "LIVE" and not os.path.isdir(d):
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "USER.cfg")
+            text = open(p, encoding="utf-8", errors="replace").read() if os.path.isfile(p) else ""
+            added = []
+            for key, val in SC_LINES:
+                pattern = r"^\s*" + re.escape(key).replace(r"\.", r"[._]") + r"\s*="
+                if not re.search(pattern, text, re.M | re.I):
+                    added.append(val)
+            if added:
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(("\n" if text and not text.endswith("\n") else "") + "\n".join(added) + "\n")
+            done.append(ch)
+        except OSError:
+            pass
+    try:
+        import glob, json
+        for gs in glob.glob(os.path.join(drive, "users", "*", "AppData", "Local", "star citizen", "*", "GraphicsSettings", "GraphicsSettings.json")):
+            try:
+                with open(gs, "r+", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("GraphicsSettings", {}).get("GraphicsRenderer") == 1:
+                        data["GraphicsSettings"]["GraphicsRenderer"] = 0
+                        f.seek(0)
+                        json.dump(data, f, indent=2)
+                        f.truncate()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return done
+
+
+def star_citizen(game, exe):
+    """Запуск RSI Launcher / Star Citizen — курсор и Direct3D 11 (sc_cursor), а также симлинк drive_c в корне .prefix
+    (RSI Launcher под Wine ищет $WINEPREFIX/drive_c напрямую, без подпапки pfx). «Диска C:» ещё нет (первый запуск:
+    его сейчас создаст Proton) — ждём его в отдельном процессе, чтобы не мешать Proton создавать префикс."""
+    if os.path.basename(exe).lower() not in SC_EXES:
+        return
+    prefix = os.path.join(game, ".prefix")
+    drive = os.path.join(prefix, "pfx", "drive_c")
+    link = os.path.join(prefix, "drive_c")
+    if os.path.isdir(os.path.join(drive, "windows")):
+        if not os.path.exists(link):
+            try:
+                os.symlink("pfx/drive_c", link)
+            except OSError:
+                pass
+        sc_cursor(drive)
+        return
+    if os.fork():
+        return
+    try:                                                # процесс-наблюдатель: без вывода, отдельно от игры
+        os.setsid()
+        nul = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(nul, fd)
+        for _ in range(360):                            # до 30 минут
+            time.sleep(5)
+            if os.path.isdir(os.path.join(drive, "windows")):
+                time.sleep(5)
+                if not os.path.exists(link):
+                    try:
+                        os.symlink("pfx/drive_c", link)
+                    except OSError:
+                        pass
+                sc_cursor(drive)
+                break
+    finally:
+        os._exit(0)
 
 
 def main(a):
@@ -3225,6 +3356,10 @@ def main(a):
         print(f"vg-run: {why}", file=sys.stderr)
         return 1
     argv, env, cwd, _ = cmd
+    try:
+        star_citizen(os.path.realpath(game), cmd[3])
+    except Exception:                                   # мелочь для одной игры не должна мешать запуску
+        pass
     os.chdir(cwd)
     os.execvpe(argv[0], argv, env)
 
@@ -3314,6 +3449,7 @@ T = {
         "prog.manager": "«{exe}» — менеджер модов: запускай его кнопкой «Запустить» в VastGame («Программы игры») в любое время, и без игры — он работает в «диске C:» «{game}».",
         "inst.unpacking": "Ставлю «{name}» в «{game}»…\nУстановщик этой программы под Linux спотыкается — достаю программу из него сам.",
         "inst.unpack_failed": "Не получилось достать «{name}» из установщика: {why}",
+        "game.unpacking": "Добавляю «{name}»…\nУстановщик этой игры под Linux спотыкается — достаю её из него сам.",
         "bad.wand": "«{name}» — это Wand (бывший WeMod). Под Linux он не работает: окно остаётся чёрным, и Wand зависает. Это известная проблема самого Wand: его разработчики Linux не поддерживают.\n\nВместо него подойдут отдельные трейнеры FLiNG (flingtrainer.com): скачай трейнер для своей игры, положи его в Programs и запускай кнопкой «Запустить» рядом с игрой в окне VastGame.",
         "bad.anyway": "Всё равно поставить",
         "inst.prepare": "Готовлю установку «{name}» в «{game}»…",
@@ -3359,6 +3495,7 @@ T = {
         "prog.manager": "«{exe}» is a mod manager: start it with «Start» in VastGame («Game programs») any time, even without the game — it works in the «C: drive» of «{game}».",
         "inst.unpacking": "Installing «{name}» into «{game}»…\nThis program's installer trips up on Linux — taking the program out of it myself.",
         "inst.unpack_failed": "Couldn't take «{name}» out of its installer: {why}",
+        "game.unpacking": "Adding «{name}»…\nThis game's installer trips up on Linux — taking the game out of it myself.",
         "bad.wand": "«{name}» is Wand (formerly WeMod). It doesn't work on Linux: the window stays black and Wand hangs. This is a known issue of Wand itself: its developers don't support Linux.\n\nStandalone FLiNG trainers (flingtrainer.com) work instead: download the trainer for your game, put it into Programs and start it with «Start» next to the game in the VastGame window.",
         "bad.anyway": "Install anyway",
         "inst.prepare": "Preparing to install «{name}» into «{game}»…",
@@ -3404,6 +3541,7 @@ T = {
         "prog.manager": "«{exe}» es un gestor de mods: ábrelo con «Iniciar» en VastGame («Programas del juego») cuando quieras, incluso sin el juego; funciona en el «disco C:» de «{game}».",
         "inst.unpacking": "Instalando «{name}» en «{game}»…\nEl instalador de este programa falla en Linux: saco el programa de él yo mismo.",
         "inst.unpack_failed": "No pude sacar «{name}» de su instalador: {why}",
+        "game.unpacking": "Añadiendo «{name}»…\nEl instalador de este juego falla en Linux: saco el juego de él yo mismo.",
         "bad.wand": "«{name}» es Wand (antes WeMod). No funciona en Linux: la ventana se queda negra y Wand se cuelga. Es un problema conocido del propio Wand: sus desarrolladores no dan soporte a Linux.\n\nEn su lugar sirven los entrenadores independientes de FLiNG (flingtrainer.com): descarga el de tu juego, ponlo en Programs y ábrelo con «Iniciar» junto al juego en la ventana de VastGame.",
         "bad.anyway": "Instalar de todos modos",
         "inst.prepare": "Preparando la instalación de «{name}» en «{game}»…",
@@ -3893,11 +4031,25 @@ def choose_exe(folder, before=()):
 
 
 def do_installer(f):
-    name = entry(t("name"), default_name(f))
+    payload = electron_payload(f)
+    name = entry(t("name"), app_name(f) if payload else default_name(f))
     if not name:
         return
     folder = os.path.join(GD, name)
     if os.path.exists(folder) and not ask(t("exists", name=name), t("ok")):
+        return
+    if payload and not os.path.exists(folder):
+        # [2026-10-16] Установщик electron-builder (RSI Launcher — Star Citizen): под Wine он видит себя «уже запущенным»
+        # и закрывается (живой случай: «RSI Launcher cannot be closed»). Программа внутри готова — достаём её сами
+        with adding(folder):
+            err = extract_app(f, payload, folder, t("game.unpacking", name=name))
+            if err:
+                shutil.rmtree(folder, ignore_errors=True)
+                info(t("inst.unpack_failed", name=name, why=err))
+                return
+            ok = choose_exe(folder)
+        if ok:
+            finish(folder)
         return
     if os.path.exists(folder):                            # ставим в уже добавленную — метка спрятала бы её («удалена?»)
         before = set(exes(folder))
@@ -4084,12 +4236,15 @@ def electron_payload(f):
     2026-10-15, r2modman: «cannot be closed», установка прерывается) — программу достаём сами."""
     if not shutil.which("7z") or not f.lower().endswith(".exe"):
         return None
-    try:
-        r = subprocess.run(["7z", "l", "-slt", f], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    paths = re.findall(r"^Path = (\$PLUGINSDIR/app-(?:64|32)\.7z)$", r.stdout, re.M)
-    return next((p for p in paths if "app-64" in p), paths[0] if paths else None)
+    for extra in ([], ["-tNsis"]):
+        try:
+            r = subprocess.run(["7z", "l", *extra, "-slt", f], capture_output=True, text=True, timeout=60)
+            paths = re.findall(r"^Path = (\$PLUGINSDIR/app-(?:64|32)\.7z)$", r.stdout, re.M)
+            if paths:
+                return next((p for p in paths if "app-64" in p), paths[0])
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
 
 
 def game_drive(g):
@@ -4099,12 +4254,15 @@ def game_drive(g):
     return d if d and os.path.isdir(d) else None
 
 
-def do_unpack_app(f, g, payload, drive):
-    """Готовая программа из установщика electron-builder — в AppData/Local/Programs/НАЗВАНИЕ «диска C:» игры (туда же
-    ставит сам установщик «только для меня»)."""
-    name = clean_name(re.sub(r"[-_ ]?(setup|installer?)([-_ ]?v?[\d.]+)?$", "", os.path.splitext(os.path.basename(f))[0],
+def app_name(f):
+    """Название программы по имени установщика: «RSI Launcher-Setup-2.18.1.exe» → «RSI Launcher»."""
+    return clean_name(re.sub(r"[-_ ]?(setup|installer?)([-_ ]?v?[\d.]+)?$", "", os.path.splitext(os.path.basename(f))[0],
                              flags=re.I)) or default_name(f)
-    dest = os.path.join(drive, "users", "steamuser", "AppData", "Local", "Programs", name)
+
+
+def extract_app(f, payload, dest, text):
+    """Достать готовую программу (payload — «$PLUGINSDIR/app-64.7z») из установщика electron-builder в dest, пока
+    видно окно «идёт…» с text. Ошибка (строкой) или None."""
     tmp = os.path.join(STATE, "unpack", f"{os.getpid()}-app")
     box = {}
 
@@ -4123,10 +4281,19 @@ def do_unpack_app(f, g, payload, drive):
             shutil.rmtree(tmp, ignore_errors=True)
     th = threading.Thread(target=work, daemon=True)
     th.start()
-    waiting(t("inst.unpacking", name=name, game=g["name"]), lambda: True if not th.is_alive() else None, 3600)
+    waiting(text, lambda: True if not th.is_alive() else None, 3600)
     th.join()
-    if not box.get("ok"):
-        info(t("inst.unpack_failed", name=name, why=box.get("err") or "?"))
+    return None if box.get("ok") else (box.get("err") or "?")
+
+
+def do_unpack_app(f, g, payload, drive):
+    """Готовая программа из установщика electron-builder — в AppData/Local/Programs/НАЗВАНИЕ «диска C:» игры (туда же
+    ставит сам установщик «только для меня»)."""
+    name = app_name(f)
+    dest = os.path.join(drive, "users", "steamuser", "AppData", "Local", "Programs", name)
+    err = extract_app(f, payload, dest, t("inst.unpacking", name=name, game=g["name"]))
+    if err:
+        info(t("inst.unpack_failed", name=name, why=err))
         return
     exes = sorted((e for e in os.listdir(dest) if e.lower().endswith(".exe") and not NOISE_EXE.search(e)),
                   key=lambda e: (e.lower() != name.lower() + ".exe", -os.path.getsize(os.path.join(dest, e))))
