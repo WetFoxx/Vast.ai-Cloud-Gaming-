@@ -113,10 +113,6 @@
           <div class="params-danger" id="params-danger"></div>
         </div>
       </div>
-      <div class="live" id="live" hidden>
-        <div class="label" data-i18n="live.title"></div>
-        <ul class="archives" id="live-archives"></ul>
-      </div>
       <!-- [2026-10-15] Машины нет — последняя игра крупно и «Играть» сразу в неё; «Машина без игры» — прежняя «Играть» -->
       <div class="hero-acts">
         <button class="primary" id="play-game" hidden data-i18n="btn.play"></button>
@@ -124,6 +120,11 @@
       </div>
     </section>
 
+    <!-- [2026-10-16] Синхронизация — отдельным блоком под карточкой: внутри она растягивала и сжимала большую карточку -->
+    <section class="card live" id="live" hidden>
+      <div class="label" data-i18n="live.title"></div>
+      <ul class="archives" id="live-archives"></ul>
+    </section>
     <div class="foot" id="foot" hidden>
       <button class="link danger" id="emergency" data-i18n="btn.emergency"></button>
       <button id="stop" disabled data-i18n="btn.stop"></button>

@@ -347,3 +347,7 @@ body.pad-mode, body.pad-mode * { cursor: none !important; }
 .setup-steps li { padding: 14px 4px; }
 .lang-card { padding: 16px 20px; }
 @media (max-width: 980px) { .set-layout { grid-template-columns: 1fr; } .set-cats { flex-direction: row; flex-wrap: wrap; position: static; } .set-cat { width: auto; } }
+
+/* [2026-10-16] Большая карточка постоянной высоты: картинка не прыгает, пока на машине что-то качается/выгружается */
+.hero.with-art { min-height: 340px; }
+#live.card { border-top: 0; padding: 16px 20px; gap: 6px; }
