@@ -264,28 +264,51 @@ echo "Screen 0: minimum 8 x 8, current $W x $H, maximum 3840 x 3840"
         self.assertIn("libxrandr-dev", df)
 
     def test_driver_libraries_supplied_run(self):
-        # Настоящий кусок nvidia-setup.sh: хост дал декодер, но не кодировщик — подкладывается только кодировщик
+        # Настоящий кусок nvidia-setup.sh: хост дал декодер, но не дал кодировщик и графику/Vulkan —
+        # докладываются недостающие 64-битные библиотеки и nvidia_icd.json, чужие ICD (Mesa) убираются
         nv = (D / "rootfs/opt/vastgame/nvidia-setup.sh").read_text()
         a = nv.index('add=""\n')
         b = nv.index("\nldconfig\n", a)
         d = Path(tempfile.mkdtemp())
-        (d / "T").mkdir(); (d / "lib").mkdir()
-        for n in ("libnvidia-encode", "libnvcuvid"):
+        for sub in ("T", "lib", "lib32", "etc_vk", "share_vk", "etc_lay", "share_lay", "etc_egl", "share_egl"):
+            (d / sub).mkdir()
+        for n in ("libnvidia-encode", "libnvcuvid", "libGLX_nvidia", "libnvidia-glvkspirv", "libnvidia-fbc"):
             (d / "T" / f"{n}.so.595.91.07").write_text(n)
-        script = (f'VER=595.91.07\nT={d}/T\nldconfig() {{ echo "\tlibnvcuvid.so.1 (libc6,x86-64) => /x"; }}\n'
-                  + nv[a:b].replace("/usr/lib/x86_64-linux-gnu", f"{d}/lib"))
+        (d / "T" / "nvidia_icd.json").write_text('{"ICD":{"library_path":"__NV_VK_ICD__"}}')
+        (d / "share_vk" / "lvp_icd.x86_64.json").write_text("{}")
+        body = (nv[a:b]
+                .replace("/usr/lib/x86_64-linux-gnu", f"{d}/lib")
+                .replace("/usr/lib/i386-linux-gnu", f"{d}/lib32")
+                .replace("/etc/vulkan/icd.d", f"{d}/etc_vk")
+                .replace("/usr/share/vulkan/icd.d", f"{d}/share_vk")
+                .replace("/etc/vulkan/implicit_layer.d", f"{d}/etc_lay")
+                .replace("/usr/share/vulkan/implicit_layer.d", f"{d}/share_lay")
+                .replace("/etc/glvnd/egl_vendor.d", f"{d}/etc_egl")
+                .replace("/usr/share/glvnd/egl_vendor.d", f"{d}/share_egl"))
+        script = f'VER=595.91.07\nT={d}/T\nldconfig() {{ echo "\tlibnvcuvid.so.1 (libc6,x86-64) => /x"; }}\n' + body
         out = sh("bash", "-c", script).stdout
-        self.assertEqual(sorted(p.name for p in (d / "lib").iterdir()),
-                         ["libnvidia-encode.so.1", "libnvidia-encode.so.595.91.07"])
-        self.assertIn("взяты из драйвера 595.91.07: nvidia-encode", out)
+        self.assertEqual(sorted(p.name for p in (d / "lib").iterdir()), [
+            "libGLX_nvidia.so.0", "libGLX_nvidia.so.595.91.07",
+            "libnvidia-encode.so.1", "libnvidia-encode.so.595.91.07",
+            "libnvidia-glvkspirv.so.595.91.07",
+        ])
+        self.assertIn("libGLX_nvidia.so.0", (d / "etc_vk" / "nvidia_icd.json").read_text())
+        self.assertFalse((d / "share_vk" / "lvp_icd.x86_64.json").exists())
+        self.assertIn("взяты из драйвера 595.91.07:", out)
+        self.assertIn("nvidia-encode", out)
+        self.assertIn("GLX_nvidia", out)
+        self.assertIn("nvidia_icd.json", out)
 
     def test_driver_libraries_supplied(self):
-        # Хост не дал libnvidia-encode / libnvcuvid — берутся из .run той же версии, до ldconfig, свои не трогаются
+        # Хост не дал 64-битные библиотеки видео или графики/Vulkan — берутся из .run до ldconfig и до уборки .run;
+        # запускатель Steam указывает VK_DRIVER_FILES / VK_ICD_FILENAMES на паспорт NVIDIA
         nv = (D / "rootfs/opt/vastgame/nvidia-setup.sh").read_text()
-        self.assertIn("for l in libnvidia-encode libnvcuvid; do", nv)
-        self.assertIn('ldconfig -p | grep -qE "[[:space:]]$l\\.so\\.1 " && continue', nv)
-        self.assertLess(nv.index("for l in libnvidia-encode"), nv.index("\nldconfig\n"))
-        self.assertLess(nv.index("for l in libnvidia-encode"), nv.rindex('rm -rf "$T" /tmp/nv.run'))     # до уборки .run
+        self.assertIn('for f in "$T"/lib*.so."$VER" "$T"/tls/lib*.so."$VER"; do', nv)
+        self.assertIn("nvidia_icd.json", nv)
+        self.assertLess(nv.index('for f in "$T"/lib*.so."$VER"'), nv.index("\nldconfig\n"))
+        self.assertLess(nv.index('for f in "$T"/lib*.so."$VER"'), nv.rindex('rm -rf "$T" /tmp/nv.run'))
+        steam = (D / "rootfs/usr/bin/steam").read_text()
+        self.assertIn('export VK_DRIVER_FILES="$icd" VK_ICD_FILENAMES="$icd"', steam)
 
     def test_encoder_retried_then_found(self):
         bad = "[t]: Fatal: Couldn't find any working encoder\n"
