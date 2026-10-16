@@ -224,10 +224,14 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
         # debug_rc.py на порту 8788, только через Tailscale и только с этим одноразовым паролем
         if os.environ.get("VASTGAME_DEBUG_TOKEN"):
             env["VASTGAME_DEBUG_TOKEN"] = os.environ["VASTGAME_DEBUG_TOKEN"]
+        # [2026-10-16] Проверка до закрепления (только запуск из папки проекта): VASTGAME_IMAGE — другая сборка образа,
+        # VASTGAME_FORCE_HEADLESS=1 — экран без монитора на любом хосте (режим хостов без прав на выход видеокарты)
+        if os.environ.get("VASTGAME_FORCE_HEADLESS") == "1":
+            env["VG_FORCE_HEADLESS"] = "1"
         res = setup.env_value(tpl.get("env"), "RES")
         if res:
             env["RES"] = res
-        body = {"client_id": "me", "image": DOCKER_IMAGE, "disk": disk, "label": "vastgame",
+        body = {"client_id": "me", "image": os.environ.get("VASTGAME_IMAGE") or DOCKER_IMAGE, "disk": disk, "label": "vastgame",
                 "runtype": "args", "args": ["start"], "env": env}
     else:
         body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}

@@ -40,6 +40,18 @@ class TestRentalBody(unittest.TestCase):
         self.assertEqual((e["RES"], e["STEAM_LANG"]), ("2560x1440", "russian"))
         self.assertEqual((e["SYNC_STEAM_GAMES"], e["SYNC_OTHER_GAMES"], e["SYNC_SAVES"]), ("0", "1", "1"))
 
+    def test_test_overrides_only_when_set(self):
+        # Проверка образа из папки проекта: другая сборка и «сразу без монитора»; без переменных — как у людей
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ("VASTGAME_IMAGE", "VASTGAME_FORCE_HEADLESS"):
+                os.environ.pop(k, None)
+            b = core.rental_body(TPL, 60, docker=True)
+            self.assertEqual(b["image"], core.DOCKER_IMAGE)
+            self.assertNotIn("VG_FORCE_HEADLESS", b["env"])
+        with mock.patch.dict(os.environ, {"VASTGAME_IMAGE": "ghcr.io/x/y:1", "VASTGAME_FORCE_HEADLESS": "1"}):
+            b = core.rental_body(TPL, 60, docker=True)
+            self.assertEqual((b["image"], b["env"]["VG_FORCE_HEADLESS"]), ("ghcr.io/x/y:1", "1"))
+
     def test_kvm_unchanged(self):
         b = core.rental_body(TPL, 100, sync={"saves": False})
         self.assertEqual(b, {"client_id": "me", "template_hash_id": "abc", "disk": 100, "label": "vastgame",

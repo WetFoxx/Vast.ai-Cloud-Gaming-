@@ -197,9 +197,48 @@ class TestSunshineReport(unittest.TestCase):
         a = ds.index('if [ "${2:-}" = headless ]; then')
         block = ds[a:ds.index("\nfi\n", a)]
         self.assertIn('Option     "UseDisplayDevice" "none"', block)
-        self.assertIn("Virtual ${RES%x*} ${RES#*x}", block)
+        self.assertIn("Virtual 3840 3840", block)                        # предел; размер под клиента — wolf-res
         self.assertNotIn("ConnectedMonitor", block)                      # без монитора — его права и не нужны
         self.assertLess(ds.index("IFS=:. read -r _ b1 b2 b3"), a)        # шина видеокарты уже известна
+
+    def test_wolf_res_headless_resizes_screen(self):
+        # Экран без монитора: выходов нет — wolf-res меняет размер экрана (xrandr --fb) под клиента Moonlight;
+        # больше предела Virtual — базовый; без аргументов — базовый
+        d = Path(tempfile.mkdtemp())
+        (d / "bin").mkdir()
+        fake = d / "bin/xrandr"
+        fake.write_text(f"""#!/bin/bash
+S={d}/size
+[ -f $S ] || echo "3840 3840" > $S
+if [ "$1" = --fb ]; then
+  echo "$*" >> {d}/calls
+  W=${{2%x*}}; H=${{2#*x}}
+  [ "$W" -le 3840 ] && [ "$H" -le 3840 ] || {{ echo "screen cannot be larger than 3840x3840" >&2; exit 1; }}
+  echo "$W $H" > $S; exit 0
+fi
+read W H < $S
+echo "Screen 0: minimum 8 x 8, current $W x $H, maximum 3840 x 3840"
+""")
+        fake.chmod(0o755)
+        text = (D / "rootfs/usr/local/bin/wolf-res").read_text().replace("/run/vastgame/headless", f"{d}/headless")
+        text = text.replace('if [ "$(id -u)" = 0 ]', "if false")
+        (d / "wolf-res").write_text(text)
+        env = {"PATH": f"{d}/bin:" + os.environ["PATH"]}
+        size = lambda: (d / "size").read_text().split()
+        (d / "headless").write_text("")
+        sh("bash", str(d / "wolf-res"), env=env)
+        self.assertEqual(size(), ["1920", "1200"])                       # при запуске — базовый
+        sh("bash", str(d / "wolf-res"), "2560", "1600", "120", env=env)
+        self.assertEqual(size(), ["2560", "1600"])                       # под клиента
+        sh("bash", str(d / "wolf-res"), "5120", "2880", "60", env=env)
+        self.assertEqual(size(), ["1920", "1200"])                       # больше предела — базовый
+        n = len((d / "calls").read_text().splitlines())
+        sh("bash", str(d / "wolf-res"), "1920", "1200", env=env)
+        self.assertEqual(len((d / "calls").read_text().splitlines()), n)  # уже такой — не трогать
+        (d / "headless").unlink()                                        # с монитором — как было: ищет выход
+        (d / "size").write_text("3840 3840")
+        sh("bash", str(d / "wolf-res"), "2560", "1600", env=env)
+        self.assertEqual(size(), ["3840", "3840"])
 
     def test_steam_without_xrandr_on_headless(self):
         # Steam на экране без монитора: SDL без XRandR, иначе ни одного окна; на обычном экране — как было
