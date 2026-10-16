@@ -13,6 +13,16 @@ export LD_PRELOAD="libvgpad.so${LD_PRELOAD:+:$LD_PRELOAD}" SDL_JOYSTICK_DISABLE_
 # RandR, и Steam не открывал ни одного окна («CreateOutputWindow: Could not find display info», GTX 1660 S Вьетнам).
 # SDL без XRandR берёт размер экрана целиком — окна открываются (проверено вживую); игры наследуют то же
 [ -e /run/vastgame/headless ] && export SDL_VIDEO_X11_XRANDR=0
+# [2026-10-16] Только видеокарта NVIDIA в Vulkan: без встроенной карты ноутбука (Intel/AMD) и программной заглушки Mesa,
+# на которых игры DirectX 12 отвечают «видеокарта не поддерживает DX12»
+for icd in /etc/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.x86_64.json; do
+  [ -s "$icd" ] && { export VK_DRIVER_FILES="$icd" VK_ICD_FILENAMES="$icd"; break; }
+done
+# [2026-10-16] Временные папки Windows в префиксах Proton: архивы pfx--* выгружаются без Temp,
+# а библиотеки DLSS/Reflex (sl.common.dll) падают при старте с filesystem_error, если Temp не создан
+for pfx in "$HOME"/.steam/debian-installation/steamapps/compatdata/*/pfx/drive_c "$HOME"/.steam/steam/steamapps/compatdata/*/pfx/drive_c; do
+  [ -d "$pfx/users/steamuser" ] && mkdir -p "$pfx/users/steamuser/AppData/Local/Temp" "$pfx/users/steamuser/Temp" "$pfx/users/steamuser/Documents" "$pfx/windows/temp" 2>/dev/null
+done
 # Steam уже работает — передать ему команду (steam://…) и выйти
 if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
 exec 9>"/tmp/steam-run-$ME.lock"

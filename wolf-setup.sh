@@ -1479,13 +1479,40 @@ unpack() {
   u mkdir -p "$B"
   # [v5.8] Сбой скачивания (живой случай 2026-10-15, Орегон: «не сходится MD5» — кусок пришёл испорченным, а файл в
   # облаке цел) — ещё раз, всего 3: распаковка повторно просто перепишет те же файлы, битый архив не распакуется
-  local try
+  local try _pfx _u
   for try in 1 2 3; do
     if get "$n.tar.zst" "$n" \
        && { [ "$K" = 0 ] || man "$n" > "$S/m/$n"; } \
        && { [[ $rv != *+* ]] || { get "$n.tar.zst.${rv:0:8}" "$n" && del "$n"; }; }; then
       man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
       echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
+      case $n in
+        pfx--*)
+          [ -n "$SR" ] || sr
+          _pfx="$DH/$SR/steamapps/compatdata/${n#pfx--}/pfx/drive_c"
+          if [ -d "$_pfx" ]; then
+            u mkdir -p "$_pfx/users/steamuser/AppData/Local/Temp" "$_pfx/users/steamuser/Temp" "$_pfx/users/steamuser/Documents" "$_pfx/windows/temp" 2>/dev/null || true
+            for _u in "$_pfx"/users/*; do
+              [ -d "$_u" ] && u mkdir -p "$_u/AppData/Local/Temp" "$_u/Temp" "$_u/Documents" 2>/dev/null || true
+            done
+          fi
+          ;;
+        game--*)
+          _pfx="$GD/${n#game--}/.prefix/drive_c"
+          if [ -d "$_pfx" ]; then
+            u mkdir -p "$_pfx/users/steamuser/AppData/Local/Temp" "$_pfx/users/steamuser/Temp" "$_pfx/users/steamuser/Documents" "$_pfx/windows/temp" 2>/dev/null || true
+            for _u in "$_pfx"/users/*; do
+              [ -d "$_u" ] && u mkdir -p "$_u/AppData/Local/Temp" "$_u/Temp" "$_u/Documents" 2>/dev/null || true
+            done
+          fi
+          ;;
+        compatdata)
+          [ -n "$SR" ] || sr
+          for _pfx in "$DH/$SR"/steamapps/compatdata/*/pfx/drive_c; do
+            [ -d "$_pfx" ] && u mkdir -p "$_pfx/users/steamuser/AppData/Local/Temp" "$_pfx/users/steamuser/Temp" "$_pfx/users/steamuser/Documents" "$_pfx/windows/temp" 2>/dev/null || true
+          done
+          ;;
+      esac
       st "$n" ok "восстановлено"; return 0
     fi
     [ "$try" = 3 ] || { log "$n: восстановление не удалось — пробую ещё раз ($((try + 1)) из 3)"; sleep $((try * 5)); }
