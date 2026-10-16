@@ -808,3 +808,12 @@
   `users/steamuser/AppData/Local/Temp`, `users/steamuser/Temp`, `users/steamuser/Documents` и `windows/temp` при
   распаковке префиксов (`unpack`) и перед запуском Steam. В облако файлы по-прежнему не попадают (`-prune`). Скрипт
   закреплён в `setup.py` (`DOCKER_SCRIPT_URL` на коммит `c55c6cc`).
+- **Установщики Electron/NSIS в Games, мышь Star Citizen и поиск Proton/SLR (`wolf-setup.sh`, `vg-run`, `vg-open`, 2026-10-16):**
+  установщики на базе Electron-builder/NSIS (RSI Launcher для Star Citizen, Discord и др.) под Wine падают на ложной проверке
+  `tasklist | find` с ошибкой «cannot be closed». В `vg-open` (`do_installer`) добавлено извлечение готового пакета программы
+  `$PLUGINSDIR/app-64.7z` напрямую в папку игры (`Games/<Название>`) с регистрацией главного exe как portable-игры в Steam и на
+  рабочем столе без запуска сбойного установщика. `electron_payload` теперь проверяет и флаг `-tNsis` в 7z. В `vg-run` добавлен хук
+  для Star Citizen: автоматическая запись `pl_pit.forceSoftwareCursor = 1` в `USER.cfg` каналов LIVE/PTU при запуске
+  RSI Launcher / Star Citizen, что решает рассинхронизацию мыши в interaction mode (`F`) и mobiGlas под Wine. Служебные
+  инструменты (`tool`: Proton, SteamLinuxRuntime) в `want()` теперь восстанавливаются всегда (даже при `SYNC_STEAM_GAMES=0`),
+  а `_acf_dir` в `vg-run` ищет манифесты рантаймов и в папке `.vastgame-hidden`. Тесты в `tests/test_own_games.py`.
