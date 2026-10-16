@@ -791,3 +791,18 @@
   `VASTGAME_FORCE_HEADLESS=1` → `VG_FORCE_HEADLESS=1` (сразу без монитора на любом хосте). **Проверено вживую:**
   подключение Moonlight → экран 2560×1600, Sunshine «VIRTUAL-0 with res 2560x1600 offset by 0x0»; у NVIDIA без монитора
   RandR «maximum 32767 x 32767». Тест `test_wolf_res_headless_resizes_screen`.
+- **DirectX 12 на мобильных GPU и машинах без монтирования графических библиотек (образ `c55c6cc`, 2026-10-16):**
+  на машинах вроде RTX 3060 Laptop (хост 152536) хост монтировал в Docker только compute-библиотеки NVIDIA, без
+  64-битных библиотек графики и Vulkan (`libGLX_nvidia`, `libnvidia-glvkspirv`, `libnvidia-rtcore`, `nvidia_icd.json`).
+  Из-за этого игры DX12 (The Blood of Dawnwalker) выдавали «видеокарта не поддерживает DX12». В `nvidia-setup.sh`
+  добавлена автоматическая распаковка полного набора 64-битных библиотек из `.run`-файла хоста и генерация
+  `nvidia_icd.json` с удалением чужих ICD Mesa. В `/usr/bin/steam` — экспорт `VK_DRIVER_FILES`. **Проверено вживую:**
+  Vulkan 1.4 и vkd3d-proton определили RTX 3060 Laptop GPU, D3D12 Ultimate с DXR 1.1 инициализировался без ошибок,
+  игра запустилась в режиме DX12.
+- **Автосоздание папок Temp и Documents в префиксах Proton/Wine (`wolf-setup.sh` v5.11, `/usr/bin/steam`, 2026-10-16):**
+  при упаковке `pfx--*` папка `Temp` исключается, чтобы не перегружать облако временными файлами (`-prune`); при
+  распаковке на новом инстансе папка отсутствовала. Библиотеки NVIDIA Reflex/Streamline (`sl.common.dll`) при старте
+  вызывают C++17 `std::filesystem::temp_directory_path()`, бросали `filesystem_error` и вызывали падение
+  `Dawnwalker.exe` по нулевому указателю `slReflexGetState` (`0x14151f504`). Добавлено автоматическое создание папок
+  `users/steamuser/AppData/Local/Temp`, `users/steamuser/Temp`, `users/steamuser/Documents` и `windows/temp` при
+  распаковке префиксов (`unpack`) и перед запуском Steam. В облако файлы по-прежнему не попадают (`-prune`).
