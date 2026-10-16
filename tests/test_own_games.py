@@ -167,24 +167,36 @@ class TestVgRun(unittest.TestCase):
         return g, drive / "Program Files/Roberts Space Industries/StarCitizen"
 
     def test_star_citizen_software_cursor(self):
-        # [2026-10-16] Star Citizen под Wine: курсор расходится с игрой — USER.cfg с программным курсором
+        # [2026-10-16] Star Citizen под Wine: программный курсор и Direct3D 11 в USER.cfg + симлинк drive_c
         g, sc = self.sc_game()
         (sc / "PTU").mkdir(parents=True)
-        (sc / "PTU/USER.cfg").write_text("r_DisplayInfo = 1")    # своё — сохраняем, строку дописываем
+        (sc / "PTU/USER.cfg").write_text("r_DisplayInfo = 1")    # своё — сохраняем, строки дописываем
         code, out, err = self.run_vg(str(g))
         self.assertEqual(code, 0, err)
-        self.assertEqual((sc / "LIVE/USER.cfg").read_text(), "pl_pit.forceSoftwareCursor = 1\n")
-        self.assertEqual((sc / "PTU/USER.cfg").read_text(), "r_DisplayInfo = 1\npl_pit.forceSoftwareCursor = 1\n")
+        self.assertEqual((sc / "LIVE/USER.cfg").read_text(), "pl_pit.forceSoftwareCursor = 1\nr.GraphicsRenderer = 0\n")
+        self.assertEqual((sc / "PTU/USER.cfg").read_text(), "r_DisplayInfo = 1\npl_pit.forceSoftwareCursor = 1\nr.GraphicsRenderer = 0\n")
         self.assertFalse((sc / "EPTU").exists())                 # не скачанный канал не создаём
+        self.assertTrue((g / ".prefix/drive_c").is_symlink())     # симлинк для RSI Launcher
         self.run_vg(str(g))                                      # второй запуск — без повторов
         self.assertEqual((sc / "LIVE/USER.cfg").read_text().count("forceSoftwareCursor"), 1)
+        self.assertEqual((sc / "LIVE/USER.cfg").read_text().count("GraphicsRenderer"), 1)
 
     def test_star_citizen_keeps_own_choice(self):
         g, sc = self.sc_game()
         (sc / "LIVE").mkdir(parents=True)
-        (sc / "LIVE/USER.cfg").write_text("pl_pit.forceSoftwareCursor = 0\n")
+        (sc / "LIVE/USER.cfg").write_text("pl_pit.forceSoftwareCursor = 0\nr.GraphicsRenderer = 1\n")
         self.assertEqual(self.run_vg(str(g))[0], 0)
-        self.assertEqual((sc / "LIVE/USER.cfg").read_text(), "pl_pit.forceSoftwareCursor = 0\n")
+        self.assertEqual((sc / "LIVE/USER.cfg").read_text(), "pl_pit.forceSoftwareCursor = 0\nr.GraphicsRenderer = 1\n")
+
+    def test_star_citizen_patches_graphics_settings(self):
+        import json
+        g, sc = self.sc_game()
+        gs_dir = g / ".prefix/pfx/drive_c/users/steamuser/AppData/Local/star citizen/channel_0/GraphicsSettings"
+        gs_dir.mkdir(parents=True)
+        (gs_dir / "GraphicsSettings.json").write_text(json.dumps({"GraphicsSettings": {"GraphicsRenderer": 1}}))
+        self.assertEqual(self.run_vg(str(g))[0], 0)
+        data = json.loads((gs_dir / "GraphicsSettings.json").read_text())
+        self.assertEqual(data["GraphicsSettings"]["GraphicsRenderer"], 0)
 
     def test_other_games_untouched(self):
         own(self.game, ".prefix/pfx/drive_c/Program Files/HoYoPlay/launcher.exe")

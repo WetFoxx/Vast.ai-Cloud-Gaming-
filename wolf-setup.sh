@@ -3201,6 +3201,13 @@ def command(game, exe=None, args=()):
     env = dict(os.environ)
     prefix = os.path.join(game, ".prefix")
     os.makedirs(prefix, exist_ok=True)
+    link = os.path.join(prefix, "drive_c")
+    pfx_drive = os.path.join(prefix, "pfx", "drive_c")
+    if os.path.isdir(pfx_drive) and not os.path.exists(link):
+        try:
+            os.symlink("pfx/drive_c", link)
+        except OSError:
+            pass
     env.update(STEAM_COMPAT_DATA_PATH=prefix, STEAM_COMPAT_CLIENT_INSTALL_PATH=root)
     env.setdefault("SteamAppId", "0")
     env.setdefault("SteamGameId", "0")
@@ -3211,17 +3218,21 @@ def command(game, exe=None, args=()):
     return (argv, env, os.path.dirname(exe), exe), None
 
 
-# [2026-10-16] Star Citizen под Wine/Proton: системный курсор расходится с игрой (режим взаимодействия «F», mobiGlas,
-# меню — клики мимо или мышь не двигает взгляд). Игре велим рисовать свой курсор (USER.cfg в папке канала — LIVE, PTU…).
-# Игру запускает RSI Launcher в том же «диске C:», поэтому проверяем при каждом его запуске
+# [2026-10-16] Star Citizen под Wine/Proton:
+# 1) системный курсор расходится с игрой (режим «F», mobiGlas, меню) — форсируем программный курсор (USER.cfg).
+# 2) Vulkan падает при создании логического устройства (ошибка 60101) — форсируем Direct3D 11 (USER.cfg и GraphicsSettings.json).
+# 3) RSI Launcher ищет $WINEPREFIX/drive_c напрямую (без pfx/) — делаем симлинк drive_c -> pfx/drive_c в корне .prefix.
 SC_EXES = ("rsi launcher.exe", "starcitizen.exe", "starcitizen_launcher.exe")
 SC_CHANNELS = ("LIVE", "PTU", "EPTU", "TECH-PREVIEW", "HOTFIX")
-SC_LINE = "pl_pit.forceSoftwareCursor = 1"
+SC_LINES = (
+    ("pl_pit.forceSoftwareCursor", "pl_pit.forceSoftwareCursor = 1"),
+    ("r.GraphicsRenderer", "r.GraphicsRenderer = 0"),
+)
 
 
 def sc_cursor(drive):
-    """Строка SC_LINE в USER.cfg каналов Star Citizen (LIVE — всегда, остальные — если скачаны). Своё значение человека
-    (строка pl_pit.forceSoftwareCursor уже есть) не трогаем."""
+    """Строки SC_LINES в USER.cfg каналов Star Citizen (LIVE — всегда, остальные — если скачаны). Своё значение человека
+    не трогаем. Также переключаем GraphicsRenderer на 0 (DirectX 11 / DXVK) в GraphicsSettings.json, если там стоит 1."""
     base = os.path.join(drive, "Program Files", "Roberts Space Industries", "StarCitizen")
     done = []
     for ch in SC_CHANNELS:
@@ -3232,23 +3243,50 @@ def sc_cursor(drive):
             os.makedirs(d, exist_ok=True)
             p = os.path.join(d, "USER.cfg")
             text = open(p, encoding="utf-8", errors="replace").read() if os.path.isfile(p) else ""
-            if re.search(r"^\s*pl_pit\.forceSoftwareCursor\s*=", text, re.M | re.I):
-                continue
-            with open(p, "a", encoding="utf-8") as f:
-                f.write(("\n" if text and not text.endswith("\n") else "") + SC_LINE + "\n")
+            added = []
+            for key, val in SC_LINES:
+                pattern = r"^\s*" + re.escape(key).replace(r"\.", r"[._]") + r"\s*="
+                if not re.search(pattern, text, re.M | re.I):
+                    added.append(val)
+            if added:
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(("\n" if text and not text.endswith("\n") else "") + "\n".join(added) + "\n")
             done.append(ch)
         except OSError:
             pass
+    try:
+        import glob, json
+        for gs in glob.glob(os.path.join(drive, "users", "*", "AppData", "Local", "star citizen", "*", "GraphicsSettings", "GraphicsSettings.json")):
+            try:
+                with open(gs, "r+", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("GraphicsSettings", {}).get("GraphicsRenderer") == 1:
+                        data["GraphicsSettings"]["GraphicsRenderer"] = 0
+                        f.seek(0)
+                        json.dump(data, f, indent=2)
+                        f.truncate()
+            except Exception:
+                pass
+    except Exception:
+        pass
     return done
 
 
 def star_citizen(game, exe):
-    """Запуск RSI Launcher / Star Citizen — курсор игры (sc_cursor). «Диска C:» ещё нет (первый запуск: его сейчас создаст
-    Proton) — ждём его в отдельном процессе, чтобы не мешать Proton создавать префикс."""
+    """Запуск RSI Launcher / Star Citizen — курсор и Direct3D 11 (sc_cursor), а также симлинк drive_c в корне .prefix
+    (RSI Launcher под Wine ищет $WINEPREFIX/drive_c напрямую, без подпапки pfx). «Диска C:» ещё нет (первый запуск:
+    его сейчас создаст Proton) — ждём его в отдельном процессе, чтобы не мешать Proton создавать префикс."""
     if os.path.basename(exe).lower() not in SC_EXES:
         return
-    drive = os.path.join(game, ".prefix", "pfx", "drive_c")
+    prefix = os.path.join(game, ".prefix")
+    drive = os.path.join(prefix, "pfx", "drive_c")
+    link = os.path.join(prefix, "drive_c")
     if os.path.isdir(os.path.join(drive, "windows")):
+        if not os.path.exists(link):
+            try:
+                os.symlink("pfx/drive_c", link)
+            except OSError:
+                pass
         sc_cursor(drive)
         return
     if os.fork():
@@ -3262,6 +3300,11 @@ def star_citizen(game, exe):
             time.sleep(5)
             if os.path.isdir(os.path.join(drive, "windows")):
                 time.sleep(5)
+                if not os.path.exists(link):
+                    try:
+                        os.symlink("pfx/drive_c", link)
+                    except OSError:
+                        pass
                 sc_cursor(drive)
                 break
     finally:

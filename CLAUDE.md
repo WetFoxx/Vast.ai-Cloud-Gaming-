@@ -817,3 +817,12 @@
   RSI Launcher / Star Citizen, что решает рассинхронизацию мыши в interaction mode (`F`) и mobiGlas под Wine. Служебные
   инструменты (`tool`: Proton, SteamLinuxRuntime) в `want()` теперь восстанавливаются всегда (даже при `SYNC_STEAM_GAMES=0`),
   а `_acf_dir` в `vg-run` ищет манифесты рантаймов и в папке `.vastgame-hidden`. Тесты в `tests/test_own_games.py`.
+- **Симлинк drive_c для лаунчеров и Direct3D 11 для Star Citizen (`wolf-setup.sh`, `vg-run`, 2026-10-16):**
+  RSI Launcher, детектируя среду Wine, ищет исполняемый файл игры напрямую по пути `$WINEPREFIX/drive_c/...`, не зная про
+  структуру Proton `$WINEPREFIX/pfx/drive_c`, из-за чего запуск завершался с ошибкой `Could not find game launch executable`.
+  В `vg-run` добавлено автоматическое создание симлинка `.prefix/drive_c -> pfx/drive_c`. Экспериментальный Vulkan-рендерер
+  в Star Citizen 3.23+/4.0 под Wine падает при инициализации логического устройства с кодом ошибки `60101` (`Failed to create Vulkan logical device`).
+  В хук `sc_cursor` добавлено принудительное переключение на стабильный Direct3D 11 (DXVK): строка `r.GraphicsRenderer = 0`
+  в `USER.cfg` и авто-исправление `"GraphicsRenderer": 0` в `GraphicsSettings.json` (так как локальный JSON-конфиг игры
+  имеет приоритет над `USER.cfg`). Проверено вживую на инстансе Vast.ai: Star Citizen запускается, мышь и игровой процесс работают.
+
