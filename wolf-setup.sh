@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.8 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.9 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -1477,13 +1477,19 @@ unpack() {
   if [ "$rv" = "$(rd "$S/v/$n")" ] && [ -z "${FORCE:-}" ]; then st "$n" ok "актуально"; return 0; fi
   st "$n" down "восстановление"
   u mkdir -p "$B"
-  if get "$n.tar.zst" "$n" \
-     && { [ "$K" = 0 ] || man "$n" > "$S/m/$n"; } \
-     && { [[ $rv != *+* ]] || { get "$n.tar.zst.${rv:0:8}" "$n" && del "$n"; }; }; then
-    man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
-    echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
-    st "$n" ok "восстановлено"; return 0
-  fi
+  # [v5.8] Сбой скачивания (живой случай 2026-10-15, Орегон: «не сходится MD5» — кусок пришёл испорченным, а файл в
+  # облаке цел) — ещё раз, всего 3: распаковка повторно просто перепишет те же файлы, битый архив не распакуется
+  local try
+  for try in 1 2 3; do
+    if get "$n.tar.zst" "$n" \
+       && { [ "$K" = 0 ] || man "$n" > "$S/m/$n"; } \
+       && { [[ $rv != *+* ]] || { get "$n.tar.zst.${rv:0:8}" "$n" && del "$n"; }; }; then
+      man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+      echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
+      st "$n" ok "восстановлено"; return 0
+    fi
+    [ "$try" = 3 ] || { log "$n: восстановление не удалось — пробую ещё раз ($((try + 1)) из 3)"; sleep $((try * 5)); }
+  done
   st "$n" err "ошибка восстановления"; return 1
 }
 
