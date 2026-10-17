@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.10 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.12 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -287,7 +287,10 @@ for _ in {1..60}; do getent hosts github.com >/dev/null && break; sleep 2; done
 
 # В Docker всё нужное уже в образе (там своя, закреплённая Sunshine и Steam с заплатками) —
 # ничего не ставим: apt здесь только потерял бы время
-if [ "$WM" != docker ]; then
+if [ "$WM" = docker ]; then
+  [ -f /usr/bin/steam ] && ! grep -q -- '-cef-enable-debugging' /usr/bin/steam 2>/dev/null \
+    && sed -i 's/-cef-disable-gpu-compositing/-cef-disable-gpu-compositing -cef-enable-debugging/' /usr/bin/steam
+else
 # xrandr/xhost/xset — x11-xserver-utils, cvt — xserver-xorg-core
 hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables zenity 7z bsdtar 2>/dev/null || {
   apt-get update -q
@@ -1738,7 +1741,10 @@ sunshine_restart() {
 steam_go() {
   pgrep -x steam >/dev/null && return 0
   [ -x /usr/games/steam ] || { log "Steam не установлен"; return 0; }
-  local a=()
+  local a=(-cef-enable-debugging) sd
+  for sd in "$DH/${SR:-.steam/debian-installation}" "$DH/.steam/steam" "$DH/.local/share/Steam"; do
+    [ -d "$sd" ] && u sh -c ': > "$0"' "$sd/.cef-enable-remote-debugging" 2>/dev/null
+  done
   [ -n "${SL:-}" ] && a+=(-language "$SL")
   [ -n "$SR" ] && [ -f "$DH/$SR/steam.cfg" ] && a+=(-noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles)
   # [v5.6] NVAPI выключен на машинах, где он вредит (nvapi_check при загрузке): игры наследуют окружение Steam
@@ -2082,6 +2088,34 @@ sunshine_creds() {
   echo "sunshine-creds: ok"
 }
 
+# Авторизация устройства Steam Link по 4-значному PIN-коду в клиенте Steam (Remote Play) и проверка активного аккаунта.
+# Данные сопряжения Steam хранит в своих файлах настроек — сразу после успеха выгружаем steam-state в облако.
+steamlink_check() {
+  [ -n "$SR" ] || sr
+  xenv
+  pgrep -x steam >/dev/null || steam_go
+  python3 /usr/local/bin/wolf-steam.py pin-check "$DH/$SR" 2>&1
+}
+
+steamlink_pin() {
+  local pin=${1:-} r
+  [[ $pin =~ ^[0-9]{4}$ ]] || { echo "pin: invalid"; return 2; }
+  [ -n "$SR" ] || sr
+  xenv
+  pgrep -x steam >/dev/null || steam_go
+  r=$(python3 /usr/local/bin/wolf-steam.py pin "$pin" "$DH/$SR" 2>&1)
+  if [[ $r == "pin: nosteam"* ]] && ! python3 /usr/local/bin/wolf-steam.py running >/dev/null 2>&1; then
+    steam_off; steam_go
+    r=$(python3 /usr/local/bin/wolf-steam.py pin "$pin" "$DH/$SR" 2>&1)
+  fi
+  echo "$r"
+  if [[ $r == "pin: ok"* ]]; then
+    ( NOW=1 "$0" push steam-state >/dev/null 2>&1 & )
+    return 0
+  fi
+  return 1
+}
+
 # ------------------------------------------------------------------- finish ---
 # [v3.11] Завершение сессии, которое не зависит от связи с компьютером. «wolf finish» только
 # запускает «wolf finish-run» отдельной службой (systemd-run) и сразу отвечает — обрыв SSH,
@@ -2337,6 +2371,8 @@ case ${1:-} in
   boot)                                      boot ;;
   finish)                                    finish_start ;;
   sunshine-creds)                            shift; sunshine_creds "$@" ;;
+  steamlink-check)                           steamlink_check ;;
+  steamlink-pin)                             shift; steamlink_pin "$@" ;;
   prog)                                      shift; prog_cmd "$@" ;;
   finish-run)                                finish_run ;;
   state|games|shutdown|restore|push|forget|answer|mods|lgame)  bk "$@" ;;
@@ -2480,6 +2516,7 @@ WOLF = '/usr/local/bin/wolf'
 # символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
 ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,200}$')
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+PIN = re.compile(r'^\d{4}$')
 GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
 MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
 RESTORABLE = ('steam-state', 'steam-client', 'steam-cache')   # [v5.10] служебные — тоже можно повторить (не identity)
@@ -2499,6 +2536,8 @@ def command(c, a):
             'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and isinstance(a[1], str) and a[2] in ('yes', 'no')
                       and ((a[0] in ('new', 'del') and GAME.match(a[1])) or (a[0] == 'mod' and MOD.match(a[1]))) else None,
             'sunshine-creds': ([WOLF, 'sunshine-creds', arg], False) if LOGIN.match(arg) else None,
+            'steamlink-check': ([WOLF, 'steamlink-check'], False) if not a else None,
+            'steamlink-pin': ([WOLF, 'steamlink-pin', arg], False) if PIN.match(arg) else None,
             # [v5.4] программы игр: [номер, id] — запустить; [номер, id, on|off] — «вместе с игрой»
             'prog-run': ([WOLF, 'prog', 'run', *a], False) if len(a) == 2 and str(a[0]).isdigit() and len(str(a[0])) <= 10
                         and isinstance(a[1], str) and PROG.match(a[1]) else None,
@@ -4492,9 +4531,10 @@ def account(root, sid):
         if me:
             m = re.search(r'"AccountName"\s*"([^"]*)"', blk)
             name = m.group(1) if m else None
-        blk = kv(blk, "MostRecent", "1" if me else "0")
+        blk = kv(kv(blk, "MostRecent", "1" if me else "0"), "AutoLogin", "1" if me else "0")
+        blk = kv(blk, "AllowAutoLogin", "1" if me else "0")
         if me:
-            blk = kv(kv(blk, "AllowAutoLogin", "1"), "WantsOfflineMode", "0")
+            blk = kv(kv(blk, "WantsOfflineMode", "0"), "Timestamp", str(int(time.time())))
         out += [text[pos:a], blk]
         pos = b
     if text:
@@ -4505,11 +4545,9 @@ def account(root, sid):
     if reg.exists():
         r = reg.read_text(errors="replace")
         if re.search(r'"AutoLoginUser"', r, re.I):
-            r = re.sub(r'("AutoLoginUser"\s*")[^"]*(")', lambda m: m.group(1) + (name or "") + m.group(2), r, count=1, flags=re.I)
+            r = re.sub(r'("AutoLoginUser"\s*")[^"]*(")', lambda m: m.group(1) + (name or "") + m.group(2), r, flags=re.I)
         else:
-            m = re.search(r'"Valve"\s*\{\s*"Steam"\s*\{', r, re.I)
-            if m:
-                r = r[:m.end()] + f'\n\t\t\t\t\t"AutoLoginUser"\t\t"{name or ""}"' + r[m.end():]
+            r = re.sub(r'("Valve"\s*\{\s*"Steam"\s*\{)', lambda m: m.group(1) + f'\n\t\t\t\t\t"AutoLoginUser"\t\t"{name or ""}"', r, flags=re.I)
         reg.write_text(r)
     if name:
         print(f"Steam войдёт аккаунтом {name}")
@@ -5363,11 +5401,253 @@ def vgplay(sdir):
     return 0
 
 
+def _ws_eval(ws_url, expr):
+    """Выполнить выражение JavaScript в контексте страницы CEF по WebSocket (RFC 6455, только stdlib)."""
+    import socket, struct
+    from urllib.parse import urlparse
+    u = urlparse(ws_url)
+    host = u.hostname or "127.0.0.1"
+    port = u.port or 8080
+    path = u.path or "/"
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection((host, port), timeout=5) as s:
+        req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+               f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        s.sendall(req.encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        hdr, rest = buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in hdr.splitlines()[0]:
+            return None
+        payload = json.dumps({"id": 1, "method": "Runtime.evaluate",
+                              "params": {"expression": expr, "returnByValue": True}}).encode()
+        mask = os.urandom(4)
+        n = len(payload)
+        head = bytearray([0x81])
+        if n < 126:
+            head.append(0x80 | n)
+        elif n < 65536:
+            head.append(0x80 | 126)
+            head.extend(struct.pack("!H", n))
+        else:
+            head.append(0x80 | 127)
+            head.extend(struct.pack("!Q", n))
+        head.extend(mask)
+        head.extend(b ^ mask[i & 3] for i, b in enumerate(payload))
+        s.sendall(bytes(head))
+        while True:
+            while len(rest) < 2:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return None
+                rest += chunk
+            b0, b1 = rest[0], rest[1]
+            ln = b1 & 0x7F
+            idx = 2
+            if ln == 126:
+                while len(rest) < 4:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        return None
+                    rest += chunk
+                ln = struct.unpack("!H", rest[2:4])[0]
+                idx = 4
+            elif ln == 127:
+                while len(rest) < 10:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        return None
+                    rest += chunk
+                ln = struct.unpack("!Q", rest[2:10])[0]
+                idx = 10
+            if b1 & 0x80:
+                idx += 4
+            while len(rest) < idx + ln:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return None
+                rest += chunk
+            frame = rest[idx:idx + ln]
+            rest = rest[idx + ln:]
+            if (b0 & 0x0F) == 1:
+                msg = json.loads(frame.decode("utf-8", "replace"))
+                if msg.get("id") == 1:
+                    return ((msg.get("result") or {}).get("result") or {}).get("value")
+
+
+def active_account(root):
+    """Текущий аккаунт Steam (steamid64): из connection_log.txt (последний вход) или AutoLogin/MostRecent в loginusers.vdf."""
+    if not root:
+        return ""
+    root = Path(root)
+    last_acc = None
+    try:
+        with open(root / "logs/connection_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode(errors="replace")
+        for m in re.finditer(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[Logged On, [^\]]*\] \[U:1:(\d+)\]", tail, re.M):
+            if m.group(2) != "0":
+                last_acc = str(BASE + int(m.group(2)))
+    except OSError:
+        pass
+    if last_acc:
+        return last_acc
+    try:
+        text = (root / "config/loginusers.vdf").read_text(errors="replace")
+        for sid, a, b in users(text):
+            if re.search(r'"(?:AutoLogin|MostRecent)"\s*"1"', text[a:b], re.I):
+                return sid
+    except OSError:
+        pass
+    return ""
+
+
+def _streaming_pin_needed(root, window_sec=90):
+    """Есть ли в streaming_log.txt свежий запрос PIN или отказ по авторизации от Steam Link."""
+    if not root:
+        return False
+    try:
+        with open(Path(root) / "logs/streaming_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        return False
+    cutoff = time.time() - window_sec
+    need = False
+    for m in re.finditer(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]\s+(.*)$", tail, re.M):
+        try:
+            ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        if ts < cutoff:
+            continue
+        ln = m.group(2)
+        if re.search(r"PINRequired|Unauthorized|AuthorizationRequest|RemoteDeviceAuthorization", ln, re.I):
+            need = True
+        elif re.search(r"k_ERemoteDeviceStreamingSuccess|StartStreaming|AuthorizationConfirmed", ln, re.I):
+            need = False
+    return need
+
+
+def pin_check(root=None, port=8080):
+    """Проверить состояние Steam для Steam Link: «check: ok|pin|nologin|nosteam [steamid64]».
+    Ставит в CEF перехватчик RegisterForRemoteDeviceAuthorizationRequested, чтобы заметить запрос PIN от клиента."""
+    import urllib.request
+    sid = active_account(root)
+    expr = (
+        "(function(){"
+        "if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
+        "if (!window.__vg_rp_hooked && SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationRequested) {"
+        "  window.__vg_rp_hooked = true;"
+        "  try { SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationRequested(function(){ window.__vg_rp_pin_req = Date.now(); }); } catch(e){}"
+        "  try { if (SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationCancelled) SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationCancelled(function(){ window.__vg_rp_pin_req = 0; }); } catch(e){}"
+        "}"
+        "var u = (typeof App !== 'undefined' && App.m_CurrentUser && App.m_CurrentUser.strSteamID) ? String(App.m_CurrentUser.strSteamID) : '';"
+        "var p = (window.__vg_rp_pin_req && (Date.now() - window.__vg_rp_pin_req < 120000)) ? 'pin' : 'ok';"
+        "return p + ' ' + u;"
+        "})()"
+    )
+    targets = None
+    for path in ("/json", "/json/list"):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
+                targets = json.loads(r.read().decode("utf-8", "replace"))
+            break
+        except Exception:
+            continue
+    if not isinstance(targets, list) or not targets:
+        print(f"check: nosteam {sid}".strip())
+        return 0
+    ordered = sorted(targets, key=lambda t: (0 if "SharedJSContext" in (t.get("title") or "") else
+                                             1 if "SP" in (t.get("title") or "") else 2))
+    for t in ordered:
+        ws = t.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            res = _ws_eval(ws, expr)
+            if isinstance(res, str) and (res.startswith("ok ") or res.startswith("pin ")):
+                st, _, u = res.partition(" ")
+                u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
+                if st == "ok" and _streaming_pin_needed(root):
+                    st = "pin"
+                print(f"check: {st} {u}".strip())
+                return 0
+        except Exception:
+            continue
+    print(f"check: nologin {sid}".strip())
+    return 0
+
+
+def pin(code, root=None, port=8080, wait=15):
+    """Авторизовать устройство Steam Link по 4-значному PIN-коду через CEF Remote Debugging клиента Steam
+    (127.0.0.1:8080). Печатает «pin: ok [steamid64]», «pin: nologin» (Steam открыт на окне входа) или «pin: nosteam»."""
+    import urllib.request
+    code = str(code or "").strip()
+    if not re.fullmatch(r"\d{4}", code):
+        print("pin: invalid")
+        return 2
+    sid = active_account(root)
+    expr = (
+        f"(function(){{"
+        f"if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
+        f"if (SteamClient.RemotePlay.SetRemotePlayEnabled) SteamClient.RemotePlay.SetRemotePlayEnabled(true);"
+        f"SteamClient.RemotePlay.SetRemoteDeviceAuthorized(true, {json.dumps(code)});"
+        f"window.__vg_rp_pin_req = 0;"
+        f"var u = (typeof App !== 'undefined' && App.m_CurrentUser && App.m_CurrentUser.strSteamID) ? String(App.m_CurrentUser.strSteamID) : '';"
+        f"return 'ok ' + u;"
+        f"}})()"
+    )
+    deadline = time.time() + max(1, wait)
+    saw_cef = False
+    while True:
+        targets = None
+        for path in ("/json", "/json/list"):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
+                    targets = json.loads(r.read().decode("utf-8", "replace"))
+                break
+            except Exception:
+                continue
+        if isinstance(targets, list) and targets:
+            saw_cef = True
+            ordered = sorted(targets, key=lambda t: (0 if "SharedJSContext" in (t.get("title") or "") else
+                                                     1 if "SP" in (t.get("title") or "") else 2))
+            for t in ordered:
+                ws = t.get("webSocketDebuggerUrl")
+                if not ws:
+                    continue
+                try:
+                    res = _ws_eval(ws, expr)
+                    if isinstance(res, str) and res.startswith("ok"):
+                        _, _, u = res.partition(" ")
+                        u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
+                        print(f"pin: ok {u}".strip())
+                        return 0
+                except Exception:
+                    continue
+        if time.time() >= deadline:
+            break
+        time.sleep(1)
+    print("pin: nologin" if saw_cef else "pin: nosteam")
+    return 1
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     try:
         if a[:1] == ["vgplay"] and len(a) == 2:
             sys.exit(vgplay(a[1]))
+        if a[:1] == ["pin-check"] and len(a) in (1, 2):
+            sys.exit(pin_check(a[1] if len(a) == 2 else None))
+        if a[:1] == ["pin"] and len(a) in (2, 3):
+            sys.exit(pin(a[1], a[2] if len(a) == 3 else None))
         if a[:1] == ["account"] and len(a) == 3:
             sys.exit(account(Path(a[1]), a[2]))
         if a[:1] == ["manifest"] and len(a) in (5, 6) and a[2].isdigit():
