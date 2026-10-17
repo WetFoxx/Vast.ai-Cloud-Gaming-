@@ -1287,21 +1287,22 @@ class TestMoonlight(unittest.TestCase):
         with mock.patch.object(gui.moonlight, "steamlink_path", lambda: None):
             r = gui.Api().open_steamlink()
             self.assertEqual(r["error"]["key"], "steamlink.missing")
-        # 1) Первый запуск на аккаунте 76561198000000001 — нужен PIN, открывается в окне
-        # 2) После привязки этого аккаунта — сразу на весь экран, PIN не нужен
-        # 3) Переключились на второй аккаунт 76561198000000002 — снова нужен PIN
-        checks = iter(["check: ok 76561198000000001\n", "check: ok 76561198000000001\n", "check: ok 76561198000000002\n"])
+        # 1) Первый запуск на непривязанном аккаунте (check: pin) — нужен PIN, открывается в окне
+        # 2) Аккаунт уже привязан в облаке (check: ok) — сразу на весь экран, PIN не нужен (даже если в settings ещё пусто)
+        # 3) Переключились на непривязанный аккаунт (check: pin) — снова нужен PIN
+        checks = iter(["check: pin 76561198000000001\n", "check: ok 76561198000000001\n", "check: pin 76561198000000002\n"])
         with mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/Applications/Steam Link.app/Contents/MacOS/Steam Link"), \
              mock.patch.object(gui.moonlight, "native_display", lambda: {"w": 2560, "h": 1600, "fps": 60}), \
              mock.patch.object(gui.moonlight, "steamlink_stream", lambda size=None, windowed=False: calls.append((size, windowed)) or True), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, *a, **kw: (0, next(checks))), \
-             mock.patch.object(gui.settings, "get", lambda k, d=None: saved.get(k, d)):
+             mock.patch.object(gui.settings, "get", lambda k, d=None: saved.get(k, d)), \
+             mock.patch.object(gui.settings, "set", lambda k, v: saved.__setitem__(k, v)):
             r1 = gui.Api().open_steamlink(False)
             self.assertEqual(r1, {"ok": True, "need_pin": True, "account": "76561198000000001"})
-            saved["steamlink_paired"] = ["76561198000000001"]
             r2 = gui.Api().open_steamlink(False)
             self.assertEqual(r2, {"ok": True, "need_pin": False, "account": "76561198000000001"})
+            self.assertEqual(saved.get("steamlink_paired"), ["76561198000000001"])
             r3 = gui.Api().open_steamlink(False)
             self.assertEqual(r3, {"ok": True, "need_pin": True, "account": "76561198000000002"})
         self.assertEqual(calls, [(None, True), ((2560, 1600), False), (None, True)])

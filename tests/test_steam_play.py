@@ -203,6 +203,28 @@ class TestStateAndLogon(unittest.TestCase):
             self.assertEqual(py("vgplay", e, stdin=bad)[0], 1)
         self.assertEqual(list(e.iterdir()), [])
 
+    def test_pin_check_devices_in_localconfig(self):
+        import time
+        root = steam_dir()
+        now = int(time.time())
+        at = time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime(now))
+        (root / "logs/connection_log.txt").write_text(
+            f"{at} [Logged On, 4, 7] [U:1:692993918] RecvMsgClientLogOnResponse()\n")
+        # Без привязанных устройств в localconfig.vdf (и без CEF на порту 19) -> nosteam
+        self.assertEqual(py("pin-check", root, 19)[1].strip(), f"check: nosteam {B}")
+        # С привязанным устройством в userdata/<uid>/config/localconfig.vdf -> check: ok <steamid64>
+        lc = root / "userdata/692993918/config/localconfig.vdf"
+        lc.parent.mkdir(parents=True)
+        lc.write_text('"UserLocalConfigStore"\n{\n\t"streaming"\n\t{\n\t\t"Devices"\n\t\t{\n'
+                      '\t\t\t"a5f6d82b4ca3d79d"\n\t\t\t{\n\t\t\t\t"DeviceName"\t\t"MacBook-Air.local"\n'
+                      '\t\t\t\t"Key"\t\t"0123456789abcdef"\n\t\t\t}\n\t\t}\n\t}\n}\n')
+        self.assertEqual(py("pin-check", root, 19)[1].strip(), f"check: ok {B}")
+        # Если в streaming_log.txt свежий запрос PIN (k_ERemoteDeviceAuthorizationNeedsPIN) -> нужен PIN
+        (root / "logs/streaming_log.txt").write_text(
+            f"{at} Remote Client service connection status: k_ERemoteDeviceAuthorizationNeedsPIN\n")
+        self.assertEqual(py("pin-check", root, 19)[1].strip(), f"check: pin {B}")
+
+
 
 PLAY = "\n".join(fn(n) for n in ("play_init", "play_prepare", "flags_ready", "play_watch", "play_launch", "mods_mark")) \
     .replace("/usr/local/bin/wolf-steam.py", str(PY))

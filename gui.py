@@ -1205,6 +1205,8 @@ class Api:
         """Нужен ли ввод PIN для этого аккаунта Steam на этом компьютере."""
         if status == "pin":
             return True
+        if status == "ok":
+            return False
         paired = settings.get("steamlink_paired") or []
         if account:
             return account not in paired
@@ -1229,6 +1231,8 @@ class Api:
             moonlight.steamlink_stream(size=None, windowed=True)
             return {"ok": True, "need_pin": True}
         status, account = self._steamlink_machine_check()
+        if status == "ok" and account:
+            self._remember_steamlink_account(account)
         need_pin = self._steamlink_needs_pin(status, account)
         size, _, _ = self._stream_args()
         settings.applog(f"steamlink: статус={status!r}, аккаунт={account!r}, need_pin={need_pin}, разрешение={size}")

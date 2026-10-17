@@ -905,3 +905,20 @@
   уведомления о новых программах `.exe` в папках игр Steam (`ask--prog`), переключатель анимации запуска Moonlight в «Настройке → Окно»,
   убрана подсказка про «30 ГБ в час», в собранном `.app` (`sys.frozen`) отключены отладочные переменные окружения (`VASTGAME_DEBUG_TOKEN`,
   `VASTGAME_DEBUG`, `VASTGAME_SCRIPT_URL`, `VASTGAME_IMAGE`, `VASTGAME_FORCE_HEADLESS`, `VASTGAME_KVM_SCRIPT_URL`).
+- **0.5.9 (2026-10-17) — исправление ложного запроса PIN-кода Steam Link на уже привязанном аккаунте (`gui.py`, `wolf-setup.sh`, `tests/test_gui.py`, `tests/test_steam_play.py`):**
+  - **Причина:** при запуске игры под вторым аккаунтом (`76561198653259646`), к которому устройство уже было привязано в облаке (`steam-state`),
+    машина ответила `check: ok 76561198653259646`, однако `gui._steamlink_needs_pin(status, account)` проверял только `status == "pin"`, а при
+    `status == "ok"` проваливался в проверку локального списка `settings.get("steamlink_paired")` на Mac. Поскольку привязка хранилась в облачном
+    архиве `steam-state` (`userdata/<id>/config/localconfig.vdf`), а не в локальном `settings.json`, `gui.py` выставил `need_pin=True`, открыл
+    Steam Link в оконном режиме без `--autoconnect` и показал окно ввода PIN.
+  - **Исправление:**
+    1) В `wolf-setup.sh` (v5.13, `62e53d7`) добавлена функция `_account_has_device(root, sid)`, проверяющая наличие привязанных устройств
+       (`"streaming"` → `"Devices"` → `"DeviceName"` / `"Key"`) в `userdata/<int(sid) - BASE>/config/localconfig.vdf` активного аккаунта:
+       `pin_check` возвращает `check: ok <steamid64>`, если у текущего аккаунта в `localconfig.vdf` уже есть привязанное устройство (или
+       привязка прошла в текущей сессии CEF) и нет свежего запроса `k_ERemoteDeviceAuthorizationNeedsPIN` в `logs/streaming_log.txt`, иначе —
+       `check: pin <steamid64>`.
+    2) В `gui.py` (`_steamlink_needs_pin`, `open_steamlink`) ответ машины `status == "ok"` теперь считается достаточным (`return False`) и
+       автоматически добавляет `account` в локальный кеш `steamlink_paired` (`_remember_steamlink_paired(account)`), который используется только
+       как запасной вариант, когда машина не смогла ответить (`status` пустой / `nosteam`).
+
+
