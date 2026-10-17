@@ -834,4 +834,9 @@
   завершении сессии (`NOW=1`) игра `>= 15 ГБ` не выгружается вслепую, а пишется предупреждение в журнал. Если игра уже сохранена в
   облаке (`incloud`), она скачивается и обновляется автоматически. Тесты в `tests/test_game_select.py` и `tests/test_own_games.py`.
   Скрипт опубликован (`WetFoxx/Vast.ai-Cloud-Gaming-` коммит `780686e`, v5.11) и закреплён в `setup.py` (`DOCKER_SCRIPT_URL`).
+- **0.5.7 (2026-10-17):** собран и установлен в `/Applications/vastgame.app` (`build.sh`, `vastgame.dmg`). Включает образ
+  `ghcr.io/wetfoxx/vastgame-desktop:c55c6cc` (DirectX 12 / Vulkan на RTX 3060 Laptop и мобильных GPU, Temp/Documents папки),
+  скрипт `wolf-setup.sh` v5.11 (`780686e`: защита Google Диска от автоматической выгрузки игр >= 15 ГБ, распаковка Electron-установщиков,
+  симлинк `drive_c`, фиксы Star Citizen — мышь и D3D11).
+
 
