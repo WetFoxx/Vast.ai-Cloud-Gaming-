@@ -710,10 +710,9 @@ function gpuRank(o) {
   const rest = m[2].toLowerCase(), ti = /\bti\b/.test(rest), sup = /\bs\b|super/.test(rest);
   return Number(m[1]) * 10 + (ti ? 2 : 0) + (sup ? 1 : 0) - (/laptop|mobile|max-q/.test(rest) ? 5 : 0);
 }
-// Трафик сортируется по ↑ (с машины к тебе): за час игры уходит ~30 ГБ трансляции — это основная часть трат
+// Трафик сортируется по ↑ (с машины к тебе): трансляция и выгрузка в облако
 const SORT_VALUE = { price: (o) => o.price, ping: (o) => o.ping.ms, net: netSpeed, traffic: (o) => o.tb_up ?? o.traffic_tb, gpu: gpuRank };
 const SORT_FIRST = { price: "asc", ping: "asc", net: "desc", traffic: "asc", gpu: "desc" };
-const STREAM_TB_HOUR = 0.03;   // ТБ за час трансляции (~30 ГБ)
 // Цена трафика: «$3.91» (в обе стороны одинаково), «↓ $4.00 / ↑ $5.33», «бесплатно»
 function trafficText(o, sep = " / ") {
   const d = o.tb_down || 0, u = o.tb_up || 0;
@@ -1007,10 +1006,9 @@ $("rent").addEventListener("click", async () => {
   }
   const select = null;                       // [v5.7] выбора игр нет: свои игры из облака — все, сохранения — всегда
   if (docker) {
-    // Трафик в деньгах: час трансляции (~30 ГБ ↑)
     const gamesBytes = 0;
     text += "\n\n" + (o.tb_down < 0.1 && o.tb_up < 0.1 ? t("confirm.rent.traffic_free")
-      : t("confirm.rent.traffic", { price: trafficText(o), hour: money((o.tb_up || 0) * STREAM_TB_HOUR) })
+      : t("confirm.rent.traffic", { price: trafficText(o) })
         + (gamesBytes ? t("confirm.rent.traffic_games", { size: size(gamesBytes), cost: money((o.tb_down || 0) * gamesBytes / 1e12) }) : "") + ".");
   }
   if (o.bad_reason) text += "\n\n" + t("confirm.badhost", { reason: o.bad_reason });
