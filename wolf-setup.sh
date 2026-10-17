@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.12 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.13 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -5535,9 +5535,37 @@ def _streaming_pin_needed(root, window_sec=90):
     return need
 
 
+def _account_has_device(root, sid):
+    """Есть ли у аккаунта sid (steamid64) привязанное устройство Steam Link в userdata/<id>/config/localconfig.vdf."""
+    if not root or not re.fullmatch(r"7656\d{13}", str(sid or "")):
+        return False
+    uid = int(sid) - BASE
+    lc = Path(root) / "userdata" / str(uid) / "config/localconfig.vdf"
+    try:
+        text = lc.read_text(errors="replace")
+    except OSError:
+        return False
+    for m in re.finditer(r'"streaming"\s*\{', text, re.I):
+        depth, i, n = 0, m.start(), len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    blk = text[m.start():i + 1]
+                    if re.search(r'"Devices"\s*\{[^{}]*\{[^{}]*"(?:DeviceName|Key)"\s*"[^"]+"', blk, re.I):
+                        return True
+                    break
+            i += 1
+    return False
+
+
 def pin_check(root=None, port=8080):
     """Проверить состояние Steam для Steam Link: «check: ok|pin|nologin|nosteam [steamid64]».
-    Ставит в CEF перехватчик RegisterForRemoteDeviceAuthorizationRequested, чтобы заметить запрос PIN от клиента."""
+    Проверяет наличие привязанных устройств в userdata/<id>/config/localconfig.vdf ("streaming" -> "Devices")
+    и ставит в CEF перехватчик RegisterForRemoteDeviceAuthorizationRequested."""
     import urllib.request
     sid = active_account(root)
     expr = (
@@ -5549,7 +5577,7 @@ def pin_check(root=None, port=8080):
         "  try { if (SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationCancelled) SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationCancelled(function(){ window.__vg_rp_pin_req = 0; }); } catch(e){}"
         "}"
         "var u = (typeof App !== 'undefined' && App.m_CurrentUser && App.m_CurrentUser.strSteamID) ? String(App.m_CurrentUser.strSteamID) : '';"
-        "var p = (window.__vg_rp_pin_req && (Date.now() - window.__vg_rp_pin_req < 120000)) ? 'pin' : 'ok';"
+        "var p = (window.__vg_rp_pin_req && (Date.now() - window.__vg_rp_pin_req < 120000)) ? 'pin' : (window.__vg_rp_paired_acc && window.__vg_rp_paired_acc === u ? 'paired' : 'ok');"
         "return p + ' ' + u;"
         "})()"
     )
@@ -5562,6 +5590,12 @@ def pin_check(root=None, port=8080):
         except Exception:
             continue
     if not isinstance(targets, list) or not targets:
+        if _streaming_pin_needed(root):
+            print(f"check: pin {sid}".strip())
+            return 0
+        if sid and _account_has_device(root, sid):
+            print(f"check: ok {sid}")
+            return 0
         print(f"check: nosteam {sid}".strip())
         return 0
     ordered = sorted(targets, key=lambda t: (0 if "SharedJSContext" in (t.get("title") or "") else
@@ -5572,15 +5606,26 @@ def pin_check(root=None, port=8080):
             continue
         try:
             res = _ws_eval(ws, expr)
-            if isinstance(res, str) and (res.startswith("ok ") or res.startswith("pin ")):
+            if isinstance(res, str) and (res.startswith("ok ") or res.startswith("paired ") or res.startswith("pin ")):
                 st, _, u = res.partition(" ")
                 u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
-                if st == "ok" and _streaming_pin_needed(root):
-                    st = "pin"
+                if st in ("ok", "paired"):
+                    if _streaming_pin_needed(root):
+                        st = "pin"
+                    elif st == "paired" or _account_has_device(root, u):
+                        st = "ok"
+                    else:
+                        st = "pin"
                 print(f"check: {st} {u}".strip())
                 return 0
         except Exception:
             continue
+    if _streaming_pin_needed(root):
+        print(f"check: pin {sid}".strip())
+        return 0
+    if sid and _account_has_device(root, sid):
+        print(f"check: ok {sid}")
+        return 0
     print(f"check: nologin {sid}".strip())
     return 0
 
@@ -5601,6 +5646,7 @@ def pin(code, root=None, port=8080, wait=15):
         f"SteamClient.RemotePlay.SetRemoteDeviceAuthorized(true, {json.dumps(code)});"
         f"window.__vg_rp_pin_req = 0;"
         f"var u = (typeof App !== 'undefined' && App.m_CurrentUser && App.m_CurrentUser.strSteamID) ? String(App.m_CurrentUser.strSteamID) : '';"
+        f"window.__vg_rp_paired_acc = u;"
         f"return 'ok ' + u;"
         f"}})()"
     )
@@ -5644,8 +5690,8 @@ if __name__ == "__main__":
     try:
         if a[:1] == ["vgplay"] and len(a) == 2:
             sys.exit(vgplay(a[1]))
-        if a[:1] == ["pin-check"] and len(a) in (1, 2):
-            sys.exit(pin_check(a[1] if len(a) == 2 else None))
+        if a[:1] == ["pin-check"] and len(a) in (1, 2, 3):
+            sys.exit(pin_check(a[1] if len(a) >= 2 else None, int(a[2]) if len(a) == 3 and a[2].isdigit() else 8080))
         if a[:1] == ["pin"] and len(a) in (2, 3):
             sys.exit(pin(a[1], a[2] if len(a) == 3 else None))
         if a[:1] == ["account"] and len(a) == 3:
