@@ -59,6 +59,8 @@ SHELL = {"ping": lambda a: "echo ok", "time": lambda a: "date +%s", "finish": la
          "push-identity": lambda a: "(NOW=1 wolf push identity </dev/null >/dev/null 2>&1 &)",
          "forget": lambda a: f"wolf forget {shlex.quote(a[0])}",
          "sunshine-creds": lambda a: f"wolf sunshine-creds {shlex.quote(a[0])}",
+         "steamlink-check": lambda a: "wolf steamlink-check",
+         "steamlink-pin": lambda a: f"wolf steamlink-pin {shlex.quote(a[0])}",
          "answer": lambda a: "wolf answer " + " ".join(shlex.quote(x) for x in a),
          "prog-run": lambda a: "wolf prog run " + " ".join(shlex.quote(x) for x in a),          # [v5.4]
          "prog-auto": lambda a: "wolf prog auto " + " ".join(shlex.quote(x) for x in a),

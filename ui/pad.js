@@ -81,6 +81,8 @@
     return st.visibility !== "hidden" && st.display !== "none" && st.pointerEvents !== "none";
   }
   function scope() {
+    const slModal = document.getElementById("sl-modal");
+    if (slModal && !slModal.hidden) return [slModal];
     const modal = document.getElementById("modal");
     if (modal && !modal.hidden) return [modal];
     const fx = document.getElementById("launch-fx");
@@ -132,7 +134,7 @@
   // Показать выбранное: у верхних кнопок экрана — страница до самого верха (заголовок и фильтры видны), у нижних — до
   // низа, иначе — чтобы не пряталось под машиной/балансом сверху и подсказками снизу. Полка в ряд — своей прокруткой.
   function reveal(e) {
-    if (e.closest("#rail, #modal, #launch-fx")) return;
+    if (e.closest("#rail, #modal, #sl-modal, #launch-fx")) return;
     settle();
     const row = e.closest(".lib-strip");
     if (row && row.scrollWidth > row.clientWidth) {
@@ -196,6 +198,8 @@
   }
   const BACK = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back", games: "games-back", game: "game-back" };
   function back() {
+    const slModal = document.getElementById("sl-modal");
+    if (slModal && !slModal.hidden) { document.getElementById("sl-pin-cancel").click(); return; }
     const modal = document.getElementById("modal");
     if (modal && !modal.hidden) { document.getElementById("modal-no").click(); return; }
     const fx = document.getElementById("lfx-close");

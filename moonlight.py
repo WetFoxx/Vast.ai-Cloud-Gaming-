@@ -192,3 +192,49 @@ def log_tail(n=12):
     except OSError:
         return ""
     return " | ".join(ln[-160:] for ln in lines[-n:])
+
+
+# ---- Steam Link
+def steamlink_path():
+    """Исполняемый файл Steam Link: стандартная папка или PATH."""
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        candidates = [
+            os.path.join(local, "Programs", "SteamLink", "SteamLink.exe"),
+            os.path.join(local, "SteamLink", "SteamLink.exe"),
+            os.path.join(pf, "SteamLink", "SteamLink.exe"),
+            os.path.join(pf86, "SteamLink", "SteamLink.exe"),
+        ]
+    else:
+        candidates = [
+            "/Applications/Steam Link.app/Contents/MacOS/Steam Link",
+            os.path.expanduser("~/Applications/Steam Link.app/Contents/MacOS/Steam Link"),
+        ]
+    for p in candidates:
+        if p and os.path.isfile(p) and (os.name == "nt" or os.access(p, os.X_OK)):
+            return p
+    return paths.find("steamlink") or paths.find("SteamLink")
+
+
+def steamlink_stream(size=None, windowed=False):
+    """Запустить Steam Link в фоновом процессе. windowed=True — в окне (для ввода PIN рядом с окном VastGame);
+    иначе — с автоподключением на весь экран."""
+    exe = steamlink_path()
+    if not exe:
+        return False
+    if sys.platform == "darwin" and exe.endswith("/Contents/MacOS/Steam Link"):
+        # Если Steam Link уже открыт — просто выводим его окно на передний план
+        if subprocess.run(["pgrep", "-x", "Steam Link"], capture_output=True, timeout=5).returncode == 0:
+            app_bundle = os.path.dirname(os.path.dirname(os.path.dirname(exe)))
+            subprocess.Popen(["open", "-a", app_bundle], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, **paths.detached())
+            return True
+    if windowed:
+        opts = ["--windowed"]
+    else:
+        opts = ["--autoconnect", "--fullscreen"] + (["--size", f"{size[0]}x{size[1]}"] if size else [])
+    subprocess.Popen([exe, *opts], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                     **paths.detached())
+    return True

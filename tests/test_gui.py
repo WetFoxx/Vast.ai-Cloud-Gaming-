@@ -156,6 +156,14 @@ class TestLaunchFx(unittest.TestCase):
         self.assertEqual(shown, [{"name": "ELDEN RING"}])
         self.assertEqual(ended, [(False, "нет связи")])
 
+    def test_launch_fx_setting_toggle(self):
+        api = gui.Api()
+        self.assertTrue(api.settings()["launch_fx"])
+        self.assertEqual(api.set_launch_fx(False), {"ok": True})
+        self.assertFalse(api.settings()["launch_fx"])
+        self.assertEqual(api.set_launch_fx(True), {"ok": True})
+        self.assertTrue(api.settings()["launch_fx"])
+
 
 class TestPrograms(unittest.TestCase):
     """[v5.4] Программы игр: запуск рядом с игрой и «вместе с игрой» — через страницу машины."""
@@ -1273,6 +1281,44 @@ class TestMoonlight(unittest.TestCase):
     def test_not_installed(self):
         with mock.patch.object(gui.moonlight, "path", lambda: None):
             self.assertEqual(gui.Api().moonlight_apps("m"), {"installed": False})
+
+    def test_open_steamlink(self):
+        calls, saved = [], {}
+        with mock.patch.object(gui.moonlight, "steamlink_path", lambda: None):
+            r = gui.Api().open_steamlink()
+            self.assertEqual(r["error"]["key"], "steamlink.missing")
+        # 1) Первый запуск на аккаунте 76561198000000001 — нужен PIN, открывается в окне
+        # 2) После привязки этого аккаунта — сразу на весь экран, PIN не нужен
+        # 3) Переключились на второй аккаунт 76561198000000002 — снова нужен PIN
+        checks = iter(["check: ok 76561198000000001\n", "check: ok 76561198000000001\n", "check: ok 76561198000000002\n"])
+        with mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/Applications/Steam Link.app/Contents/MacOS/Steam Link"), \
+             mock.patch.object(gui.moonlight, "native_display", lambda: {"w": 2560, "h": 1600, "fps": 60}), \
+             mock.patch.object(gui.moonlight, "steamlink_stream", lambda size=None, windowed=False: calls.append((size, windowed)) or True), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, *a, **kw: (0, next(checks))), \
+             mock.patch.object(gui.settings, "get", lambda k, d=None: saved.get(k, d)):
+            r1 = gui.Api().open_steamlink(False)
+            self.assertEqual(r1, {"ok": True, "need_pin": True, "account": "76561198000000001"})
+            saved["steamlink_paired"] = ["76561198000000001"]
+            r2 = gui.Api().open_steamlink(False)
+            self.assertEqual(r2, {"ok": True, "need_pin": False, "account": "76561198000000001"})
+            r3 = gui.Api().open_steamlink(False)
+            self.assertEqual(r3, {"ok": True, "need_pin": True, "account": "76561198000000002"})
+        self.assertEqual(calls, [(None, True), ((2560, 1600), False), (None, True)])
+
+    def test_pair_steamlink(self):
+        saved = {}
+        self.assertEqual(gui.Api().pair_steamlink("12a")["error"]["key"], "steamlink.pin.invalid")
+        with mock.patch.object(gui.wolfnode, "ts_node", lambda: None), \
+             mock.patch.object(gui.time, "sleep", lambda s: None):
+            self.assertEqual(gui.Api().pair_steamlink("1234")["error"]["key"], "pair.no_machine")
+        with mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.settings, "get", lambda k, d=None: saved.get(k, d)), \
+             mock.patch.object(gui.settings, "set", lambda k, v: saved.__setitem__(k, v)), \
+             mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args, **kw: (0, "pin: ok 76561198000000001\n") if args == ["1234"] else (1, "pin: nologin\n")):
+            self.assertEqual(gui.Api().pair_steamlink("1234"), {"ok": True, "account": "76561198000000001"})
+            self.assertEqual(saved.get("steamlink_paired"), ["76561198000000001"])
+            self.assertEqual(gui.Api().pair_steamlink("5678")["error"]["key"], "steamlink.pin.nologin")
 
 
 if __name__ == "__main__":

@@ -117,7 +117,8 @@ class Api:
         открылось в конце обновления, что сказать («обновлено» / «не встало»). Страница спрашивает это первым —
         тут же новая версия ставит сторожу знак «я открылась» (updater.after_start)."""
         return {"language": settings.get("language"), "version": updater.VERSION, "update": updater.after_start(),
-                "platform": sys.platform, "sounds": settings.get("ui_sounds", True) is not False}
+                "platform": sys.platform, "sounds": settings.get("ui_sounds", True) is not False,
+                "launch_fx": settings.get("launch_fx", True) is not False}
 
     def hide_cursor(self):
         """[2026-10-15] Управляют геймпадом — спрятать указатель мыши, пока мышь или тачпад не сдвинут (macOS сама
@@ -135,6 +136,11 @@ class Api:
     def set_sounds(self, on):
         """[2026-10-15] Звуки окна (наведение, нажатие, запуск трансляции) — вкл/выкл."""
         settings.set("ui_sounds", bool(on))
+        return {"ok": True}
+
+    def set_launch_fx(self, on):
+        """[2026-10-17] Анимация запуска Moonlight — вкл/выкл (по умолчанию включена)."""
+        settings.set("launch_fx", bool(on))
         return {"ok": True}
 
     def set_language(self, lang, remember=False):
@@ -1178,6 +1184,92 @@ class Api:
                 time.sleep(pause)
         return False
 
+    # ---- Steam Link
+    def _steamlink_machine_check(self):
+        """Спросить машину об активном аккаунте Steam и состоянии Remote Play: (status, steamid64) или (None, '')."""
+        node = wolfnode.ts_node()
+        for _ in range(2):
+            if node:
+                break
+            time.sleep(2)
+            node = wolfnode.ts_node()
+        if not node:
+            return None, ""
+        code, out = wolfnode.run(node[1], "steamlink-check", timeout=20, on_notice=self._ssh_notice)
+        settings.applog(f"steamlink-check: код={code}, ответ={(out or '').strip()!r}")
+        m = re.search(r"check:\s*(\w+)(?:\s+(7656\d{13}))?", out or "")
+        return (m.group(1), m.group(2) or "") if m else ("", "")
+
+    @staticmethod
+    def _steamlink_needs_pin(status, account):
+        """Нужен ли ввод PIN для этого аккаунта Steam на этом компьютере."""
+        if status == "pin":
+            return True
+        paired = settings.get("steamlink_paired") or []
+        if account:
+            return account not in paired
+        return not paired
+
+    @staticmethod
+    def _remember_steamlink_account(account):
+        if not account:
+            return
+        paired = list(settings.get("steamlink_paired") or [])
+        if account not in paired:
+            paired.append(account)
+            settings.set("steamlink_paired", paired)
+
+    def open_steamlink(self, windowed=False):
+        """Запустить Steam Link: сам определяет, привязан ли текущий аккаунт Steam на машине к этому компьютеру;
+        если нужен PIN (первый запуск или смена аккаунта) — открывает в окне и возвращает need_pin=True."""
+        if not moonlight.steamlink_path():
+            return {"error": {"key": "steamlink.missing", "params": {}, "text": "Steam Link не установлен"}}
+        if windowed:
+            settings.applog("steamlink: запуск в окне")
+            moonlight.steamlink_stream(size=None, windowed=True)
+            return {"ok": True, "need_pin": True}
+        status, account = self._steamlink_machine_check()
+        need_pin = self._steamlink_needs_pin(status, account)
+        size, _, _ = self._stream_args()
+        settings.applog(f"steamlink: статус={status!r}, аккаунт={account!r}, need_pin={need_pin}, разрешение={size}")
+        moonlight.steamlink_stream(size=None if need_pin else size, windowed=need_pin)
+        return {"ok": True, "need_pin": need_pin, "account": account}
+
+    def check_steamlink_pin(self):
+        """Фоновая проверка после запуска Steam Link: попросил ли Steam на машине PIN-код (например, при смене аккаунта внутри Steam)."""
+        status, account = self._steamlink_machine_check()
+        if not status:
+            return {"need_pin": False, "account": ""}
+        return {"need_pin": self._steamlink_needs_pin(status, account), "account": account, "status": status}
+
+    def pair_steamlink(self, pin):
+        """Авторизовать устройство Steam Link по 4-значному PIN-коду в клиенте Steam на машине и запомнить аккаунт."""
+        pin = str(pin or "").strip()
+        if not re.fullmatch(r"\d{4}", pin):
+            return {"error": {"key": "steamlink.pin.invalid", "params": {}, "text": "нужен 4-значный PIN-код"}}
+        node = wolfnode.ts_node()
+        for _ in range(2):
+            if node:
+                break
+            time.sleep(2)
+            node = wolfnode.ts_node()
+        if not node:
+            settings.applog("steamlink-pin: машины нет в Tailscale")
+            return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
+        code, out = wolfnode.run(node[1], "steamlink-pin", [pin], timeout=45, on_notice=self._ssh_notice)
+        settings.applog(f"steamlink-pin: код={code}, ответ={(out or '').strip()!r}")
+        m = re.search(r"pin:\s*(\w+)(?:\s+(7656\d{13}))?", out or "")
+        res = m.group(1) if m else ""
+        account = (m.group(2) or "") if m else ""
+        if res == "ok":
+            self._remember_steamlink_account(account or "_default")
+            return {"ok": True, "account": account}
+        if res == "nologin":
+            return {"error": {"key": "steamlink.pin.nologin", "params": {}, "text": "в Steam на машине ещё не выполнен вход"}}
+        if res == "nosteam":
+            return {"error": {"key": "steamlink.pin.nosteam", "params": {}, "text": "Steam на машине ещё загружается"}}
+        return {"error": {"key": "steamlink.pin.failed", "params": {}, "text": (out or "").strip()[-200:]}}
+
     def _ssh_notice(self, text):
         """Tailscale SSH просит подтвердить вход (режим «check») — открыть его страницу в браузере
         самим, один раз: окно ждёт ответа и ничего показать не может. Только страницы Tailscale."""
@@ -1531,7 +1623,7 @@ def main():
         threading.Thread(target=api._watch_show, daemon=True).start()
     # Свой поток, а не webview.start(func): поток pywebview не фоновый и не дал бы процессу выйти после окна
     threading.Thread(target=api._watch_asks, daemon=True).start()
-    webview.start(debug=bool(os.environ.get("VASTGAME_DEBUG")))
+    webview.start(debug=bool(os.environ.get("VASTGAME_DEBUG")) and not getattr(sys, "frozen", False))
 
 
 def card_main():

@@ -77,6 +77,7 @@
       <div class="links" id="links" hidden>
         <div class="ml-row">
           <button class="primary" id="ml-start" data-i18n="moonlight.start"></button>
+          <button id="sl-start" data-i18n="steamlink.start"></button>
         </div>
         <div class="sub" id="ml-note" hidden></div>
         <div class="row-link" id="params-row">
@@ -243,7 +244,10 @@
         </section>
         <section class="card lang-card" data-cat="window">
           <span class="label" data-i18n="setup.fx_preview.title"></span>
-          <button class="small" id="fx-preview" data-i18n="setup.fx_preview"></button>
+          <div class="lang-actions">
+            <button class="small" id="fx-preview" data-i18n="setup.fx_preview"></button>
+            <input type="checkbox" id="launch-fx-on" checked>
+          </div>
         </section>
         <section class="card reset-card" data-cat="reset">
           <div class="label" data-i18n="setup.reset.title"></div>
@@ -390,6 +394,21 @@
       <div class="actions">
         <button class="primary" id="modal-yes"></button>
         <button id="modal-no"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Авторизация Steam Link по PIN-коду ===== -->
+  <div class="modal" id="sl-modal" hidden>
+    <div class="dialog sl-dialog">
+      <div class="title" data-i18n="steamlink.pin.title"></div>
+      <div class="modal-text" data-i18n="steamlink.pin.text"></div>
+      <button class="small sl-open-btn" id="sl-open-windowed" data-i18n="steamlink.pin.open_app"></button>
+      <input type="text" class="sl-pin-input" id="sl-pin-input" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="off">
+      <div class="sub sl-pin-status" id="sl-pin-status" hidden></div>
+      <div class="actions">
+        <button class="primary" id="sl-pin-submit" data-i18n="steamlink.pin.submit"></button>
+        <button id="sl-pin-cancel" data-i18n="steamlink.pin.close"></button>
       </div>
     </div>
   </div>

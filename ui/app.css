@@ -287,10 +287,19 @@ button.danger { color: var(--error); }
 .card.update > button { flex: none; }
 #update-state.err, #update-title.err { color: var(--error); }
 
-/* ---- Запуск Moonlight */
-.ml-row { display: flex; gap: 10px; align-items: stretch; }
+/* ---- Запуск Moonlight и Steam Link */
+.ml-row { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
 .ml-row button { flex: 1; }
+.ml-row #sl-pin-open { flex: none; padding-left: 14px; padding-right: 14px; }
 .ml-row select { font-size: 14px; padding: 6px 10px; border-radius: 12px; max-width: 45%; }
+.sl-open-btn { align-self: flex-start; }
+.sl-pin-input {
+  font: 700 28px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 10px; text-align: center; padding: 12px 16px; border-radius: 14px;
+  width: 180px; align-self: center;
+}
+.sl-pin-status.ok { color: var(--ready, #3fb950); }
+.sl-pin-status.err { color: var(--error); }
 
 /* ---- Игры в облаке */
 #open-games { flex: none; }
@@ -602,6 +611,7 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 button.cancel { flex: none; padding: 12px 22px; }
 .lang-card { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .lang-card select { font-size: 14px; padding: 6px 10px; }
+.lang-actions { display: flex; align-items: center; gap: 12px; }
 
 /* ---- Движение: экраны и карточки появляются мягко, одна за другой; вопрос — «всплывает».
    Анимация срабатывает, когда блок становится видимым (hidden снят), — обновления данных её не повторяют. */

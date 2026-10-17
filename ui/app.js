@@ -404,8 +404,10 @@ function libGame(g) {
   const lib = libData && (libData.games || []).find((x) => String(x.appid) === String(g.appid));
   return lib ? { ...lib, ...g, hero: g.hero || lib.hero, cap: g.cap || lib.cap } : g;
 }
+let launchFxOn = true;
 // preview — «Посмотреть» в настройке (машины может не быть): последняя игра
 function launchFx(preview = false) {
+  if (!preview && !launchFxOn) return { done() {} };
   const box = $("launch-fx"), m = current && current.status && current.status.machine;
   // Трансляция машины: игра, с которой её арендовали; машина без игры — рабочий стол (без картинки чужой игры)
   const g = preview ? heroGame : m ? libGame(playNowGame()) : heroGame;
@@ -523,6 +525,134 @@ for (const id of ["stream-res", "stream-bitrate"]) {
 
 $("ml-start").addEventListener("click", () => {
   if (current && current.status.links) startMoonlight(current.status.links.moonlight, $("ml-app").value || "Desktop");
+});
+
+// ---- Steam Link: запуск клиента; если текущий аккаунт Steam на машине ещё не привязан (или попросил PIN) —
+// автоматически открываем окно ввода 4-значного PIN-кода
+let demoSlPaired = false;
+let slWatchTimer = null;
+
+function watchSteamLinkPin() {
+  if (slWatchTimer) clearInterval(slWatchTimer);
+  if (DEMO) return;
+  let tries = 0;
+  slWatchTimer = setInterval(async () => {
+    tries++;
+    if (tries > 5 || !$("sl-modal").hidden) { clearInterval(slWatchTimer); slWatchTimer = null; return; }
+    try {
+      const r = await api().check_steamlink_pin();
+      if (r && r.need_pin && $("sl-modal").hidden) {
+        clearInterval(slWatchTimer);
+        slWatchTimer = null;
+        openSteamLinkPinModal();
+      }
+    } catch (e) { /* ignore */ }
+  }, 2500);
+}
+
+async function launchSteamLink(btn, note, windowed = false) {
+  if (btn) btn.disabled = true;
+  if (note) { note.hidden = false; note.textContent = t("steamlink.starting"); }
+  try {
+    const hasNative = !!(window.pywebview && window.pywebview.api && window.pywebview.api.open_steamlink);
+    let r;
+    if (DEMO) {
+      const needPin = windowed ? true : !demoSlPaired;
+      if (hasNative) await api().open_steamlink(needPin);
+      r = { ok: true, need_pin: needPin };
+    } else {
+      r = await api().open_steamlink(!!windowed);
+    }
+    if (note) {
+      note.textContent = r && r.error ? errText(r.error) : "";
+      note.hidden = !(r && r.error);
+    }
+    if (!windowed && r && r.ok) {
+      if (r.need_pin) openSteamLinkPinModal();
+      else watchSteamLinkPin();
+    }
+    return r;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function openSteamLinkPinModal() {
+  const modal = $("sl-modal"), inp = $("sl-pin-input"), st = $("sl-pin-status"), sub = $("sl-pin-submit");
+  inp.value = "";
+  inp.disabled = false;
+  sub.disabled = false;
+  st.hidden = true;
+  st.textContent = "";
+  st.className = "sub sl-pin-status";
+  modal.hidden = false;
+  setTimeout(() => inp.focus(), 30);
+}
+
+function closeSteamLinkPinModal() {
+  $("sl-modal").hidden = true;
+}
+
+async function submitSteamLinkPin() {
+  const inp = $("sl-pin-input"), st = $("sl-pin-status"), sub = $("sl-pin-submit");
+  const pin = (inp.value || "").replace(/\D+/g, "");
+  st.hidden = false;
+  st.className = "sub sl-pin-status";
+  if (pin.length !== 4) {
+    st.classList.add("err");
+    st.textContent = t("steamlink.pin.invalid");
+    inp.focus();
+    return;
+  }
+  inp.disabled = true;
+  sub.disabled = true;
+  st.textContent = t("steamlink.pin.sending");
+  try {
+    const r = DEMO ? await new Promise((ok) => setTimeout(() => ok({ ok: true }), 800)) : await api().pair_steamlink(pin);
+    if (r && r.ok) {
+      demoSlPaired = true;
+      st.classList.add("ok");
+      st.textContent = t("steamlink.pin.ok");
+      window.sfx && window.sfx.select();
+      setTimeout(() => { if (st.classList.contains("ok")) closeSteamLinkPinModal(); }, 1200);
+    } else {
+      st.classList.add("err");
+      st.textContent = (r && r.error) ? errText(r.error) : t("steamlink.pin.failed");
+      window.sfx && window.sfx.error();
+    }
+  } catch (e) {
+    st.classList.add("err");
+    st.textContent = String(e);
+  } finally {
+    inp.disabled = false;
+    sub.disabled = false;
+  }
+}
+
+$("sl-start").addEventListener("click", () => {
+  launchSteamLink($("sl-start"), $("ml-note"), false);
+});
+$("sl-open-windowed").addEventListener("click", async () => {
+  const st = $("sl-pin-status");
+  const r = await launchSteamLink($("sl-open-windowed"), null, true);
+  if (r && r.error) {
+    st.hidden = false;
+    st.className = "sub sl-pin-status err";
+    st.textContent = errText(r.error);
+  }
+});
+$("sl-pin-input").addEventListener("input", (e) => {
+  const digits = (e.target.value || "").replace(/\D+/g, "").slice(0, 4);
+  if (e.target.value !== digits) e.target.value = digits;
+});
+$("sl-pin-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); submitSteamLinkPin(); }
+  else if (e.key === "Escape") { e.preventDefault(); closeSteamLinkPinModal(); }
+});
+$("sl-pin-submit").addEventListener("click", submitSteamLinkPin);
+$("sl-pin-cancel").addEventListener("click", closeSteamLinkPinModal);
+$("sl-modal").addEventListener("click", (e) => {
+  if (e.target === $("sl-modal") && !$("sl-pin-submit").disabled) closeSteamLinkPinModal();
 });
 
 $("open-sunshine").addEventListener("click", () => {
@@ -2827,6 +2957,8 @@ function renderResult(r) {
     if (!m.installed) { btn.disabled = false; note.textContent = t("moonlight.missing"); return; }
     launchMoonlight(btn, note, r.links.moonlight, m.selected);
   };
+  const slBtn = part("sl-start");
+  if (slBtn) slBtn.onclick = () => launchSteamLink(slBtn, note, false);
   links.removeAttribute("id");
   links.querySelectorAll("[id]").forEach((e) => e.removeAttribute("id"));
   box.appendChild(links);
@@ -2848,7 +2980,7 @@ $("progress-back").addEventListener("click", () => { if (!DEMO) api().session_se
 $("open-home").addEventListener("click", () => $("brand").click());
 $("play-game").addEventListener("click", () => { if (heroGame && heroGame.accounts) openGame(heroGame); });   // сначала страница игры
 $("brand").addEventListener("click", () => {
-  if (!$("modal").hidden) return;
+  if (!$("modal").hidden || !$("sl-modal").hidden) return;
   const cur = ["main", "offers", "progress", "games", "setup", "history", "wizard", "library", "game"].find((s) => !$("screen-" + s).hidden);
   if (cur === "main" || cur === "wizard") { show("main"); refresh(); return; }
   const back = { offers: "offers-cancel", setup: "setup-back", library: "library-back", history: "history-back", game: "game-back",
@@ -3119,17 +3251,25 @@ function demoUpdate() {
 
 // ---------------------------------------------------------------- старт
 async function start() {
-  let saved = null, version = "0.2.0", notice = null, sounds = true;
+  let saved = null, version = "0.2.0", notice = null, sounds = true, launch_fx = true;
   if (DEMO) {
     const q = new URLSearchParams(location.search);
     saved = q.get("lang");
     PLATFORM = q.get("platform") || "";                         // ?platform=win32 — тексты для Windows
     if (q.get("updated")) notice = q.get("updated") === "failed" ? { failed: "0.2.1" } : { updated: { from: "0.2.0", to: q.get("updated") } };
-  } else ({ language: saved, version, update: notice, platform: PLATFORM = "", sounds = true } = await api().settings());
-  // [2026-10-15] звуки окна — переключатель в «Настройке» (pad.js)
+  } else ({ language: saved, version, update: notice, platform: PLATFORM = "", sounds = true, launch_fx = true } = await api().settings());
+  // [2026-10-15] звуки окна и анимация запуска трансляции — переключатели в «Настройке» (pad.js)
   window.setSounds(sounds);
   $("ui-sounds").checked = sounds;
   $("ui-sounds").addEventListener("change", () => { window.setSounds($("ui-sounds").checked); if (!DEMO) api().set_sounds($("ui-sounds").checked); });
+  launchFxOn = launch_fx !== false;
+  if ($("launch-fx-on")) {
+    $("launch-fx-on").checked = launchFxOn;
+    $("launch-fx-on").addEventListener("change", () => {
+      launchFxOn = $("launch-fx-on").checked;
+      if (!DEMO) api().set_launch_fx(launchFxOn);
+    });
+  }
   // Окно открылось в конце обновления — сказать итог (минуту, потом надпись живёт как обычно)
   if (notice) { updateNotice = notice; setTimeout(() => { updateNotice = null; renderUpdate(updateInfo); }, 60 * 1000); }
   LANG = I18N[saved] ? saved : detectLanguage();

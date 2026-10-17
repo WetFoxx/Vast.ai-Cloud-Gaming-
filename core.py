@@ -214,32 +214,33 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     docker — образ vastgame-desktop вместо шаблона KVM: тот же wolf-setup.sh (образ скачивает его по
     WOLF_SCRIPT_URL), настройки разрешения и языка Steam — из шаблона, порт Tailscale для прямой связи.
     lang — язык окна (ru/en/es): язык Steam на машине, если в шаблоне не задан свой (steam_lang)."""
+    dev = not getattr(sys, "frozen", False)
     if docker:
         import setup      # адрес скрипта Docker — setup.DOCKER_SCRIPT_URL (setup не импортирует core)
-        # VASTGAME_SCRIPT_URL — проверка скрипта до публикации (только запуск из папки проекта; у людей её нет):
+        # VASTGAME_SCRIPT_URL — проверка скрипта до публикации (только запуск из папки проекта; в собранном .app отключено):
         # «drive:ПАПКА/wolf-setup.sh» — образ берёт скрипт с Google Drive этого аккаунта
-        env = {"WOLF_SCRIPT_URL": os.environ.get("VASTGAME_SCRIPT_URL") or setup.DOCKER_SCRIPT_URL, "-p 41641:41641/udp": "1",
+        env = {"WOLF_SCRIPT_URL": (os.environ.get("VASTGAME_SCRIPT_URL") if dev else None) or setup.DOCKER_SCRIPT_URL, "-p 41641:41641/udp": "1",
                "SYNC_STEAM_GAMES": template_games(tpl)}
-        # Отладка образа (только при запуске из папки проекта с этой переменной; у людей её нет): канал команд
+        # Отладка образа (только при запуске из папки проекта с этой переменной; в собранном .app отключено): канал команд
         # debug_rc.py на порту 8788, только через Tailscale и только с этим одноразовым паролем
-        if os.environ.get("VASTGAME_DEBUG_TOKEN"):
+        if dev and os.environ.get("VASTGAME_DEBUG_TOKEN"):
             env["VASTGAME_DEBUG_TOKEN"] = os.environ["VASTGAME_DEBUG_TOKEN"]
         # [2026-10-16] Проверка до закрепления (только запуск из папки проекта): VASTGAME_IMAGE — другая сборка образа,
         # VASTGAME_FORCE_HEADLESS=1 — экран без монитора на любом хосте (режим хостов без прав на выход видеокарты)
-        if os.environ.get("VASTGAME_FORCE_HEADLESS") == "1":
+        if dev and os.environ.get("VASTGAME_FORCE_HEADLESS") == "1":
             env["VG_FORCE_HEADLESS"] = "1"
         res = setup.env_value(tpl.get("env"), "RES")
         if res:
             env["RES"] = res
-        body = {"client_id": "me", "image": os.environ.get("VASTGAME_IMAGE") or DOCKER_IMAGE, "disk": disk, "label": "vastgame",
+        body = {"client_id": "me", "image": (os.environ.get("VASTGAME_IMAGE") if dev else None) or DOCKER_IMAGE, "disk": disk, "label": "vastgame",
                 "runtype": "args", "args": ["start"], "env": env}
     else:
         body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
         env = {}
-        # [2026-10-15] Проверка скрипта на KVM до публикации (только запуск из папки проекта; у людей переменной нет):
+        # [2026-10-15] Проверка скрипта на KVM до публикации (только запуск из папки проекта; в собранном .app отключено):
         # VASTGAME_KVM_SCRIPT_URL=https://raw.githubusercontent.com/…/<коммит>/wolf-setup.sh — разовый загрузчик вместо
         # шаблонного (сам шаблон не меняется)
-        kvm_url = os.environ.get("VASTGAME_KVM_SCRIPT_URL") or ""
+        kvm_url = (os.environ.get("VASTGAME_KVM_SCRIPT_URL") or "") if dev else ""
         if kvm_url.startswith("https://raw.githubusercontent.com/WetFoxx/"):
             import setup
             body["onstart"] = setup.ONSTART.replace(setup.SCRIPT_URL, kvm_url)

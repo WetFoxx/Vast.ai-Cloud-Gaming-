@@ -29,6 +29,7 @@ LOGIN = f'''"users"
 \t\t"RememberPassword"\t\t"1"
 \t\t"WantsOfflineMode"\t\t"1"
 \t\t"MostRecent"\t\t"1"
+\t\t"AutoLogin"\t\t"1"
 \t}}
 \t"{A}"
 \t{{
@@ -36,11 +37,25 @@ LOGIN = f'''"users"
 \t\t"PersonaName"\t\t"Alex"
 \t\t"RememberPassword"\t\t"1"
 \t\t"WantsOfflineMode"\t\t"1"
+\t\t"AutoLogin"\t\t"0"
 \t}}
 }}
 '''
 REGISTRY = '''"Registry"
 {
+\t"HKLM"
+\t{
+\t\t"Software"
+\t\t{
+\t\t\t"Valve"
+\t\t\t{
+\t\t\t\t"Steam"
+\t\t\t\t{
+\t\t\t\t\t"AutoLoginUser"\t\t"bob"
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t}
 \t"HKCU"
 \t{
 \t\t"Software"
@@ -84,21 +99,29 @@ class TestAccount(unittest.TestCase):
         code, out = py("account", root, A)
         self.assertEqual(code, 0, out)
         lu = (root / "config/loginusers.vdf").read_text()
-        self.assertIn('"AutoLoginUser"\t\t"alex"', (root.parent / "registry.vdf").read_text())
+        reg = (root.parent / "registry.vdf").read_text()
+        self.assertEqual(re.findall(r'"AutoLoginUser"\s*"([^"]*)"', reg), ["alex", "alex"])
         me, other = block(lu, A), block(lu, B)
         self.assertRegex(me, r'"MostRecent"\s*"1"')
+        self.assertRegex(me, r'"AutoLogin"\s*"1"')
         self.assertRegex(me, r'"AllowAutoLogin"\s*"1"')
         self.assertRegex(me, r'"WantsOfflineMode"\s*"0"')
+        self.assertRegex(me, r'"Timestamp"\s*"\d+"')
         self.assertRegex(other, r'"MostRecent"\s*"0"')
+        self.assertRegex(other, r'"AutoLogin"\s*"0"')
+        self.assertRegex(other, r'"AllowAutoLogin"\s*"0"')
         self.assertRegex(other, r'"WantsOfflineMode"\s*"1"')      # чужие настройки не трогаем
-        self.assertIn('"Language"\t\t"russian"', (root.parent / "registry.vdf").read_text())
+        self.assertIn('"Language"\t\t"russian"', reg)
 
     def test_new_account_gets_login_window(self):
         root = steam_dir()
         code, _ = py("account", root, "76561198000000009")
         self.assertEqual(code, 3)
-        self.assertIn('"AutoLoginUser"\t\t""', (root.parent / "registry.vdf").read_text())
-        self.assertNotRegex((root / "config/loginusers.vdf").read_text(), r'"MostRecent"\s*"1"')
+        reg = (root.parent / "registry.vdf").read_text()
+        self.assertEqual(re.findall(r'"AutoLoginUser"\s*"([^"]*)"', reg), ["", ""])
+        lu = (root / "config/loginusers.vdf").read_text()
+        self.assertNotRegex(lu, r'"MostRecent"\s*"1"')
+        self.assertNotRegex(lu, r'"AutoLogin"\s*"1"')
 
 
 class TestManifest(unittest.TestCase):

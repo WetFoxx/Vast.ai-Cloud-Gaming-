@@ -182,6 +182,8 @@ body[data-screen="main"] #top-machine { display: none !important; }
 /* Заголовок экрана и кнопка рядом (библиотека: «Обновить») — кнопка сразу за заголовком, не под балансом справа */
 .lib-top { justify-content: flex-start; gap: 16px; padding-right: 380px; }
 .lib-top h1 { padding-right: 0; }
+.ml-row #sl-start { flex: none; padding: 15px 22px; font-size: 16px; background: rgba(255, 255, 255, .12); }
+.ml-row #sl-pin-open { flex: none; padding: 15px 18px; font-size: 15px; background: rgba(255, 255, 255, .08); }
 .ml-row #stop { flex: none; padding: 15px 24px; font-size: 16px; background: rgba(255, 255, 255, .1); }
 .foot:not(:has(> :not([hidden]))) { display: none; }
 .hero-art { transition: opacity .2s ease; }

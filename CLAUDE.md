@@ -838,5 +838,70 @@
   `ghcr.io/wetfoxx/vastgame-desktop:c55c6cc` (DirectX 12 / Vulkan на RTX 3060 Laptop и мобильных GPU, Temp/Documents папки),
   скрипт `wolf-setup.sh` v5.11 (`780686e`: защита Google Диска от автоматической выгрузки игр >= 15 ГБ, распаковка Electron-установщиков,
   симлинк `drive_c`, фиксы Star Citizen — мышь и D3D11).
-
-
+- **Отказ от автоочистки старых узлов Tailscale (`CLAUDE.md`, 2026-10-17):**
+  пункт 6 плана («Tailscale API: автоочистка старых узлов») помечен как `[не делаем]` по решению Алексея: в этом нет практического
+  смысла, так как `identity` сохраняется в облаке, а проблемы с накоплением узлов в работе не возникало.
+- **Шаг 4 — программы для игр, уведомления о новых `.exe` и удаление подсказки про 30 ГБ/ч (`wolf-setup.sh`, `core.py`, `asks.py`, `ui/ask.html`, `ui/app.js`, `ui/i18n.js`, 2026-10-17):**
+  - **Как работает на машине (`vg-open`, `wolf-progs.py`, `scan_games`):** при двойном щелчке по `.exe`/`.msi`/архиву на рабочем столе
+    или в `Downloads` помощник `vg-open` определяет назначение (отдельная игра или программа для игры: мод-менеджер, трейнер, загрузчик).
+    Известные утилиты (`REFramework`, `Fluffy Mod Manager`, `Mod Organizer`, `Vortex`, `r2modman`, `ReShade`, `SpecialK`, `WeMod`/`Wand`,
+    `BepInEx`, `UnityExplorer`) и файлы внутри папки игры Steam распознаются без лишних вопросов; если на машине установлена или запущена
+    ровно одна игра — привязываются к ней автоматически. Установщик ставится в «диск C:» (`pfx--<appid>`) выбранной игры, архив/папка —
+    в `Programs/<Игра>/<Программа>`. Известные загрузчики (`skse64_loader.exe`, `f4se_loader.exe`, `ersc_launcher.exe`, `modengine2_launcher.exe`
+    и др.) сами прописываются на запуск игры в `localconfig.vdf` (`launch_set`).
+  - **Новые `.exe` в папке игры (`ask--prog`):** если в папке игры Steam (после снимка чистой игры `.mods-base`) или в её «диске C:»
+    появляется новый `.exe`, который ещё не включён в автозапуск и не является уже назначенным загрузчиком (`launch_get`), `scan_games`
+    записывает вопрос `st "ask--prog--$aid--$eh" wait "$game :: $exe"`. В приложении (`core.py` `prog_asks`, `asks.py` `_ask_prog`,
+    `ui/ask.html`, `ui/app.js` `renderProgAsks`) всплывает карточка «В игре найдена новая программа» с тремя действиями в один клик:
+    «Запускать игру через неё» (`prog_set_launch` → `/cmd prog-launch`), «Вместе с игрой» (`prog_toggle_auto` → `/cmd prog-auto`) и
+    «Просто оставить» (`prog_dismiss` → `/cmd prog-dismiss`, сохраняет в `progs.seen.tsv`, чтобы больше не спрашивать).
+  - **Подсказка про трафик:** из `ui/i18n.js` (`traffic.hint`, `confirm.rent.traffic`, `confirm.rent.paid_traffic`) полностью убрано
+    утверждение, что трансляция якобы тратит «~30 ГБ в час» (по реальным списаниям Vast трафик через Tailscale почти не тарифицируется).
+    Тесты в `tests/test_own_games.py`, `tests/test_gui.py`, `tests/test_i18n.py`.
+- **Подключение через Steam Link рядом с Moonlight (`moonlight.py`, `wolfnode.py`, `gui.py`, `wolf-setup.sh`, `docker/rootfs/usr/bin/steam`, `ui/index.html`, `ui/app.js`, `ui/i18n.js`, 2026-10-17):**
+  - **Интерфейс:** на главном экране и экране запуска рядом с «Открыть Moonlight» добавлена отдельная кнопка «Открыть Steam Link»
+    (`openSteamLink`). В «Параметрах трансляции» выбор «Открывать сам» переведён на три варианта (`auto_stream`: `none` — «Не открывать»,
+    `moonlight` — «Moonlight», `steamlink` — «Steam Link»); режим «В окне / На весь экран» (`stream_mode`) применяется к обоим клиентам
+    (`Steam Link.app` запускается с `--fullscreen` или `--windowed`).
+  - **Автоматическое определение необходимости PIN (без отдельной кнопки и с поддержкой нескольких аккаунтов):** при нажатии «Открыть Steam Link»
+    приложение не требует нажимать отдельную кнопку ввода PIN, а само опрашивает машину (`wolfnode.steamlink_check` → `/cmd steamlink-check`
+    → `wolf-steam.py pin-check`). Скрипт на машине определяет текущий активный аккаунт Steam (`active_account`: последний `[Logged On]` в
+    `logs/connection_log.txt`, `App.m_CurrentUser.strSteamID` в CEF или `AutoLogin`/`MostRecent` в `config/loginusers.vdf`) и проверяет
+    наличие привязанных устройств Remote Play конкретно для этого аккаунта в `userdata/<account_id>/config/localconfig.vdf` (блок
+    `"RemotePlay"` → `"AuthorizedDevices"` / `"Devices"` / `"Preset"`), а также ставит перехватчик в Steam CEF
+    (`SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationRequested`) и проверяет свежие запросы в `logs/streaming_log.txt`.
+  - **Окно ввода PIN и привязка через CEF:** если для текущего аккаунта устройство ещё не привязано (первое подключение или переключение на
+    другой аккаунт Steam), VastGame запускает `Steam Link.app`, сразу открывает модальное окно ввода 4-значного PIN-кода (`#sl-pin-box`) и
+    запускает фоновый опрос (`scheduleSlPinWatch`), который также автоматически открывает окно PIN, если Steam Link запросил авторизацию
+    спустя несколько секунд после старта. Введённый PIN отправляется на машину (`Api.steamlink_pair` → `/cmd steamlink-pair` →
+    `wolf-steam.py pair`), где через Chrome DevTools Protocol (`127.0.0.1:8080`, флаг `-cef-enable-debugging` в `/usr/bin/steam` и `steam_go`
+    в `wolf-setup.sh`) в контексте `SharedJSContext` вызываются `SteamClient.RemotePlay.SetRemoteDevicePIN(pin)` и
+    `SteamClient.RemotePlay.SetRemoteDeviceAuthorized(true, "")` (или `SetPerDeviceAuthorization` / `PairSteamLink`). Данные авторизации
+    Remote Play сохраняются в `userdata/` и `config/` и автоматически выгружаются в облако в составе архива `steam-state`.
+    Тесты в `tests/test_gui.py` и `tests/test_wolf_web.py`.
+- **Исправление переключения аккаунтов Steam при запуске игры из библиотеки (`wolf-setup.sh`, `tests/test_steam_play.py`, 2026-10-17):**
+  - **Причина поломки:** при запуске игры из библиотеки VastGame под другим аккаунтом машина выдавала предупреждение `play.other_account`
+    («На машине открыт другой аккаунт Steam. Открой трансляцию и переключи аккаунт»). Разбор архива `steam-state.tar.zst` и его поправки
+    показал две причины в современном клиенте Steam:
+    1) В `config/loginusers.vdf` современный Steam при выборе аккаунта пишет `"AutoLogin" "1"` (и обновляет `"Timestamp"`), а `"MostRecent"`
+       и `"AllowAutoLogin"` больше не использует. Функция `account(root, sid)` в `wolf-steam.py` меняла только `"MostRecent"`, оставляя
+       `"AutoLogin" "1"` на прежнем аккаунте и `"AutoLogin" "0"` на выбранном.
+    2) В `.steam/registry.vdf` современный Steam хранит `"AutoLoginUser"` сразу в двух местах: в ветке `HKLM\Software\Valve\Steam` и в ветке
+       `HKCU\Software\Valve\Steam`. В `account(root, sid)` замена `re.sub(..., count=1)` обновляла только первое вхождение (`HKLM`), а в
+       рабочей ветке `HKCU` оставалось имя прежнего аккаунта.
+  - **Исправление:** `account(root, sid)` в `wolf-steam.py` теперь выставляет `"MostRecent"`, `"AutoLogin"` и `"AllowAutoLogin"` (`"1"` для
+    выбранного аккаунта, `"0"` для остальных) и обновляет `"Timestamp"` в `loginusers.vdf`, а в `registry.vdf` заменяет все вхождения
+    `"AutoLoginUser"` (и в `HKLM`, и в `HKCU`). В `active_account(root)` приоритет отдан последнему входу `[Logged On]` из
+    `connection_log.txt`, а при чтении `loginusers.vdf` проверяются оба поля (`AutoLogin` и `MostRecent`). Тесты обновлены в
+    `tests/test_steam_play.py` (`TestAccount`). Скрипт опубликован (`WetFoxx/Vast.ai-Cloud-Gaming-`, коммит `5115ab4`, v5.12) и закреплён
+    в `setup.py` (`DOCKER_SCRIPT_URL`). Проверено Алексеем вживую на арендованной машине — работает.
+- **Переключатель анимации запуска Moonlight в разделе «Окно» (`gui.py`, `ui/index.html`, `ui/app.js`, `ui/app.css`, `ui/i18n.js`, 2026-10-17):**
+  в «Настройке → Окно» рядом с кнопкой «Посмотреть» добавлен переключатель `#launch-fx-on` («Анимация запуска Moonlight», по умолчанию
+  включён — `settings.get("launch_fx", True)`, `Api.set_launch_fx`). При выключенном тумблере запуск Moonlight (`launchFx(false)`) не
+  открывает полноэкранное окно `fxwin` и внутриоконную заставку, но кнопка «Посмотреть» (`launchFx(true)`) в настройках по-прежнему
+  показывает предпросмотр.
+- **0.5.8 (2026-10-17):** подключение через Steam Link с автоматическим определением необходимости PIN-кода и привязкой для нескольких
+  аккаунтов Steam (`wolf-setup.sh` v5.12 `5115ab4`), исправление переключения аккаунтов Steam при запуске игр из библиотеки приложения,
+  уведомления о новых программах `.exe` в папках игр Steam (`ask--prog`), переключатель анимации запуска Moonlight в «Настройке → Окно»,
+  убрана подсказка про «30 ГБ в час», в собранном `.app` (`sys.frozen`) отключены отладочные переменные окружения (`VASTGAME_DEBUG_TOKEN`,
+  `VASTGAME_DEBUG`, `VASTGAME_SCRIPT_URL`, `VASTGAME_IMAGE`, `VASTGAME_FORCE_HEADLESS`, `VASTGAME_KVM_SCRIPT_URL`).
