@@ -638,7 +638,7 @@
 3. **[готово]** Аренда по шаблону и ожидание готовности: узел в Tailscale онлайн, `/json` отвечает, `boot` в статусе `ok`. Выключатель загрузки игр (`SYNC_STEAM_GAMES`).
 4. **[готово]** Остановка (`stop.py`): `wolf shutdown` через Tailscale SSH → дождаться, пока в статусе не останется `up` и `err` → удалить инстанс через API. Если выгрузка не подтвердилась — **не удалять**, сообщить мне.
 5. **[почти готово]** Мастер первой настройки `vastgame setup`: 0 — проверка Mac; 1 — ключ Vast (Keychain); 2 — Google Drive (rclone authorize, проверка владельца и папки, токен в аккаунт Vast); 3 — Tailscale auth key (Keychain + аккаунт Vast); 4 — шаблон `vastgame`; 5 — итог. Осталось:  (библиотека `keyring`). Вход в Google из утилиты — вместе с переходом скрипта на scope `drive.file`.
-6. Tailscale API: создание ключа с нужными флагами, отключение срока действия ключа у узла, удаление старых узлов.
+6. **[не делаем]** Tailscale API: автоочистка старых узлов — отменено (нет необходимости, узлы сохраняют identity в облаке).
 7. Настольное приложение (pywebview) — см. раздел «Приложение» ниже.
 8. Версия для Windows. Уже переносимо: Python, `keyring` (на Windows — Диспетчер учётных данных), rclone, Tailscale CLI, ssh (есть в Windows 10+), `webbrowser`, `readline` необязателен. Осталось: запускатель вместо `bin/vastgame` (bash) — `vastgame.cmd`; тексты мастера («Keychain», «brew install», «в строке меню»); проверить `tailscale status --json` и Tailscale SSH на Windows.
 9. Публикация: `wolf-setup.sh` держать в репозитории проекта на GitHub с тегом версии, а не в личном gist; `SCRIPT_URL` в `setup.py` — на тег/коммит репозитория.
