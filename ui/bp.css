@@ -67,6 +67,9 @@ select { background-color: var(--solid); border-color: var(--border); }
 .pill #top-machine-text { color: var(--text); }
 .money-text { font-weight: 800; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .pill.low { background: var(--warn-bg); }
+.pill button { flex: none; margin: -3px -8px -3px 2px; padding: 4px 10px; border-radius: 999px; font-size: 13px;
+  background: var(--grad); color: #fff; box-shadow: none; }
+.pill button:hover:not(:disabled) { background: var(--grad); filter: brightness(1.08); }
 
 /* Экраны */
 main { padding: 20px 40px 28px; gap: 18px; max-width: 1400px; }

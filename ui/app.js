@@ -1930,6 +1930,7 @@ function setupActions(st, li) {
 // последним: токен Google уходит в аккаунт Vast, значит Vast раньше) → остальное само → «Всё готово».
 const WIZ_STEPS = ["programs", "vast", "google", "tailscale", "finish"];
 const VAST_BILLING = "https://cloud.vast.ai/billing/";
+$("top-up").addEventListener("click", () => openUrl(VAST_BILLING));
 let wiz = null;          // {step, state, gen, auto: {что уже сделали сами один раз}, timer}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function wizAlive(g) { return wiz && wiz.gen === g && !$("screen-wizard").hidden; }
@@ -2216,6 +2217,8 @@ $("library-login").addEventListener("click", () => steamLogin($("library-login-m
 $("library-search").addEventListener("input", renderLibrary);
 window.addEventListener("focus", () => {
   if (!$("screen-library").hidden && libData && libData.accounts.length && Date.now() - libAt > LIB_STALE_MS) loadLibrary(true);
+  // Вернулись со страницы оплаты Vast — баланс на экране обновить сразу, не ждать 15 секунд
+  if (!DEMO && $("screen-progress").hidden) refresh();
 });
 
 async function openLibrary() {
