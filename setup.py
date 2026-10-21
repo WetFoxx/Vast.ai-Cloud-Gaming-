@@ -272,18 +272,16 @@ def step_tailscale():
     return False
 
 
-# Скрипт wolf-setup.sh — в репозитории проекта на GitHub, ссылка закреплена на коммит (v3.9,
-# побайтно совпадает с wolf-setup.sh в проекте). Изменения в репозитории не попадут на машины,
-# пока здесь не поменяют коммит и не обновят шаблон (vastgame setup → шаг «Шаблон»).
-SCRIPT_VERSION = "v5.7"
+# Скрипт wolf-setup.sh — в публичном репозитории, ссылка закреплена на коммит.
+# KVM берёт её из шаблона vastgame (onstart). Шаблон на Vast обновляет refresh_template:
+# правка здесь сама на машины не попадает.
+# [2026-10-22] KVM переведён на тот же v5.13, что и Docker. Вживую на KVM ещё не проверено.
+SCRIPT_VERSION = "v5.13"
 SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-              "eac124d3fd80a05ebb101c2519a18a1f6575f293/wolf-setup.sh")
-# [2026-10-15] Docker — свой адрес: v5.8 проверена вживую только в Docker (KVM-машин на рынке почти нет, три попытки
-# аренды упали на стороне хостов). KVM (шаблон выше) остаётся на v5.7, пока v5.8 не проверят на KVM
-# (core.rental_body: VASTGAME_KVM_SCRIPT_URL — разовая проверка без смены шаблона). Проверили — один адрес на оба.
-DOCKER_SCRIPT_VERSION = "v5.13"
-DOCKER_SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-                     "62e53d7d1367d0dbd6639e4f83df1d82f82590ae/wolf-setup.sh")
+              "62e53d7d1367d0dbd6639e4f83df1d82f82590ae/wolf-setup.sh")
+# Docker качает тот же коммит переменной аренды WOLF_SCRIPT_URL, не из шаблона KVM.
+DOCKER_SCRIPT_VERSION = SCRIPT_VERSION
+DOCKER_SCRIPT_URL = SCRIPT_URL
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
 # Порты: Sunshine (47984–48010), портал Vast (1111), рабочий стол в браузере (6100, 6200), VNC (5900),
 # Tailscale (41641/udp, 3478/udp — STUN)
