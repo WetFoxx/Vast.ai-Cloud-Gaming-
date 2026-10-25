@@ -275,10 +275,12 @@ def step_tailscale():
 # Скрипт wolf-setup.sh — в публичном репозитории, ссылка закреплена на коммит.
 # KVM берёт её из шаблона vastgame (onstart). Шаблон на Vast обновляет refresh_template:
 # правка здесь сама на машины не попадает.
-# [2026-10-22] KVM переведён на тот же v5.13, что и Docker. Вживую на KVM ещё не проверено.
-SCRIPT_VERSION = "v5.13"
+# [2026-10-25] v5.14: rclone скачивает архив, который Google пометил как вредоносный.
+# Вживую на KVM ещё не проверено. Установленное 0.5.10 при аренде Docker и по кнопке
+# «Обновить шаблон» всё ещё подставляет v5.13.
+SCRIPT_VERSION = "v5.14"
 SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-              "62e53d7d1367d0dbd6639e4f83df1d82f82590ae/wolf-setup.sh")
+              "823e0d4387f261d3724eac0ea31d34c45f2873e7/wolf-setup.sh")
 # Docker качает тот же коммит переменной аренды WOLF_SCRIPT_URL, не из шаблона KVM.
 DOCKER_SCRIPT_VERSION = SCRIPT_VERSION
 DOCKER_SCRIPT_URL = SCRIPT_URL

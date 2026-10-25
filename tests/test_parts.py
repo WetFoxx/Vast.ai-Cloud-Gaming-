@@ -585,5 +585,13 @@ class TestMacTrash(unittest.TestCase):
         self.assertEqual(calls, ["X.tar.zst.parts"])
 
 
+class TestDriveAbuseFlag(unittest.TestCase):
+    """[v5.14] Помеченный Google файл скачивается: флаг есть и у обычного rclone, и у частей."""
+
+    def test_flag_on_both_download_paths(self):
+        self.assertEqual(WOLF.count("--drive-pacer-burst=200 --drive-acknowledge-abuse"), 2)
+        self.assertIn('"--drive-acknowledge-abuse"', CODE)
+
+
 if __name__ == "__main__":
     unittest.main()

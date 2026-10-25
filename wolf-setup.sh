@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.13 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.14 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -364,11 +364,13 @@ mkdir -p "$S"/{h,m,v,p,st,nt,nm,x,pg} "$T" "$L"
 
 # ------------------------------------------------------------------ утилиты ---
 # [HARDENING #2] rc — данные (перезапись/удаление в корзину, восстановимо)
+# [v5.14] Drive иногда помечает архив с файлами игры как вредоносный и отвечает 403.
+# --drive-acknowledge-abuse просит отдать файл всё равно. Обычные файлы качаются как раньше.
 rc()  { rclone "$@" --retries=5 --low-level-retries=20 --drive-use-trash=true \
-          --drive-pacer-min-sleep=10ms --drive-pacer-burst=200; }
+          --drive-pacer-min-sleep=10ms --drive-pacer-burst=200 --drive-acknowledge-abuse; }
 # rcp — служебные .part/устаревшие дельты (мимо корзины, чтобы не копить мусор)
 rcp() { rclone "$@" --retries=5 --low-level-retries=20 --drive-use-trash=false \
-          --drive-pacer-min-sleep=10ms --drive-pacer-burst=200; }
+          --drive-pacer-min-sleep=10ms --drive-pacer-burst=200 --drive-acknowledge-abuse; }
 rd()  { cat "$1" 2>/dev/null; }
 log() { echo "[$(date '+%F %T')] $*" | tee -a /var/log/wolf.log; }
 st()  { echo "$(date +%s)|$2|$3" > "$S/st/$1"; log "$1: $2 $3"; case $2 in ok|err) rm -f "$S/pg/$1" ;; esac; }
@@ -6414,7 +6416,7 @@ RC_READ = ["--timeout=60s", "--contimeout=15s"]   # соединение зав�
 SLOW_RATE = int(os.environ.get("WOLF_SLOW_KBPS") or 512) * 1024
 SLOW_MIN = float(os.environ.get("WOLF_SLOW_MIN_SEC") or 60)
 RC = ["rclone", "--retries=5", "--low-level-retries=20", "--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200",
-      "--drive-chunk-size=64M"]         # куски выгрузки: по умолчанию 8 МБ — медленно
+      "--drive-acknowledge-abuse", "--drive-chunk-size=64M"]         # [v5.14] помеченный Drive архив тоже скачивается
 HEAD = "vastgame-parts 1"
 
 
