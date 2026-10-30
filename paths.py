@@ -102,6 +102,16 @@ def run(cmd, timeout, env=None):
                                            err.read().decode(errors="replace"))
 
 
+def read_open_log(log):
+    """Текст журнала, который ещё открыт.
+
+    На Windows второй open того же временного файла запрещён (PermissionError, Errno 13) —
+    так падал вход в Tailscale после установки. Читаем этот же объект, а не путь заново."""
+    log.flush()
+    log.seek(0)
+    return log.read()
+
+
 def tailscale_env():
     """Окружение для программы Tailscale. Tailscale для Mac работает как команда, только если задан
     TERM; у приложения, открытого из Finder, его нет — и она пытается запуститься окном («The

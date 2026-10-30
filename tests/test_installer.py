@@ -61,5 +61,44 @@ class TestTailscale(unittest.TestCase):
         self.assertEqual(e.exception.key, "install.cancelled")
 
 
+class TestSteamLink(unittest.TestCase):
+    def test_mac_opens_the_app_store_when_missing(self):
+        cmds = []
+
+        def run(cmd, timeout, env=None):
+            cmds.append(cmd)
+            return done()
+        with mock.patch.object(installer.sys, "platform", "darwin"), \
+             mock.patch.object(installer.moonlight_app, "steamlink_path", lambda: None), \
+             mock.patch.object(installer.paths, "run", run):
+            self.assertTrue(installer.steamlink())
+        self.assertEqual(cmds, [["open", installer.STEAMLINK_STORE]])
+
+    def test_already_installed_is_left_alone(self):
+        with mock.patch.object(installer.moonlight_app, "steamlink_path", lambda: "/Applications/Steam Link.app"), \
+             mock.patch.object(installer, "_download", lambda *_a: self.fail("качать не нужно")):
+            self.assertTrue(installer.steamlink())
+
+    def test_windows_refuses_a_foreign_signature(self):
+        import zipfile
+
+        def download(_url, dest):
+            with zipfile.ZipFile(dest, "w") as z:
+                z.writestr("SteamLink.msi", b"not a real msi")
+        ran = []
+
+        def run(cmd, timeout, env=None):
+            ran.append(env.get("VG_FILE", "") if env else "")
+            return done(out="CN=Evil, O=Evil Corp, L=X")
+        with mock.patch.object(installer.sys, "platform", "win32"), \
+             mock.patch.object(installer.moonlight_app, "steamlink_path", lambda: None), \
+             mock.patch.object(installer, "_download", download), \
+             mock.patch.object(installer.paths, "run", run):
+            with self.assertRaises(VastgameError) as e:
+                installer.steamlink()
+        self.assertEqual(e.exception.key, "install.bad_signature")
+        self.assertEqual(len(ran), 1)          # только проверка подписи, msiexec не запускался
+
+
 if __name__ == "__main__":
     unittest.main()

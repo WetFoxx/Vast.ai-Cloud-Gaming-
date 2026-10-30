@@ -82,6 +82,7 @@ function show(screen) {
   $("open-home").classList.toggle("active", ["main", "offers", "progress"].includes(screen));
   document.body.dataset.screen = screen;               // [2026-10-15] фон и раскладка нового вида — по экрану
   if (screen !== "main") backdrop(screen === "game" ? playGame : screen === "progress" || screen === "offers" ? heroGame : null);
+  renderNotice();
 }
 
 // [2026-10-15] Картинка игры: на главной — слева в большой карточке и размыто на фоне окна (как Big Picture).
@@ -536,9 +537,10 @@ function watchSteamLinkPin() {
   if (slWatchTimer) clearInterval(slWatchTimer);
   if (DEMO) return;
   let tries = 0;
+  // Минута: Steam Link просит PIN не сразу, а когда дойдёт до машины. Раньше смотрели 12 секунд и пропускали.
   slWatchTimer = setInterval(async () => {
     tries++;
-    if (tries > 5 || !$("sl-modal").hidden) { clearInterval(slWatchTimer); slWatchTimer = null; return; }
+    if (tries > 24 || !$("sl-modal").hidden) { clearInterval(slWatchTimer); slWatchTimer = null; return; }
     try {
       const r = await api().check_steamlink_pin();
       if (r && r.need_pin && $("sl-modal").hidden) {
@@ -562,6 +564,18 @@ async function launchSteamLink(btn, note, windowed = false) {
       r = { ok: true, need_pin: needPin };
     } else {
       r = await api().open_steamlink(!!windowed);
+    }
+    if (r && r.error && r.error.key === "steamlink.missing" && !DEMO) {
+      if (note) { note.hidden = false; note.textContent = t("steamlink.installing"); }
+      const inst = await api().install_tool("steamlink");
+      if (note) {
+        if (inst.error) note.textContent = errText(inst.error);
+        else {
+          const p = await waitJob();
+          note.textContent = p.error ? errText(p.error) : t(PLATFORM === "win32" ? "steamlink.installed" : "steamlink.store");
+        }
+      }
+      return r;
     }
     if (note) {
       note.textContent = r && r.error ? errText(r.error) : "";
@@ -1668,6 +1682,7 @@ function showSetupCat(cat) {
   setupCat = cat;
   for (const b of document.querySelectorAll(".set-cat")) b.classList.toggle("on", b.dataset.cat === cat);
   for (const sec of document.querySelectorAll("#set-panes > [data-cat]")) sec.classList.toggle("set-off", sec.dataset.cat !== cat);
+  renderNotice();
 }
 for (const b of document.querySelectorAll(".set-cat")) b.addEventListener("click", () => showSetupCat(b.dataset.cat));
 // Посмотреть анимацию запуска трансляции без машины: те же картинки и звуки, через 3.5 с — «Поехали!»
@@ -1679,23 +1694,66 @@ $("fx-preview").addEventListener("click", async () => {
 });
 showSetupCat("ready");
 $("setup-banner-open").addEventListener("click", () => openWizard());
-$("setup-recheck").addEventListener("click", openSetup);
+$("notice-open").addEventListener("click", () => { showSetupCat("ready"); openSetup(); });
+$("setup-recheck").addEventListener("click", () => openSetup(true));
 $("setup-back").addEventListener("click", () => { show("main"); refresh(); });
 
-async function loadSetup() {
+let setupSeq = 0;
+async function loadSetup(fresh) {
+  const seq = ++setupSeq;
   let d;
-  try { d = DEMO ? demoSetup() : await api().setup_status(); }
+  try { d = DEMO ? demoSetup() : await api().setup_status(!!fresh); }
   catch (e) { d = { error: { key: null, text: String(e) } }; }   // ответ не пришёл — показать, а не висеть
+  if (seq !== setupSeq) return d;                                 // уже пошла более новая проверка
   if (!d.error) setupData = d;
   $("setup-banner").hidden = !setupData || setupData.ready;
+  renderNotice();
+  if (document.body.dataset.screen === "setup") renderSetup();
   if (current) render(current);
   return d;
 }
 
-async function openSetup() {
+// Прошлая проверка (её же сразу показывает «Настройка») — на главный экран, не дожидаясь сети.
+// Свежая проверка Tailscale и Vast бывает долгой; без этого предупреждение видно только после входа в настройки.
+async function primeSetupNotice() {
+  if (DEMO || setupData) { if (DEMO) renderNotice(); return; }
+  const snap = await snapshotOf("setup");
+  if (setupData || !snap || !Array.isArray(snap.steps)) return;
+  setupData = snap;
+  renderNotice();
+}
+
+// Важные пункты настройки — на любом экране, не только в «Готовности».
+// «Продолжать после перезагрузки» и «открывать при входе» — выбор человека, не поломка.
+function renderNotice() {
+  const bar = $("notice-bar");
+  if (!bar) return;
+  const screen = document.body.dataset.screen || "";
+  const skip = new Set(["autostart", "open_at_login"]);
+  const bad = ((setupData && setupData.steps) || []).filter((s) => s.state !== "ok" && !skip.has(s.id));
+  const rank = (s) => (s.state === "missing" ? 0 : s.id === "derp" ? 1 : 2);
+  bad.sort((a, b) => rank(a) - rank(b));
+  // На экране «Готовность» список и так перед глазами. В мастере — свои шаги.
+  // На главном и на остальных экранах полоса видна сразу, без захода в настройки.
+  const onReady = screen === "setup" && setupCat === "ready";
+  const hide = !bad.length || onReady || screen === "wizard";
+  bar.hidden = hide;
+  document.body.classList.toggle("has-notice", !hide);
+  if (screen === "main") $("setup-banner").hidden = !hide || !setupData || setupData.ready;
+  if (hide) return;
+  const first = bad[0];
+  const p = { ...first.params };
+  if ("lang" in p && !p.lang) p.lang = t("setup.lang_default");
+  const extra = bad.length - 1;
+  $("notice-text").textContent = t("setup.step." + first.id) + " — " + t(first.key, p)
+    + (extra ? " " + t("notice.more", { n: extra }) : "");
+  bar.classList.toggle("missing", first.state === "missing");
+}
+
+async function openSetup(fresh) {
   show("setup");
   showError("setup-error", null);
-  const fresh = loadSetup();
+  const pending = loadSetup(fresh === true);
   if (!setupData) {
     $("setup-summary").textContent = t("setup.loading");
     $("setup-steps").innerHTML = "";
@@ -1703,7 +1761,7 @@ async function openSetup() {
     if (!setupData && snap && Array.isArray(snap.steps)) setupData = snap;
   }
   if (setupData) { setStale("screen-setup", true); renderSetup(); }    // прошлая проверка — сразу
-  const d = await fresh;
+  const d = await pending;
   setStale("screen-setup", false);
   if (d.error) { $("setup-summary").textContent = ""; showError("setup-error", d.error); return; }
   renderSetup();
@@ -1758,10 +1816,11 @@ $("setup-reset").addEventListener("click", async () => {
 
 // ---- Действия шагов настройки
 const DOWNLOAD = { rclone: "https://rclone.org/downloads/", tailscale_app: "https://tailscale.com/download",
+                   steamlink: "https://store.steampowered.com/app/353380/Steam_Link/",
                    moonlight: "https://moonlight-stream.org" };
 const KEYS_URL = { vast: "https://cloud.vast.ai/manage-keys/", tailscale_key: "https://login.tailscale.com/admin/settings/keys" };
 const DNS_URL = "https://login.tailscale.com/admin/dns";
-const TOOL_NAME = { rclone: "rclone", tailscale_app: "Tailscale", moonlight: "Moonlight" };
+const TOOL_NAME = { rclone: "rclone", tailscale_app: "Tailscale", moonlight: "Moonlight", steamlink: "Steam Link" };
 
 function el(tag, attrs = {}, text) {
   const e = document.createElement(tag);
@@ -1855,12 +1914,13 @@ function setupActions(st, li) {
   }
 
   const tsInstalled = key === "setup.tailscale_app.offline" || key === "setup.tailscale_app.no_answer";
-  if (id in TOOL_NAME && st.state === "missing" && !tsInstalled) {
+  if (id in TOOL_NAME && !tsInstalled && (st.state === "missing" || id === "steamlink" && st.state !== "ok")) {
     if ((setupData.platform === "darwin" && (id !== "rclone" || setupData.brew)) ||
         (setupData.platform === "win32" && id !== "rclone")) {
       box.appendChild(button(t("setup.act.install"), async () => {
         const name = TOOL_NAME[id];
-        if (!(await ask({ title: t("setup.confirm.install.title", { name }), text: t("setup.confirm.install.text"),
+        const askKey = id === "steamlink" ? "setup.confirm.install.steamlink" : "setup.confirm.install.text";
+        if (!(await ask({ title: t("setup.confirm.install.title", { name }), text: t(askKey),
                            yes: t("setup.act.install"), no: t("btn.cancel") }))) return;
         actBackground(li, () => api().install_tool(id), t("setup.working"));
       }, true));
@@ -1928,7 +1988,7 @@ function setupActions(st, li) {
 // Один экран — одно действие. Что уже готово (проверяет Python: wizard_state) — пропускаем, после
 // каждого действия сами идём дальше. Порядок: программы → Vast → Google → Tailscale (самый трудный —
 // последним: токен Google уходит в аккаунт Vast, значит Vast раньше) → остальное само → «Всё готово».
-const WIZ_STEPS = ["programs", "vast", "google", "tailscale", "finish"];
+const WIZ_STEPS = ["programs", "vast", "google", "tailscale", "steam", "finish"];
 const VAST_BILLING = "https://cloud.vast.ai/billing/";
 $("top-up").addEventListener("click", () => openUrl(VAST_BILLING));
 let wiz = null;          // {step, state, gen, auto: {что уже сделали сами один раз}, timer}
@@ -1941,6 +2001,7 @@ function wizIsDone(step, s) {
   if (step === "vast") return s.vast.ok;
   if (step === "google") return s.google.ok;
   if (step === "tailscale") return s.tailscale.phase === "ready";
+  if (step === "steam") return !!(s.steam && s.steam.ok);   // вход необязателен: «Пропустить» тоже отмечает шаг
   return false;
 }
 function wizNext(after) {
@@ -1972,7 +2033,7 @@ function goWiz(step) {
   wiz.step = step;
   wiz.gen++;
   ({ welcome: wizWelcome, programs: wizPrograms, vast: wizVast, google: wizGoogle,
-     tailscale: wizTailscale, finish: wizFinish, done: wizFinished })[step]();
+     tailscale: wizTailscale, steam: wizSteam, finish: wizFinish, done: wizFinished })[step]();
 }
 
 // Экран шага: заголовок, текст, элементы, строка состояния, кнопка «Дальше» (или «Повторить»)
@@ -2025,12 +2086,14 @@ function wizWelcome() {
 function wizPrograms() {
   const g = wiz.gen, s = wiz.state;
   const list = el("ul", { className: "wiz-check" });
-  for (const [name, ok] of [["Tailscale", s.programs.tailscale], ["Moonlight", s.programs.moonlight]])
-    list.appendChild(el("li", { className: ok ? "done" : "" }, t("wizard.programs.item." + name.toLowerCase())));
+  for (const [name, ok] of [["tailscale", s.programs.tailscale], ["moonlight", s.programs.moonlight],
+                             ["steamlink", s.programs.steamlink]])
+    list.appendChild(el("li", { className: ok ? "done" : "" }, t("wizard.programs.item." + name)));
   if (s.platform !== "darwin" && s.platform !== "win32") {   // сам ставит на Mac и Windows — остальным ссылки
     wizScreen({ title: t("wizard.programs.title"), text: t("wizard.programs.text_other"), body: [list,
       wizRow(button(t("setup.act.download") + " Tailscale", () => openUrl(DOWNLOAD.tailscale_app)),
-             button(t("setup.act.download") + " Moonlight", () => openUrl(DOWNLOAD.moonlight)))],
+             button(t("setup.act.download") + " Moonlight", () => openUrl(DOWNLOAD.moonlight)),
+             button(t("setup.act.download") + " Steam Link", () => openUrl(DOWNLOAD.steamlink)))],
       retry: async () => { await wizRefreshState(); goWiz(wizIsDone("programs", wiz.state) ? wizNext("programs") : "programs"); } });
     return;
   }
@@ -2047,6 +2110,34 @@ function wizPrograms() {
     if (wizAlive(g)) goWiz(wizIsDone("programs", wiz.state) ? wizNext("programs") : "programs");
   });
   wizScreen({ title: t("wizard.programs.title"), text: t("wizard.programs.text"), body: [list, install] });
+}
+
+function wizSteam() {
+  const g = wiz.gen, s = wiz.state.steam || { ok: false, name: "" };
+  const login = bigButton(t("steam.login"), async () => {
+    login.disabled = true;
+    wizStatus(t("steam.login.wait"));
+    const r = DEMO ? { ok: true, account: { name: "Demo" } } : await api().steam_login(t("steam.login.window"));
+    if (!wizAlive(g)) return;
+    if (r.error) { wizStatus(errText(r.error), true); login.disabled = false; return; }
+    if (!r.ok) { wizStatus(""); login.disabled = false; return; }          // окно входа закрыли
+    wiz.state.steam = { ok: true, name: (r.account && r.account.name) || "" };
+    goWiz(wizNext("steam"));
+  });
+  const skip = button(t("wizard.steam.skip"), async () => {
+    if (!DEMO) {
+      const r = await api().wizard_skip_steam();
+      if (r && r.error) { wizStatus(errText(r.error), true); return; }
+    }
+    wiz.state.steam = { ok: true, name: s.name };
+    goWiz(wizNext("steam"));
+  });
+  wizScreen({
+    title: t("wizard.steam.title"),
+    text: s.ok && s.name ? t("wizard.steam.ok", { name: s.name }) : t("wizard.steam.text"),
+    body: s.ok ? [] : [login, skip],
+    next: s.ok ? { label: t("wizard.next"), onclick: () => goWiz(wizNext("steam")) } : null
+  });
 }
 
 function wizVast(replace = false) {
@@ -2215,10 +2306,14 @@ $("library-back").addEventListener("click", () => { show("main"); refresh(); ren
 $("library-refresh").addEventListener("click", () => loadLibrary(true));
 $("library-login").addEventListener("click", () => steamLogin($("library-login-msg")));
 $("library-search").addEventListener("input", renderLibrary);
+let derpFocusAt = 0;
 window.addEventListener("focus", () => {
   if (!$("screen-library").hidden && libData && libData.accounts.length && Date.now() - libAt > LIB_STALE_MS) loadLibrary(true);
   // Вернулись со страницы оплаты Vast — баланс на экране обновить сразу, не ждать 15 секунд
   if (!DEMO && $("screen-progress").hidden) refresh();
+  // Вернулись из админки Tailscale — спросить серверы заново, не держать старое предупреждение.
+  const derpBad = setupData && (setupData.steps || []).some((s) => s.id === "derp" && s.state !== "ok");
+  if (!DEMO && derpBad && Date.now() - derpFocusAt > 20000) { derpFocusAt = Date.now(); loadSetup(true); }
 });
 
 async function openLibrary() {
@@ -3143,7 +3238,8 @@ function demoSetup() {
   const st = (id, state, key, params = {}) => ({ id, state, key, params });
   return { ready: false, brew: true, platform: "darwin", steps: [
     st("rclone", "ok", "setup.rclone.ok"), st("tailscale_app", "ok", "setup.tailscale_app.ok", { tailnet: "tail3d42c9.ts.net" }),
-    st("moonlight", "missing", "setup.moonlight.missing"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
+    st("moonlight", "missing", "setup.moonlight.missing"),
+    st("steamlink", "warn", "setup.steamlink.off"), st("vast", "ok", "setup.vast.ok", { balance: 3.15 }),
     st("google", "warn", "setup.google.old"), st("sshkey", "missing", "setup.sshkey.missing"), st("tailscale_key", "missing", "setup.tailscale_key.missing"),
     st("template", "ok", "setup.template.ok", { disk: 100, res: "1920x1200", lang: "", version: "v3.11" }),
     st("autostart", "warn", "setup.autostart.off"), st("open_at_login", "ok", "setup.open_at_login.off")] };
@@ -3161,15 +3257,18 @@ function demoWizState() {
   if (!demoWiz) {
     const w = new URLSearchParams(location.search).get("wiz") || "new";
     const past = w !== "new";
-    demoWiz = { platform: "darwin", programs: { tailscale: past, moonlight: past }, vast: { ok: past, balance: 0.42 },
-                google: { ok: past, email: "player@gmail.com" }, tailscale: { phase: w === "done" ? "ready" : "start" } };
+    demoWiz = { platform: "darwin", programs: { tailscale: past, moonlight: past, steamlink: past },
+                vast: { ok: past, balance: 0.42 },
+                google: { ok: past, email: "player@gmail.com" },
+                tailscale: { phase: w === "done" ? "ready" : "start" },
+                steam: { ok: w === "done", name: w === "done" ? "Demo" : "" } };
   }
   return JSON.parse(JSON.stringify(demoWiz));
 }
 function demoWizMark(step) {
   if (!DEMO) return;
   demoWizState();
-  if (step === "programs") demoWiz.programs = { tailscale: true, moonlight: true };
+  if (step === "programs") demoWiz.programs = { tailscale: true, moonlight: true, steamlink: true };
   if (step === "google") demoWiz.google.ok = true;
   if (step === "vast") demoWiz.vast = { ok: true, balance: 7.5 };
 }
@@ -3293,6 +3392,8 @@ async function start() {
   if (DEMO === "setup") { openSetup(); return; }
   if (DEMO === "history") { openHistory(30); return; }
   if (DEMO === "wizard") { openWizard(); return; }
+  if (!document.body.dataset.screen) document.body.dataset.screen = "main";
+  primeSetupNotice();
   await refresh();
   // Окно открыли заново: запуск/завершение ещё идёт в фоне — показать ход; закончилось, пока окно
   // было закрыто, — показать результат (особенно важно, если что-то не получилось)

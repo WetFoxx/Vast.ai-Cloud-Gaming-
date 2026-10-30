@@ -467,10 +467,11 @@ class Api:
         jobs.mark_seen()
 
     # ---- Настройка
-    def setup_status(self):
-        """Состояние первой настройки: шаги (готово / нужно внимание / не настроено)."""
+    def setup_status(self, fresh=False):
+        """Состояние первой настройки: шаги (готово / нужно внимание / не настроено).
+        fresh — заново проверить серверы Tailscale, не показывать ответ из памяти минуты."""
         try:
-            d = setupcheck.status()
+            d = setupcheck.status(fresh=bool(fresh))
         except VastgameError as e:
             return {"error": error_data(e)}
         snapshot.save("setup", d)
@@ -482,7 +483,11 @@ class Api:
         from concurrent.futures import ThreadPoolExecutor
         mac = sys.platform == "darwin"
         programs = {"tailscale": bool(paths.tailscale_app() if mac else paths.find("tailscale")),
-                    "moonlight": bool(moonlight.path())}
+                    "moonlight": bool(moonlight.path()),
+                    "steamlink": bool(moonlight.steamlink_path())}
+        accs = steamlib.accounts()
+        steam = {"ok": bool(accs) or bool(settings.get("wizard_steam_skipped")),
+                 "name": accs[0]["name"] if accs else ""}
         # Проверки ходят в сеть (Vast, Google) — одновременно, чтобы экран «Проверяю…» не висел
         with ThreadPoolExecutor(3) as ex:
             v = ex.submit(setupcheck.vast_key)
@@ -494,15 +499,16 @@ class Api:
         # сам; вход через старый общий клиент rclone («old») — войти заново
         google = {"ok": vast["ok"] and (g["state"] == "ok" or g["key"] == "setup.google.not_in_vast"),
                   "email": g["params"].get("email") if vast["ok"] else None}
-        return {"platform": sys.platform, "programs": programs, "vast": vast, "google": google, "tailscale": ts}
+        return {"platform": sys.platform, "programs": programs, "vast": vast, "google": google,
+                "tailscale": ts, "steam": steam}
 
     def tailscale_phase(self):
         """Этап подключения Tailscale — страница спрашивает раз в пару секунд, пока идёт этот шаг."""
         return setupcheck.tailscale_phase()
 
     def install_programs(self):
-        """Поставить недостающие Tailscale и Moonlight (официальные файлы с проверкой подписи).
-        Пароль Mac спросит сама macOS — один раз, для Tailscale; Moonlight ставится без пароля."""
+        """Поставить недостающие Moonlight, Steam Link и Tailscale. Пароль спросит система —
+        для Tailscale, а на Windows ещё и для Steam Link. На Mac Steam Link открывается в App Store."""
         if sys.platform not in ("darwin", "win32"):
             return {"error": {"key": "wizard.install.not_mac", "params": {}, "text": "not mac"}}
         mac = sys.platform == "darwin"
@@ -511,6 +517,9 @@ class Api:
             if not moonlight.path():
                 job.say("Устанавливаю Moonlight", key="wizard.install.moonlight")
                 installer.moonlight()
+            if not moonlight.steamlink_path():
+                job.say("Устанавливаю Steam Link", key="wizard.install.steamlink")
+                installer.steamlink()
             if not (paths.tailscale_app() if mac else paths.find("tailscale")):
                 job.say("Устанавливаю Tailscale — macOS спросит пароль", key="wizard.install.tailscale")
                 installer.tailscale()
@@ -537,6 +546,11 @@ class Api:
             r = None
         if r is None or r.returncode != 0:
             return {"error": {"key": "wizard.ts.up_failed", "params": {}, "text": "tailscale up failed"}}
+        return {"ok": True}
+
+    def wizard_skip_steam(self):
+        """Человек пропустил вход в Steam в первой настройке. Играть можно и без него."""
+        settings.set("wizard_steam_skipped", True)
         return {"ok": True}
 
     def wizard_finish(self):
@@ -599,6 +613,8 @@ class Api:
             return self._background("tailscale", self._install_tailscale, with_job=True)
         if tool == "moonlight":
             return self._background("install", installer.moonlight)
+        if tool == "steamlink":
+            return self._background("install", installer.steamlink)
         brew = paths.find("brew")
         if tool not in BREW:
             return {"error": {"key": None, "params": {}, "text": "unknown tool"}}
@@ -1202,11 +1218,13 @@ class Api:
 
     @staticmethod
     def _steamlink_needs_pin(status, account):
-        """Нужен ли ввод PIN для этого аккаунта Steam на этом компьютере."""
+        """Нужен ли ввод PIN для этого аккаунта Steam на этом компьютере.
+
+        «ok» с машины значит только «в настройках Steam уже есть какое-то устройство». Оно часто
+        приехало из облака с другого компьютера. Этот компьютер считаем привязанным, только если
+        PIN вводили здесь (steamlink_paired). Steam прямо просит PIN — окно снова, даже после этого."""
         if status == "pin":
             return True
-        if status == "ok":
-            return False
         paired = settings.get("steamlink_paired") or []
         if account:
             return account not in paired
@@ -1222,8 +1240,9 @@ class Api:
             settings.set("steamlink_paired", paired)
 
     def open_steamlink(self, windowed=False):
-        """Запустить Steam Link: сам определяет, привязан ли текущий аккаунт Steam на машине к этому компьютеру;
-        если нужен PIN (первый запуск или смена аккаунта) — открывает в окне и возвращает need_pin=True."""
+        """Запустить Steam Link. PIN — пока этот компьютер сам не привязал текущий аккаунт.
+        Устройство из облака (другой компьютер) не считается. Тогда открываем в окне и need_pin=True.
+        Аккаунт запоминается только после удачного PIN (pair_steamlink), не по ответу «ok»."""
         if not moonlight.steamlink_path():
             return {"error": {"key": "steamlink.missing", "params": {}, "text": "Steam Link не установлен"}}
         if windowed:
@@ -1231,8 +1250,6 @@ class Api:
             moonlight.steamlink_stream(size=None, windowed=True)
             return {"ok": True, "need_pin": True}
         status, account = self._steamlink_machine_check()
-        if status == "ok" and account:
-            self._remember_steamlink_account(account)
         need_pin = self._steamlink_needs_pin(status, account)
         size, _, _ = self._stream_args()
         settings.applog(f"steamlink: статус={status!r}, аккаунт={account!r}, need_pin={need_pin}, разрешение={size}")

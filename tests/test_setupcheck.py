@@ -90,6 +90,13 @@ class TestStatus(unittest.TestCase):
         self.assertTrue(r["ready"])                     # служба выключена (warn) — играть всё равно можно
         self.assertEqual([s["id"] for s in r["steps"][-2:]], ["autostart", "open_at_login"])
 
+    def test_fresh_asks_derp_again(self):
+        seen = []
+        self.patch(tools=lambda: [], vast_key=lambda: step("vast", "missing"),
+                   derp=lambda fresh=False: seen.append(fresh) or None)
+        setupcheck.status(fresh=True)
+        self.assertEqual(seen, [True])
+
     def test_autostart_hidden_where_unsupported(self):
         self.patch(tools=lambda: [], vast_key=lambda: step("vast", "missing"))
         with mock.patch.object(setupcheck.autostart, "status", lambda name="resume": "unsupported"):

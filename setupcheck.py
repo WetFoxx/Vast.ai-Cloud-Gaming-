@@ -51,6 +51,10 @@ def tools():
                              tailnet=(st.get("MagicDNSSuffix") or "").rstrip(".")))
     out.append(_step("moonlight", "ok", "setup.moonlight.ok") if moonlight.path()
                else _step("moonlight", "missing", "setup.moonlight.missing"))
+    # Steam Link играть не мешает (Moonlight остаётся). Нет его — предупреждение, не «не настроено»:
+    # иначе кнопка «Играть» гаснет, а на Mac без App Store из мастера не выйти.
+    out.append(_step("steamlink", "ok", "setup.steamlink.ok") if moonlight.steamlink_path()
+               else _step("steamlink", "warn", "setup.steamlink.off"))
     return out
 
 
@@ -192,9 +196,10 @@ def autostart_steps():
     return [resume, app]
 
 
-def derp():
-    """Серверы-посредники Tailscale, которые не открываются с этого интернета (derpcheck); None — не проверить."""
-    bad = derpcheck.blocked()
+def derp(fresh=False):
+    """Серверы-посредники Tailscale, которые не открываются с этого интернета (derpcheck); None — не проверить.
+    fresh — спросить Tailscale заново, не брать ответ из памяти минуты."""
+    bad = derpcheck.blocked(fresh=fresh)
     if bad is None:
         return None
     if not bad:
@@ -203,8 +208,9 @@ def derp():
                  block=derpcheck.policy_block([b["id"] for b in bad]), url=derpcheck.POLICY_URL)
 
 
-def status():
+def status(fresh=False):
     """Все шаги по порядку и общий итог: ready — можно арендовать (нет ни одного missing).
+    fresh — заново спросить, какие серверы Tailscale закрыты (после правки в админке).
     [0.4.5] Проверки — одновременно (по очереди было ~10 с: Drive 4.5, шаблон Vast 2–7, остальное по ~1 с). Ключ
     Vast в Связке ключей есть — проверки аккаунта начинаются сразу, не дожидаясь проверки самого ключа; ключ
     оказался плохим — их итог отбрасывается."""
@@ -213,7 +219,7 @@ def status():
             fs = ex.submit(_vast_secrets)
             return [ex.submit(ssh_key), ex.submit(google, fs.result),
                     ex.submit(lambda: tailscale_key(fs.result())), ex.submit(template)]
-        ft, fa, fv, fd = ex.submit(tools), ex.submit(autostart_steps), ex.submit(vast_key), ex.submit(derp)
+        ft, fa, fv, fd = ex.submit(tools), ex.submit(autostart_steps), ex.submit(vast_key), ex.submit(derp, fresh)
         rest = account() if keystore.get("VAST_API_KEY") else None
         steps = ft.result()
         if fd.result():

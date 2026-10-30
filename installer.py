@@ -14,6 +14,8 @@
 #    (окно UAC «Разрешить вносить изменения?»), приложение ничего не вводит. Отказ в окне — «отменено».
 #  * Moonlight — переносная версия (zip) с GitHub, в %LOCALAPPDATA%\Programs\Moonlight — без прав администратора,
 #    как на Mac. Проверяется подпись Moonlight.exe до того, как папка встанет на место.
+#  * Steam Link — на Windows архив с media.steampowered.com, внутри .msi (подпись O=Valve Corp., сверено
+#    2026-10-30); права спрашивает окно UAC. На Mac файла у Valve нет — открывается страница Mac App Store.
 
 import os
 import platform
@@ -26,6 +28,7 @@ from pathlib import Path
 
 import requests
 
+import moonlight as moonlight_app
 import paths
 from vastapi import VastgameError
 
@@ -37,6 +40,9 @@ TAILSCALE_MSI = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-{arch}
 TAILSCALE_SIGNER = "Tailscale Inc."             # O= в подписи Authenticode
 MOONLIGHT_SIGNER = "Cameron Gutman"             # автор Moonlight
 MOONLIGHT_WIN_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Moonlight"
+STEAMLINK_ZIP = "https://media.steampowered.com/steamlink/windows/latest/SteamLink.zip"
+STEAMLINK_SIGNER = "Valve Corp."                # O= в подписи Authenticode (сверено 2026-10-30)
+STEAMLINK_STORE = "macappstore://apps.apple.com/app/steam-link/id1246969117"
 
 
 def _download(url, dest):
@@ -201,3 +207,43 @@ def moonlight():
             raise VastgameError("Не удалось скопировать Moonlight в «Программы».", key="install.failed", out="")
         finally:
             paths.run(["hdiutil", "detach", "-quiet", str(mnt)], 60)
+
+
+def _steamlink_windows():
+    """Скачать официальный архив Valve, поставить подписанный .msi. Пароль спросит окно UAC."""
+    with tempfile.TemporaryDirectory() as d:
+        z = Path(d) / "SteamLink.zip"
+        _download(STEAMLINK_ZIP, z)
+        unpacked = Path(d) / "unpacked"
+        try:
+            shutil.unpack_archive(str(z), str(unpacked))
+        except (OSError, ValueError, shutil.ReadError) as e:
+            raise VastgameError("Не удалось распаковать Steam Link.", key="install.failed", out=str(e)[-300:])
+        msi = next(unpacked.rglob("*.msi"), None)
+        if msi is None or _signer_win(msi) != STEAMLINK_SIGNER:
+            raise VastgameError("Подпись установщика Steam Link не совпала — не устанавливаю.",
+                                key="install.bad_signature", name="Steam Link")
+        r = paths.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ELEVATE_PS], 900,
+                      env={**os.environ, "VG_FILE": str(msi)})
+        if r.returncode in (1223, 1602):
+            raise VastgameError("Установка отменена.", key="install.cancelled")
+        if r.returncode not in (0, 3010):
+            raise VastgameError(f"Установщик Steam Link завершился с кодом {r.returncode}",
+                                key="install.failed", out=f"msiexec {r.returncode}")
+    return True
+
+
+def steamlink():
+    """Поставить Steam Link, если его ещё нет. Windows — подписанный .msi. Mac — страница App Store
+    (своего установщика у Valve нет). True — уже стоит или установка запущена."""
+    if moonlight_app.steamlink_path():
+        return True
+    if sys.platform == "darwin":
+        r = paths.run(["open", STEAMLINK_STORE], 30)
+        if r.returncode != 0:
+            raise VastgameError("Не удалось открыть App Store.", key="install.failed", out=r.stderr[-300:])
+        return True
+    if sys.platform == "win32":
+        return _steamlink_windows()
+    raise VastgameError("Ставить программы сам VastGame пока умеет только на Mac и Windows.",
+                        key="wizard.install.not_mac")

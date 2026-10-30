@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import derpcheck  # noqa: E402
@@ -38,6 +39,26 @@ class TestBlocked(unittest.TestCase):
 
     def test_no_network_under_tests(self):
         self.assertIsNone(derpcheck.blocked())                           # без разрешения теста в сеть не ходит
+
+    def test_memory_is_a_minute_and_fresh_asks_again(self):
+        # Человек убрал город в админке. Пока минута не вышла, повтор берёт память.
+        # «Проверить снова» (fresh) спрашивает Tailscale ещё раз и видит, что города уже нет.
+        derpcheck.TESTS = True
+        derpcheck._cache = None
+        maps = iter([DMAP, {"Regions": {"4": DMAP["Regions"]["4"]}}])   # второй раз Токио и Хельсинки убраны
+        try:
+            with mock.patch.object(derpcheck, "_derp_map", lambda: next(maps)), \
+                 mock.patch.object(derpcheck, "_reach", lambda n, iface: n["IPv4"] in UP):
+                first = [x["code"] for x in derpcheck.blocked()]
+                again = [x["code"] for x in derpcheck.blocked()]
+                fresh = [x["code"] for x in derpcheck.blocked(fresh=True)]
+            self.assertEqual(first, ["tok", "hel"])
+            self.assertEqual(again, ["tok", "hel"])                      # из памяти, карту не спрашивали
+            self.assertEqual(fresh, [])
+            self.assertLessEqual(derpcheck.CACHE_SEC, 60)
+        finally:
+            derpcheck.TESTS = False
+            derpcheck._cache = None
 
 
 class TestPolicyBlock(unittest.TestCase):

@@ -118,8 +118,11 @@ class TestSnapshots(unittest.TestCase):
             api.history(7, False)
         self.assertEqual(api.snapshot("history:7:game")["totals"]["cost"], 1.5)
         self.assertIsNone(api.snapshot("history:7:all"))
-        with mock.patch.object(gui.setupcheck, "status", lambda: {"steps": [], "ready": True}):
+        seen = []
+        with mock.patch.object(gui.setupcheck, "status", lambda fresh=False: seen.append(fresh) or {"steps": [], "ready": True}):
             api.setup_status()
+            api.setup_status(True)
+        self.assertEqual(seen, [False, True])                            # «Проверить снова» не берёт память
         self.assertTrue(api.snapshot("setup")["ready"])
 
 
@@ -1287,10 +1290,12 @@ class TestMoonlight(unittest.TestCase):
         with mock.patch.object(gui.moonlight, "steamlink_path", lambda: None):
             r = gui.Api().open_steamlink()
             self.assertEqual(r["error"]["key"], "steamlink.missing")
-        # 1) Первый запуск на непривязанном аккаунте (check: pin) — нужен PIN, открывается в окне
-        # 2) Аккаунт уже привязан в облаке (check: ok) — сразу на весь экран, PIN не нужен (даже если в settings ещё пусто)
-        # 3) Переключились на непривязанный аккаунт (check: pin) — снова нужен PIN
-        checks = iter(["check: pin 76561198000000001\n", "check: ok 76561198000000001\n", "check: pin 76561198000000002\n"])
+        # 1) Машина просит PIN — окно ввода, аккаунт ещё не запоминаем
+        # 2) В облаке уже есть чужое устройство (check: ok), а этот компьютер аккаунт не привязывал — всё равно PIN
+        # 3) Этот компьютер уже вводил PIN (список) и машина не просит заново — сразу на весь экран
+        # 4) Тот же аккаунт, но Steam снова просит PIN — окно ещё раз
+        checks = iter(["check: pin 76561198000000001\n", "check: ok 76561198000000001\n",
+                       "check: ok 76561198000000001\n", "check: pin 76561198000000001\n"])
         with mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/Applications/Steam Link.app/Contents/MacOS/Steam Link"), \
              mock.patch.object(gui.moonlight, "native_display", lambda: {"w": 2560, "h": 1600, "fps": 60}), \
              mock.patch.object(gui.moonlight, "steamlink_stream", lambda size=None, windowed=False: calls.append((size, windowed)) or True), \
@@ -1300,12 +1305,16 @@ class TestMoonlight(unittest.TestCase):
              mock.patch.object(gui.settings, "set", lambda k, v: saved.__setitem__(k, v)):
             r1 = gui.Api().open_steamlink(False)
             self.assertEqual(r1, {"ok": True, "need_pin": True, "account": "76561198000000001"})
+            self.assertNotIn("steamlink_paired", saved)
             r2 = gui.Api().open_steamlink(False)
-            self.assertEqual(r2, {"ok": True, "need_pin": False, "account": "76561198000000001"})
-            self.assertEqual(saved.get("steamlink_paired"), ["76561198000000001"])
+            self.assertEqual(r2, {"ok": True, "need_pin": True, "account": "76561198000000001"})
+            self.assertNotIn("steamlink_paired", saved)                  # чужое устройство в облаке не записываем
+            saved["steamlink_paired"] = ["76561198000000001"]
             r3 = gui.Api().open_steamlink(False)
-            self.assertEqual(r3, {"ok": True, "need_pin": True, "account": "76561198000000002"})
-        self.assertEqual(calls, [(None, True), ((2560, 1600), False), (None, True)])
+            self.assertEqual(r3, {"ok": True, "need_pin": False, "account": "76561198000000001"})
+            r4 = gui.Api().open_steamlink(False)
+            self.assertEqual(r4, {"ok": True, "need_pin": True, "account": "76561198000000001"})
+        self.assertEqual(calls, [(None, True), (None, True), ((2560, 1600), False), (None, True)])
 
     def test_pair_steamlink(self):
         saved = {}

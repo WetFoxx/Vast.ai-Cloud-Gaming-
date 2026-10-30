@@ -205,7 +205,9 @@ def steamlink_path():
             os.path.join(local, "Programs", "SteamLink", "SteamLink.exe"),
             os.path.join(local, "SteamLink", "SteamLink.exe"),
             os.path.join(pf, "SteamLink", "SteamLink.exe"),
+            os.path.join(pf, "Steam Link", "SteamLink.exe"),
             os.path.join(pf86, "SteamLink", "SteamLink.exe"),
+            os.path.join(pf86, "Steam Link", "SteamLink.exe"),
         ]
     else:
         candidates = [

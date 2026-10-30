@@ -20,7 +20,9 @@ from concurrent.futures import ThreadPoolExecutor
 import paths
 
 TIMEOUT = 3          # с на одно соединение
-CACHE_SEC = 3600     # итог помним час (в процессе окна и в фоновом процессе — у каждого свой)
+CACHE_SEC = 60       # итог помним минуту. Дольше нельзя: человек убрал город в настройках Tailscale
+                      # и ждёт, что предупреждение погаснет. «Проверить снова» и возврат в окно
+                      # спрашивают заново (fresh=True), не дожидаясь этой минуты.
 POLICY_URL = "https://login.tailscale.com/admin/acls/file"
 IP_BOUND_IF = 25     # macOS <netinet/in.h>
 TESTS = False        # под автотестами — только если тест разрешил (иначе пошли бы в сеть)
@@ -72,14 +74,15 @@ def _reach(node, iface):
     return False
 
 
-def blocked(dmap=None, reach=None):
+def blocked(dmap=None, reach=None, fresh=False):
     """[{id, code, name}] — регионы, где отвечает меньше половины серверов; [] — всё доступно;
-    None — проверить нельзя (нет Tailscale или он не ответил)."""
+    None — проверить нельзя (нет Tailscale или он не ответил).
+    fresh — не смотреть в память минуты: человек нажал «Проверить снова» или вернулся в окно."""
     global _cache
     if dmap is None and reach is None:
         if "unittest" in sys.modules and not TESTS:
             return None
-        if _cache and time.time() - _cache[0] < CACHE_SEC:
+        if not fresh and _cache and time.time() - _cache[0] < CACHE_SEC:
             return _cache[1]
     dmap = dmap if dmap is not None else _derp_map()
     if not dmap or not dmap.get("Regions"):

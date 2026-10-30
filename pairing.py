@@ -22,7 +22,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from pathlib import Path
 
 import keystore
 import requests
@@ -233,7 +232,7 @@ def _pair(exe, host, ip, on_notice):
             if p.poll() is None:
                 raise VastgameError("Moonlight не связался с машиной за полторы минуты.", key="pair.timeout")
             if p.returncode != 0:
-                out = Path(log.name).read_text().strip()[-200:]
+                out = paths.read_open_log(log).strip()[-200:]
                 raise VastgameError(f"Moonlight не связался с машиной: {out}", key="pair.failed", out=out)
         finally:
             if p.poll() is None:

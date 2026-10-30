@@ -66,9 +66,13 @@ class TestWizardApi(unittest.TestCase):
              mock.patch.object(gui.setupcheck, "_vast_secrets", lambda: set()), \
              mock.patch.object(gui.setupcheck, "google", lambda s, sizes=True: {"state": "warn", "key": "setup.google.not_in_vast",
                                                                                 "params": {"email": "a@b.c"}}), \
-             mock.patch.object(gui.setupcheck, "tailscale_phase", lambda: {"phase": "login"}):
+             mock.patch.object(gui.setupcheck, "tailscale_phase", lambda: {"phase": "login"}), \
+             mock.patch.object(gui.moonlight, "steamlink_path", lambda: None), \
+             mock.patch.object(gui.steamlib, "accounts", lambda: []), \
+             mock.patch.object(gui.settings, "get", lambda name, default=None: False):
             s = self.api.wizard_state()
-        self.assertEqual(s["programs"], {"tailscale": True, "moonlight": False})
+        self.assertEqual(s["programs"], {"tailscale": True, "moonlight": False, "steamlink": False})
+        self.assertEqual(s["steam"], {"ok": False, "name": ""})
         self.assertEqual(s["vast"], {"ok": True, "balance": 3.2})
         self.assertEqual(s["google"], {"ok": True, "email": "a@b.c"})    # «не в Vast» доделает последний шаг
         self.assertEqual(s["tailscale"]["phase"], "login")
@@ -88,13 +92,28 @@ class TestWizardApi(unittest.TestCase):
         with mock.patch.object(gui.sys, "platform", "darwin"), \
              mock.patch.object(gui.moonlight, "path", lambda: "/Applications/Moonlight.app"), \
              mock.patch.object(gui.paths, "tailscale_app", lambda: None), \
+             mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/S"), \
              mock.patch.object(gui.installer, "moonlight", lambda: done.append("moonlight")), \
+             mock.patch.object(gui.installer, "steamlink", lambda: done.append("steamlink")), \
              mock.patch.object(gui.installer, "tailscale", lambda: done.append("tailscale")):
             self.assertEqual(self.api.install_programs(), {"ok": True})
             p = wait(self.api)
         self.assertIsNone(p["error"])
-        self.assertEqual(done, ["tailscale"])                            # Moonlight уже стоял
+        self.assertEqual(done, ["tailscale"])                            # Moonlight и Steam Link уже стояли
         self.assertIn("wizard.install.tailscale", [e["key"] for e in p["events"]])
+
+    def test_installs_missing_steamlink(self):
+        done = []
+        with mock.patch.object(gui.sys, "platform", "darwin"), \
+             mock.patch.object(gui.moonlight, "path", lambda: "/M"), \
+             mock.patch.object(gui.paths, "tailscale_app", lambda: "/T"), \
+             mock.patch.object(gui.moonlight, "steamlink_path", lambda: None), \
+             mock.patch.object(gui.installer, "steamlink", lambda: done.append("steamlink")):
+            self.assertEqual(self.api.install_programs(), {"ok": True})
+            p = wait(self.api)
+        self.assertIsNone(p["error"])
+        self.assertEqual(done, ["steamlink"])
+        self.assertIn("wizard.install.steamlink", [e["key"] for e in p["events"]])
 
     def test_install_cancelled_password(self):
         def cancelled():
@@ -102,6 +121,7 @@ class TestWizardApi(unittest.TestCase):
         with mock.patch.object(gui.sys, "platform", "darwin"), \
              mock.patch.object(gui.moonlight, "path", lambda: "/M"), \
              mock.patch.object(gui.paths, "tailscale_app", lambda: None), \
+             mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/S"), \
              mock.patch.object(gui.installer, "tailscale", cancelled):
             self.api.install_programs()
             self.assertEqual(wait(self.api)["error"]["key"], "install.cancelled")

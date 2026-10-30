@@ -93,6 +93,20 @@ class TestTailscaleLogin(unittest.TestCase):
              mock.patch.object(paths, "tailscale_status", lambda: {"BackendState": "Running"}):
             self.assertTrue(setupcheck.setup.tailscale_login(lambda u: self.fail("ссылка не нужна"), wait=5))
 
+    def test_login_log_is_not_opened_a_second_time(self):
+        # Windows: файл журнала ещё открыт — второй open даёт PermissionError и вход обрывался
+        state = {"s": "NeedsLogin"}
+
+        def boom(*_a, **_k):
+            raise PermissionError(13, "Permission denied")
+
+        def open_url(_u):
+            state["s"] = "Running"
+        with mock.patch.object(paths, "find", lambda n: self.fake_cli()), \
+             mock.patch.object(paths, "tailscale_status", lambda: {"BackendState": state["s"]}), \
+             mock.patch.object(Path, "read_text", boom):
+            self.assertTrue(setupcheck.setup.tailscale_login(open_url, wait=10))
+
 
 if __name__ == "__main__":
     unittest.main()

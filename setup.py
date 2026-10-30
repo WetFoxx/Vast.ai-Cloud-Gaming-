@@ -14,7 +14,6 @@ import shutil     # shutil.which — найти программу на Mac
 import subprocess
 import sys
 import webbrowser   # открыть ссылку в браузере (Mac и Windows)
-from pathlib import Path
 
 import keystore   # ключи и токены — в Связке ключей macOS (keystore.py)
 
@@ -426,13 +425,13 @@ def tailscale_login(open_url, wait=600):
             url, end = None, time.time() + 30
             while not url and time.time() < end and p.poll() is None:
                 time.sleep(0.5)
-                m = re.search(r"https://login\.tailscale\.com/\S+", Path(log.name).read_text())
+                m = re.search(r"https://login\.tailscale\.com/\S+", paths.read_open_log(log))
                 url = m.group(0) if m else None
             running = lambda: (paths.tailscale_status() or {}).get("BackendState") == "Running"   # noqa: E731
             if not url:
                 if running():
                     return True                  # уже в сети — входить не нужно
-                out = Path(log.name).read_text().strip()[-200:]
+                out = paths.read_open_log(log).strip()[-200:]
                 raise VastgameError(f"Tailscale не выдал ссылку для входа: {out}", key="setup.err.ts_login_failed",
                                     out=out)
             open_url(url)
