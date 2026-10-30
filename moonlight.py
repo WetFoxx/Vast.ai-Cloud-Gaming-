@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -195,6 +196,18 @@ def log_tail(n=12):
 
 
 # ---- Steam Link
+def computer_name():
+    """Имя этого компьютера — так Steam Link обычно называется в Remote Play."""
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return os.environ.get("COMPUTERNAME") or socket.gethostname()
+
+
 def steamlink_path():
     """Исполняемый файл Steam Link: стандартная папка или PATH."""
     if os.name == "nt":

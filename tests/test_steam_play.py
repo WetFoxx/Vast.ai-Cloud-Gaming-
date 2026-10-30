@@ -224,6 +224,37 @@ class TestStateAndLogon(unittest.TestCase):
             f"{at} Remote Client service connection status: k_ERemoteDeviceAuthorizationNeedsPIN\n")
         self.assertEqual(py("pin-check", root, 19)[1].strip(), f"check: pin {B}")
 
+    def test_pin_check_separate_devices(self):
+        # Каждое устройство само по себе. Чужое в списке не закрывает PIN. Свой номер в списке — без PIN,
+        # даже если журнал просит код (это второй компьютер). Удалили свой номер — снова PIN, чужой остаётся.
+        import time
+        root = steam_dir()
+        now = int(time.time())
+        at = time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime(now))
+        (root / "logs/connection_log.txt").write_text(
+            f"{at} [Logged On, 4, 7] [U:1:692993918] RecvMsgClientLogOnResponse()\n")
+        mac, win = "a5f6d82b4ca3d79d", "bbbbbbbbbbbbbbbb"
+        lc = root / "userdata/692993918/config/localconfig.vdf"
+        lc.parent.mkdir(parents=True)
+
+        def write(ids):
+            body = "".join(
+                f'\t\t\t"{i}"\n\t\t\t{{\n\t\t\t\t"DeviceName"\t\t"{n}"\n\t\t\t\t"Key"\t\t"0123456789abcdef"\n\t\t\t}}\n'
+                for i, n in ids)
+            lc.write_text('"UserLocalConfigStore"\n{\n\t"streaming"\n\t{\n\t\t"Devices"\n\t\t{\n' + body + '\t\t}\n\t}\n}\n')
+
+        write([(mac, "MacBook-Air.local"), (win, "Desktop")])
+        ask = lambda *extra: py("pin-check", root, 19, *extra)[1].strip()
+        self.assertEqual(ask("-", "Other-PC", "-"), f"check: pin {B}")
+        self.assertEqual(ask(win, "Desktop", "-"), f"check: ok {B} {win}")
+        self.assertEqual(ask("-", "MacBook Air", B), f"check: ok {B} {mac}")
+        (root / "logs/streaming_log.txt").write_text(
+            f"{at} Remote Client service connection status: k_ERemoteDeviceAuthorizationNeedsPIN\n")
+        self.assertEqual(ask(mac, "MacBook Air", B), f"check: ok {B} {mac}")
+        write([(win, "Desktop")])
+        self.assertEqual(ask(mac, "MacBook Air", B), f"check: pin {B}")
+        self.assertEqual(ask(win, "Desktop", "-"), f"check: ok {B} {win}")
+
 
 
 PLAY = "\n".join(fn(n) for n in ("play_init", "play_prepare", "flags_ready", "play_watch", "play_launch", "mods_mark")) \

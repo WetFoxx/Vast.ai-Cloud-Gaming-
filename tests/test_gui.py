@@ -1295,7 +1295,9 @@ class TestMoonlight(unittest.TestCase):
         # 3) Этот компьютер уже вводил PIN (список) и машина не просит заново — сразу на весь экран
         # 4) Тот же аккаунт, но Steam снова просит PIN — окно ещё раз
         checks = iter(["check: pin 76561198000000001\n", "check: ok 76561198000000001\n",
-                       "check: ok 76561198000000001\n", "check: pin 76561198000000001\n"])
+                       "check: ok 76561198000000001\n", "check: pin 76561198000000001\n",
+                       "check: ok 76561198000000001 a5f6d82b4ca3d79d\n",
+                       "check: pin 76561198000000001\n"])
         with mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/Applications/Steam Link.app/Contents/MacOS/Steam Link"), \
              mock.patch.object(gui.moonlight, "native_display", lambda: {"w": 2560, "h": 1600, "fps": 60}), \
              mock.patch.object(gui.moonlight, "steamlink_stream", lambda size=None, windowed=False: calls.append((size, windowed)) or True), \
@@ -1314,7 +1316,15 @@ class TestMoonlight(unittest.TestCase):
             self.assertEqual(r3, {"ok": True, "need_pin": False, "account": "76561198000000001"})
             r4 = gui.Api().open_steamlink(False)
             self.assertEqual(r4, {"ok": True, "need_pin": True, "account": "76561198000000001"})
-        self.assertEqual(calls, [(None, True), (None, True), ((2560, 1600), False), (None, True)])
+            # Машина назвала номер этого устройства — PIN не нужен, номер запоминается.
+            # Потом записи в Remote Play нет — окно снова, даже если аккаунт уже в списке.
+            r5 = gui.Api().open_steamlink(False)
+            self.assertEqual(r5, {"ok": True, "need_pin": False, "account": "76561198000000001"})
+            self.assertEqual(saved.get("steamlink_devices"), {"76561198000000001": "a5f6d82b4ca3d79d"})
+            r6 = gui.Api().open_steamlink(False)
+            self.assertEqual(r6, {"ok": True, "need_pin": True, "account": "76561198000000001"})
+        self.assertEqual(calls, [(None, True), (None, True), ((2560, 1600), False), (None, True),
+                                 ((2560, 1600), False), (None, True)])
 
     def test_pair_steamlink(self):
         saved = {}

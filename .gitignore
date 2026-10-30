@@ -14,6 +14,8 @@ oauth_client.json
 build/
 dist/
 dist.noindex/
+# Старые выпуски, скачанные с GitHub. В git не класть.
+archive/releases/
 # Ключ подписи выпусков: резервная копия (*.pem) — никогда не в git; открытый ключ после keygen вшивается в updater.py
 *.pem
 release-public-key.txt

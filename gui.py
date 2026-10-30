@@ -1201,8 +1201,21 @@ class Api:
         return False
 
     # ---- Steam Link
+    def _steamlink_args(self):
+        """Что сказать машине про этот компьютер: номера уже привязанных здесь устройств,
+        имя компьютера и аккаунты, для которых PIN здесь уже вводили."""
+        devs = settings.get("steamlink_devices") or {}
+        ids = [v.lower() for v in devs.values()
+               if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F]{8,64}", v)]
+        known = [str(x) for x in (settings.get("steamlink_paired") or [])
+                 if re.fullmatch(r"7656\d{13}", str(x))]
+        name = moonlight.computer_name() or "-"
+        if len(name) > 80 or re.search(r"[\x00-\x1f/]", name):
+            name = "-"
+        return [",".join(ids) or "-", name, ",".join(known) or "-"]
+
     def _steamlink_machine_check(self):
-        """Спросить машину об активном аккаунте Steam и состоянии Remote Play: (status, steamid64) или (None, '')."""
+        """Спросить машину: это устройство есть в Remote Play? (status, steamid64, номер устройства)."""
         node = wolfnode.ts_node()
         for _ in range(2):
             if node:
@@ -1210,21 +1223,31 @@ class Api:
             time.sleep(2)
             node = wolfnode.ts_node()
         if not node:
-            return None, ""
-        code, out = wolfnode.run(node[1], "steamlink-check", timeout=20, on_notice=self._ssh_notice)
+            return None, "", ""
+        code, out = wolfnode.run(node[1], "steamlink-check", self._steamlink_args(),
+                                 timeout=20, on_notice=self._ssh_notice)
+        if code is None and "нет такой команды" in (out or ""):
+            code, out = wolfnode.run(node[1], "steamlink-check", (), timeout=20, on_notice=self._ssh_notice)
         settings.applog(f"steamlink-check: код={code}, ответ={(out or '').strip()!r}")
-        m = re.search(r"check:\s*(\w+)(?:\s+(7656\d{13}))?", out or "")
-        return (m.group(1), m.group(2) or "") if m else ("", "")
+        m = re.search(r"check:\s*(ok|pin|nologin|nosteam)(?:\s+(7656\d{13}))?(?:\s+([0-9a-fA-F]{8,64}))?",
+                      out or "")
+        if not m:
+            return "", "", ""
+        return m.group(1), m.group(2) or "", (m.group(3) or "").lower()
 
     @staticmethod
-    def _steamlink_needs_pin(status, account):
-        """Нужен ли ввод PIN для этого аккаунта Steam на этом компьютере.
+    def _steamlink_needs_pin(status, account, device_id):
+        """PIN нужен, только если этого компьютера нет в Remote Play.
 
-        «ok» с машины значит только «в настройках Steam уже есть какое-то устройство». Оно часто
-        приехало из облака с другого компьютера. Этот компьютер считаем привязанным, только если
-        PIN вводили здесь (steamlink_paired). Steam прямо просит PIN — окно снова, даже после этого."""
+        Машина прислала номер устройства вместе с ok — запись на месте, окно не открываем.
+        pin — записи нет (новый компьютер или её удалили в настройках Steam).
+        ok без номера — старая машина: она не отличает устройства, решаем по списку на этом компьютере."""
         if status == "pin":
             return True
+        if device_id:
+            return False
+        if status != "ok":
+            return False
         paired = settings.get("steamlink_paired") or []
         if account:
             return account not in paired
@@ -1232,36 +1255,53 @@ class Api:
 
     @staticmethod
     def _remember_steamlink_account(account):
-        if not account:
+        if not account or not re.fullmatch(r"7656\d{13}", str(account)):
             return
         paired = list(settings.get("steamlink_paired") or [])
         if account not in paired:
             paired.append(account)
             settings.set("steamlink_paired", paired)
 
+    @staticmethod
+    def _remember_steamlink_device(account, device_id):
+        if not account or not re.fullmatch(r"7656\d{13}", str(account)):
+            return
+        if not device_id or not re.fullmatch(r"[0-9a-fA-F]{8,64}", device_id):
+            return
+        devs = dict(settings.get("steamlink_devices") or {})
+        if devs.get(account) != device_id.lower():
+            devs[account] = device_id.lower()
+            settings.set("steamlink_devices", devs)
+
     def open_steamlink(self, windowed=False):
-        """Запустить Steam Link. PIN — пока этот компьютер сам не привязал текущий аккаунт.
-        Устройство из облака (другой компьютер) не считается. Тогда открываем в окне и need_pin=True.
-        Аккаунт запоминается только после удачного PIN (pair_steamlink), не по ответу «ok»."""
+        """Запустить Steam Link. Окно PIN — если этого компьютера нет в Remote Play у текущего аккаунта.
+        Другой компьютер в том же списке не мешает и не закрывает окно. Свой номер запоминается,
+        когда машина подтвердила, что запись есть."""
         if not moonlight.steamlink_path():
             return {"error": {"key": "steamlink.missing", "params": {}, "text": "Steam Link не установлен"}}
         if windowed:
             settings.applog("steamlink: запуск в окне")
             moonlight.steamlink_stream(size=None, windowed=True)
             return {"ok": True, "need_pin": True}
-        status, account = self._steamlink_machine_check()
-        need_pin = self._steamlink_needs_pin(status, account)
+        status, account, device_id = self._steamlink_machine_check()
+        need_pin = self._steamlink_needs_pin(status, account, device_id)
+        if not need_pin and device_id:
+            self._remember_steamlink_account(account)
+            self._remember_steamlink_device(account, device_id)
         size, _, _ = self._stream_args()
         settings.applog(f"steamlink: статус={status!r}, аккаунт={account!r}, need_pin={need_pin}, разрешение={size}")
         moonlight.steamlink_stream(size=None if need_pin else size, windowed=need_pin)
         return {"ok": True, "need_pin": need_pin, "account": account}
 
     def check_steamlink_pin(self):
-        """Фоновая проверка после запуска Steam Link: попросил ли Steam на машине PIN-код (например, при смене аккаунта внутри Steam)."""
-        status, account = self._steamlink_machine_check()
+        """Фоновая проверка после запуска: не появился ли запрос PIN (другой аккаунт или устройство удалили)."""
+        status, account, device_id = self._steamlink_machine_check()
         if not status:
             return {"need_pin": False, "account": ""}
-        return {"need_pin": self._steamlink_needs_pin(status, account), "account": account, "status": status}
+        if device_id and status == "ok":
+            self._remember_steamlink_account(account)
+            self._remember_steamlink_device(account, device_id)
+        return {"need_pin": self._steamlink_needs_pin(status, account, device_id), "account": account, "status": status}
 
     def pair_steamlink(self, pin):
         """Авторизовать устройство Steam Link по 4-значному PIN-коду в клиенте Steam на машине и запомнить аккаунт."""
@@ -1279,11 +1319,13 @@ class Api:
             return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
         code, out = wolfnode.run(node[1], "steamlink-pin", [pin], timeout=45, on_notice=self._ssh_notice)
         settings.applog(f"steamlink-pin: код={code}, ответ={(out or '').strip()!r}")
-        m = re.search(r"pin:\s*(\w+)(?:\s+(7656\d{13}))?", out or "")
+        m = re.search(r"pin:\s*(\w+)(?:\s+(7656\d{13}))?(?:\s+([0-9a-fA-F]{8,64}))?", out or "")
         res = m.group(1) if m else ""
         account = (m.group(2) or "") if m else ""
+        device_id = (m.group(3) or "").lower() if m else ""
         if res == "ok":
-            self._remember_steamlink_account(account or "_default")
+            self._remember_steamlink_account(account)
+            self._remember_steamlink_device(account, device_id)
             return {"ok": True, "account": account}
         if res == "nologin":
             return {"error": {"key": "steamlink.pin.nologin", "params": {}, "text": "в Steam на машине ещё не выполнен вход"}}

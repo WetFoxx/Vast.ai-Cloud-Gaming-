@@ -321,7 +321,7 @@ def publish(notes):
     notes_file = DIST / "release-notes.md"
     notes_file.write_text(notes + "\n")
     r = _run(["gh", "release", "create", tag, *map(str, files),
-              "--repo", updater.REPO, "--title", f"vastgame {version}", "--notes-file", str(notes_file), "--latest"])
+              "--repo", updater.REPO, "--title", f"vastgame {version} beta", "--notes-file", str(notes_file), "--latest"])
     if r.returncode != 0:
         sys.exit(f"gh не опубликовал выпуск: {r.stderr.strip()[:300]}")
 
