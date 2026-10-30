@@ -1,0 +1,196 @@
+#!/bin/bash
+# Sunshine от пользователя рабочего стола (звук — его PulseAudio; геймпад — vgpad; NvFBC — копия из /opt/fbc).
+# Свой файл настроек Docker: связка с Moonlight и логин кабинета — общие с KVM (sunshine_state.json в
+# ~/.config/sunshine едет в облако с identity), а захват, кодировщик и режим геймпада — свои (на KVM NvFBC нет,
+# и его sunshine.conf мы не трогаем). NVENC проверяется: нет — захват X11 и кодирование процессором
+# (/run/vastgame/nvenc = no — машину стоит заменить).
+# Зовут: wolf (sunshine_restart, режим Docker), присмотр entrypoint.sh и рабочий стол без агента —
+# под блокировкой, чтобы двое не запустили две Sunshine сразу.
+set -u
+# sunshine-start.sh ensure — только если Sunshine не работает (присмотр: пока он ждал блокировку, её мог поднять wolf;
+# лишний перезапуск оборвал бы начатую связку с Moonlight)
+# [0.5.3] sunshine-start.sh probe — проба кодировщика сразу после экрана, до агента (entrypoint.sh, в фоне): та же
+# проверка, что ниже, но во временной папке — связку с Moonlight не трогает (её агент восстановит из облака позже).
+# Итог — строкой в журнал контейнера: «!!! видео не работает: …» видно у Vast без Tailscale через минуту, и приложение
+# сразу заменяет машину (раньше поломку видео узнавали только после Tailscale — 5–10 минут на машину)
+PROBE=
+[ "${1:-}" = probe ] && PROBE=1
+exec 9>/run/vastgame/sunshine.lock
+flock -w 360 9 || { echo "sunshine: занято другим перезапуском"; exit 1; }     # проба — до трёх попыток по 90 с
+DU=user
+[ "${1:-}" = ensure ] && pgrep -u "$DU" -x sunshine >/dev/null && exit 0
+DH=/home/user
+C=$DH/.config/sunshine
+CONF=$C/sunshine-docker.conf
+# [0.3.1] Драйвер хоста старше 580 — Sunshine на CUDA 12 (нынешняя собрана с CUDA 13 и там не работает). Связку с
+# Moonlight она ведёт в своей копии (общий файл новой версии старая могла бы испортить): копия делается один раз из
+# общего — для Moonlight это тот же компьютер (номер и связка те же), связывать заново не надо. Если старая копию не
+# поймёт, VastGame свяжет Moonlight с ней сам, без PIN. Копия едет в облако с identity. Логин кабинета — общий
+SUN=sunshine
+STATE=$C/sunshine_state.json
+DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1 | tr -dc 0-9)
+# [0.3.1] и видеокарты поколения Pascal (GTX 10xx, compute 6.x): CUDA 13 их больше не поддерживает — у нынешней
+# Sunshine на них «NVENC не работает» (живой тест 2026-10-01, 2× GTX 1070), а CUDA 12.9 — поддерживает
+CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -dc 0-9)
+if { { [ -n "$DRV" ] && [ "$DRV" -lt 580 ]; } || { [ -n "$CC" ] && [ "$CC" -lt 75 ]; }; } && [ -x /opt/sunshine-cuda12/sunshine ]; then
+  SUN=/opt/sunshine-cuda12/sunshine
+  STATE=$C/sunshine_state_cuda12.json
+  [ -s "$STATE" ] || { [ -s "$C/sunshine_state.json" ] && cp "$C/sunshine_state.json" "$STATE" && chown "$DU:" "$STATE"; }
+fi
+LOGF=/tmp/sunshine.log
+if [ -n "$PROBE" ]; then
+  C=/tmp/sunshine-probe; CONF=$C/probe.conf; STATE=$C/state.json; LOGF=$C/sunshine.log
+  rm -rf "$C"
+fi
+mkdir -p "$C" && chown -R "$DU:" "$DH/.config" "$C"
+[ -f "$C/apps.json" ] || { [ -f /usr/share/sunshine/apps.json ] && cp /usr/share/sunshine/apps.json "$C/apps.json" && chown "$DU:" "$C/apps.json"; }
+# Чистое окружение, как на KVM (env -i): ключи аккаунта Vast из окружения root — не в Sunshine
+XRD=/run/user/$(id -u $DU)
+u() { runuser -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" LANG=C.UTF-8 DISPLAY=:0 \
+        XDG_RUNTIME_DIR="$XRD" DBUS_SESSION_BUS_ADDRESS="unix:path=$XRD/bus" \
+        PATH=/usr/local/bin:/usr/bin:/bin:/usr/games "$@"; }
+
+conf() {  # $1 захват  $2 кодировщик
+  cat > "$CONF" <<CONF
+# vastgame-desktop: пишется при каждом запуске (sunshine-start.sh) — правки здесь не сохранятся
+capture = $1
+encoder = $2
+gamepad = x360
+sunshine_name = vastai-gaming
+output_name = 0
+system_tray = disabled
+fec_percentage = 50
+origin_web_ui_allowed = wan
+file_state = $STATE
+credentials_file = $C/sunshine_state.json
+file_apps = $C/apps.json
+log_path = $LOGF
+global_prep_cmd = [{"do":"/bin/sh -c \\"/usr/local/bin/wolf-res \${SUNSHINE_CLIENT_WIDTH} \${SUNSHINE_CLIENT_HEIGHT} \${SUNSHINE_CLIENT_FPS}\\"","undo":"/usr/local/bin/wolf-res"}]
+CONF
+  chown "$DU:" "$CONF"
+}
+
+# [0.5.3] Многокарточный хост (Vast сдаёт одну карту из нескольких): кодировщик NVIDIA в контейнере спотыкается о
+# чужие карты («unsupported device», NVIDIA/nvidia-container-toolkit#1249) — vgnv (LD_PRELOAD) оставляет ему только
+# свои, по адресам PCI из nvidia-smi (в контейнере он видит только свои). Ход — /tmp/vgnv.log (диагностика видео)
+NVKEEP=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | tr -d ' ' | paste -sd, -)
+PRE=libvgpad.so
+[ -f /usr/lib/x86_64-linux-gnu/libvgnv.so ] && [ -n "$NVKEEP" ] && PRE="libvgpad.so libvgnv.so"
+# [2026-10-15] Экран без монитора (entrypoint.sh, /run/vastgame/headless): у X-сервера нет ни одного выхода —
+# vgrr показывает Sunshine один «монитор» во весь экран; захват — обычный (NvFBC без выхода не работает)
+HEADLESS=
+if [ -e /run/vastgame/headless ] && [ -f /opt/vgrr/libvgrr.so ]; then HEADLESS=1; PRE="$PRE /opt/vgrr/libvgrr.so"; fi
+
+start() {  # $1 захват  $2 кодировщик
+  pkill -u "$DU" -x sunshine; sleep 1
+  conf "$1" "$2"
+  rm -f "$LOGF"
+  if [ "$1" = nvfbc ]; then
+    u setsid env LD_PRELOAD="$PRE" VG_NV_KEEP="$NVKEEP" VG_NV_LOG=/tmp/vgnv.log LD_LIBRARY_PATH=/opt/fbc "$SUN" "$CONF" \
+      </dev/null >/dev/null 2>&1 9>&- &
+  else
+    u setsid env LD_PRELOAD="$PRE" VG_NV_KEEP="$NVKEEP" VG_NV_LOG=/tmp/vgnv.log "$SUN" "$CONF" </dev/null >/dev/null 2>&1 9>&- &
+  fi
+  # Проверка кодировщиков у Sunshine на медленных хостах идёт дольше 20 с (было 20 — у друга 2026-09-26 так
+  # забраковали три исправные машины): ждём до 90 с
+  for i in $(seq 1 180); do grep -qE "Found H.264 encoder|Couldn.t find any working encoder" "$LOGF" 2>/dev/null && break; sleep 0.5; done
+}
+
+# Логин кабинета из переменной — только без агента: у агента логин общий с KVM и приезжает из облака
+# (identity), а задаёт его приложение (wolf sunshine-creds)
+[ -z "${WOLF_SCRIPT_URL:-}" ] && [ -n "${SUNSHINE_PASSWORD:-}" ] && u sunshine --creds vastgame "$SUNSHINE_PASSWORD" >/dev/null 2>&1
+
+CAP=x11; [ "$(cat /run/vastgame/capture 2>/dev/null)" = fbc ] && [ -z "$HEADLESS" ] && CAP=nvfbc
+# [0.4.7] Кодировщик на части хостов не находится только иногда (хост 152580: 12 удачных сессий, 2026-10-08 — «не
+# работает»): прежде чем браковать машину, ещё две попытки. Не повторяем, если у видеокарты нет экрана (не лечится)
+# или проверка просто не закончилась
+# [2026-10-15] Быстрый захват (NvFBC) на части хостов не видит экран («Found [0] outputs», «Failed to create session»),
+# хотя у X-сервера выход есть (RTX 3060 laptop, Вашингтон: DP-0 connected) — тогда обычный захват (X11) с тем же
+# кодировщиком NVIDIA: проверено вживую, 60 к/с и под 3D-нагрузкой. Машину бракуем, только если и он не снимает экран
+NOCAP="Found \[0\] outputs|Platform failed to initialize|Failed to create session|Unable to initialize capture method"
+TRIES=0
+for try in 1 2 3; do
+  TRIES=$try
+  start "$CAP" nvenc
+  grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null && break
+  grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null || break
+  if [ "$CAP" = nvfbc ] && grep -qE "$NOCAP" "$LOGF" 2>/dev/null; then
+    echo "sunshine: быстрый захват (NvFBC) не видит экран — пробую обычный (X11)"
+    CAP=x11
+    { echo x11 > /run/vastgame/capture; } 2>/dev/null
+    continue
+  fi
+  grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null && break
+  [ "$try" -lt 3 ] && { echo "sunshine: NVENC не нашёлся (попытка $try) — пробую ещё раз через 10 с"; sleep 10; }
+done
+# Почему видео не работает — одной строкой (и пробе, и записи для приложения)
+why_bad() {
+  # [0.4.4] У X-сервера нет ни одного выхода (хост не дал видеокарте экран, разбор 2026-10-02, Техас): Sunshine
+  # пишет «Found [0] outputs» / «Platform failed to initialize» — это не кодировщик, надпись должна говорить правду
+  if grep -qE "Found \[0\] outputs|Platform failed to initialize" "$LOGF" 2>/dev/null; then
+    echo "нет выхода на монитор: обычный захват тоже не видит экран (Sunshine: 0 выходов)"
+    return
+  fi
+  if grep -q "Cannot load libnvidia-encode" "$LOGF" 2>/dev/null; then
+    echo "у хоста нет библиотеки кодировщика NVIDIA (libnvidia-encode), и в драйвере её не нашлось"
+    return
+  fi
+  # Настоящая причина: строки «Error:»/«Fatal:», без служебной «Testing for available encoders, this may generate
+  # errors» (раньше в отчёт попадала она). Сначала — про NVENC/CUDA/кодирование, иначе последняя ошибка
+  local errs real why
+  errs=$(grep -E '\]: (Error|Fatal): ' "$LOGF" 2>/dev/null | grep -viE 'may generate errors')
+  real=$(printf '%s\n' "$errs" | grep -v "Couldn.t find any working encoder")     # итоговая — без причины
+  why=$(printf '%s\n' "$real" | grep -iE 'nvenc|cuda|encod' | tail -1)
+  [ -n "$why" ] || why=$(printf '%s\n' "$real" | grep . | tail -1)
+  [ -n "$why" ] || why=$(printf '%s\n' "$errs" | tail -1)
+  echo "NVENC не работает ($TRIES попытки): $(printf '%s' "${why:-нет строки ошибки в журнале}" | sed 's/^\[[^]]*\]: *//' | cut -c1-150)"
+}
+# [0.5.3] Видео не работает — подробности в журнал контейнера (приложение сохраняет его у себя): режимы видеокарты у
+# хоста, есть ли библиотека кодировщика (её даёт хост), что разрешено контейнеру и последние строки Sunshine о NVENC.
+# Для разбора «Function not implemented» (22 из 43 сломанных хостов, 2026-10-15): предсказуемо ли это по хосту
+video_diag() {
+  echo "диагностика видео:"
+  nvidia-smi --query-gpu=name,driver_version,compute_mode,persistence_mode,display_mode,display_active,pci.bus_id \
+    --format=csv,noheader 2>&1 | sed 's/^/  gpu: /'
+  nvidia-smi -q 2>/dev/null | grep -iE "Virtualization Mode|Host VGPU Mode|MIG Mode|Current *:|Encoder Stats|Session Count|Average FPS" \
+    | head -12 | sed 's/^ */  smi: /'
+  echo "  NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-нет}"
+  ls -1 /usr/lib/x86_64-linux-gnu/libnvidia-encode.so* /usr/lib/x86_64-linux-gnu/libnvcuvid.so* 2>&1 | sed 's/^/  lib: /'
+  grep -iE "nvenc|cuda|encod|driver|api version|codec|capab" "$LOGF" 2>/dev/null | grep -viE "may generate errors" \
+    | tail -25 | cut -c1-220 | sed 's/^/  sunshine> /'
+  echo "  свои карты (VG_NV_KEEP): ${NVKEEP:-нет}"
+  tail -6 /tmp/vgnv.log 2>/dev/null | sed 's/^/  /'
+}
+if [ -n "$PROBE" ]; then
+  pkill -u "$DU" -x sunshine                   # проба закончилась — настоящую Sunshine запустит агент
+  if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
+    echo ok > /run/vastgame/nvenc
+    echo "видео: NVENC работает (проба)"
+  elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
+    echo "видео: проба NVENC не закончилась за 90 с — проверит агент"
+  else
+    echo no > /run/vastgame/nvenc
+    video_diag
+    echo "!!! видео не работает: $(why_bad)"
+  fi
+  exit 0
+fi
+# Итог — и приложению: запись «sunshine» на странице wolf (есть только у агента; архивом не считается).
+# NVENC нет — приложение заменит машину на следующую из списка
+report() { [ -d /var/lib/wolf/st ] && echo "$(date +%s)|$1|$2" > /var/lib/wolf/st/sunshine; }
+if grep -q "Found H.264 encoder: h264_nvenc" "$LOGF" 2>/dev/null; then
+  echo ok > /run/vastgame/nvenc
+  echo "sunshine: NVENC, захват $(sed -n 's/^capture = //p' "$CONF"), драйвер $DRV, ${SUN##*/opt/}"
+  report ok "NVENC, захват $(sed -n 's/^capture = //p' "$CONF"), драйвер $DRV$([ "$SUN" = sunshine ] || echo ', Sunshine CUDA 12')$([ -z "$HEADLESS" ] || echo ', экран без монитора')"
+elif ! grep -q "Couldn.t find any working encoder" "$LOGF" 2>/dev/null; then
+  # Ни «нашла», ни «не нашла» за 90 с — не браковать машину: без явной ошибки это просто медленная проверка
+  echo ok > /run/vastgame/nvenc
+  echo "sunshine: проверка NVENC не закончилась за 90 с — оставляю как есть"
+  report ok "NVENC: проверка не закончилась за 90 с"
+else
+  echo no > /run/vastgame/nvenc
+  echo "sunshine: NVENC на этой машине не работает — захват X11, кодирование процессором (медленно)"
+  video_diag
+  report err "$(why_bad)"
+  start x11 software
+fi

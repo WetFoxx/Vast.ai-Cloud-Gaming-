@@ -1,0 +1,7040 @@
+#!/bin/bash
+# ==============================================================================
+# wolf-setup.sh v5.14 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+#                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
+# Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
+# ------------------------------------------------------------------------------
+# Харденинг (в коде помечен [HARDENING #N]):
+#  #1 Разрешение. Базовый режим 1920x1200 на NVIDIA без монитора: EDID (CVT-RB) +
+#     xorg.conf (CustomEDID на DFP-0, MetaModes). Под клиента Moonlight режим
+#     меняется на лету: wolf-res + global_prep_cmd Sunshine (cvt + xrandr).
+#     Виртуальный монитор драйвер считает DVI-монитором и режет режимы по частоте
+#     пикселей (165 МГц, single-link TMDS) и по диапазонам частот из EDID; эти
+#     проверки отключены в ModeValidation, иначе выше ~2048x1152 не подняться.
+#  #2 Атомарность Drive: заливка в ИМЯ.part -> moveto; rclone данных с
+#     --drive-use-trash=true (перезапись/удаление восстановимы); .part мимо корзины.
+#  #3 Безопасная распаковка: identity НИКОГДА не в '/'. Скачивание в temp, tar -tf
+#     (запрет абсолютных путей и '..'), staging, проверка симлинков через realpath,
+#     копирование allowlist на фиксированные пути. Пользовательские архивы — всегда
+#     от desktop-юзера (не root), защита GNU tar 1.34 от traversal.
+#  #4 Изоляция: iptables WOLF_SUN — порты Sunshine 47984-48010 (вкл. веб-UI 47990)
+#     И страница статуса WOLF_PORT только с tailscale0 и lo, остальное DROP;
+#     политика INPUT не трогается (SSH и управление Vast работают).
+#  #5 Авторизация Steam / гонка: machine-id + local.vdf + config/config.vdf
+#     (ConnectCache) + loginusers.vdf + userdata/ + ssfn* + registry.vdf. Таймеры
+#     после wolf-boot + ConditionPathExists=/run/wolf/boot-done; sentinel ставится
+#     только после восстановления и запуска Steam; flock на каждый архив.
+#
+# СЕКРЕТЫ. В файле их нет: RCLONE_REFRESH_TOKEN и TAILSCALE_AUTHKEY передаются через
+# Vast (Environment Variables) или загрузчик on-start. ZeroTier включается переменной
+# ZT_NETWORK_ID (без неё не ставится и не запускается).
+#  * refresh-token — только в /root/.config/rclone/rclone.conf (600, root).
+#  * auth-key Tailscale — в /etc/wolf/tskey (600, root), передаётся как file: (не в ps).
+#  * Оба вычищаются из /etc/environment; пользовательские процессы стартуют через env -i.
+#  * Старт без секретов не затирает сохранённые токен и ключ.
+#  * Не держите два инстанса одновременно. Останавливайте через `sudo wolf shutdown`.
+#
+# ДОСТУП ПО SSH ЧЕРЕЗ TAILSCALE включён по умолчанию (TAILSCALE_SSH=1): любой узел
+# вашей сети Tailscale получает root на инстансе. Для личной сети это удобно; если
+# сеть общая — поставьте TAILSCALE_SSH=0.
+#
+# ЯЗЫК STEAM. STEAM_LANG пуст по умолчанию: флаг -language не передаётся, Steam берёт
+# язык из своих настроек (они восстанавливаются вместе с steam-state). Задайте
+# STEAM_LANG=russian (english, german, ...), чтобы принудительно фиксировать язык.
+#
+# ОФЛАЙН-РЕЖИМ STEAM. В офлайне Steam берёт данные о лицензиях и играх из кэша appcache;
+# без него он бесконечно крутит заставку. Кэш (без веб-кэша) сохраняется архивом
+# steam-cache: во время работы — когда он два прохода подряд не менялся (Steam его не
+# пишет, копия целая), при выключении — только если Steam уже закрыт. Восстанавливается
+# до запуска Steam. Если офлайн-режим включён, а кэша нет, этот запуск идёт онлайн:
+# Steam соберёт кэш, на странице статуса и в уведомлении будет подсказка снова
+# включить автономный режим.
+#
+# ИГРЫ STEAM В ОБЛАКЕ (SYNC_STEAM_GAMES=1). Каждая игра — отдельный архив sgame--<папка>
+# (рядом бывает дельта sgame--<папка>.tar.zst.<8 символов>), сохранения — отдельно, в
+# pfx--<appid>. Ненужную игру можно убрать из облака любым из трёх способов:
+#  * удалить её файлы на Drive вручную — скрипт заметит и перестанет её выгружать;
+#  * sudo wolf forget 'sgame--<папка>' — то же из терминала, файлы уходят в корзину Drive;
+#  * удалить игру в Steam — её архив больше не восстанавливается на новых инстансах.
+# Если в библиотеке Steam осталась игра, которой нет ни на диске, ни в облаке, при
+# загрузке её манифест убирается, и Steam показывает игру неустановленной, а не сломанной.
+#
+# ЧТО СИНХРОНИЗИРОВАТЬ (v3.9). Три выключателя, по умолчанию всё включено:
+#  * SYNC_STEAM_GAMES=0 — игры Steam (sgame--) не скачиваются из облака и не выгружаются:
+#    Steam сам докачает их из магазина;
+#  * SYNC_OTHER_GAMES=0 — игры из папки GAMES_DIR (game--) не скачиваются и не выгружаются;
+#  * SYNC_SAVES=0 — сохранения (префиксы Proton, pfx--) не скачиваются и не выгружаются —
+#    например, если сохранения и так хранит Steam Cloud.
+# Выключенное помечается в статусе «синхронизация выключена». Ручные wolf push/restore/forget
+# работают всегда.
+#
+# ИГРЫ ИЗ ПАПКИ — В БИБЛИОТЕКЕ STEAM (v4.1). Каждая подпапка GAMES_DIR с .exe появляется в Steam
+# сторонней игрой с Proton (wolf-shortcuts.py): при загрузке и при выключении, когда Steam закрыт.
+# Номер игры считается как у самого Steam, поэтому её сохранения (pfx--<номер>) общие на всех машинах.
+# Игры, добавленные в Steam руками, не трогаются; папку удалили — игра пропадает из библиотеки.
+#
+# БОЛЬШИЕ АРХИВЫ — ЧАСТЯМИ (v4.4). Google Drive отдаёт и принимает один файл одним потоком (~25 МБ/с):
+# игра на 50 ГБ восстанавливалась 35+ минут. Архив больше 512 МБ теперь хранится частями ИМЯ.tar.zst.g…-0000…
+# с оглавлением ИМЯ.tar.zst.parts, части идут по 4 сразу (wolf-parts.py), на диске — лишь несколько частей.
+# Новая версия появляется только целиком (сначала части, потом оглавление), оборвалось — цела прежняя.
+# Маленькие архивы (вход в Steam, личность, сохранения) — одним файлом, как раньше.
+# СКАЧИВАНИЕ КУСКАМИ (v4.5). Архивы качаются кусками по 64 МБ, до 8 сразу, прямо в распаковку, без временных
+# файлов — в том числе большие одиночные архивы, выгруженные до v4.4 (им не нужно заново выгружаться частями).
+# ВЫБОР ИГР (v4.6). Приложение передаёт, какие игры скачивать и выгружать (VG_SYNC: игры и выключенные
+# сохранения; нет его — как раньше, выключатели SYNC_*). Служебное Steam (Proton, Runtime…) — всегда. Паспорта
+# невыбранных игр прячутся от Steam. Во время игры раз в 30 с: игру удалили, а она есть в облаке, — вопрос
+# «удалить и оттуда?» (ask--del--АРХИВ на странице статуса); появилась невыбранная — «синхронизировать?»
+# (ask--new--АРХИВ); ответ — wolf answer (приложение, /cmd). Без ответа ничего не теряется: новая выгружается
+# при выключении, удалённая остаётся в облаке. Запущенная игра не выгружается, пока не закрыта; по выходу — не
+# чаще раза в 10 минут (раньше «мигающая» игра выгружалась каждую минуту). Список игр для приложения —
+# vastgame-games.json в облаке (wolf-games.py): архив, номер Steam (его сохранения — pfx--номер), название.
+# Ход каждого архива (проценты и скорость, скачивание и выгрузка) — в /json поле progress {done, total, speed}.
+# [v4.7] Игра Steam выгружается, только когда Steam установил её целиком (StateFlags в паспорте, steam_ready):
+# недокачанная не уезжает в облако частями — ни раз в 15 минут, ни при выключении, ни по выходу из игры.
+# [v4.8] ИГРЫ STEAM — ИЗ STEAM. Новое приложение (VG_SYNC с "steam": "store") больше не синхронизирует игры Steam
+# с облаком: их качает сам Steam (быстрее, чем Google Drive); вопросов о них нет, архивы sgame-- в облаке не
+# трогаются. Игры из папки Games, сохранения и вход в Steam — как раньше. Игра, выбранная в библиотеке приложения
+# (VG_PLAY: номер, аккаунт, название), — перед запуском Steam: вход нужным аккаунтом (если им на машине уже входили;
+# иначе Steam покажет окно входа), паспорт игры (Steam сам начнёт качать), ход скачивания — запись play на странице
+# статуса (wait login → down с progress → up → ok), скачалась — запуск (steam -applaunch). wolf-steam.py.
+# VG_SYNC и VG_PLAY теперь доходят и до загрузки на KVM (раньше служба systemd их не видела — выбор игр там не
+# работал): сохраняются в /etc/wolf/env как VGS и VGP.
+# [v4.9] Вход в Steam для игры из библиотеки определяется надёжнее: вход нужным аккаунтом после запуска Steam
+# (а не последняя строка журнала) или идущее скачивание.
+# [v5.0] МОДЫ. Игру качает Steam (чистую), моды — то, что потом появилось или изменилось в её папке, — уезжают в облако
+# отдельным архивом mod--НОМЕР--Название (wolf-mods.py): только эти файлы и список удалённых. Чистая игра запоминается,
+# как только Steam её поставил (снимок в $S/van). После выхода из игры — вопрос «сохранять моды?» (ask--mod--mod--НОМЕР;
+# ответ запоминается, приложение передаёт прежние ответы в VG_SYNC "mods": {"yes": [...], "no": [...]}); «да» — выгрузка
+# сразу и потом сама; без ответа — при выключении (кроме одних логов, дампов и кэшей). Запуск из библиотеки «с модами»
+# (VG_PLAY "mods": true): Steam поставил чистую игру → моды из облака поверх → запуск. Steam обновил игру за сессию — моды
+# этой игры не выгружаются (обновление могло затереть их часть — облако не перезаписываем неполным архивом).
+# [v5.1] Вопросов о модах нет (решение Алексея 2026-10-02): моды выгружаются, только если у игры включён тумблер
+# «Сохранять моды в облако» в приложении (VG_SYNC "mods": {"yes": [...]}; во время игры — wolf answer mod mod--НОМЕР
+# yes|no). Выключен — моды остаются только на этой машине.
+# [v5.2] У ссылок в папке игры время не сравнивается (распаковка ставит им «сейчас») — те же моды не выгружаются повторно.
+# [v5.3] Вышли из аккаунта Steam на машине — его данные (userdata/НОМЕР) при выключении убираются и уходят из облака
+# вместе со steam-state (вход и пропуск Steam убирает сам): убирается папка любого аккаунта, которого нет в списке
+# входа Steam (loginusers.vdf), — и вышедшего за сессию, и раньше. Только если steam-state при загрузке восстановлен.
+# Сохранения (pfx--) не трогаются.
+# [v5.4] ПРОГРАММЫ ИГР. Трейнеры и программы для модов запускаются рядом с игрой — её Proton, префикс и контейнер
+# Steam Linux Runtime (wolf-steam.py progs-*): кнопкой из приложения (wolf prog run НОМЕР ID) или сами «вместе с
+# игрой» (VG_SYNC "progs": {номер: [id]}, во время игры — wolf prog auto). Программы — .exe, добавленные в папку игры
+# (сохраняются с модами), и папка Programs (PROGRAMS_DIR = ~/Downloads/Programs, ярлык на рабочем столе): подпапка = архив
+# prog--ПАПКА (как игры из Games, но в Steam не добавляется, вопросов о ней нет). Список — запись progs на /json.
+# [v5.5] Программа запускается от имени пользователя игры: в Docker root не читает окружение её процесса (нет
+# CAP_SYS_PTRACE) — v5.4 отвечал «не через Proton» при запущенной игре.
+# [v5.6] ЗАПУСК ИГРЫ ЧЕРЕЗ ПРОГРАММУ И УСТАНОВКА В ИГРУ. Загрузчики модов (XIVLauncher, SKSE…) запускаются вместо .exe
+# игры: в параметры запуска Steam ставится прокладка vg-launch (в домашней папке — видна и внутри Steam Linux Runtime),
+# она подменяет в команде Proton .exe игры на программу из ~/.local/share/vastgame/launch/НОМЕР (wolf prog launch;
+# VG_SYNC "launch") — только у игр с включённым тумблером «Моды» (sel.mods_on). Установщики («Установить в игру», wolf prog install) — так же, один раз (.once): ставятся в префикс
+# игры, а он едет в облако с сохранениями (pfx--); их .exe — в списке программ (id «pfx:путь в drive_c»).
+#
+# ПАСПОРТА ИГР STEAM (v4.2). Файлы appmanifest_*.acf (по ним Steam знает, что игра установлена) всегда
+# уезжают в облако со steam-state. Синхронизация игр Steam выключена — паспорта игр без файлов на диске
+# прячутся в steamapps/.vastgame-hidden (иначе Steam сам начнёт качать всю библиотеку); включена —
+# возвращаются, и игры восстанавливаются из облака. Раньше выключенная синхронизация стирала паспорта.
+#
+# STEAM INPUT (v4.3) по умолчанию выключен для каждой игры, где ты сам не выбирал в её свойствах
+# («Контроллер» → Steam Input): игры получают геймпад напрямую как Xbox-контроллер. В Docker со
+# Steam Input игры геймпад не видели. Включить для игры — в её свойствах, выбор сохранится.
+#
+# ВЫГРУЗКА ПО ВЫХОДУ ИЗ ИГРЫ. wolf-watch.service раз в 5 с смотрит, какие игры запущены
+# (Steam — по процессу reaper с AppId, игры из GAMES_DIR — по пути к их папке у
+# процессов), и через ~10 с после выхода сразу выгружает их архивы: префикс Proton
+# (и папку игры при SYNC_STEAM_GAMES=1) или папку из GAMES_DIR. Таймеры — страховка.
+#
+# УВЕДОМЛЕНИЯ. Только об успешной выгрузке сохранений: одно на игру, после выхода из
+# неё; скрываются через NOTIFY_SEC секунд (по умолчанию 8), NOTIFY_SAVES=0 — выключить.
+# Ошибки — в /var/log/wolf.log и на странице статуса http://<tailscale-ip>:WOLF_PORT.
+#
+# АВТООБНОВЛЕНИЯ UBUNTU отключены: на одноразовом инстансе они ставят новое ядро и
+# библиотеки прямо во время игры и требуют перезагрузки.
+#
+# DOCKER (v4.0, WOLF_MODE=docker). Обычный контейнер Vast без systemd, /dev/net/tun и user
+# namespaces — образ vastgame-desktop (папка docker/ репозитория): X, звук, Sunshine, рабочий стол и
+# Steam с заплатками он поднимает сам, а wolf здесь — тот же агент, те же архивы в облаке и та же
+# страница статуса, что на KVM (общие для обоих). Отличия режима: службы systemd заменяет
+# «wolf supervise» (страница статуса, наблюдение за играми, загрузка и таймеры), Tailscale — в
+# userspace-режиме без Tailscale SSH (команды приложения идут через страницу /cmd), firewall и
+# настройка экрана пропускаются (делает образ), Sunshine перезапускает скрипт образа со своими
+# настройками захвата — связка с Moonlight общая с KVM. На KVM ничего из этого не действует.
+# ==============================================================================
+
+# Переменные из Vast (/etc/environment) имеют приоритет над значениями ниже.
+set -a; . /etc/environment 2>/dev/null; set +a
+
+# =============================== СЕКРЕТЫ И ФЛАГИ ===============================
+export RCLONE_REFRESH_TOKEN="${RCLONE_REFRESH_TOKEN:-}"
+export TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
+export STEAM_FREEZE="${STEAM_FREEZE:-1}"          # 1 = не обновлять клиент Steam при запуске
+export SYNC_STEAM_GAMES="${SYNC_STEAM_GAMES:-1}"  # 1 = синхронизировать сами Steam-игры (0 — перекачивать со Steam)
+export SYNC_OTHER_GAMES="${SYNC_OTHER_GAMES:-1}"  # 1 = синхронизировать игры из GAMES_DIR (не из Steam)
+export SYNC_SAVES="${SYNC_SAVES:-1}"              # 1 = синхронизировать сохранения (префиксы Proton)
+export AUTO_RES="${AUTO_RES:-1}"                  # 1 = управлять разрешением (EDID/xorg + wolf-res)
+export WOLF_MODE="${WOLF_MODE:-kvm}"              # kvm | docker (v4.0; docker задаёт образ vastgame-desktop)
+
+set -uo pipefail
+umask 022
+[ "$(id -u)" = 0 ] || { echo "Запускайте от root"; exit 1; }
+mkdir -p /etc/wolf /var/lib/wolf /run/wolf
+exec > >(tee -a /var/log/wolf-setup.log) 2>&1
+echo "=== wolf-setup $(date '+%F %T')"
+
+WM="$WOLF_MODE"
+[ "$WM" = docker ] || WM=kvm
+# Автообновления Ubuntu выключаются до того, как успеют сработать их таймеры (в Docker их нет)
+[ "$WM" = docker ] || systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service &>/dev/null || true
+
+# ================================== НАСТРОЙКИ ==================================
+R="${R_REMOTE:-gdrive:vastai-cloud-games}"     # папка в Google Drive
+ZT="${ZT_NETWORK_ID:-}"                        # сеть ZeroTier (пусто = без ZeroTier)
+TSH="${TAILSCALE_HOSTNAME:-vastai-gaming}"
+TSX="${TAILSCALE_EXTRA_ARGS:-}"                # доп. флаги tailscale up
+TSS="${TAILSCALE_SSH:-1}"                      # 1 = поднимать Tailscale SSH (root из своей сети)
+SF="$STEAM_FREEZE"; SG="$SYNC_STEAM_GAMES"; SO="$SYNC_OTHER_GAMES"; SV="$SYNC_SAVES"; AR="$AUTO_RES"
+SL="${STEAM_LANG:-}"                           # пусто = не передавать -language вообще
+RES="${RES:-1920x1200}"                        # базовое разрешение рабочего стола
+PAR="${PAR:-4}"                                # архивов параллельно
+VGS="${VG_SYNC:-}"; VGP="${VG_PLAY:-}"         # [v4.8] выбор игр и игра для запуска (не секреты) — в /etc/wolf/env
+ZL="${ZSTD_STATE:-3}"                          # zstd для состояния/префиксов
+ZG="${ZSTD_GAMES:-1}"                          # zstd для игр
+SMIN="${STATE_SYNC_MIN:-5}"                    # период синхронизации состояния, мин
+GMIN="${GAMES_SYNC_MIN:-15}"                   # период синхронизации игр, мин
+NT="${NOTIFY_SAVES:-1}"                        # 1 = уведомлять о выгрузке сохранений
+NS="${NOTIFY_SEC:-8}"                          # сколько секунд показывать уведомление
+WP="${WOLF_PORT:-8099}"                        # порт страницы статуса (закрыт тем же firewall)
+
+DU="${DESKTOP_USER:-$(getent passwd 1000 | cut -d: -f1)}"
+[ -n "$DU" ] || DU=$(getent passwd | awk -F: '$3>=1000 && $3<60000 {print $1; exit}')
+[ -n "$DU" ] || { echo "Не найден пользователь рабочего стола"; exit 1; }
+DH=$(getent passwd "$DU" | cut -d: -f6)
+UI=$(id -u "$DU")
+GD="${GAMES_DIR:-$DH/Downloads/Games}"         # игры вне Steam: подпапка = архив
+PD="${PROGRAMS_DIR:-$DH/Downloads/Programs}"   # [v5.4] программы для игр и модов: подпапка = архив prog--
+
+# ============================== ПРОВЕРКА ОКРУЖЕНИЯ =============================
+# На KVM фатально только отсутствие systemd: без него службы и таймеры не заработают вовсе.
+# В Docker (v4.0) их заменяет «wolf supervise». Остальное — предупреждения, чтобы причина была
+# видна сразу, а не через час отладки.
+EW=()
+if [ "$WM" = docker ]; then
+  # Контейнер без /dev/net/tun: ни ZeroTier, ни Tailscale SSH (команды — через страницу /cmd)
+  [ -z "$ZT" ] || EW+=("ZT_NETWORK_ID в Docker не поддерживается (нет /dev/net/tun) — ZeroTier пропущен")
+  ZT= TSS=0
+  [ -x /opt/vastgame/sunshine-start.sh ] \
+    || EW+=("WOLF_MODE=docker, но это не образ vastgame-desktop — Sunshine и экран работать не будут")
+else
+  [ -d /run/systemd/system ] || {
+    echo "ОШИБКА: systemd не управляет системой — нужен KVM-инстанс (для контейнера — образ vastgame-desktop)"
+    exit 1; }
+fi
+. /etc/os-release 2>/dev/null
+if [ "$WM" = docker ]; then
+  [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = "24.04" ] \
+    || EW+=("система «${PRETTY_NAME:-неизвестна}» — режим Docker проверялся только на Ubuntu 24.04")
+else
+  [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = "22.04" ] \
+    || EW+=("система «${PRETTY_NAME:-неизвестна}» — скрипт проверялся только на Ubuntu 22.04")
+fi
+{ hash nvidia-smi 2>/dev/null && nvidia-smi -L &>/dev/null; } \
+  || EW+=("NVIDIA не обнаружена — управление разрешением отключится, аппаратного кодировщика может не быть")
+[ -n "$RCLONE_REFRESH_TOKEN" ] || [ -s /root/.config/rclone/rclone.conf ] \
+  || EW+=("нет RCLONE_REFRESH_TOKEN — синхронизации с Google Drive не будет")
+[ -n "$TAILSCALE_AUTHKEY" ] || [ -s /etc/wolf/tskey ] \
+  || EW+=("нет TAILSCALE_AUTHKEY — узел поднимется только из восстановленного состояния")
+[ ${#EW[@]} -eq 0 ] || printf '!!! %s\n' "${EW[@]}"
+
+# ==================== [HARDENING] ИЗОЛЯЦИЯ СЕКРЕТОВ ============================
+chmod 700 /etc/wolf
+umask 077
+# Пустое значение не затирает сохранённый ключ: без него узел поднимается
+# из восстановленного состояния Tailscale
+if [ -n "$TAILSCALE_AUTHKEY" ]; then
+  printf '%s' "$TAILSCALE_AUTHKEY" > /etc/wolf/tskey
+  chown root:root /etc/wolf/tskey; chmod 600 /etc/wolf/tskey
+fi
+if [ -f /etc/environment ]; then
+  sed -i -E '/^(export[[:space:]]+)?(RCLONE_REFRESH_TOKEN|TAILSCALE_AUTHKEY)=/d' /etc/environment
+fi
+# [v3.11] Ограниченный ключ Vast ЭТОГО инстанса (Vast кладёт его в CONTAINER_API_KEY: им можно
+# только запустить, остановить или удалить этот инстанс) — для «wolf finish»: удалить себя после
+# подтверждённой выгрузки, даже если связь с компьютером пропала. Копия — в файл 600 root.
+# Из /etc/environment не убираем: не знаем, не нужен ли он там самому Vast.
+if [ -n "${CONTAINER_API_KEY:-}" ]; then
+  printf '%s' "$CONTAINER_API_KEY" > /etc/wolf/vastkey
+  chown root:root /etc/wolf/vastkey; chmod 600 /etc/wolf/vastkey
+fi
+VI="${CONTAINER_ID:-}"                          # номер инстанса в Vast (не секрет)
+umask 022
+
+# /etc/wolf/env НЕ содержит секретов (auth-key -> /etc/wolf/tskey, token -> rclone.conf, ключ Vast -> vastkey)
+# [v5.6] SMIN/GMIN — периоды синхронизации для wolf supervise (Docker): без них в /etc/wolf/env цикл получал пустые
+# значения и запускал state и games каждые 20 с вместо 5 и 15 мин (с v4.0; заметили 2026-10-08 — сохранения FF14
+# выгружались по кругу)
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD PD VI WM VGS VGP SMIN GMIN > /etc/wolf/env
+chmod 600 /etc/wolf/env
+
+# Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
+touch /var/log/wolf.log; chmod 644 /var/log/wolf.log
+touch /var/log/wolf-res.log; chown "$DU:" /var/log/wolf-res.log; chmod 644 /var/log/wolf-res.log
+# [HARDENING #1] базовое разрешение для wolf-res (читается от пользователя)
+echo "$RES" > /etc/wolf-res.conf; chmod 644 /etc/wolf-res.conf
+
+# ================================ ЗАВИСИМОСТИ ==================================
+export DEBIAN_FRONTEND=noninteractive
+echo 'DPkg::Lock::Timeout "600";' > /etc/apt/apt.conf.d/90wolf
+for _ in {1..60}; do getent hosts github.com >/dev/null && break; sleep 2; done
+
+# В Docker всё нужное уже в образе (там своя, закреплённая Sunshine и Steam с заплатками) —
+# ничего не ставим: apt здесь только потерял бы время
+if [ "$WM" = docker ]; then
+  [ -f /usr/bin/steam ] && ! grep -q -- '-cef-enable-debugging' /usr/bin/steam 2>/dev/null \
+    && sed -i 's/-cef-disable-gpu-compositing/-cef-disable-gpu-compositing -cef-enable-debugging/' /usr/bin/steam
+else
+# xrandr/xhost/xset — x11-xserver-utils, cvt — xserver-xorg-core
+hash curl zstd unzip xhost xset xrandr cvt notify-send python3 iptables zenity 7z bsdtar 2>/dev/null || {
+  apt-get update -q
+  apt-get install -yq curl zstd unzip x11-xserver-utils xserver-xorg-core libnotify-bin python3 iptables zenity p7zip-full libarchive-tools
+}
+hash rclone 2>/dev/null    || curl -fsSL https://rclone.org/install.sh | bash
+hash tailscale 2>/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
+[ -z "$ZT" ] || hash zerotier-cli 2>/dev/null || curl -fsSL https://install.zerotier.com | bash
+
+if ! hash sunshine 2>/dev/null; then
+  url=$(curl -fsSL https://api.github.com/repos/LizardByte/Sunshine/releases/latest \
+        | grep -oP '"browser_download_url":\s*"\K[^"]+ubuntu.?22\.04.amd64\.deb' | head -1)
+  [ -n "$url" ] && curl -fsSLo /tmp/sunshine.deb "$url" && apt-get install -yq /tmp/sunshine.deb
+fi
+if [ ! -x /usr/games/steam ]; then
+  curl -fsSLo /tmp/steam.deb https://cdn.akamai.steamstatic.com/client/installer/steam.deb \
+    && dpkg --add-architecture i386 && apt-get update -q && apt-get install -yq /tmp/steam.deb
+fi
+fi
+
+# =================================== rclone ====================================
+# access_token не пустой + истёкший expiry => rclone сразу обновит его по refresh_token
+# (при пустом access_token rclone 1.71 теряет refresh_token). Если секрет при старте
+# не передан, рабочий конфиг не трогаем.
+mkdir -p /root/.config/rclone
+if [ -n "$RCLONE_REFRESH_TOKEN" ]; then
+  cat > /root/.config/rclone/rclone.conf <<EOF
+[gdrive]
+type = drive
+scope = drive
+client_id = ${RCLONE_CLIENT_ID:-}
+client_secret = ${RCLONE_CLIENT_SECRET:-}
+token = {"access_token":"x","token_type":"Bearer","refresh_token":"$RCLONE_REFRESH_TOKEN","expiry":"2000-01-01T00:00:00Z"}
+EOF
+  chmod 600 /root/.config/rclone/rclone.conf
+fi
+
+# Атомарная запись скриптов (повторный on-start не ломает работающий экземпляр)
+w() { cat > "$1.new" && chmod "${2:-755}" "$1.new" && mv -f "$1.new" "$1"; }
+
+# ============================= /usr/local/bin/wolf =============================
+w /usr/local/bin/wolf <<'WOLF'
+#!/bin/bash
+# wolf — синхронизация с Google Drive и запуск окружения
+#   wolf boot              полный цикл загрузки (wolf-boot.service)
+#   wolf state | games     синхронизация (таймеры, гейт по /run/wolf/boot-done)
+#   wolf shutdown          корректно закрыть Steam и сразу выгрузить всё
+#   wolf sunshine-creds [ЛОГИН]  [v3.13] задать логин кабинета Sunshine, пароль — во вход команды
+#   wolf finish            [v3.11] выгрузить всё, проверить и удалить инстанс — отдельной
+#                          службой: обрыв связи с компьютером её не прерывает
+#   wolf restore ИМЯ...    восстановить архивы (FORCE=1 — даже если актуальны)
+#   wolf push ИМЯ...       сразу выгрузить указанные архивы (при выходе из игры);
+#                          FORCE=1 — снова выгружать архив, убранный из облака
+#   wolf forget ИМЯ...     убрать архивы игр из облака (в корзину Drive) и больше
+#                          не выгружать их с этого инстанса
+#   wolf watch             следить за запуском и выходом игр (wolf-watch.service)
+#   wolf firewall          [HARDENING #4] переприменить изоляцию портов
+#   wolf display           [HARDENING #1] привести EDID/xorg.conf к нужному виду и
+#                          вернуть базовый режим (может перезапустить X)
+. /etc/wolf/env
+export RCLONE_CONFIG=/root/.config/rclone/rclone.conf
+S=/var/lib/wolf     # h/ отпечаток  m/ манифест базы  v/ версия облака  p/ ожидание
+                    # st/ статусы  nt/ сохранения, ожидающие уведомления
+                    # nm/ названия сторонних игр, запущенных через Steam
+                    # x/ архивы, убранные из облака, — их больше не выгружаем
+T=/var/tmp/wolf     # временные файлы
+L=/run/wolf         # блокировки, найденный X-дисплей, boot-done
+D=:0 SR=
+mkdir -p "$S"/{h,m,v,p,st,nt,nm,x,pg} "$T" "$L"
+[ -f "$L/x" ] && . "$L/x"
+
+# ------------------------------------------------------------------ утилиты ---
+# [HARDENING #2] rc — данные (перезапись/удаление в корзину, восстановимо)
+# [v5.14] Drive иногда помечает архив с файлами игры как вредоносный и отвечает 403.
+# --drive-acknowledge-abuse просит отдать файл всё равно. Обычные файлы качаются как раньше.
+rc()  { rclone "$@" --retries=5 --low-level-retries=20 --drive-use-trash=true \
+          --drive-pacer-min-sleep=10ms --drive-pacer-burst=200 --drive-acknowledge-abuse; }
+# rcp — служебные .part/устаревшие дельты (мимо корзины, чтобы не копить мусор)
+rcp() { rclone "$@" --retries=5 --low-level-retries=20 --drive-use-trash=false \
+          --drive-pacer-min-sleep=10ms --drive-pacer-burst=200 --drive-acknowledge-abuse; }
+rd()  { cat "$1" 2>/dev/null; }
+log() { echo "[$(date '+%F %T')] $*" | tee -a /var/log/wolf.log; }
+st()  { echo "$(date +%s)|$2|$3" > "$S/st/$1"; log "$1: $2 $3"; case $2 in ok|err) rm -f "$S/pg/$1" ;; esac; }
+# [HARDENING] env -i => секреты (если бы были в env root) НЕ попадают в игры
+u()   { runuser -u "$DU" -- env -i \
+          HOME="$DH" USER="$DU" LOGNAME="$DU" \
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+          LANG=C.UTF-8 DISPLAY="$D" XAUTHORITY="$DH/.Xauthority" \
+          XDG_RUNTIME_DIR="/run/user/$UI" \
+          DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UI/bus" "$@"; }
+# [v4.0] Tailscale: на KVM — служба systemd; в Docker — tailscaled без /dev/net/tun
+# (userspace, запуск — скрипт образа, те же путь состояния и сокет)
+tsd() {
+  if [ "${WM:-kvm}" = docker ]; then
+    case $1 in
+      stop)  pkill -x tailscaled && sleep 2 ;;
+      start) /opt/vastgame/tailscaled-start.sh ;;
+    esac
+    return 0
+  fi
+  systemctl "$1" tailscaled 2>/dev/null
+}
+# Уведомление на рабочем столе: обычная срочность, скрывается через NS секунд,
+# transient — не остаётся в истории. Код возврата не влияет на сервисы.
+ntf() { u notify-send -a Wolf -i document-save -u normal -t "$(( ${NS:-8} * 1000 ))" \
+          -h int:transient:1 "$@" &>/dev/null; :; }
+
+# Корень Steam относительно $DH
+sr() {
+  local c p; SR=
+  for c in .steam/steam .local/share/Steam; do
+    p=$(readlink -f "$DH/$c") && [ -d "$p/config" ] && { SR=${p#"$DH"/}; return 0; }
+  done
+  return 1
+}
+
+rl() { rc lsf --files-only -F phs --hash MD5 -s $'\t' "$R"; }
+# [v4.4] Объект (архив или его дельта) — одним файлом ИМЯ или частями с оглавлением ИМЯ.parts
+# (wolf-parts.py); при обоих видах верно оглавление, версия частей — MD5 оглавления
+rver() {
+  awk -F'\t' -v b="$1.tar.zst" '{H[$1]=$2}
+    END{h=H[b".parts"]; if(h=="") h=H[b]
+        if(h!=""){d=b"."substr(h,1,8); dh=H[d".parts"]; if(dh=="") dh=H[d]; print h (dh!=""?"+"dh:"")}}' "${2:-$LS}"
+}
+names() { sed -n -E 's/\.tar\.zst(\.parts)?\t.*//p' "$LS" | awk '!s[$0]++' | grep -E "$1"; }
+# [v4.4] Большие архивы — частями, параллельно: parts put|get|rm ОБЪЕКТ [--no-trash] (ход — в wolf.log)
+parts() { local c=$1; shift; WOLF_TMP="$T" WOLF_PG="${PG:-}" python3 /usr/local/bin/wolf-parts.py "$c" "$R" "$@" 2>>/var/log/wolf.log; }
+ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null; }
+# [v5.7] Игры из Games без тех, что сейчас добавляет помощник vg-open (метка ~/.local/share/vastgame/adding/ПАПКА с
+# номером его процесса) и без его временных папок распаковки (*.vgtmp): о недоустановленной игре не спрашивать и не
+# выгружать её (живой случай 2026-10-09: вопрос «новая игра 7-Zip» всплыл посреди установки). Процесса нет — метка не
+# мешает (помощник упал, машину перезапустили).
+ldg() {
+  local n p
+  ld "$GD" game-- | while IFS= read -r n; do
+    case $n in *.vgtmp) continue ;; esac
+    p=$(cat "$DH/.local/share/vastgame/adding/${n#game--}" 2>/dev/null) || p=""
+    [[ $p =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && continue
+    echo "$n"
+  done
+}
+# Папка для игр не из Steam (v3.10): если её нет — создать пустой. Зовётся при загрузке и каждые
+# GMIN минут вместе с синхронизацией игр: случайно удалённая папка возвращается сама. Облако
+# при этом не страдает — выгружаются только папки, которые есть на диске.
+mkgd()  { [ -d "$GD" ] || { u mkdir -p "$GD" && log "папка для игр $GD создана"; }; }
+# [v5.7] Двойной щелчок на рабочем столе машины (XFCE в Docker, KDE на KVM — обе читают mimeapps.list): .exe, .msi и
+# архивы открывает помощник vg-open; язык его окон — язык Steam (его задаёт приложение по языку VastGame)
+OWN_MIME="application/x-ms-dos-executable application/x-msdownload application/x-msi application/x-ms-installer
+application/vnd.microsoft.portable-executable application/zip application/x-7z-compressed application/vnd.rar
+application/x-rar application/x-rar-compressed"
+own_setup() {
+  local a="$DH/.local/share/applications" v="$DH/.local/share/vastgame" l
+  u mkdir -p "$a" "$v/requests" "$DH/.config"
+  case ${SL:-} in russian) l=ru ;; spanish|latam) l=es ;; *) l=en ;; esac
+  u sh -c 'echo "$1" > "$0"' "$v/lang" "$l"
+  u sh -c 'printf "%s\n" "[Desktop Entry]" "Type=Application" "Name=VastGame" "Exec=/usr/local/bin/vg-open %f" \
+    "MimeType=$1" "NoDisplay=true" > "$0"' "$a/vastgame-open.desktop" "$(echo $OWN_MIME | tr ' ' ';');"
+  u python3 - "$DH/.config/mimeapps.list" $OWN_MIME <<'PY'
+import sys, re
+path, mimes = sys.argv[1], sys.argv[2:]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    text = ""
+lines, sect, out, seen = text.splitlines(), None, [], False
+for ln in lines:
+    m = re.match(r"^\[(.+)\]$", ln.strip())
+    if m:
+        if sect == "Default Applications" and not seen:
+            out += [f"{x}=vastgame-open.desktop" for x in mimes]; seen = True
+        sect = m.group(1)
+    elif sect == "Default Applications" and ln.split("=", 1)[0] in mimes:
+        continue                                           # наше значение — ниже, заново
+    out.append(ln)
+if sect == "Default Applications" and not seen:
+    out += [f"{x}=vastgame-open.desktop" for x in mimes]; seen = True
+if not seen:
+    out += ["", "[Default Applications]"] + [f"{x}=vastgame-open.desktop" for x in mimes]
+open(path, "w", encoding="utf-8").write("\n".join(out).strip("\n") + "\n")
+PY
+  hash update-desktop-database 2>/dev/null && u update-desktop-database "$a" 2>/dev/null
+  return 0
+}
+# [v5.7] Значки своих игр на рабочем столе машины (как ярлыки в Windows): двойной щелчок — vg-run, без вопросов.
+# Появляются один раз на машину (удалил значок — до следующей аренды не вернётся: $S/own.icons); игру удалили — убираются
+own_icons() {
+  local dk f d n
+  dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
+  [ -d "$dk" ] || return 0
+  for f in "$dk"/*.desktop; do
+    [ -e "$f" ] && grep -qx 'X-VastGame=own' "$f" || continue
+    d=$(sed -n 's/^X-VastGame-Folder=//p' "$f" | head -1)
+    [ -f "$d/.vastgame.json" ] || { rm -f "$f"; rmline "$d" own.icons; }
+  done
+  for d in "$GD"/*/; do
+    d=${d%/}; [ -f "$d/.vastgame.json" ] || continue
+    inlist "$d" own.icons && continue
+    n=${d##*/}; f="$dk/$n.desktop"
+    [ -e "$f" ] || u python3 - "$f" "$d" "$n" <<'PY'
+import sys
+path, folder, name = sys.argv[1:4]
+q = lambda s: '"' + "".join("\\" + c if c in '"`$\\' else c for c in s).replace("%", "%%") + '"'
+open(path, "w", encoding="utf-8").write("\n".join([
+    "[Desktop Entry]", "Type=Application", f"Name={name}", f"Exec=/usr/local/bin/vg-run {q(folder)}",
+    "Icon=applications-games", "Terminal=false", "X-VastGame=own", f"X-VastGame-Folder={folder}", ""]))
+PY
+    u chmod 755 "$f" 2>/dev/null
+    addline "$d" own.icons
+  done
+}
+# [v5.7] Пометка «исполняемый» у .exe/.msi в Загрузках и на рабочем столе: с ней XFCE пытается запустить файл как
+# программу Linux и молчит (живой случай 2026-10-09), а не отдаёт его помощнику; Windows-программам она не нужна
+own_noexec() {
+  local dk
+  dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
+  u find "$dk" "$DH/Downloads" -maxdepth 6 \( -name .prefix -o -name steamapps -o -name compatdata \) -prune -o \
+    -type f \( -iname '*.exe' -o -iname '*.msi' \) -perm /111 -exec chmod a-x {} + 2>/dev/null
+  return 0
+}
+# Запрос помощника (своя игра добавлена или стала своей): обновить ярлыки Steam — только когда не идёт ни одна игра
+# (Steam для этого закрывается и открывается)
+own_shortcuts() {
+  local r="$DH/.local/share/vastgame/requests/shortcuts"
+  [ -e "$r" ] || return 0
+  [ -n "$SR" ] || sr
+  [ -n "$SR" ] || return 0
+  running_keys | grep -qE '^(app|dir):' && return 0
+  rm -f "$r"
+  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --check >/dev/null 2>&1
+  [ $? = 3 ] || return 0
+  if pgrep -x steam >/dev/null; then steam_off && { shortcuts; steam_go; }; else shortcuts; fi
+  log "свои игры: ярлыки Steam обновлены по запросу помощника"
+}
+# [v5.7] Помощник двойного щелчка (vg-open, от имени пользователя) просит поставить установщик в «диск C:» игры Steam:
+# requests/install/НОМЕР.req — путь установщика от ~/.local/share/vastgame/installers (другие места wolf-steam.py не
+# примет). Дальше — как «Установить в игру» из окна; ответ — НОМЕР.res (prog: installing | running | notinstalled | nofile),
+# итог установки — НОМЕР.done (wolf-steam.py install_done). Раз в 5 с из wolf watch
+install_requests() {
+  local d="$DH/.local/share/vastgame/requests/install" f a p r
+  for f in "$d"/*.req; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    a=${f##*/}; a=${a%.req}
+    p=$(head -c 1024 "$f" | head -1); rm -f "$f"
+    [[ $a =~ ^[0-9]+$ ]] && [ -n "$p" ] || continue
+    r=$(prog_cmd install "$a" "inst:$p" 2>&1 | tail -1)
+    printf '%s\n' "$r" > "$d/$a.res"; chown "$DU:" "$d/$a.res" 2>/dev/null
+    log "установка в игру $a по просьбе помощника: ${p##*/} — $r"
+  done
+}
+# [v5.7] Просьбы помощника о программах: requests/prog/*.json → wolf-steam.py helper-req (закрытый список, проверка) →
+# wolf prog run|auto|launch; выбор (auto, launch) — в progs.helper для окна VastGame. Раз в 5 с из wolf watch
+prog_requests() {
+  local d="$DH/.local/share/vastgame/requests/prog" f cmd a id v r
+  for f in "$d"/*.json; do
+    [ -f "$f" ] || continue
+    IFS=$'\t' read -r cmd a id v < <(python3 /usr/local/bin/wolf-steam.py helper-req "$f")
+    rm -f "$f"
+    [ -n "$cmd" ] || continue
+    case $cmd in
+      run)    r=$(prog_cmd run "$a" "$id" 2>&1 | tail -1) ;;
+      auto)   r=$(prog_cmd auto "$a" "$id" "$v" 2>&1 | tail -1) ;;
+      launch) r=$(prog_cmd launch "$a" "$id" "$v" 2>&1 | tail -1) ;;
+    esac
+    case $cmd in auto|launch) python3 /usr/local/bin/wolf-steam.py helper-note "$S" "$a" "$cmd" "$id" "$v" ;; esac
+    log "программа ${id##*/} для $a по просьбе помощника: $cmd — $r"
+  done
+}
+# [v5.4] Папка Programs (программы для игр): подпапка = программа (архив prog--). Чтобы было понятно, зачем она, — внутри
+# README_ru/en/es.txt, на рабочем столе — ярлык Programs (рядом с Games). Имена латиницей — без кириллицы в путях Wine
+mkpd() {
+  local dk
+  [ -n "${PD:-}" ] || return 0
+  [ -d "$PD" ] || { u mkdir -p "$PD" && log "папка программ $PD создана"; }
+  # три файла — на языках VastGame (кириллица только внутри файлов, не в путях)
+  [ -e "$PD/README_ru.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README_ru.txt" <<'TXT'
+Programs — программы для игр
+
+Сюда кладут программы, которые нужны играм или модам: трейнеры, Cheat Engine, загрузчики модов и т.п.
+Каждую программу — в свою папку, например Programs/WeMod. Всё, что здесь лежит, сохраняется в облаке
+и появится на следующих машинах.
+
+Запускать — в VastGame, на главном экране, блок «Программы игры»: кнопкой «Запустить» или тумблером
+«Вместе с игрой». Программа откроется рядом с игрой, в том же Proton, — так трейнеры видят игру.
+TXT
+  [ -e "$PD/README_en.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README_en.txt" <<'TXT'
+Programs — programs for games
+
+Put programs that games or mods need here: trainers, Cheat Engine, mod loaders and so on.
+One folder per program, for example Programs/WeMod. Everything in this folder is saved to the cloud
+and will be there on your next machines.
+
+Start them in VastGame, on the main screen, in the "Game programs" block: with the "Start" button or the
+"With the game" switch. The program opens next to the game, in the same Proton — that's how trainers see the game.
+TXT
+  [ -e "$PD/README_es.txt" ] || u sh -c 'cat > "$1"' _ "$PD/README_es.txt" <<'TXT'
+Programs — programas para juegos
+
+Aquí van los programas que necesitan los juegos o los mods: trainers, Cheat Engine, cargadores de mods, etc.
+Cada programa en su propia carpeta, por ejemplo Programs/WeMod. Todo lo que hay aquí se guarda en la nube
+y estará en tus próximas máquinas.
+
+Inícialos en VastGame, en la pantalla principal, en el bloque «Programas del juego»: con el botón «Iniciar»
+o el interruptor «Con el juego». El programa se abre junto al juego, en el mismo Proton: así los trainers ven el juego.
+TXT
+  dk=$(u xdg-user-dir DESKTOP 2>/dev/null); [ -n "$dk" ] || dk="$DH/Desktop"
+  [ -d "$dk" ] && [ ! -e "$dk/Programs" ] && u ln -s "$PD" "$dk/Programs"
+  return 0
+}
+sz()    { tr '\0' '\n' < "$1" | awk -F'\t' '{s+=$3} END{printf "%.0f", s}'; }
+# [2026-10-15] Сколько байт прежней описи ($1) приходится на удалённые пути (список путей $2, через \0): удаление — тоже
+# изменение. Раньше поправка выбиралась только по новому и изменённому — после уборки 1.6 ГБ тестовых программ из «диска C:»
+# в облаке навсегда осталась прежняя основа (1.8 ГБ) с ними и качалась каждую аренду
+delsz() { awk -F'\t' 'NR==FNR{d[$0]=1;next} ($1 in d){s+=$3} END{printf "%.0f", s}' <(tr '\0' '\n' < "$2") <(tr '\0' '\n' < "$1"); }
+# Архив одной игры: его можно убрать из облака (wolf forget или вручную на Drive)
+gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*|prog--*|lgame--*|gsave--*) return 0 ;; esac; return 1; }
+# Перестать синхронизировать архив на этом инстансе: забыть версию, манифест и
+# отпечаток и поставить метку x/, чтобы таймеры и wolf-watch не выгрузили его снова
+drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1"; : > "$S/x/$1"; }
+# Каталоги установки из манифестов Steam: installdir из appmanifest_*.acf
+idirs() { sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$@" 2>/dev/null; }
+# [v4.2] Паспорта игр Steam хранятся в облаке всегда. Без синхронизации игр Steam паспорта игр, файлов которых
+# на диске нет, прячутся в steamapps/$HID — иначе Steam сам начнёт качать всю библиотеку; с синхронизацией
+# возвращаются на место, и игры восстанавливаются из облака. Steam в эту папку не заглядывает
+HID=.vastgame-hidden
+acf_hide() {
+  local s="$DH/$SR/steamapps" f d n=0
+  for f in "$s"/appmanifest_*.acf; do
+    [ -e "$f" ] || continue
+    d=$(idirs "$f" | head -1)
+    [ -n "$d" ] && [ -d "$s/common/$d" ] && continue
+    u mkdir -p "$s/$HID" && u mv -f "$f" "$s/$HID/" && n=$((n + 1))
+  done
+  [ $n = 0 ] || log "игры Steam: паспортов без файлов — $n, спрятаны от Steam (их игры сюда не скачиваются); в облаке сохранены"
+  return 0
+}
+acf_unhide() {
+  local s="$DH/$SR/steamapps" f n=0
+  for f in "$s/$HID"/appmanifest_*.acf; do
+    [ -e "$f" ] || continue
+    if [ -e "$s/${f##*/}" ]; then u rm -f "$f"          # в библиотеке уже есть — он новее
+    else u mv -f "$f" "$s/" && n=$((n + 1)); fi
+  done
+  [ $n = 0 ] || log "игры Steam: возвращено паспортов — $n (синхронизация игр Steam включена)"
+  return 0
+}
+
+# ------------------------------------------------------- выбор игр (v4.6) ---
+# Приложение передаёт, какие игры синхронизировать: VG_SYNC — base64 от JSON {"games": [архивы игр],
+# "saves_off": [архивы сохранений, которые не синхронизировать]} (base64 — чтобы имена с пробелами пережили
+# /etc/environment). Нет VG_SYNC — как раньше: SYNC_STEAM_GAMES / SYNC_OTHER_GAMES. Выбор этой машины — файлы
+# $S/sel.*: при загрузке из VG_SYNC, дальше — ответы человека (wolf answer). Служебные «игры» Steam (Proton,
+# Steam Linux Runtime, Steamworks Shared, настройки контроллера) синхронизируются всегда, в приложении их нет.
+sel_init() {
+  local v=${VG_SYNC:-${VGS:-}}                    # [v4.8] на KVM — из /etc/wolf/env (службе systemd окружение аренды не видно)
+  rm -f "$S"/sel.* "$S/present" "$S"/progs.* "$S/launch.sel"
+  [ -n "$v" ] || return 0
+  printf '%s' "$v" | base64 -d 2>/dev/null | S="$S" python3 -c '
+import json, os, sys
+d, s = json.load(sys.stdin), os.environ["S"]
+ok = lambda n: isinstance(n, str) and n and "/" not in n and "\n" not in n
+for key, f in (("games", "sel.games"), ("saves_off", "sel.saves_off")):
+    open(os.path.join(s, f), "w").write("".join(n + "\n" for n in d.get(key) or [] if ok(n)))
+mods = d.get("mods") if isinstance(d.get("mods"), dict) else {}
+for key in ("yes", "no"):                                        # [v5.0] прежние ответы «сохранять моды?» по номерам игр
+    open(os.path.join(s, "sel.mods_" + key), "w").write("".join(str(n) + "\n" for n in mods.get(key) or [] if str(n).isdigit()))
+# [v5.6] тумблер «Моды» включён — от него зависит «запуск игры через программу» (sel.mods_yes — сохранять изменения;
+# сейчас то же самое, но сохранение может быть выключено отдельно)
+open(os.path.join(s, "sel.mods_on"), "w").write("".join(str(n) + "\n" for n in mods.get("yes") or [] if str(n).isdigit()))
+# [v5.7] «С модами» — по умолчанию у всех игр (кнопки «С модами | Без модов»): sel.mods_all, исключения — sel.mods_no
+if mods.get("all") is True:
+    open(os.path.join(s, "sel.mods_all"), "w").close()
+# [v5.6] «хранить игру в облаке»: номера игр, файлы которых (то, что качает их собственный лаунчер) — архивом lgame--
+open(os.path.join(s, "sel.gdata"), "w").write("".join(str(n) + "\n" for n in d.get("gdata") or [] if str(n).isdigit()))
+if d.get("steam") == "store":
+    open(os.path.join(s, "sel.store"), "w").close()
+if d.get("own") == "all":                              # [v5.7] свои игры (папка Games) — все, что есть в облаке
+    open(os.path.join(s, "sel.own_all"), "w").close()
+recipes = d.get("recipes") if isinstance(d.get("recipes"), dict) else {}  # [v5.6] рецепты: {номер: ["ff14-ru"]}
+by = {}
+for k, v in recipes.items():
+    for r in v if str(k).isdigit() and isinstance(v, list) else []:
+        if isinstance(r, str) and r in ("ff14-ru",):
+            by.setdefault(r, []).append(str(k))
+for r, ids in by.items():
+    open(os.path.join(s, "sel.recipe." + r), "w").write("".join(i + "\n" for i in ids))
+progs = d.get("progs") if isinstance(d.get("progs"), dict) else {}  # [v5.4] программы «вместе с игрой»: {номер: [id]}
+json.dump({str(k): [i for i in v if isinstance(i, str) and i.split(":", 1)[0] in ("game", "prog", "pfx") and "\0" not in i]
+           for k, v in progs.items() if str(k).isdigit() and isinstance(v, list)},
+          open(os.path.join(s, "progs.auto"), "w"))
+launch = d.get("launch") if isinstance(d.get("launch"), dict) else {}   # [v5.6] «запускать игру через»: {номер: {id, args}}
+json.dump({str(k): {"id": v["id"], "args": str(v.get("args") or "")[:300]} for k, v in launch.items()
+           if str(k).isdigit() and isinstance(v, dict) and isinstance(v.get("id"), str)
+           and v["id"].split(":", 1)[0] in ("game", "prog", "pfx") and "\0" not in v["id"]},
+          open(os.path.join(s, "launch.sel"), "w"))
+open(os.path.join(s, "sel.on"), "w").close()' || log "VG_SYNC не разобран — синхронизация как раньше"
+}
+selon()  { [ -e "$S/sel.on" ]; }
+# [v4.8] Игры Steam качает Steam: не скачивать из облака, не выгружать, не спрашивать о них
+store()  { [ -e "$S/sel.store" ]; }
+tool()   { case $1 in sgame--Proton*|sgame--SteamLinuxRuntime*|"sgame--Steam Linux Runtime"*|"sgame--Steamworks Shared"|"sgame--Steam Controller Configs") return 0 ;; esac; return 1; }
+inlist() { grep -qxF -- "$1" "$S/$2" 2>/dev/null; }
+# [v5.7] Игра «с модами»: выбрана явно или «с модами» у всех, кроме отмеченных «Без модов»
+modson() { inlist "$1" sel.mods_yes || { [ -e "$S/sel.mods_all" ] && ! inlist "$1" sel.mods_no; }; }
+addline() { inlist "$1" "$2" || printf '%s\n' "$1" >> "$S/$2"; }
+rmline() { [ -e "$S/$2" ] || return 0; grep -vxF -- "$1" "$S/$2" > "$S/$2.new"; mv -f "$S/$2.new" "$S/$2"; }
+# Размер игры на диске в мегабайтах (для sgame-- и game--)
+game_size_mb() {
+  local p s
+  case $1 in
+    sgame--*) [ -n "$SR" ] || sr; p="$DH/$SR/steamapps/common/${1#sgame--}" ;;
+    game--*)  p="$GD/${1#game--}" ;;
+    *)        echo 0; return ;;
+  esac
+  [ -d "$p" ] || { echo 0; return; }
+  s=$(du -sm "$p" 2>/dev/null | awk '{print $1}')
+  echo "${s:-0}"
+}
+# Синхронизировать ли архив игры (sgame--/game--) и сохранения (pfx--)
+want() {
+  tool "$1" && return 0
+  if selon; then
+    case $1 in sgame--*) store && return 1 ;; esac
+    # [v5.7] «все свои игры»: игра из Games, которая уже есть в облаке и на которую не отвечали «не синхронизировать»;
+    # новая на диске — по-прежнему с вопросом (её нет в облаке)
+    case $1 in game--*) [ -e "$S/sel.own_all" ] && ! inlist "$1" sel.skip && incloud "$1" && return 0 ;; esac
+    # [v5.7] своя игра с паспортом .vastgame.json: если меньше 15 ГБ — синхронизируется без вопроса;
+    # тяжёлая игра (>= 15 ГБ, Star Citizen и др.) — только с явного согласия человека (sel.games),
+    # чтобы не забить бесплатный Google Диск (15 ГБ) и не зависать на выгрузке
+    case $1 in game--*)
+      if [ -f "$GD/${1#game--}/.vastgame.json" ] && ! inlist "$1" sel.skip; then
+        incloud "$1" && return 0
+        [ "$(game_size_mb "$1")" -lt "${GAME_MAX_AUTO_MB:-15000}" ] && return 0
+      fi
+      ;;
+    esac
+    inlist "$1" sel.games; return
+  fi
+  case $1 in sgame--*) [ "$SG" = 1 ] ;; game--*) [ "$SO" = 1 ] ;; *) return 1 ;; esac
+}
+wants() { [ "$SV" = 1 ] && ! inlist "$1" sel.saves_off; }
+# Есть ли архив в облаке (по списку $LS: одним файлом или частями); списка нет — «нет»
+incloud() { [ -n "${LS:-}" ] && [ -s "$LS" ] && awk -F'\t' -v o="$1.tar.zst" 'index($1, o)==1 {f=1} END {exit !f}' "$LS"; }
+# Игры на диске: sgame--ПАПКА (steamapps/common) и game--ПАПКА ($GD), без служебных
+ondisk() {
+  { ld "$DH/$SR/steamapps/common" sgame--; ldg; } | while IFS= read -r n; do tool "$n" || echo "$n"; done \
+    | LC_ALL=C sort
+}
+# [v4.8] Игры, о которых спрашивать человека: без игр Steam, если их качает Steam
+askable() { if store; then ondisk | grep -v '^sgame--' || true; else ondisk; fi; }
+# [v4.7] Игра Steam установлена целиком — только такую выгружаем. Недокачанную (или обновляющуюся) Steam сам докачает
+# из магазина, а в облако она уехала бы частями — раз в 15 минут, пока качается, и при выключении. Паспорт игры
+# (appmanifest) пишет состояние в StateFlags: 4 — установлена; рядом допустимы 2 (ждёт обновления, файлы целые),
+# 8, 16, 64 (запущена) и [v5.6] 512 (обновление отложено планировщиком Steam — «не играли N минут»; файлы целые,
+# Steam докачает при запуске: так у пробной FF14 сразу после установки, 2026-10-09). Любой другой бит — качается,
+# обновляется, проверяется, файлы потеряны. Паспорта нет или
+# в нём нет StateFlags — не знаем, выгружаем как раньше. Не Steam (game--) — всегда да.
+steam_ready() {
+  local d f s
+  case $1 in sgame--*) d=${1#sgame--} ;; *) return 0 ;; esac
+  for f in "$DH/$SR/steamapps"/appmanifest_*.acf; do
+    [ -e "$f" ] && [ "$(idirs "$f" | head -1)" = "$d" ] || continue
+    s=$(sed -n 's/^[[:space:]]*"StateFlags"[[:space:]]*"\([0-9]*\)".*/\1/p' "$f" | head -1)
+    [ -n "$s" ] || return 0
+    flags_ready "$s"
+    return
+  done
+  return 0
+}
+# Архивы игр, запущенных сейчас (их файлы не выгружаем, пока игра идёт: игра всё время пишет в свою папку)
+running_archives() {
+  local k d
+  running_keys | while IFS= read -r k; do
+    case $k in
+      app:*) d=$(idir "${k#app:}"); [ -n "$d" ] && echo "sgame--$d" ;;
+      dir:*) echo "game--${k#dir:}" ;;
+    esac
+  done
+}
+# Название игры: из списка игр, из её паспорта Steam (в том числе спрятанного), иначе папка
+aname() {
+  local d=${1#*game--} f x
+  x=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "$1" name 2>/dev/null)
+  [ -n "$x" ] && { echo "$x"; return; }
+  case $1 in sgame--*)
+    for f in "$DH/$SR/steamapps"/appmanifest_*.acf "$DH/$SR/steamapps/$HID"/appmanifest_*.acf; do
+      [ "$(idirs "$f" | head -1)" = "$d" ] || continue
+      x=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$f" | head -1)
+      [ -n "$x" ] && { echo "$x"; return; }
+    done ;;
+  esac
+  echo "$d"
+}
+# Вопрос человеку: запись ask--new--АРХИВ / ask--del--АРХИВ на странице статуса (состояние ask, текст — название
+# игры). Приложение показывает вопрос и отвечает командой wolf answer. Без ответа ничего не теряется: новая игра
+# выгружается при выключении, удалённая остаётся в облаке.
+ask()   { [ -e "$S/st/ask--$1--$2" ] || st "ask--$1--$2" ask "$3"; }
+unask() { rm -f "$S/st/ask--$1--$2"; }
+# Раз в 30 с (из wolf watch): игру удалили с диска — есть в облаке? спросить, удалить ли и оттуда; появилась
+# игра, которую не выбирали, — спросить, синхронизировать ли. Первый проход запоминает, что есть после загрузки.
+scan_games() {
+  local n cur old lsd="" f="$T/ls.scan"
+  selon && [ -e "$L/boot-done" ] || return 0
+  [ -n "$SR" ] || sr
+  [ -d "$DH/$SR/steamapps/common" ] || return 0          # нет папки — не повод считать игры удалёнными
+  cur=$(askable)
+  [ -e "$S/present" ] || { printf '%s\n' "$cur" > "$S/present"; return 0; }
+  old=$(cat "$S/present")
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$cur" || continue
+    unask new "$n"; rmline "$n" sel.games
+    inlist "$n" sel.keep && continue
+    if [ -z "$lsd" ]; then rl > "$f" 2>/dev/null || return 0; lsd=1; fi    # нет связи — спросим в следующий раз
+    awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" && ask del "$n" "$(aname "$n")"
+  done <<< "$old"
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    if ! grep -qxF -- "$n" <<< "$old" || { ! want "$n" && ! inlist "$n" sel.skip; }; then
+      want "$n" || inlist "$n" sel.skip || ask new "$n" "$(aname "$n")"
+    fi
+  done <<< "$cur"
+  printf '%s\n' "$cur" > "$S/present"
+}
+# [v5.7] Папку программы удалили из Programs — убрать её и из облака (в корзину Drive, 30 дней), без вопроса: папку
+# программы человек удаляет сам (живой случай 2026-10-09: удалённые программы возвращались на следующей машине —
+# scan_games смотрит только на игры). Первый проход запоминает, что есть после загрузки. Нет самой папки Programs —
+# ничего не трогаем (mkpd её вернёт). Нет связи с облаком или forget не удался — попробуем в следующий раз.
+# Папка с тем же именем появилась снова — снова выгружается (метка «убран из облака» снимается).
+prog_scan() {
+  local n cur old lsd="" f="$T/ls.pscan"
+  [ -e "$L/boot-done" ] && [ -d "$PD" ] || return 0
+  cur=$(ld "$PD" prog-- | LC_ALL=C sort)
+  [ -e "$S/present.prog" ] || { printf '%s\n' "$cur" > "$S/present.prog"; return 0; }
+  old=$(cat "$S/present.prog")
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$cur" || continue
+    if [ -z "$lsd" ]; then rl > "$f" 2>/dev/null || return 0; lsd=1; fi
+    awk -F'\t' -v o="$n.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$f" || continue
+    log "$n: папку удалили из Programs — убираю и из облака"
+    LS=$f forget "$n" < /dev/null || return 0             # forget не должен съесть список из stdin
+  done <<< "$old"
+  while IFS= read -r n; do
+    [ -n "$n" ] && ! grep -qxF -- "$n" <<< "$old" && rm -f "$S/x/$n"
+  done <<< "$cur"
+  printf '%s\n' "$cur" > "$S/present.prog"
+}
+# wolf answer new|del АРХИВ yes|no — ответ человека (через bk: свежий список облака для forget)
+answer() {
+  local k=$1 n=$2 a=$3 p
+  case $n in game--*|sgame--*|mod--*) ;; *) log "answer: '$n' — не архив игры"; return 1 ;; esac
+  case $k:$a in
+    mod:yes) p=${n#mod--}; addline "$p" sel.mods_yes; rmline "$p" sel.mods_no; log "моды $p: сохранять — выбрано"
+             ( NOW=1 "$0" mods "$p" >/dev/null 2>&1 & ) ;;
+    mod:no)  p=${n#mod--}; rmline "$p" sel.mods_yes; log "моды $p: не сохранять — выбрано" ;;
+    new:yes) addline "$n" sel.games; rmline "$n" sel.skip; log "$n: синхронизировать — выбрано" ;;
+    new:no)  addline "$n" sel.skip; log "$n: не синхронизировать — выбрано" ;;
+    del:yes) p=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "$n" appid 2>/dev/null)
+             forget "$n"; [ -n "$p" ] && awk -F'\t' -v o="pfx--$p.tar.zst" 'index($1, o)==1 {f=1} END {exit !f}' "$LS" \
+               && forget "pfx--$p"
+             rmline "$n" sel.games ;;
+    del:no)  addline "$n" sel.keep; log "$n: оставить в облаке — выбрано" ;;
+    *)       log "answer: не понял '$k $a'"; return 1 ;;
+  esac
+  unask "$k" "$n"
+}
+# Список игр для приложения — в облако файлом vastgame-games.json, когда меняется (wolf-games.py)
+gindex() {
+  local j="$S/index.json" nj="$T/index.new"
+  [ -n "$SR" ] || sr
+  [ -n "$SR" ] || return 0
+  if [ ! -s "$j" ]; then
+    # прежний список из облака: в нём и игры, которых на этой машине нет; не скачался, хотя есть, — не трогаем
+    if grep -q $'^vastgame-games.json\t' "$LS" 2>/dev/null; then rc cat "$R/vastgame-games.json" > "$j" || { rm -f "$j"; return 0; }; fi
+  fi
+  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --index 2>/dev/null \
+    | python3 /usr/local/bin/wolf-games.py index "$DH/$SR/steamapps" "$j" > "$nj" || return 0
+  cmp -s "$nj" "$j" 2>/dev/null && return 0
+  rc rcat "$R/vastgame-games.json" < "$nj" && mv -f "$nj" "$j" && log "список игр для приложения обновлён"
+}
+
+# ---------------------------------------------- игра из библиотеки (v4.8) ---
+# VG_PLAY — игра, выбранная в библиотеке приложения: её качает и запускает сам Steam. Ход — запись play на странице
+# статуса: wait login (войти в Steam на машине; other — вошли не тем аккаунтом), down download (+progress),
+# up launch, ok running; err stuck / launch. Один раз за аренду (play.done): перезагрузка машины игру не перезапускает.
+play_init() {
+  local v=${VG_PLAY:-${VGP:-}}
+  rm -f "$S"/play.app "$S"/play.acc "$S"/play.name "$S"/play.mods
+  [ -n "$v" ] || return 0
+  log "$(printf '%s' "$v" | python3 /usr/local/bin/wolf-steam.py vgplay "$S" 2>&1)"
+}
+# До запуска Steam: аккаунт (registry.vdf/loginusers.vdf) и паспорт игры
+play_prepare() {
+  local a acc
+  a=$(rd "$S/play.app"); acc=$(rd "$S/play.acc")
+  [ -n "$a" ] && [ -n "$acc" ] && [ ! -e "$S/play.done" ] && [ -n "$SR" ] || return 0
+  pgrep -x steam >/dev/null && { steam_off || log "play: Steam не закрылся — аккаунт может быть не тот"; }
+  log "play: $(u python3 /usr/local/bin/wolf-steam.py account "$DH/$SR" "$acc" 2>&1)"
+  # [v5.6] настоящая папка игры и её системы — из кэша Steam (appinfo.vdf); нет Linux-версии — включить Proton сразу
+  local info dir os
+  info=$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --appinfo "$a" 2>/dev/null)
+  dir=${info%%$'\t'*}; os=${info#*$'\t'}
+  log "play: $(u python3 /usr/local/bin/wolf-steam.py manifest "$DH/$SR" "$a" "$acc" "$(rd "$S/play.name")" "$dir" 2>&1)"
+  if [ -n "$info" ] && [ -n "$os" ] && [[ $os != *linux* ]]; then
+    log "play: $(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --proton-for "$a" 2>&1)"
+  fi
+  st play wait "steam"
+}
+# StateFlags: игра установлена целиком (как steam_ready)
+flags_ready() { (( ($1 & 4) && !($1 & ~(2 | 4 | 8 | 16 | 64 | 512)) )); }
+# После запуска Steam (в фоне): ждать вход, следить за скачиванием, запустить игру
+play_watch() {
+  local a acc fl d tot dir on now t0 last=-1 lt sp=0 seen="" mode="" moved
+  a=$(rd "$S/play.app"); acc=$(rd "$S/play.acc")
+  [ -n "$a" ] && [ ! -e "$S/play.done" ] && [ -n "$SR" ] || return 0
+  exec 8>"$L/play.lock"; flock -n 8 || return 0
+  t0=$(date +%s); moved=$t0; lt=$t0
+  while [ ! -e "$S/play.done" ]; do
+    sleep "${PLAY_POLL:-4}"; now=$(date +%s)
+    read -r fl d tot dir < <(u python3 /usr/local/bin/wolf-steam.py state "$DH/$SR" "$a" 2>/dev/null) || continue
+    if flags_ready "${fl:-0}" && [ -n "$dir" ] && [ -d "$DH/$SR/steamapps/common/$dir" ]; then
+      if store; then                               # [v5.0] чистая игра — запомнить; «с модами» — моды поверх
+        [ -e "$S/van/$a.tsv" ] || mods_snap "$a" "$dir" "$(acf_get "$DH/$SR/steamapps/appmanifest_$a.acf" buildid)"
+        flock "$L/snap-$a.lock" true                  # [v5.6] снимок и архив игры мог делать проход наблюдения
+        mods_apply "$a" "$dir"
+      fi
+      recipe_play "$a" "$dir"                         # [v5.6] рецепт игры (перевод FF14…) — до запуска
+      play_launch "$a"; return 0
+    fi
+    if [ "${d:-0}" -gt "$last" ] && [ "$last" -ge 0 ]; then
+      sp=$(( ( sp + (d - last) / (now - lt > 0 ? now - lt : 1) ) / 2 )); moved=$now
+    fi
+    [ "${d:-0}" -ne "$last" ] && { last=${d:-0}; lt=$now; }
+    if [ "$moved" = "$now" ] && [ "$last" -gt 0 ]; then on=on   # [v4.9] качается — значит, вошёл
+    else on=$(u python3 /usr/local/bin/wolf-steam.py logon "$DH/$SR" "$acc" "$(( t0 - 10 ))" 2>/dev/null); fi
+    if [ "$on" = on ] && [ "${tot:-0}" -gt 0 ]; then
+      echo "$d $tot $sp $now" > "$S/pg/play"
+      [ "$mode" = down ] || { mode=down; st play down "download"; }
+      if [ $(( now - moved )) -ge "${PLAY_STUCK:-900}" ] && [ -z "$seen" ]; then
+        seen=1; log "play: $a — скачивание стоит $(( (now - moved) / 60 )) мин"
+      fi
+    elif [ "$on" = other ]; then
+      [ "$mode" = other ] || { mode=other; st play wait "other"; }
+    elif [ "$on" != on ]; then
+      [ $(( now - t0 )) -ge "${PLAY_LOGIN_WAIT:-30}" ] && { [ "$mode" = login ] || { mode=login; st play wait "login"; }; }
+    else
+      moved=$now                                   # вошёл, Steam готовит скачивание
+    fi
+  done
+}
+# Скачалась — запустить и убедиться, что игра пошла (процесс Steam с её номером)
+play_launch() {
+  local a=$1 k i
+  st play up "launch"
+  mods_mark "$a"                                     # [v5.7] что игра напишет с первой секунды — данные игры, не моды
+  for k in 1 2; do
+    u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+    for i in $(seq "${PLAY_LAUNCH_WAIT:-40}"); do
+      sleep 3
+      running_keys | grep -qxF "app:$a" && { echo "$a" > "$S/play.done"; st play ok "running"; return 0; }
+    done
+  done
+  echo "$a" > "$S/play.done"
+  st play err "launch"
+}
+
+# ------------------------------------------------------------ моды (v5.0) ---
+# Снимок чистой игры: $S/van/НОМЕР.tsv (файлы), .build (сборка Steam), .upd (Steam обновил игру за сессию),
+# .fp (отпечаток модов, которые уже в облаке или наложены из него — не выгружать то же самое снова)
+acf_get() { sed -n "s/^[[:space:]]*\"$2\"[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" 2>/dev/null | head -1; }
+# mods_snap НОМЕР ПАПКА СБОРКА
+mods_snap() {
+  mkdir -p "$S/van"
+  exec 7> "$L/snap-$1.lock"; flock 7               # [v5.6] запуск из библиотеки ждёт, пока архив игры восстановится
+  [ -e "$S/van/$1.tsv" ] && { exec 7>&-; return 0; }
+  python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/$2" "$S/van/$1.tsv" && echo "$3" > "$S/van/$1.build" \
+    && log "моды $1: чистая игра запомнена" && lgame_restore "$1" "$2" && gsave_restore "$1" "$2"
+  exec 7>&-
+}
+# [v5.6] Игра, которую докачивает её лаунчер, «в облаке» (sel.gdata): её файлы — архив lgame--НОМЕР--Название.
+# Восстановление — сразу после снимка чистой игры из Steam и до модов; восстановленное — слой игры (claim)
+lgame_restore() {
+  local a=$1 d=$2 n LS
+  inlist "$a" sel.gdata || return 0
+  LS=$T/ls.lgame-$a
+  rl > "$LS" 2>/dev/null || { log "игра $a: не удалось получить список облака — лаунчер скачает её сам"; return 0; }
+  n=$(sed -n -E "s/^(lgame--$a--[^\t]*)\.tar\.zst(\.parts)?\t.*/\1/p" "$LS" | head -1)
+  [ -n "$n" ] || { log "игра $a: её файлов в облаке ещё нет — лаунчер скачает сам, при выключении уедут в облако"; return 0; }
+  st play up "game"
+  if LS=$LS unpack "$n"; then
+    log "игра $a: файлы из облака на месте, лаунчеру осталось докачать новое ($(python3 /usr/local/bin/wolf-mods.py claim \
+      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv") файлов)"
+    spec "$n" && man "$n" > "$S/m/$n" && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+  else
+    log "игра $a: из облака не восстановилась — лаунчер скачает её сам"
+  fi
+}
+# [v5.7] Данные игры (сохранения и настройки, которые запущенная игра пишет в свою папку) — архив gsave--НОМЕР--Название:
+# всегда (с модами и без), восстановление — сразу после файлов игры и до модов; восстановленное — данные игры (claim data)
+gsave_name() { python3 /usr/local/bin/wolf-mods.py arch "$1" "$DH/$SR/steamapps/appmanifest_$1.acf" gsave; }
+gsave_restore() {
+  local a=$1 d=$2 n LS
+  [ "$SV" = 1 ] || return 0
+  LS=$T/ls.gsave-$a
+  rl > "$LS" 2>/dev/null || { log "данные игры $a: не удалось получить список облака — игра начнёт с чистого листа"; return 0; }
+  n=$(sed -n -E "s/^(gsave--$a--[^\t]*)\.tar\.zst(\.parts)?\t.*/\1/p" "$LS" | head -1)
+  [ -n "$n" ] || return 0
+  if LS=$LS unpack "$n"; then
+    log "данные игры $a: из облака на месте ($(python3 /usr/local/bin/wolf-mods.py claim \
+      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" data) файлов)"
+    spec "$n" && man "$n" > "$S/m/$n" && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+  else
+    log "данные игры $a: из облака не восстановились"
+  fi
+}
+gsave_push() {
+  local f a
+  [ "$SV" = 1 ] || return 0
+  for f in "$S/van"/*.pend.tsv; do
+    a=${f##*/}; a=${a%.pend.tsv}
+    [[ $a =~ ^[0-9]+$ ]] && [ -s "$f" ] && [ -n "$(idir "$a")" ] || continue
+    pack "$(gsave_name "$a")"
+  done
+}
+# Выключение: файлы игр «в облаке» — их архивами (только изменения, большие — частями)
+lgame_push() {
+  local a d n
+  for a in $(cat "$S/sel.gdata" 2>/dev/null); do
+    [[ $a =~ ^[0-9]+$ ]] && [ -s "$S/van/$a.game.tsv" ] || continue
+    d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
+    n=$(python3 /usr/local/bin/wolf-mods.py arch "$a" "$DH/$SR/steamapps/appmanifest_$a.acf" lgame) || continue
+    pack "$n"
+  done
+}
+# Раз в 30 с (wolf watch): игры, которые Steam только что поставил, — запомнить чистыми; обновил — пометить
+mods_scan() {
+  local f a d b
+  store && [ -n "$SR" ] || return 0
+  for f in "$DH/$SR/steamapps"/appmanifest_*.acf; do
+    [ -e "$f" ] || continue
+    a=${f##*appmanifest_}; a=${a%.acf}
+    d=$(idirs "$f" | head -1)
+    [[ $a =~ ^[0-9]+$ ]] && [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] && ! tool "sgame--$d" || continue
+    flags_ready "$(acf_get "$f" StateFlags || echo 0)" 2>/dev/null || continue
+    b=$(acf_get "$f" buildid)
+    if [ ! -e "$S/van/$a.tsv" ]; then mods_snap "$a" "$d" "$b"
+    elif [ "$(rd "$S/van/$a.build")" != "$b" ] && [ ! -e "$S/van/$a.upd" ]; then
+      : > "$S/van/$a.upd"; log "моды $a: Steam обновил игру — моды в этот раз не выгружаю (обновление могло затереть их часть)"
+    fi
+  done
+}
+# [v5.6] Раз в 30 с: что меняется в папках игр Steam, пока они запущены (их лаунчер качает), — wolf-mods.py track
+lgame_track() {
+  local f a d on keys
+  store && [ -n "$SR" ] || return 0
+  keys=$(running_keys)
+  for f in "$S/van"/*.tsv; do
+    a=${f##*/}; a=${a%.tsv}
+    [[ $a =~ ^[0-9]+$ ]] || continue
+    d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
+    on=0; grep -qx "app:$a" <<< "$keys" && on=1
+    [ $on = 1 ] || [ -e "$S/van/$a.seen.tsv" ] || continue
+    # [v5.7] точку отсчёта сняли перед запуском (mods_mark), игра ещё стартует — не закрывать наблюдение (5 мин)
+    if [ $on = 1 ]; then rm -f "$S/van/$a.armed"
+    elif [ -n "$(find "$S/van/$a.armed" -mmin -5 2>/dev/null)" ]; then continue
+    else rm -f "$S/van/$a.armed"; fi
+    python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/$d" "$f" "$on" "$PD" >> /var/log/wolf.log 2>&1
+  done
+}
+# [v5.7] Точка отсчёта «что пишет запущенная игра» — до её запуска (play_launch) или сразу, как игра появилась (wolf watch,
+# раз в 5 с): раньше её снимал проход раз в 30 с, и всё, что игра создавала в первые секунды (отчёты о сбоях, журналы,
+# настройки), считалось модами (живой случай 2026-10-10, Avatar Legends). mods_mark НОМЕР
+mods_mark() {
+  local a=$1 d
+  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.seen.tsv" ] || return 0
+  d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || return 0
+  python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 1 "$PD" >> /var/log/wolf.log 2>&1
+  : > "$S/van/$a.armed"
+}
+# После выхода из игры: тумблер «Сохранять моды» включён и моды изменились — выгрузить (в фоне)
+mods_check() {
+  local a=$1 d cnt fp junk
+  store && [ -e "$S/van/$a.tsv" ] && [ ! -e "$S/van/$a.upd" ] && modson "$a" || return 0
+  d=$(idir "$a"); [ -n "$d" ] || return 0
+  read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || return 0
+  [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && return 0
+  ( NOW=1 "$0" mods "$a" >/dev/null 2>&1 & )
+}
+# wolf mods [НОМЕР...] (через bk: свежий список облака) — выгрузить моды; без номеров — всех запомненных игр (выключение)
+mods_push() {
+  local a d cnt fp junk
+  [ $# -gt 0 ] || set -- $(ls "$S/van" 2>/dev/null | sed -n 's/\.tsv$//p')    # номера игр — только цифры
+  for a in "$@"; do
+    [[ $a =~ ^[0-9]+$ ]] && [ -e "$S/van/$a.tsv" ] || continue
+    [ -e "$S/van/$a.upd" ] && { log "моды $a: Steam обновлял игру в этой сессии — не выгружаю"; continue; }
+    modson "$a" || continue                              # [v5.1] только с включённым тумблером; [v5.7] «С модами»
+    d=$(idir "$a"); [ -n "$d" ] && [ -d "$DH/$SR/steamapps/common/$d" ] || continue
+    read -r cnt fp junk < <(python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 2>/dev/null) || continue
+    [ "$fp" = "$(rd "$S/van/$a.fp" || echo 0)" ] && continue
+    mods_pack "$a" "$d"
+  done
+}
+# mods_pack НОМЕР ПАПКА
+mods_pack() {
+  local a=$1 d=$2 base out r cnt fp n
+  base=$(python3 /usr/local/bin/wolf-mods.py arch "$a" "$DH/$SR/steamapps/appmanifest_$a.acf") || return 1
+  [ -e "$S/x/$base" ] && { log "$base: убран из облака на этой машине — не выгружаю"; return 0; }
+  out="$T/$base.tar.zst"
+  st "$base" up "моды"
+  r=$(python3 /usr/local/bin/wolf-mods.py pack "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" "$out" "$a" \
+      "$(rd "$S/van/$a.build")" 2>>/var/log/wolf.log) || { rm -f "$out"; st "$base" err "не удалось собрать архив модов"; return 1; }
+  read -r cnt fp <<< "$r"
+  if [ "$cnt" = 0 ]; then
+    names "^mod--$a--" | while IFS= read -r n; do forget "$n" < /dev/null; rm -f "$S/x/$n"; done
+    # [v5.7] убрали сами, а не человек: новый мод в этой же сессии снова выгружается (живой случай 2026-10-10)
+    st "$base" ok "модов больше нет — архив убран из облака (в корзине Drive 30 дней)"
+  else
+    rc copyto "$out" "$R/$base.tar.zst" --drive-chunk-size=64M || { rm -f "$out"; st "$base" err "выгрузка модов не удалась"; return 1; }
+    rm -f "$out"
+    names "^mod--$a--" | while IFS= read -r n; do [ "$n" = "$base" ] || rc deletefile "$R/$n.tar.zst"; done   # прежнее название
+    st "$base" ok "моды выгружены: файлов $cnt"
+  fi
+  echo "$fp" > "$S/van/$a.fp"
+}
+# Запуск из библиотеки «с модами»: после установки Steam (снимок уже снят) — моды из облака поверх чистой игры
+# mods_apply НОМЕР ПАПКА
+mods_apply() {
+  local a=$1 d=$2 base r
+  [ "$(rd "$S/play.mods")" = 1 ] || return 0
+  base=$(rl 2>/dev/null | sed -n -E "s/^(mod--$a--[^\t]*)\.tar\.zst\t.*/\1/p" | head -1)
+  [ -n "$base" ] || { log "моды $a: в облаке их нет — запускаю чистую игру"; return 0; }
+  st play up "mods"
+  if r=$(rc cat "$R/$base.tar.zst" | zstd -d -q | u python3 /usr/local/bin/wolf-mods.py apply "$DH/$SR/steamapps/common/$d" 2>>/var/log/wolf.log); then
+    log "моды $a: наложено файлов ${r%% *}"; echo "${r##* }" > "$S/van/$a.fp"
+  else
+    log "моды $a: наложить не удалось — запускаю как есть"
+  fi
+}
+
+# ----------------------------------------------------------------- манифест ---
+F() { find "$@" \( -type d -printf '%p\td\0' -o -printf '%p\t%y\t%s\t%T@\t%l\0' \) 2>/dev/null; }
+
+spec() {
+  B=$DH Z=$ZL K=1 DB=0 A=
+  case $1 in
+    identity)     B=/ K=0 ;;
+    steam-client) DB=1 ;;
+    steam-cache)  K=0 DB=1 ;;       # всегда целиком и только после «успокоения»
+    steam-state)  ;;
+    compatdata)   K=0 ;;
+    pfx--*)       A=${1#pfx--} ;;
+    game--*)      B=$GD Z=$ZG DB=1 A=${1#game--} ;;
+    prog--*)      B=$PD Z=$ZG DB=1 A=${1#prog--} ;;         # [v5.4] программы для игр
+    sgame--*)     Z=$ZG DB=1 A=${1#sgame--} ;;
+    lgame--*)     Z=$ZG DB=1 A=${1#lgame--}; A=${A%%--*} ;;   # [v5.6] файлы игры от её лаунчера (номер игры)
+    gsave--*)     A=${1#gsave--}; A=${A%%--*} ;;              # [v5.7] данные игры в её папке (номер игры)
+    *)            return 1 ;;
+  esac
+}
+
+# Что входит в архив (cwd = B)
+ls_() {
+  local s=$SR/steamapps
+  case $1 in
+    identity)      # machine-id; ключи ZeroTier; состояние Tailscale; Sunshine без логов
+      F etc/machine-id var/lib/zerotier-one/identity.* var/lib/tailscale/tailscaled.state \
+        etc/sunshine "${DH#/}/.config/sunshine" -name '*.log*' -prune -o ;;
+    steam-client)  # клиент без состояния, кэшей, логов и игр
+      F "$SR" \( -regex "$SR/\(steamapps\|config\|userdata\|logs\|dumps\|appcache\|depotcache\|steam\.cfg\|local\.vdf\|ssfn.*\)" \
+        -o -name '*.pi[dp]*' -o -name .crash -o -type s -o -type p \) -prune -o ;;
+    steam-cache)   # кэш лицензий и игр для офлайн-режима, без веб-кэша
+      F "$SR/appcache" -path "$SR/appcache/httpcache" -prune -o ;;
+    steam-state)   # [HARDENING #5] вход и настройки: local.vdf, config/ (config.vdf/ConnectCache,
+                   # loginusers.vdf), userdata/, registry.vdf, ssfn*, ссылки ~/.steam
+      F .steam -maxdepth 1 \( -type l -o -name registry.vdf \)
+      F "$SR/config" "$SR/userdata" -path "$SR/config/htmlcache" -prune -o
+      F "$SR" -maxdepth 1 \( -name local.vdf -o -name 'ssfn*' \)
+      # [v4.2] паспорта игр (appmanifest_*.acf) — всегда, в том числе спрятанные (acf_hide): раньше без
+      # синхронизации игр Steam их здесь не было, и выгрузка удаляла их из облака — включённая потом
+      # синхронизация уже не могла вернуть игры (Steam их «не знал»)
+      F "$s" -maxdepth 1 \( -name '*.acf' -o -name libraryfolders.vdf \)
+      F "$s/$HID" -maxdepth 1 -name '*.acf'; : ;;
+    # [v5.6] без временных папок Windows в префиксе: лаунчер Square Enix качает туда патчи FF14 и всё время их
+    # меняет — сохранения уходили в облако по кругу, по 2 ГБ каждые полминуты (живой случай 2026-10-08)
+    compatdata) F "$s/compatdata" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
+    pfx--*)     F "$s/compatdata/$A" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
+    game--*)    F "$A" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;   # [v5.7] .prefix своей игры
+    prog--*)    F "$A" ;;
+    sgame--*)   F "$s/common/$A" ;;
+    lgame--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" ;;
+    gsave--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" data ;;
+  esac
+}
+man() { [ -n "$SR" ] || sr; (cd "$B" && ls_ "$1") | LC_ALL=C sort -z; }
+
+pool() {
+  local f=$1 n; shift
+  for n; do
+    while [ "$(jobs -rp | wc -l)" -ge "$PAR" ]; do wait -n; done
+    ( $f "$n" || echo "$n" >> "$FL" ) &
+  done
+  wait
+}
+
+# ----------------------------------------------------------------- выгрузка ---
+# [HARDENING #2] Всегда пишем в ИМЯ.part, боевой файл заменяем только успешным
+# moveto; при обрыве сети боевой архив не тронут. Перезапись боевого через
+# moveto (rc, trash=true) уводит старую версию в корзину — восстановимо.
+pack() {
+  local n=$1 w="$T/$1.w" fp rv lv o f=1 s x=() t=$SECONDS
+  spec "$n" || return 0
+  exec 8> "$L/$n.lock"
+  # при немедленной выгрузке (NOW) ждём, пока архив освободит другой проход, а не пропускаем
+  if [ -n "${NOW:-}" ]; then flock -w 900 8; else flock -n 8; fi || return 0
+  # Убран из облака (wolf forget или вручную на Drive) — больше не выгружаем.
+  # Метка проверяется под блокировкой, чтобы не разминуться с идущим wolf forget.
+  # FORCE=1 wolf push ИМЯ снимает метку и выгружает архив заново.
+  if [ -e "$S/x/$n" ]; then
+    [ -n "${FORCE:-}" ] || return 0
+    rm -f "$S/x/$n"
+  fi
+  mkdir -p "$w"
+  man "$n" > "$w/c"
+  if ! { [ -s "$w/c" ] && fp=$(sha1sum < "$w/c" | cut -c1-40) && [ "$fp" != "$(rd "$S/h/$n")" ]; }; then
+    rm -rf "$w"; return 0
+  fi
+  rv=$(rver "$n"); lv=$(rd "$S/v/$n")
+  # Архив игры пропал из облака, хотя этот инстанс его знал, — его удалили с Drive
+  # вручную. Это решение пользователя: не воюем с ним и заново не выгружаем.
+  # Отсутствие перепроверяем прямым запросом, чтобы сбой списка не выдал себя за удаление.
+  if [ -z "$rv" ] && [ -n "$lv" ] && [ "$lv" != "?" ] && gamearch "$n" \
+     && ! { rclone lsf "$R/$n.tar.zst" --retries 1; rclone lsf "$R/$n.tar.zst.parts" --retries 1; } 2>/dev/null | grep -q .; then
+    drop "$n"
+    st "$n" ok "удалён из облака вручную — больше не выгружается (вернуть: sudo FORCE=1 wolf push '$n')"
+    rm -rf "$w"; return 0
+  fi
+  # [v4.4] Список облака ($LS) снят в начале прохода; пока мы ждали блокировку архива, его мог выгрузить
+  # параллельный проход (выход из игры, таймер, wolf shutdown) — тогда версия «чужая» лишь в старом списке.
+  # Перечитываем облако и только после этого считаем, что версия правда другая (живой случай 2026-09-26).
+  if [ "$rv" != "$lv" ] && [ "$lv" != "?" ] && rl > "$w/r" 2>/dev/null; then
+    rv=$(rver "$n" "$w/r")
+  fi
+  if [ "$rv" != "$lv" ] && [ "$lv" != "?" ]; then
+    st "$n" err "в облаке другая версия (второй инстанс?) — выполните: wolf restore $n"
+    rm -rf "$w"; return 1
+  fi
+  if [ "$K" = 1 ] && [ -n "$rv" ] && [ -s "$S/m/$n" ]; then
+    LC_ALL=C comm -z13 "$S/m/$n" "$w/c" > "$w/d"
+    LC_ALL=C comm -z23 <(cut -zf1 "$S/m/$n") <(cut -zf1 "$w/c") > "$w/.wolf-del.$n"
+    [ $(( ($(sz "$w/d") + $(delsz "$S/m/$n" "$w/.wolf-del.$n")) * 4 )) -lt "$(sz "$S/m/$n")" ] && f=0
+  fi 2>/dev/null
+  if [ $f = 1 ] && [ "$DB" = 1 ] && [ -z "${NOW:-}" ] && [ "$fp" != "$(rd "$S/p/$n")" ]; then
+    echo "$fp" > "$S/p/$n"; st "$n" wait "изменился, жду стабильности"
+    rm -rf "$w"; return 0
+  fi
+  if [ $f = 1 ]; then
+    o=$n.tar.zst;            cut -zf1 "$w/c" > "$w/l"
+  else
+    o=$n.tar.zst.${rv:0:8};  cut -zf1 "$w/d" > "$w/l"; x=(-C "$w" ".wolf-del.$n")
+  fi
+  st "$n" up "выгрузка $o"
+  rcp deletefile "$R/$o.part" &>/dev/null       # хвост прерванной выгрузки — мимо корзины
+  # [v4.6] между tar и zstd — счётчик хода (проценты от объёма файлов, скорость) для приложения
+  tar -cf - -C "$B" --no-recursion --null -T "$w/l" "${x[@]}" --ignore-failed-read \
+      --warning=no-file-changed --warning=no-file-removed 2>> "$T/tar.err" \
+    | WOLF_PG="$S/pg/$n" WOLF_PG_TOTAL="$(sz "$([ $f = 1 ] && echo "$w/c" || echo "$w/d")")" \
+      python3 /usr/local/bin/wolf-parts.py count \
+    | zstd -q -T0 -"$Z" \
+    | parts put "$o"            # [v4.4] маленький — одним файлом (.part → переименование), большой — частями
+  s=("${PIPESTATUS[@]}")
+  if [ "${s[0]}" -le 1 ] && [ "${s[1]}${s[2]}${s[3]}" = 000 ]; then
+    if [ $f = 1 ]; then
+      mv "$w/c" "$S/m/$n"
+      [[ $rv = *+* ]] && parts rm "$n.tar.zst.${rv:0:8}" --no-trash &>/dev/null   # дельта к прежней базе
+    fi
+    echo "$fp" > "$S/h/$n"; rm -f "$S/p/$n"
+    { rl > "$w/r" && rver "$n" "$w/r"; } > "$S/v/$n" || echo "?" > "$S/v/$n"
+    st "$n" ok "выгружено $o за $((SECONDS - t)) с"
+    case $n in pfx--*|game--*|sgame--*|lgame--*) : > "$S/nt/$n" ;; esac   # сохранения — к уведомлению
+    rm -rf "$w"; return 0
+  fi
+  st "$n" err "ошибка выгрузки (tar/счётчик/zstd/rclone: ${s[*]})"
+  rcp deletefile "$R/$o.part" &>/dev/null
+  rm -rf "$w"; return 1
+}
+
+# wolf forget ИМЯ — убрать архив игры из облака: основной файл и дельту — в корзину
+# Drive (30 дней их можно вернуть оттуда). Сама игра на этом инстансе остаётся, но
+# больше не выгружается; на следующих инстансах её архива уже не будет.
+forget() {
+  local n=$1 o=()
+  gamearch "$n" || { log "forget: '$n' — не архив игры (нужен game--, sgame--, pfx--, mod-- или prog--)"; return 1; }
+  exec 8> "$L/$n.lock"; flock -w 900 8 || return 1
+  mapfile -t o < <(awk -F'\t' -v b="$n.tar.zst" '$1==b || index($1, b".")==1 {print $1}' "$LS")
+  # [v4.4] все файлы архива (части, дельты) — параллельно, оглавления первыми; список берётся свежий
+  parts rm "$n.tar.zst" --all || { st "$n" err "не удалось удалить $n из облака"; return 1; }
+  drop "$n"
+  st "$n" ok "удалён из облака${o[*]:+ (лежит в корзине Drive 30 дней)} — больше не выгружается"
+}
+
+# ------------------------------------------------------------ уведомления ---
+# Название игры: из манифеста Steam; для сторонней игры, запущенной через Steam, —
+# по её папке в $GD; иначе номер
+gname() {
+  local s
+  s=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
+        "$DH/$SR/steamapps/appmanifest_$1.acf" 2>/dev/null | head -1)
+  [ -n "$s" ] || s=$(rd "$S/nm/$1")
+  echo "${s:-appid $1}"
+}
+# Одно уведомление на игру после выгрузки её сохранений (префикс Proton или папка игры).
+# Пока игра запущена, архив выгружается молча: игры постоянно пишут логи в префикс,
+# и иначе уведомление приходило бы каждые 5 минут. Покажется после выхода из игры.
+saves_notify() {
+  local f n a l=()
+  [ "${NT:-1}" = 1 ] || { rm -f "$S"/nt/*; return 0; }
+  exec 7> "$L/notify.lock"; flock -n 7 || return 0
+  for f in "$S"/nt/*; do
+    [ -e "$f" ] || continue
+    n=${f##*/}
+    case $n in
+      pfx--*) a=${n#pfx--}
+              pgrep -f "AppId=$a( |\$)" >/dev/null && continue    # игра ещё запущена
+              l+=("$(gname "$a")") ;;
+      *)      l+=("${n#*--}") ;;
+    esac
+    rm -f "$f"
+  done
+  [ ${#l[@]} -gt 0 ] || return 0
+  ntf "Сохранения в облаке" \
+      "$(printf '%s\n' "${l[@]}" | awk '!s[$0]++ { printf "%s%s", (c++ ? ", " : ""), $0 }')"
+  return 0
+}
+
+# ------------------------------------------------------- выгрузка по выходу ---
+# Каталог установки Steam-игры по appid (для sgame-- при SYNC_STEAM_GAMES=1)
+idir() { idirs "$DH/$SR/steamapps/appmanifest_$1.acf" | head -1; }
+# Что сейчас запущено:
+#   app:ID       игра Steam (Steam запускает игры через reaper "SteamLaunch AppId=ID")
+#   dir:ПАПКА    игра из $GD: путь к её папке есть в командной строке процесса (у Wine —
+#                с "\", поэтому "\" приводится к "/"), в его текущем каталоге или exe
+#   nm:ID=ПАПКА  сторонняя игра, запущенная через Steam, — название для уведомления
+running_keys() {
+  { pgrep -af . | tr '\\' '/'
+    find /proc/[0-9]*/cwd /proc/[0-9]*/exe -maxdepth 0 -lname "$GD/*" -printf '%l\n' 2>/dev/null
+  } | G="$GD/" awk '
+    { id = "" }
+    match($0, /SteamLaunch AppId=[0-9]+/) { id = substr($0, RSTART + 18, RLENGTH - 18); print "app:" id }
+    { g = ENVIRON["G"]
+      while ((i = index($0, g)) > 0) {
+        s = substr($0, i + length(g)); n = index(s, "/")
+        f = n ? substr(s, 1, n - 1) : s
+        if (f != "") { print "dir:" f; if (id != "") print "nm:" id "=" f }
+        $0 = s
+      } }' | sort -u
+}
+# Раз в 5 с сверяет запущенные игры. Игра, которой нет 10+ с, считается закрытой:
+# её архивы сразу выгружаются (wolf push) на низком приоритете, затем уведомление.
+watch_games() {
+  local now k a d t arr scan=0
+  declare -A seen=() cur=() last=()
+  while :; do
+    sleep 5
+    [ -e "$L/boot-done" ] || continue
+    [ -n "$SR" ] || sr
+    now=$(date +%s); cur=()
+    if [ "$now" -ge "$scan" ]; then scan=$(( now + 30 )); scan_games; prog_scan; mods_scan; lgame_track; own_shortcuts; own_icons; own_noexec; fi   # [v4.6] вопросы; [v5.0] чистые игры
+    # [v5.4] программы «вместе с игрой» и список программ для приложения
+    python3 /usr/local/bin/wolf-steam.py progs-tick "$DH/$SR" "$PD" "$S" "$DU" "$DH" >> /var/log/wolf.log 2>&1
+    install_requests                                  # [v5.7] установщик с двойного щелчка — в «диск C:» игры
+    prog_requests                                     # [v5.7] запустить / вместе с игрой / запуск через — с двойного щелчка
+    while IFS= read -r k; do
+      case $k in
+        nm:*)  k=${k#nm:}
+               [ "$(rd "$S/nm/${k%%=*}")" = "${k#*=}" ] || printf '%s' "${k#*=}" > "$S/nm/${k%%=*}" ;;
+        dir:*) [ -d "$GD/${k#dir:}" ] || continue
+               cur[$k]=1; seen[$k]=$now ;;
+        app:*) cur[$k]=1; [ -n "${seen[$k]:-}" ] || mods_mark "${k#app:}"; seen[$k]=$now ;;
+      esac
+    done < <(running_keys)
+    arr=()
+    for k in "${!seen[@]}"; do
+      [ -n "${cur[$k]:-}" ] && continue
+      # [v4.6] закрытой считаем игру, которой нет 30 с (раньше 10: игра «мигала» и выгружалась по кругу),
+      # и одну и ту же выгружаем по выходу не чаще раза в 10 минут — остальное подхватят таймеры и выключение
+      t=${seen[$k]}; [ $(( now - t )) -ge 30 ] || continue
+      unset 'seen[$k]'
+      [ $(( now - ${last[$k]:-0} )) -ge 600 ] || continue
+      last[$k]=$now
+      case $k in
+        app:*) a=${k#app:}
+               # [v5.7] последний отрезок наблюдения — сейчас, а не через 30 с: данные игры до выгрузки
+               d=$(idir "$a"); [ -n "$d" ] && [ -e "$S/van/$a.seen.tsv" ] && python3 /usr/local/bin/wolf-mods.py track \
+                 "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" 0 "$PD" >> /var/log/wolf.log 2>&1
+               store && [ "$SV" = 1 ] && [ -s "$S/van/$a.pend.tsv" ] && arr+=("$(gsave_name "$a")")
+               mods_check "$a"                                       # [v5.0] появились моды — спросить
+               # [v5.7] «диска C:» от Steam нет (своя игра из Games — её C: в папке игры, едет с game--) — нечего выгружать
+               wants "pfx--$a" && [ -d "$DH/$SR/steamapps/compatdata/$a" ] && arr+=("pfx--$a")
+               d=$(idir "$a"); [ -n "$d" ] && want "sgame--$d" && steam_ready "sgame--$d" && arr+=("sgame--$d") ;;
+        dir:*) want "game--${k#dir:}" && arr+=("game--${k#dir:}") ;;
+      esac
+    done
+    if [ ${#arr[@]} -gt 0 ]; then
+      log "выход из игры: выгружаю ${arr[*]}"
+      ( NOW=1 "$0" push "${arr[@]}" >/dev/null 2>&1 & )
+    fi
+  done
+}
+
+# ------------------------------------------- [HARDENING #3] безопасная распаковка
+# Проверка членов архива: запрет абсолютных путей и обхода каталогов.
+guard_members() {  # $1 = путь к .tar.zst (временный файл)
+  local m
+  while IFS= read -r m; do
+    case "$m" in
+      /*|../*|*/../*|*/..) log "ОТКАЗ: опасный путь в архиве: $m"; return 1 ;;
+    esac
+  done < <(zstd -dcq "$1" | tar -tf - 2>/dev/null)
+  return 0
+}
+
+# identity НИКОГДА не распаковывается в '/'. Staging + realpath + allowlist.
+restore_identity_safe() {
+  local n=identity rv f stage l real
+  spec "$n"                                   # B=/ K=0
+  exec 8> "$L/$n.lock"; flock 8
+  rv=$(rver "$n"); [ -n "$rv" ] || { st "$n" ok "нет в облаке"; return 0; }
+  if [ "$rv" = "$(rd "$S/v/$n")" ] && [ -z "${FORCE:-}" ]; then st "$n" ok "актуально"; return 0; fi
+  st "$n" down "восстановление (safe, без доступа к /)"
+  f="$T/$n.dl.zst"
+  rc copyto "$R/$n.tar.zst" "$f" || { st "$n" err "скачивание не удалось"; return 1; }
+  guard_members "$f" || { rm -f "$f"; st "$n" err "небезопасный архив"; return 1; }
+  stage=$(mktemp -d "$T/id.XXXXXX") || { rm -f "$f"; return 1; }
+  zstd -dcq "$f" | tar -xf - -C "$stage" --no-same-owner --no-overwrite-dir \
+      --delay-directory-restore --warning=no-timestamp 2>>"$T/tar.err" || {
+      rm -rf "$stage" "$f"; st "$n" err "распаковка не удалась"; return 1; }
+  rm -f "$f"
+  # realpath: ни один симлинк в stage не должен указывать за пределы stage
+  while IFS= read -r -d '' l; do
+    real=$(realpath -m -- "$l")
+    case "$real/" in "$stage"/*) : ;;
+      *) rm -rf "$stage"; st "$n" err "симлинк за пределами stage: $l -> $real"; return 1 ;;
+    esac
+  done < <(find "$stage" -type l -print0)
+  # Копируем ТОЛЬКО обычные файлы из allowlist на фиксированные пути
+  cp_id() {  # $1 rel-src  $2 abs-dst  $3 mode  $4 owner:group
+    local s="$stage/$1" r
+    [ -e "$s" ] || return 0
+    r=$(realpath -e -- "$s" 2>/dev/null) || return 0
+    case "$r/" in "$stage"/*) : ;; *) return 0 ;; esac
+    [ -f "$r" ] || return 0
+    install -D -m "$3" -o "${4%%:*}" -g "${4##*:}" "$r" "$2"
+  }
+  cp_id etc/machine-id                          /etc/machine-id                          644 root:root
+  cp_id var/lib/zerotier-one/identity.public    /var/lib/zerotier-one/identity.public    644 root:root
+  cp_id var/lib/zerotier-one/identity.secret    /var/lib/zerotier-one/identity.secret    600 root:root
+  cp_id var/lib/tailscale/tailscaled.state      /var/lib/tailscale/tailscaled.state      600 root:root
+  # Sunshine (creds/state) — каталоги; симлинки внутри stage уже проверены выше
+  cp_tree() {  # $1 rel-src-dir  $2 abs-dst-dir  $3 owner:group
+    local s="$stage/$1"; [ -d "$s" ] || return 0
+    mkdir -p "$2"; cp -a --no-preserve=ownership "$s/." "$2/" 2>/dev/null
+    chown -R "$3" "$2" 2>/dev/null
+  }
+  cp_tree etc/sunshine                 /etc/sunshine            root:root
+  cp_tree "${DH#/}/.config/sunshine"   "$DH/.config/sunshine"   "$DU:"
+  rm -rf "$stage"
+  man "$n" 2>/dev/null | sha1sum | cut -c1-40 > "$S/h/$n"
+  echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
+  st "$n" ok "identity восстановлен (allowlist, без root-доступа архива)"
+  return 0
+}
+
+# Распаковка пользовательских архивов — ВСЕГДА от юзера (никогда root).
+# GNU tar 1.34 (Ubuntu 22.04) не следует за симлинками как компонентами пути
+# при извлечении => directory-traversal через симлинк невозможен; любые
+# последствия компрометации ограничены непривилегированным пользователем.
+xt_user() { u tar -xpf - -C "$B" --no-overwrite-dir --delay-directory-restore \
+              --warning=no-timestamp 2>>"$T/tar.err"; }
+
+get() {  # $1 объект в облаке  $2 имя  (B/K заданы spec)
+  local s h PG="$S/pg/$2"                        # [v4.6] ход скачивания (проценты, скорость) — для приложения
+  # [v4.4] частями; [v4.5] кусками по 64 МБ, до 8 сразу, в памяти и по порядку прямо в распаковку (без временных
+  # файлов — раньше части ложились на диск, и распаковка писала их ещё раз)
+  if awk -F'\t' -v o="$1.parts" '$1==o {f=1} END {exit !f}' "$LS"; then
+    parts get "$1" | zstd -dcq | xt_user
+    set -- "${PIPESTATUS[@]}"
+    [[ "$*" =~ ^[0\ ]+$ ]]; return
+  fi
+  s=$(awk -F'\t' -v o="$1" '$1==o{print $3}' "$LS"); h=$(awk -F'\t' -v o="$1" '$1==o{print $2}' "$LS")
+  if [ "${s:-0}" -gt "${WOLF_BIG_FILE:-134217728}" ] && [ -n "$h" ]; then
+    # [v4.5] большой одиночный архив (выгружен до v4.4) — тоже кусками в несколько потоков; раньше — одним
+    # потоком ~25 МБ/с (или целиком во временный файл, если на диске было втрое больше места)
+    parts cat "$1" "$s" "$h" | zstd -dcq | xt_user
+    set -- "${PIPESTATUS[@]}"
+  else
+    rc cat --buffer-size=128M "$R/$1" | zstd -dcq | xt_user
+    set -- "${PIPESTATUS[@]}"
+  fi
+  [[ "$*" =~ ^[0\ ]+$ ]]
+}
+
+del() {
+  [ -f "$B/.wolf-del.$1" ] && u sh -c 'cd "$1" && xargs -0r rm -rf -- < "$2"; rm -f "$2"' _ "$B" ".wolf-del.$1"
+  return 0
+}
+
+unpack() {
+  local n=$1 rv
+  [ "$n" = identity ] && { restore_identity_safe; return; }
+  spec "$n" || return 0
+  exec 8> "$L/$n.lock"; flock 8
+  rv=$(rver "$n"); [ -n "$rv" ] || return 0
+  if [ "$rv" = "$(rd "$S/v/$n")" ] && [ -z "${FORCE:-}" ]; then st "$n" ok "актуально"; return 0; fi
+  st "$n" down "восстановление"
+  u mkdir -p "$B"
+  # [v5.8] Сбой скачивания (живой случай 2026-10-15, Орегон: «не сходится MD5» — кусок пришёл испорченным, а файл в
+  # облаке цел) — ещё раз, всего 3: распаковка повторно просто перепишет те же файлы, битый архив не распакуется
+  local try _pfx _u
+  for try in 1 2 3; do
+    if get "$n.tar.zst" "$n" \
+       && { [ "$K" = 0 ] || man "$n" > "$S/m/$n"; } \
+       && { [[ $rv != *+* ]] || { get "$n.tar.zst.${rv:0:8}" "$n" && del "$n"; }; }; then
+      man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+      echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
+      case $n in
+        pfx--*)
+          [ -n "$SR" ] || sr
+          _pfx="$DH/$SR/steamapps/compatdata/${n#pfx--}/pfx/drive_c"
+          if [ -d "$_pfx" ]; then
+            u mkdir -p "$_pfx/users/steamuser/AppData/Local/Temp" "$_pfx/users/steamuser/Temp" "$_pfx/users/steamuser/Documents" "$_pfx/windows/temp" 2>/dev/null || true
+            for _u in "$_pfx"/users/*; do
+              [ -d "$_u" ] && u mkdir -p "$_u/AppData/Local/Temp" "$_u/Temp" "$_u/Documents" 2>/dev/null || true
+            done
+          fi
+          ;;
+        game--*)
+          _pfx="$GD/${n#game--}/.prefix/drive_c"
+          if [ -d "$_pfx" ]; then
+            u mkdir -p "$_pfx/users/steamuser/AppData/Local/Temp" "$_pfx/users/steamuser/Temp" "$_pfx/users/steamuser/Documents" "$_pfx/windows/temp" 2>/dev/null || true
+            for _u in "$_pfx"/users/*; do
+              [ -d "$_u" ] && u mkdir -p "$_u/AppData/Local/Temp" "$_u/Temp" "$_u/Documents" 2>/dev/null || true
+            done
+          fi
+          ;;
+        compatdata)
+          [ -n "$SR" ] || sr
+          for _pfx in "$DH/$SR"/steamapps/compatdata/*/pfx/drive_c; do
+            [ -d "$_pfx" ] && u mkdir -p "$_pfx/users/steamuser/AppData/Local/Temp" "$_pfx/users/steamuser/Temp" "$_pfx/users/steamuser/Documents" "$_pfx/windows/temp" 2>/dev/null || true
+          done
+          ;;
+      esac
+      st "$n" ok "восстановлено"; return 0
+    fi
+    [ "$try" = 3 ] || { log "$n: восстановление не удалось — пробую ещё раз ($((try + 1)) из 3)"; sleep $((try * 5)); }
+  done
+  st "$n" err "ошибка восстановления"; return 1
+}
+
+# ------------------------------------------------------------------ дисплей ---
+# Найти X-дисплей и дать пользователю доступ к нему по UID (cookie не нужен)
+xenv() {
+  local s a
+  s=$(ls /tmp/.X11-unix 2>/dev/null | head -1); [ -n "$s" ] || return 1
+  D=":${s#X}"; echo "D=$D" > "$L/x"
+  a=$(ps -eo args= | grep -m1 -oP '^\S*X\S* .*-auth \K\S+') \
+    && DISPLAY=$D XAUTHORITY=$a xhost +SI:localuser:"$DU" &>/dev/null
+  return 0
+}
+# Режим подключённого выхода (а не размер всего экрана X — он может быть больше)
+xmode() { u xrandr 2>/dev/null | sed -nE 's/^[^ ]+ connected (primary )?([0-9]+x[0-9]+)\+.*/\2/p' | head -1; }
+# Дождаться X после перезапуска: дисплей, доступ, режим выхода и сессия пользователя
+xwait() {
+  local i
+  for i in {1..40}; do
+    if xenv && [ -n "$(xmode)" ]; then
+      for i in {1..30}; do [ -S "/run/user/$UI/bus" ] && break; sleep 2; done
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+# [HARDENING #1] EDID: монитор WOLF, единственный детальный тайминг 1920x1200@60 CVT-RB
+# (154.00 МГц; Htot 2080; Vtot 1235; H+ V-) + контрольная сумма. Другие разрешения
+# wolf-res создаёт на лету, поэтому список режимов в EDID не нужен.
+gen_edid() {  # $1 — куда записать
+  python3 - > "$1" <<'PY'
+import sys
+e = bytes([
+ 0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,
+ 0x5D,0x86, 0x01,0x00, 0x01,0x00,0x00,0x00, 0x01,0x21, 0x01,0x03,
+ 0x80, 0x34,0x20, 0x78, 0x0A,
+ 0xEE,0x91,0xA3,0x54,0x4C,0x99,0x26,0x0F,0x50,0x54,
+ 0x00,0x00,0x00,
+ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+ 0x28,0x3C,0x80,0xA0,0x70,0xB0,0x23,0x40,0x30,0x20,0x36,0x00,0x06,0x44,0x21,0x00,0x00,0x1A,
+ 0x00,0x00,0x00,0xFD,0x00,0x32,0x4B,0x1E,0x5F,0x10,0x00,0x0A,0x20,0x20,0x20,0x20,0x20,0x20,
+ 0x00,0x00,0x00,0xFC,0x00,0x57,0x4F,0x4C,0x46,0x0A,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
+ 0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+ 0x00,
+])
+sys.stdout.buffer.write(e + bytes([(-sum(e)) & 0xFF]))
+PY
+}
+
+# [HARDENING #1] xorg.conf для NVIDIA без монитора. Виртуальный монитор драйвер считает
+# DVI-монитором: ограничивает частоту пикселей 165 МГц (single-link TMDS) и сверяет
+# режимы с диапазонами частот из EDID. Эти проверки отключены, иначе wolf-res не
+# поднимет разрешение выше ~2048x1152.
+write_xorg() {  # $1 — куда записать
+  local bus b1 b2 b3
+  bus=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | head -1)
+  IFS=:. read -r _ b1 b2 b3 <<< "$bus"
+  [ -n "${b3:-}" ] || return 1
+  cat > "$1" <<EOF
+Section "Device"
+    Identifier "wolfGPU"
+    Driver     "nvidia"
+    BusID      "PCI:$((16#$b1)):$((16#$b2)):$((16#$b3))"
+    Option     "AllowEmptyInitialConfiguration" "true"
+    Option     "ConnectedMonitor" "DFP-0"
+    Option     "CustomEDID" "DFP-0:/etc/X11/wolf.edid"
+    Option     "ModeValidation" "DFP-0: NoMaxPClkCheck, NoEdidMaxPClkCheck, NoHorizSyncCheck, NoVertRefreshCheck, NoDualLinkDVICheck, AllowNonEdidModes"
+    Option     "HardDPMS" "false"
+EndSection
+Section "Screen"
+    Identifier   "wolfScreen"
+    Device       "wolfGPU"
+    DefaultDepth 24
+    Option       "MetaModes" "DFP-0: $RES +0+0"
+    SubSection "Display"
+        Depth   24
+        Modes   "$RES"
+        Virtual 3840 3840
+    EndSubSection
+EndSection
+EOF
+}
+
+# [HARDENING #1] Привести EDID и xorg.conf к нужному виду. Конфиг генерируется заново и
+# сравнивается с установленным: при расхождении — установка, перезапуск X, проверка
+# базового режима и откат, если X не поднялся. Совпадает — X не трогаем.
+setup_display() {
+  [ "$AR" = 1 ] || return 0
+  # [v4.0] В Docker экран (EDID, xorg.conf, X-сервер) настраивает образ при старте
+  [ "${WM:-kvm}" = docker ] && { log "дисплей: настроен образом Docker, режим $(xmode)"; return 0; }
+  hash nvidia-smi 2>/dev/null || { log "дисплей: не NVIDIA — пропуск"; return 0; }
+  local C=/etc/X11/xorg.conf.d/10-wolf.conf E=/etc/X11/wolf.edid ne="$T/wolf.edid.new" nc="$T/10-wolf.conf.new"
+  gen_edid "$ne" && write_xorg "$nc" || { log "дисплей: не удалось сгенерировать конфиг"; return 0; }
+  if cmp -s "$ne" "$E" && cmp -s "$nc" "$C"; then
+    rm -f "$ne" "$nc"
+    [ "$(xmode)" = "$RES" ] || u /usr/local/bin/wolf-res >/dev/null 2>&1
+    log "дисплей: конфиг актуален, режим $(xmode)"
+    return 0
+  fi
+  mkdir -p /etc/X11/xorg.conf.d
+  cp -f "$C" "$C.bak" 2>/dev/null || : > "$C.bak"          # пустой .bak = файла не было
+  cp -f "$E" "$E.bak" 2>/dev/null || : > "$E.bak"
+  install -m 644 "$ne" "$E"; install -m 644 "$nc" "$C"; rm -f "$ne" "$nc"
+  sed -i 's/^#*\s*WaylandEnable=.*/WaylandEnable=false/' /etc/gdm3/custom.conf 2>/dev/null
+  log "дисплей: конфиг изменился — применяю EDID/xorg.conf, перезапуск X"
+  systemctl restart display-manager; sleep 10
+  if xwait && [ "$(xmode)" = "$RES" ]; then
+    rm -f "$C.bak" "$E.bak"; log "дисплей: $RES установлено"; return 0
+  fi
+  log "дисплей: X не поднялся в $RES (сейчас: $(xmode)) — откат"
+  if [ -s "$C.bak" ]; then cp -f "$C.bak" "$C"; else rm -f "$C"; fi
+  if [ -s "$E.bak" ]; then cp -f "$E.bak" "$E"; else rm -f "$E"; fi
+  rm -f "$C.bak" "$E.bak"
+  systemctl restart display-manager; sleep 10; xwait
+  return 0
+}
+
+# [HARDENING #4] Изоляция: порты Sunshine и страница статуса принимают трафик только
+# с tailscale0 и lo, остальное DROP. Политика INPUT не трогается => SSH и управление
+# Vast работают. Пока Tailscale не поднялся, правила не ставятся — об этом в логе.
+setup_sunshine_firewall() {
+  # [v4.0] В Docker прав на iptables нет, а наружу опубликован только порт Tailscale:
+  # Sunshine и страница статуса доступны через Tailscale (и соседям по сети хоста — у кабинета
+  # Sunshine пароль, команды страницы проверяют владельца через Tailscale)
+  [ "${WM:-kvm}" = docker ] && { log "firewall: в Docker не ставится — порты наружу не опубликованы"; return 0; }
+  hash iptables 2>/dev/null || { log "firewall: iptables нет — пропуск"; return 0; }
+  local IF=tailscale0 pr p="${WP:-8099}"
+  if ! ip link show "$IF" &>/dev/null; then
+    log "firewall: $IF не найден — Sunshine и страница статуса НЕ изолированы (проверьте Tailscale)"
+    return 1
+  fi
+  iptables -N WOLF_SUN 2>/dev/null || iptables -F WOLF_SUN
+  iptables -A WOLF_SUN -i lo   -j RETURN
+  iptables -A WOLF_SUN -i "$IF" -j RETURN
+  iptables -A WOLF_SUN -j DROP
+  for pr in tcp udp; do
+    iptables -C INPUT -p "$pr" --dport 47984:48010 -j WOLF_SUN 2>/dev/null \
+      || iptables -A INPUT -p "$pr" --dport 47984:48010 -j WOLF_SUN
+  done
+  # Страница статуса: в ней видны хвост лога, названия игр и пути — наружу не отдаём
+  iptables -C INPUT -p tcp --dport "$p" -j WOLF_SUN 2>/dev/null \
+    || iptables -A INPUT -p tcp --dport "$p" -j WOLF_SUN
+  log "firewall: Sunshine (47984-48010, вкл. веб-UI 47990) и статус ($p) только через $IF"
+  return 0
+}
+
+# [HARDENING #1] global_prep_cmd Sunshine: при подключении клиента — его разрешение (do),
+# при отключении — базовое (undo). Переменные клиента раскрывает /bin/sh -c (так в
+# примерах Sunshine). Строка переписывается, только если отличается.
+sunshine_prep() {
+  local d="$DH/.config/sunshine" cf="$DH/.config/sunshine/sunshine.conf"
+  local want='global_prep_cmd = [{"do":"/bin/sh -c \"/usr/local/bin/wolf-res ${SUNSHINE_CLIENT_WIDTH} ${SUNSHINE_CLIENT_HEIGHT} ${SUNSHINE_CLIENT_FPS}\"","undo":"/usr/local/bin/wolf-res"}]'
+  mkdir -p "$d"; touch "$cf"
+  if ! grep -qxF "$want" "$cf"; then
+    sed -i '/^global_prep_cmd/d' "$cf"
+    printf '%s\n' "$want" >> "$cf"
+  fi
+  # [v3.16] Запас на восстановление потерянных пакетов видео 50% (по умолчанию 20). Linux-Sunshine не
+  # умеет Reference frame invalidation: после невосстановимой потери Moonlight выкидывает кадры до
+  # нового ключевого (~RTT). Замер 2026-09-25 (~1% потерь на маршруте): 7–20% пропавших кадров → 3.6%.
+  # Только если строки нет — свой выбор из кабинета Sunshine не трогаем.
+  grep -q '^fec_percentage' "$cf" || printf 'fec_percentage = 50\n' >> "$cf"
+  # [v4.0] Имя для Moonlight одно на KVM и Docker (связка общая — плитка та же): без него KVM назывался
+  # «ubuntu», а контейнер — случайным номером. Своё имя из кабинета Sunshine не трогаем
+  grep -q '^sunshine_name' "$cf" || printf 'sunshine_name = vastai-gaming\n' >> "$cf"
+  chown -R "$DU:" "$d"
+}
+
+# Sunshine перезапускается ПОСЛЕ восстановления identity, иначе Moonlight просит PIN
+sunshine_restart() {
+  hash sunshine 2>/dev/null || { log "Sunshine не установлен"; return 0; }
+  # [v4.0] В Docker — скрипт образа: свой файл настроек (NvFBC, NVENC, геймпад), а связка с
+  # Moonlight и логин кабинета — общие с KVM (sunshine_state.json из identity). KVM-шный
+  # sunshine.conf здесь не трогаем
+  if [ "${WM:-kvm}" = docker ]; then
+    /opt/vastgame/sunshine-start.sh >> /var/log/wolf.log 2>&1
+    log "Sunshine перезапущен (образ Docker)"
+    return 0
+  fi
+  rm -f "$DH/.config/autostart/sunshine.desktop"
+  sunshine_prep                                  # [HARDENING #1] разрешение под клиента
+  u systemctl --user stop sunshine.service &>/dev/null
+  pkill -x sunshine && sleep 2
+  if u systemctl --user cat sunshine.service &>/dev/null; then
+    u systemctl --user set-environment DISPLAY="$D"
+    u systemctl --user enable sunshine.service &>/dev/null
+    u systemctl --user start sunshine.service && { log "Sunshine запущен (user unit)"; return 0; }
+  fi
+  u setsid -f sunshine &> /tmp/sunshine.log
+  log "Sunshine запущен"
+}
+
+# Язык: STEAM_LANG пуст => флаг не передаётся, Steam берёт язык из своих настроек
+# (они приезжают из облака в steam-state). Непустой — фиксирует язык на каждом запуске.
+steam_go() {
+  pgrep -x steam >/dev/null && return 0
+  [ -x /usr/games/steam ] || { log "Steam не установлен"; return 0; }
+  local a=(-cef-enable-debugging) sd
+  for sd in "$DH/${SR:-.steam/debian-installation}" "$DH/.steam/steam" "$DH/.local/share/Steam"; do
+    [ -d "$sd" ] && u sh -c ': > "$0"' "$sd/.cef-enable-remote-debugging" 2>/dev/null
+  done
+  [ -n "${SL:-}" ] && a+=(-language "$SL")
+  [ -n "$SR" ] && [ -f "$DH/$SR/steam.cfg" ] && a+=(-noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles)
+  # [v5.6] NVAPI выключен на машинах, где он вредит (nvapi_check при загрузке): игры наследуют окружение Steam
+  if [ -e "$S/nvapi.off" ]; then
+    u env PROTON_DISABLE_NVAPI=1 setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
+  else
+    u setsid -f /usr/games/steam "${a[@]}" &> /tmp/steam.log
+  fi
+  log "Steam запущен${SL:+ (язык: $SL)}$([ -e "$S/nvapi.off" ] && echo ", NVAPI выключен")"
+}
+
+# [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за минуту
+steam_off() {
+  pgrep -x steam >/dev/null || return 0
+  u /usr/games/steam -shutdown &>/dev/null
+  for _ in {1..60}; do pgrep -x steam >/dev/null || return 0; sleep 1; done
+  return 1
+}
+# [v5.3] Из аккаунта Steam вышли (Steam сам убрал его вход и пропуск) — убрать и его данные userdata/НОМЕР,
+# иначе они останутся в облаке со steam-state. Только при закрытом Steam и восстановленном при загрузке steam-state
+steam_gone() {
+  local out
+  [ -n "$SR" ] && [ -s "$S/steam.seen" ] || return 0
+  pgrep -x steam >/dev/null && return 0
+  out=$(python3 /usr/local/bin/wolf-steam.py gone "$DH/$SR" "$S/steam.seen" 2>&1)
+  [ -n "$out" ] && log "$out"
+  return 0
+}
+# [v4.1] Игры из папки GD — в библиотеку Steam сторонними, с Proton (wolf-shortcuts.py). Только при
+# закрытом Steam: иначе при выходе он вернёт свой список. Код 3 — список изменился
+shortcuts() {
+  local out rc
+  [ -n "$SR" ] || sr || return 0
+  pgrep -x steam >/dev/null && return 0
+  out=$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" 2>&1); rc=$?
+  [ -n "$out" ] && log "$out"
+  return $rc
+}
+
+# --------------------------------------------------------------------- boot ---
+boot() {
+  LS=$T/ls.boot FL=$T/fail.boot
+  local ok=0 m0 e lu d f k p=() g=() ka=() sh=() dirs=() offnote=
+  rm -f "$L/boot-done"                          # [HARDENING #5] гейт закрыт на время boot
+  rm -rf "${T:?}"/* "$S"/st/* "$S"/nt/*; : > "$FL"
+  sel_init                                      # [v4.6] выбор игр этой машины
+  play_init                                     # [v4.8] игра из библиотеки приложения
+  find /var/log/wolf.log -size +20M -delete 2>/dev/null
+  st boot up "старт"
+
+  for _ in {1..60}; do rc mkdir "$R" && rl > "$LS" && { ok=1; break; }; sleep 5; done
+  [ $ok = 1 ] || { log "Google Drive недоступен — восстановление пропущено"; : > "$LS"; }
+
+  # 1. identity — БЕЗОПАСНО (без распаковки в /), до сети и сервисов
+  pkill -x steam
+  tsd stop
+  [ -n "$ZT" ] && systemctl stop zerotier-one 2>/dev/null
+  u mkdir -p "$DH/.config"
+  m0=$(cat /etc/machine-id 2>/dev/null)
+  ( restore_identity_safe ) || echo identity >> "$FL"
+  if [ "$m0" != "$(cat /etc/machine-id 2>/dev/null)" ]; then
+    [ -L /var/lib/dbus/machine-id ] || cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
+    [ "${WM:-kvm}" = docker ] || systemctl restart systemd-journald
+    log "machine-id восстановлен"
+  fi
+
+  # 2. Сеть. Auth-key Tailscale — через file: (не виден в ps). ZeroTier — только если задан.
+  tsd start
+  if [ -n "$ZT" ]; then
+    systemctl start zerotier-one 2>/dev/null
+    for _ in {1..15}; do zerotier-cli join "$ZT" &>/dev/null && break; sleep 2; done
+  fi
+  [ -s /etc/wolf/tskey ] && ka=(--auth-key="file:/etc/wolf/tskey")
+  # Tailscale SSH даёт root любому узлу вашей сети; TAILSCALE_SSH=0 отключает
+  [ "${TSS:-1}" = 1 ] && sh=(--ssh)
+  # shellcheck disable=SC2086
+  tailscale up --reset --timeout=90s "${ka[@]}" --hostname="$TSH" "${sh[@]}" $TSX \
+    || log "tailscale up: ошибка"
+  # [v3.12] Ни личности из облака, ни ключа (первая машина нового человека) — вход по одобрению:
+  # ссылка публикуется в папке на Drive, приложение на Mac открывает её в браузере. В фоне — чтобы
+  # восстановление не ждало человека; узел войдёт в сеть, как только его одобрят.
+  [ "$(ts_state | cut -d' ' -f1)" = Running ] || ( ts_link_publish & )
+
+  # 3. Дисплей (EDID/xorg), firewall, Sunshine
+  for _ in {1..150}; do ls /tmp/.X11-unix/X* &>/dev/null && [ -S "/run/user/$UI/bus" ] && break; sleep 2; done
+  setup_sunshine_firewall || echo firewall >> "$FL"
+  if xenv; then
+    setup_display
+    u xset s off -dpms 2>/dev/null
+    sunshine_restart
+  else
+    log "X-дисплей не найден"
+  fi
+
+  # 4. Steam: вход/настройки, затем клиент, кэш (для офлайн-режима) и префиксы Proton
+  st boot down "Steam"
+  rm -f "$S/steam.seen"
+  ( unpack steam-state ) || echo steam-state >> "$FL"
+  if sr; then
+    # [v5.3] steam-state восстановлен — при выключении можно убрать данные аккаунтов, из которых вышли
+    grep -qx steam-state "$FL" || log "$(python3 /usr/local/bin/wolf-steam.py seen "$DH/$SR" "$S/steam.seen" 2>&1)"
+    p=()
+    if [ "$SV" = 1 ]; then
+      mapfile -t p < <(names '^pfx--' | while IFS= read -r k; do wants "$k" && echo "$k"; done)   # [v4.6] выбор
+      [ ${#p[@]} -gt 0 ] || p=(compatdata)
+    else
+      log "сохранения: синхронизация выключена (SYNC_SAVES=0) — из облака не восстанавливаю"
+    fi
+    pool unpack steam-client steam-cache "${p[@]}"
+    if [ "$SG" = 1 ] || selon; then acf_unhide; else acf_hide; fi     # [v4.2] до запуска Steam; [v4.6] выбор — ниже
+    # [v4.3] Steam Input по умолчанию выключен (до запуска Steam; папка игр ещё не восстановлена — только это)
+    log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --steam-input 2>&1)"
+    launch_boot                                    # [v5.6] «запускать игру через программу» — до запуска Steam
+    if [ -e "$DH/$SR/steam.sh" ]; then
+      if [ "$SF" = 1 ]; then
+        printf 'BootStrapperInhibitAll=Enable\nBootStrapperForceSelfUpdate=Disable\n' > "$DH/$SR/steam.cfg"
+        chown "$DU:" "$DH/$SR/steam.cfg"
+      else
+        rm -f "$DH/$SR/steam.cfg"
+      fi
+    fi
+    # Офлайн-режим без кэша лицензий — бесконечная заставка: Steam не с чем стартовать.
+    # Если кэша нет, этот запуск идёт онлайн: Steam соберёт кэш, и он уйдёт в облако.
+    lu="$DH/$SR/config/loginusers.vdf"
+    if grep -Eq '"WantsOfflineMode"[[:space:]]+"1"' "$lu" 2>/dev/null \
+       && ! { [ -s "$DH/$SR/appcache/appinfo.vdf" ] && [ -s "$DH/$SR/appcache/packageinfo.vdf" ]; }; then
+      u sed -i -E 's/("WantsOfflineMode"[[:space:]]+)"1"/\1"0"/' "$lu"
+      st steam wait "нет кэша для офлайн-режима — Steam запущен онлайн; после входа снова включи автономный режим"
+      offnote=1
+    fi
+  fi
+
+  # 5. Игры. Игру Steam восстанавливаем, только если Steam о ней знает — есть манифест
+  # appmanifest_*.acf с таким installdir. Иначе архив игры, удалённой в Steam, скачивался
+  # бы на каждом инстансе в папку, которую Steam не видит. Такой архив помечается версией
+  # «?»: если игру поставят снова, новая выгрузка спокойно его перезапишет.
+  [ "$SG" = 1 ] || selon || steam_go
+  st boot down "игры"
+  [ -n "$SR" ] && mapfile -t dirs < <(idirs "$DH/$SR"/steamapps/appmanifest_*.acf)
+  while IFS= read -r k; do
+    case $k in
+      sgame--*)
+        if ! want "$k"; then
+          if store; then :                                         # [v4.8] игры Steam качает Steam — архив не трогаем
+          elif selon; then st "$k" ok "не выбрана — не скачиваю"
+          else st "$k" ok "синхронизация игр Steam выключена — не восстанавливаю"; fi
+        elif tool "$k" || printf '%s\n' "${dirs[@]}" | grep -qxF -- "${k#sgame--}"; then
+          g+=("$k")
+        else
+          echo "?" > "$S/v/$k"
+          st "$k" ok "игры нет в библиотеке Steam — не восстанавливаю; убрать из облака: sudo wolf forget '$k'"
+        fi ;;
+      *)
+        if want "$k"; then g+=("$k")
+        elif selon; then st "$k" ok "не выбрана — не скачиваю"
+        else st "$k" ok "синхронизация игр из папки выключена — не восстанавливаю"; fi ;;
+    esac
+  done < <(names '^s?game--')
+  [ ${#g[@]} -gt 0 ] && pool unpack "${g[@]}"
+  # [v5.4] программы для игр — всегда (небольшие; без них не запустить трейнер или мод)
+  mapfile -t g < <(names '^prog--'); [ ${#g[@]} -gt 0 ] && pool unpack "${g[@]}"
+
+  mkgd   # папка для игр не из Steam — после восстановления архивов (они создают свои подпапки)
+  mkpd
+  own_setup                                    # [v5.7] двойной щелчок по .exe/.msi/архиву — помощник VastGame
+  own_icons; own_noexec                        # [v5.7] значки своих игр на рабочем столе
+
+  # Манифест есть, а игры нет ни на диске, ни в облаке (архив удалили с Drive или инстанс
+  # удалили раньше, чем игра успела выгрузиться) — убираем манифест, и Steam покажет игру
+  # неустановленной, а не сломанной. Только при полном списке облака и восстановленном
+  # steam-state: иначе «нет в облаке» может оказаться сбоем, а не удалением.
+  if { [ "$SG" = 1 ] || selon; } && [ -n "$SR" ] && [ $ok = 1 ] && ! grep -qx steam-state "$FL"; then
+    for f in "$DH/$SR"/steamapps/appmanifest_*.acf; do
+      [ -e "$f" ] || continue
+      d=$(idirs "$f" | head -1)
+      [ -n "$d" ] && [ ! -d "$DH/$SR/steamapps/common/$d" ] || continue
+      awk -F'\t' -v o="sgame--$d.tar.zst" '$1==o || $1==o".parts" {f=1} END {exit !f}' "$LS" && continue
+      rm -f "$f"
+      log "sgame--$d: игры нет ни на диске, ни в облаке — манифест убран, Steam покажет её неустановленной"
+    done
+  fi
+  # [v4.6] Невыбранные игры Steam на эту машину не скачивались — их паспорта прячем, иначе Steam начнёт качать сам
+  selon && [ -n "$SR" ] && acf_hide
+  # [v4.1] Игры из папки — в библиотеку Steam. Без синхронизации игр Steam он уже запущен: если есть что
+  # добавить или убрать — закрыть на время записи и запустить снова (обычно это первые минуты, до игры)
+  if [ -n "$SR" ]; then
+    if pgrep -x steam >/dev/null; then
+      u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --check >/dev/null 2>&1
+      if [ $? = 3 ] && steam_off; then shortcuts; steam_go; fi
+    else
+      shortcuts
+    fi
+  fi
+  play_prepare                                  # [v4.8] аккаунт и паспорт игры — до запуска Steam
+  { [ "$SG" = 1 ] || selon || [ -e "$S/play.app" ]; } && steam_go
+  [ -e "$S/play.app" ] && ( play_watch & )      # [v4.8] вход, скачивание и запуск игры — в фоне
+  selon && askable > "$S/present"              # [v4.6] что есть после загрузки — с этим сравнивает scan_games
+  ( gindex ) &
+
+  touch "$L/boot-done"   # [HARDENING #5] снять гейт с таймеров и wolf-watch только теперь
+  [ -n "$offnote" ] && ntf "Steam запущен онлайн" \
+    "Кэша для офлайн-режима не было. После входа снова включи автономный режим — кэш сохранится сам."
+
+  if [ -s "$FL" ]; then
+    e=$(tr '\n' ' ' < "$FL"); st boot err "ошибки: $e"
+  else
+    st boot ok "восстановление завершено"
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------- backup ---
+# [v4.6] Игры на диске, которые выгружать в проходе игр: выбранные и служебные; новые, о которых человек ещё не
+# ответил, — только при выключении (NOW: ничего не теряем); запущенные сейчас — после выхода (иначе игра, которая
+# всё время пишет в свою папку, выгружалась бы по кругу — живой случай 2026-09-28, Dawnwalker раз в минуту).
+gsync() {
+  local n run="" sz
+  [ -n "$SR" ] || sr
+  [ -n "${NOW:-}" ] || run=$(running_archives)
+  { ldg; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; ld "$PD" prog--; } | while IFS= read -r n; do
+    case $n in prog--*) echo "$n"; continue ;; esac      # [v5.4] программы для игр — всегда, без вопросов
+    grep -qxF -- "$n" <<< "$run" && continue
+    case $n in sgame--*) store && ! tool "$n" && continue ;; esac   # [v4.8] игры Steam качает Steam — не выгружаем
+    if ! steam_ready "$n"; then                     # [v4.7] Steam ещё качает — не выгружать (вывод gsync — список)
+      [ -n "${NOW:-}" ] && log "$n: Steam установил игру не до конца — не выгружаю, Steam докачает её сам" >/dev/null
+      continue
+    fi
+    if want "$n"; then echo "$n"
+    elif selon && [ -n "${NOW:-}" ] && ! inlist "$n" sel.skip; then
+      sz=$(game_size_mb "$n")
+      if [ "${sz:-0}" -ge "${GAME_MAX_AUTO_MB:-15000}" ]; then
+        log "$n: размер ${sz} МБ (>= 15 ГБ) — без явного согласия человека не выгружаю, чтобы не забить бесплатный Google Диск"
+      else
+        echo "$n"
+      fi
+    fi
+  done
+}
+
+bk() {
+  local m=$1 n=() a
+  LS=$T/ls.$m FL=$T/fail.$m
+  exec 9> "$L/bk-$m.lock"
+  if [ -n "${NOW:-}" ]; then flock -w 900 9; else flock -n 9; fi || return 0
+  : > "$FL"; sr
+  if [ "$m" = shutdown ]; then
+    export NOW=1
+    [ -e "$S/play.app" ] && [ ! -e "$S/play.done" ] && echo stop > "$S/play.done"   # [v4.8] не запускать игру при выключении
+    steam_off && steam_gone                      # [v5.3] данные аккаунтов, из которых вышли, — до выгрузки
+    shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
+    prog_scan      # [v5.7] программу удалили за последние 30 с — убрать из облака, а не выгружать снова
+    "$0" state; "$0" games
+    "$0" mods                                    # [v5.0] моды игр Steam
+    "$0" lgame                                   # [v5.6] файлы игр, которые качает их лаунчер («в облаке»); [v5.7] данные игр
+    return 0
+  fi
+  rl > "$LS" || { log "$m: не удалось получить список облака"; return 1; }
+  case $m in
+    state)
+      n=(identity)
+      if [ -n "$SR" ]; then
+        n+=(steam-state)
+        [ -e "$DH/$SR/steam.sh" ] && n+=(steam-client)
+        # Кэш для офлайн-режима. В обычном проходе он выгружается, только когда два прохода
+        # подряд не менялся (DB=1): значит, Steam его не пишет и копия целая. При выключении
+        # (NOW) — только если Steam уже закрыт.
+        { [ -z "${NOW:-}" ] || ! pgrep -x steam >/dev/null; } && n+=(steam-cache)
+        [ "$SV" = 1 ] && mapfile -tO ${#n[@]} n < <(ld "$DH/$SR/steamapps/compatdata" pfx-- \
+          | while IFS= read -r a; do wants "$a" && echo "$a"; done)
+      fi ;;
+    games)
+      mkgd; mkpd
+      mapfile -t n < <(gsync) ;;
+    push)
+      shift; n=("$@") ;;
+    restore)
+      shift; pool unpack "$@"; return 0 ;;
+    forget)
+      shift; for a in "$@"; do forget "$a"; done; return 0 ;;
+    answer)
+      shift; answer "$@"; return ;;
+    mods)
+      shift; mods_push "$@"; return 0 ;;
+    lgame)
+      shift; lgame_push; gsave_push; return 0 ;;
+  esac
+  [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
+  [ "$m" = state ] && gindex
+  saves_notify
+  return 0
+}
+
+# ------------------------------------------------------------ вход по ссылке ---
+# [v3.12] Состояние Tailscale: «BackendState AuthURL» (ссылка пустая, если её нет)
+ts_state() {
+  tailscale status --json 2>/dev/null | python3 -c 'import json,sys
+d = json.load(sys.stdin); print(d.get("BackendState", ""), d.get("AuthURL", ""))' 2>/dev/null
+}
+
+# Опубликовать ссылку одобрения узла для приложения: файл ts-login.url в папке на Drive
+# (видна только владельцу и его приложению; первая строка — номер инстанса, чтобы приложение не
+# открыло ссылку от чужой, прошлой машины). Ждать до часа; после входа — убрать файл.
+ts_link_publish() {
+  local s u sent= f="$T/ts-login.url" end=$(( $(date +%s) + 3600 )) sh=()
+  [ "${TSS:-1}" = 1 ] && sh=(--ssh)
+  while [ "$(date +%s)" -lt "$end" ]; do
+    read -r s u <<< "$(ts_state)"
+    [ "$s" = Running ] && break
+    if [ -z "$u" ]; then
+      # ссылки ещё (или уже) нет — попросить у Tailscale новую
+      # shellcheck disable=SC2086
+      tailscale up --reset --timeout=10s --hostname="$TSH" "${sh[@]}" $TSX >/dev/null 2>&1
+      continue
+    fi
+    if [ "$u" != "$sent" ]; then
+      printf '%s\n%s\n' "${VI:-?}" "$u" > "$f"
+      rc copyto "$f" "$R/ts-login.url" && sent=$u && log "tailscale: ссылка одобрения опубликована для приложения"
+    fi
+    sleep 5
+  done
+  rc deletefile "$R/ts-login.url" >/dev/null 2>&1; rm -f "$f"
+  [ "$s" = Running ] && log "tailscale: узел одобрен и в сети" || log "tailscale: узел так и не одобрили за час"
+}
+
+# ----------------------------------------------------------- логин Sunshine ---
+# [v3.13] Логин кабинета Sunshine от приложения (для автоматической связки Moonlight по PIN):
+# пароль приходит во вход команды (не в аргументах ssh), логин — первым аргументом. Сохраняется
+# в ~/.config/sunshine (едет в облако с identity — выгружаем сразу), затем Sunshine перезапускается.
+sunshine_creds() {
+  local p user="${1:-vastgame}"
+  IFS= read -r p
+  [ -n "$p" ] || { echo "sunshine-creds: пустой пароль"; return 1; }
+  hash sunshine 2>/dev/null || { echo "sunshine-creds: Sunshine не установлен"; return 1; }
+  xenv
+  # [v3.14] Файлы Sunshine — пользователю: иначе --creds не запишет (у root они оставались из-за
+  # chown на группу «user», которой на машинах Vast нет — основная группа «users»)
+  chown -R "$DU:" "$DH/.config/sunshine" 2>/dev/null
+  u sunshine --creds "$user" "$p" >/dev/null 2>&1 || { echo "sunshine-creds: не удалось"; return 1; }
+  sunshine_restart >/dev/null 2>&1
+  ( NOW=1 "$0" push identity >/dev/null 2>&1 & )
+  echo "sunshine-creds: ok"
+}
+
+# Авторизация устройства Steam Link по 4-значному PIN-коду в клиенте Steam (Remote Play) и проверка активного аккаунта.
+# Данные сопряжения Steam хранит в своих файлах настроек — сразу после успеха выгружаем steam-state в облако.
+steamlink_check() {
+  [ -n "$SR" ] || sr
+  xenv
+  pgrep -x steam >/dev/null || steam_go
+  python3 /usr/local/bin/wolf-steam.py pin-check "$DH/$SR" 2>&1
+}
+
+steamlink_pin() {
+  local pin=${1:-} r
+  [[ $pin =~ ^[0-9]{4}$ ]] || { echo "pin: invalid"; return 2; }
+  [ -n "$SR" ] || sr
+  xenv
+  pgrep -x steam >/dev/null || steam_go
+  r=$(python3 /usr/local/bin/wolf-steam.py pin "$pin" "$DH/$SR" 2>&1)
+  if [[ $r == "pin: nosteam"* ]] && ! python3 /usr/local/bin/wolf-steam.py running >/dev/null 2>&1; then
+    steam_off; steam_go
+    r=$(python3 /usr/local/bin/wolf-steam.py pin "$pin" "$DH/$SR" 2>&1)
+  fi
+  echo "$r"
+  if [[ $r == "pin: ok"* ]]; then
+    ( NOW=1 "$0" push steam-state >/dev/null 2>&1 & )
+    return 0
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------- finish ---
+# [v3.11] Завершение сессии, которое не зависит от связи с компьютером. «wolf finish» только
+# запускает «wolf finish-run» отдельной службой (systemd-run) и сразу отвечает — обрыв SSH,
+# выключенный свет или интернет у человека выгрузку уже не прервут. finish-run:
+#   1. выгружает всё (wolf shutdown);
+#   2. проверяет по статусам: записи новее старта в состоянии up/down/err — выгрузка НЕ
+#      подтверждена, инстанс НЕ удаляется (finish err);
+#   3. удаляет инстанс ограниченным ключом Vast (/etc/wolf/vastkey). Статус finish: «ok self: …» —
+#      удалит себя (через 30 с, чтобы приложение успело прочитать итог); «ok app: …» — ключа нет
+#      или Vast не удалил: удалит приложение, когда связь вернётся.
+finish_start() {
+  # [v4.0] В Docker без systemd: отдельный процесс в своей сессии (обрыв запроса его не прервёт),
+  # «уже идёт» — по блокировке, которую держит сам finish-run
+  if [ "${WM:-kvm}" = docker ]; then
+    flock -n "$L/finish.lock" true || { echo "finish: уже идёт"; return 0; }
+    setsid flock -n "$L/finish.lock" /usr/local/bin/wolf finish-run \
+      </dev/null >>/var/log/wolf-finish.log 2>&1 &
+    echo "finish: запущено"
+    return 0
+  fi
+  if systemctl is-active --quiet wolf-finish; then echo "finish: уже идёт"; return 0; fi
+  systemctl reset-failed wolf-finish 2>/dev/null
+  systemd-run --unit=wolf-finish --collect /usr/local/bin/wolf finish-run >/dev/null \
+    && echo "finish: запущено" || { echo "finish: не удалось запустить"; return 1; }
+}
+
+finish_run() {
+  local t0 f n ts s rest r i bad=()
+  t0=$(date +%s)
+  st finish up "выгрузка"
+  "$0" shutdown
+  for f in "$S"/st/*; do
+    n=${f##*/}
+    case $n in boot|finish|play|sunshine|progs) continue ;; esac   # [v4.8] play и sunshine — не архивы; [v5.4] progs
+    IFS='|' read -r ts s rest < "$f"
+    [ "${ts:-0}" -ge "$t0" ] && case $s in up|down|err) bad+=("$n") ;; esac
+  done
+  if [ ${#bad[@]} -gt 0 ]; then
+    st finish err "выгрузка не подтверждена: ${bad[*]} — инстанс НЕ удаляю"
+    return 1
+  fi
+  if [ ! -s /etc/wolf/vastkey ] || [ -z "$VI" ]; then
+    st finish ok "app: всё выгружено; ключа инстанса нет — удалит приложение"
+    return 0
+  fi
+  st finish ok "self: всё выгружено; инстанс удалит себя через 30 с"
+  sleep 30
+  for i in 1 2 3; do
+    # Ключ — через stdin (curl -K -), а не аргументом: не виден в списке процессов
+    r=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat /etc/wolf/vastkey)" \
+        | curl -sS -m 60 -K - -X DELETE -H 'Content-Type: application/json' -d '{}' \
+          "https://console.vast.ai/api/v0/instances/$VI/" 2>&1)
+    log "finish: удаление, ответ Vast: $(printf '%s' "$r" | tr -d '\n' | head -c 200)"
+    [[ $r =~ \"success\"[[:space:]]*:[[:space:]]*true ]] && return 0
+    sleep 20
+  done
+  st finish ok "app: всё выгружено; Vast не удалил инстанс — удалит приложение"
+}
+
+# ---------------------------------------------------------------- supervise ---
+# [v4.0] Docker: вместо служб и таймеров systemd — один процесс. Страница статуса и наблюдение за
+# играми (перезапускаются, если упали), загрузка — один раз, синхронизация по расписанию как у
+# таймеров KVM (state через 5 мин, дальше каждые SMIN; games через 12 мин, дальше каждые GMIN) и,
+# как там, только после boot-done. Низкий приоритет — чтобы не мешать игре.
+low() { if ionice -c3 true 2>/dev/null; then ionice -c3 nice -n 19 "$@"; else nice -n 19 "$@"; fi; }
+# [v5.4] wolf prog run НОМЕР ID — запустить программу рядом с игрой; wolf prog auto НОМЕР ID on|off — «вместе с игрой»
+# [v5.6] wolf prog launch НОМЕР ID|- ПАРАМЕТРЫ — запускать игру через программу («-» — как обычно);
+#        wolf prog install НОМЕР ID — один раз запустить установщик в префиксе игры (игра закрыта)
+prog_cmd() {
+  local r
+  [ -n "$SR" ] || sr
+  case ${1:-}:$# in
+    run:3)  python3 /usr/local/bin/wolf-steam.py progs-run "$DH/$SR" "$PD" "$DU" "$2" "$3" ;;
+    auto:4) python3 /usr/local/bin/wolf-steam.py progs-auto "$S" "$2" "$3" "$4" && echo "prog: auto $4" ;;
+    launch:4)
+      r=$(python3 /usr/local/bin/wolf-steam.py launch-set "$DH/$SR" "$PD" "$DH" "$DU" "$2" "$3" "$4" "$S")
+      [ "$r" = "prog: ok" ] || { echo "$r"; return 3; }
+      [ "$3" = - ] && { echo "prog: ok"; return 0; }   # как обычно — прокладка без выбора ничего не меняет
+      launch_opts "$2" ;;
+    install:3)
+      r=$(python3 /usr/local/bin/wolf-steam.py install-set "$DH/$SR" "$PD" "$DH" "$DU" "$2" "$3" "$S")
+      [ "$r" = "prog: ok" ] || { echo "$r"; return 3; }
+      launch_opts "$2" || return 3
+      log "установка в игру $2: $3"
+      ( runtimes "$2"; u setsid -f /usr/games/steam -applaunch "$2" &>/dev/null ) &>/dev/null &
+      echo "prog: installing" ;;
+    *)      echo "использование: wolf prog run|auto|launch|install НОМЕР ID …"; return 2 ;;
+  esac
+}
+# [v5.6] Библиотеки, которые нужны лаунчерам и модам (Dalamud, SKSE, ReShade…), — один раз в «диск C:» игры, до
+# первой установки в него: Visual C++ 2015–2022 (64 и 32 бита, с сайта Microsoft, тихо) и копии vcruntime140 под
+# именами *_clr0400 (их ищет XIVLauncher: на Windows их ставит .NET Framework, в Proton его нет — живой случай
+# 2026-10-08). Запуск — через Steam той же прокладкой (cmd.exe игры со своим списком команд); отметка
+# C:\.vastgame-runtimes едет в облако с «диском C:» — на других машинах не повторяется. Установщик человека ждёт.
+VCURL="https://aka.ms/vs/17/release"
+runtimes() {
+  local a=$1 c L="$DH/.local/share/vastgame/launch" i
+  c=$DH/$SR/steamapps/compatdata/$a/pfx/drive_c
+  [ -d "$c" ] && [ ! -e "$c/.vastgame-runtimes" ] && [ -e "$c/windows/system32/cmd.exe" ] || return 0
+  mkdir -p "$T/vcredist"
+  for i in x64 x86; do
+    [ -s "$T/vcredist/vc_redist.$i.exe" ] || curl -fsSL --max-time 300 -o "$T/vcredist/vc_redist.$i.exe" "$VCURL/vc_redist.$i.exe" \
+      || { log "библиотеки $a: не скачались — ставлю без них"; return 0; }
+  done
+  u mkdir -p "$c/vastgame" && u cp "$T/vcredist/vc_redist.x64.exe" "$T/vcredist/vc_redist.x86.exe" "$c/vastgame/"
+  u sh -c 'printf "%s\r\n" "$@" > "$0"' "$c/vastgame/runtimes.cmd" "@echo off" \
+    "start /wait C:\vastgame\vc_redist.x64.exe /install /quiet /norestart" \
+    "start /wait C:\vastgame\vc_redist.x86.exe /install /quiet /norestart" \
+    "if not exist C:\windows\system32\vcruntime140_clr0400.dll copy /y C:\windows\system32\vcruntime140.dll C:\windows\system32\vcruntime140_clr0400.dll" \
+    "if not exist C:\windows\system32\ucrtbase_clr0400.dll copy /y C:\windows\system32\vcruntime140.dll C:\windows\system32\ucrtbase_clr0400.dll" \
+    "echo ok> C:\.vastgame-runtimes"
+  [ -e "$L/$a.once" ] && u mv -f "$L/$a.once" "$L/$a.next"        # установщик человека — после библиотек
+  u sh -c 'printf "%s\n%s\n%s\n" "$1" "/c C:\vastgame\runtimes.cmd" "runtimes" > "$0"' "$L/$a.once" "$c/windows/system32/cmd.exe"
+  log "библиотеки $a: ставлю Visual C++ в «диск C:» игры"
+  launch_opts "$a" >/dev/null
+  u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+  for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done     # запустился
+  for i in $(seq 300); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done   # закончил
+  u rm -rf "$c/vastgame"
+  [ -e "$L/$a.next" ] && u mv -f "$L/$a.next" "$L/$a.once"
+  log "библиотеки $a: $([ -e "$c/.vastgame-runtimes" ] && echo поставлены || echo "не встали — продолжаю без них")"
+}
+# [v5.6] Один раз запустить через Steam (прокладкой, в «диске C:» игры) программу: once_run НОМЕР ПУТЬ ПАРАМЕТРЫ МЕТКА
+# [СЕКУНД]. Ждёт, пока игра Steam запустится и закончится (не дольше СЕКУНД; 0 — не ждать конца)
+once_run() {
+  local a=$1 L="$DH/.local/share/vastgame/launch" i
+  wrap_home
+  u sh -c 'printf "%s\n%s\n%s\n" "$1" "$2" "$3" > "$0"' "$L/$a.once" "$2" "$3" "$4"
+  launch_opts "$a" >/dev/null
+  u setsid -f /usr/games/steam -applaunch "$a" &>/dev/null
+  for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" && break; sleep 2; done
+  [ "${5:-600}" = 0 ] && return 0
+  for i in $(seq $(( ${5:-600} / 2 ))); do python3 /usr/local/bin/wolf-steam.py running "$a" || return 0; sleep 2; done
+  return 1
+}
+# «Диск C:» игры ещё не создан (первая аренда, сохранения не в облаке) — Proton создаёт его при первом запуске:
+# запустить через прокладку cmd.exe /c exit (vg-launch пропускает путь, которого ещё нет, только внутри префикса)
+pfx_make() {
+  local c=$DH/$SR/steamapps/compatdata/$1/pfx/drive_c
+  [ -e "$c/windows/system32/cmd.exe" ] && return 0
+  log "игра $1: создаю «диск C:»"
+  once_run "$1" "$c/windows/system32/cmd.exe" "/c exit" "pfx" 300
+  [ -e "$c/windows/system32/cmd.exe" ]
+}
+# Рецепты игры (VG_SYNC "recipes", sel.recipe.ИМЯ): recipe_play НОМЕР ПАПКА — до запуска игры из библиотеки.
+# ff14-ru: Visual C++ → настройки XIVLauncher/Dalamud, Penumbra, перевод (wolf-recipes.py) → XIVLauncher, если его нет
+# (официальный установщик с GitHub, тихо; сам открывается после установки — закрываем) → запуск игры через него
+XIVL_SETUP="https://github.com/goatcorp/FFXIVQuickLauncher/releases/latest/download/XIVLauncher-win-Setup.exe"
+recipe_play() {
+  local a=$1 d=$2 c x f i L="$DH/.local/share/vastgame/launch"
+  inlist "$a" sel.recipe.ff14-ru || return 0
+  st play up "recipe"
+  c=$DH/$SR/steamapps/compatdata/$a/pfx/drive_c
+  x=$c/users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe
+  pfx_make "$a" || { log "перевод FF14: «диск C:» не создался — запускаю игру как обычно"; return 0; }
+  runtimes "$a"
+  u mkdir -p "$DH/.cache/vastgame"
+  log "перевод FF14: $(u python3 /usr/local/bin/wolf-recipes.py ff14-ru "$c" "$a" "$d" "$DH/.cache/vastgame" 2>&1)"
+  if [ ! -e "$x" ]; then
+    f=$DH/.cache/vastgame/XIVLauncher-win-Setup.exe
+    if u curl -fsSL --max-time 900 -o "$f.part" "$XIVL_SETUP" && u mv -f "$f.part" "$f"; then
+      log "перевод FF14: ставлю XIVLauncher"
+      once_run "$a" "$f" "--silent" "xivlauncher" 0
+      for i in $(seq 300); do [ -e "$x" ] && break; python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done
+      sleep 10                                       # установщик дописывает ярлыки и открывает XIVLauncher — закрыть
+      pkill -f 'current.XIVLauncher\.exe' 2>/dev/null; pkill -f 'XIVLauncher-win-Setup\.exe' 2>/dev/null
+      for i in $(seq 60); do python3 /usr/local/bin/wolf-steam.py running "$a" || break; sleep 2; done
+      u rm -f "$f"
+    else
+      log "перевод FF14: XIVLauncher не скачался"
+    fi
+  fi
+  if [ -e "$x" ]; then
+    u python3 /usr/local/bin/wolf-recipes.py ff14-ru-mark "$c"
+    u sh -c 'printf "%s\n\n%s\n" "$1" "$2" > "$0"' "$L/$a" "$x" "pfx:users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe"
+    launch_opts "$a" >/dev/null
+    log "перевод FF14: игра запускается через XIVLauncher"
+  else
+    log "перевод FF14: XIVLauncher не встал — запускаю игру как обычно"
+  fi
+}
+# [v5.6] Прокладка vg-launch — в домашнюю папку (её видно и внутри контейнера Steam Linux Runtime)
+wrap_home() {
+  u mkdir -p "$DH/.local/share/vastgame/launch"
+  u cp /usr/local/bin/vg-launch "$DH/.local/share/vastgame/vg-launch"
+  u chmod 755 "$DH/.local/share/vastgame/vg-launch"
+}
+# Загрузка (Steam ещё не запущен): выбор из VG_SYNC → launch/НОМЕР, прокладка в параметрах запуска нужных игр;
+# у остальных наша прокладка (осталась в steam-state с прошлой аренды) убирается
+launch_boot() {
+  [ -n "$SR" ] || return 0
+  wrap_home
+  # [v5.6] окна выбора файлов Windows-программ (Wine) не показывают папки с точкой — .steam: обычная ссылка на игры
+  # Steam и «показывать скрытые» во всех «дисках C:» игр (живой случай 2026-10-08: установщик XIVLauncher)
+  [ -L "$DH/SteamGames" ] || [ -e "$DH/SteamGames" ] || u ln -s "$DH/$SR/steamapps/common" "$DH/SteamGames"
+  log "$(u python3 /usr/local/bin/wolf-steam.py pfx-tweaks "$DH/$SR" 2>&1)"
+  nvapi_check
+  for a in $NVAPI_OFF_APPS; do                   # [v5.7] у самой игры: Steam могут перезапустить руками
+    u sh -c 'echo PROTON_DISABLE_NVAPI=1 > "$0"' "$DH/.local/share/vastgame/launch/$a.env"
+  done
+  [ -s "$S/launch.sel" ] && log "$(python3 /usr/local/bin/wolf-steam.py launch-boot "$DH/$SR" "$PD" "$DH" "$S/launch.sel" "$DU" 2>&1)"
+  log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+}
+# [v5.6] NVAPI (прослойка NVIDIA для DLSS/Reflex в Proton) выключить: (1) запускаем FINAL FANTASY XIV — она с NVAPI
+# зависает при запуске (чёрный экран, последнее в журнале Dalamud — загрузка nvapi64.dll; живые случаи 2026-10-08
+# на 2× GTX 1650 и 2026-10-09 на RTX 2070, с выключенным — работает); (2) на машине нет RTX — DLSS и так нет.
+# Выключается для всего Steam (игры наследуют его окружение) — заодно и у других игр этой аренды
+NVAPI_OFF_APPS="312060 39210"
+nvapi_check() {
+  local l a
+  a=$(rd "$S/play.app")
+  l=$(nvidia-smi -L 2>/dev/null) || l=""
+  if [ -n "$a" ] && [[ " $NVAPI_OFF_APPS " == *" $a "* ]]; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: игра $a с ним не запускается"
+  elif [ -n "$l" ] && ! grep -q 'RTX' <<< "$l"; then
+    : > "$S/nvapi.off"; log "NVAPI выключен: нет RTX ($(sed -n 's/^GPU 0: \(.*\) (UUID.*/\1/p' <<< "$l"))"
+  else
+    rm -f "$S/nvapi.off"
+  fi
+}
+# Во время сессии: прокладка в параметрах запуска игры НОМЕР (Steam их перепишет при выходе — меняем при закрытом
+# Steam: закрыть, записать, открыть). Игра запущена — Steam не закрываем: «busy», выбор сработает со следующей машины
+launch_opts() {
+  wrap_home
+  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" --check >/dev/null 2>&1
+  [ $? -eq 3 ] || { echo "prog: ok"; return 0; }
+  if pgrep -x steam >/dev/null; then
+    if python3 /usr/local/bin/wolf-steam.py running; then echo "prog: busy"; return 1; fi
+    steam_off || { echo "prog: busy"; return 1; }
+    log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+    steam_go
+  else
+    log "$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --launch-opts "$DH" 2>&1)"
+  fi
+  echo "prog: ok"
+}
+supervise() {
+  local ns ng now
+  ( while :; do WOLF_PORT=$WP python3 /usr/local/bin/wolf-web.py; sleep 5; done ) &
+  ( while :; do low "$0" watch; sleep 10; done ) &
+  [ -e "$L/boot-started" ] || { : > "$L/boot-started"; "$0" boot & }
+  now=$(date +%s); ns=$(( now + 300 )); ng=$(( now + 720 ))
+  while :; do
+    sleep 20
+    [ -e "$L/boot-done" ] || continue
+    now=$(date +%s)
+    if [ "$now" -ge "$ns" ]; then ns=$(( now + SMIN * 60 )); ( low "$0" state >/dev/null 2>&1 & ); fi
+    if [ "$now" -ge "$ng" ]; then ng=$(( now + GMIN * 60 )); ( low "$0" games >/dev/null 2>&1 & ); fi
+  done
+}
+
+case ${1:-} in
+  boot)                                      boot ;;
+  finish)                                    finish_start ;;
+  sunshine-creds)                            shift; sunshine_creds "$@" ;;
+  steamlink-check)                           steamlink_check ;;
+  steamlink-pin)                             shift; steamlink_pin "$@" ;;
+  prog)                                      shift; prog_cmd "$@" ;;
+  finish-run)                                finish_run ;;
+  state|games|shutdown|restore|push|forget|answer|mods|lgame)  bk "$@" ;;
+  watch)                                     watch_games ;;
+  supervise)                                 supervise ;;
+  firewall)                                  setup_sunshine_firewall ;;
+  display)                                   xenv && setup_display ;;
+  *) echo "использование: wolf boot|state|games|shutdown|finish|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|watch|supervise|firewall|display"; exit 2 ;;
+esac
+WOLF
+
+# ============================== /usr/local/bin/wolf-res =======================
+# [HARDENING #1] Разрешение под клиента Moonlight. Sunshine вызывает wolf-res при
+# подключении (с размерами клиента) и без аргументов при отключении.
+# В Docker (v4.0) у образа свой wolf-res (плюс экран прижимается к 0,0) — его не трогаем.
+if [ "$WM" != docker ]; then
+w /usr/local/bin/wolf-res <<'RES'
+#!/bin/bash
+# wolf-res [ШИРИНА ВЫСОТА [ГЦ]] — режим под клиента; без аргументов — базовый.
+# Готовый режим берётся из списка выхода, иначе создаётся на лету (cvt): сначала с
+# частотой клиента, затем 60 Гц. Всегда завершается кодом 0: неудача не мешает стриму.
+# Лог: /var/log/wolf-res.log
+BASE=$(cat /etc/wolf-res.conf 2>/dev/null); BASE=${BASE:-1920x1200}
+log() { echo "[$(date '+%F %T')] $*" >> /var/log/wolf-res.log 2>/dev/null || true; }
+
+# Запуск от root (вручную): найти дисплей и cookie запущенного X, открыть доступ
+# пользователю рабочего стола и перезапуститься от его имени
+if [ "$(id -u)" = 0 ]; then
+  . /etc/wolf/env 2>/dev/null
+  [ -n "${DU:-}" ] || { log "нет /etc/wolf/env"; exit 0; }
+  n=$(ls /tmp/.X11-unix 2>/dev/null | sed -n 's/^X//p' | head -1)
+  XA=$(ps -eo args= | grep -m1 -oP '^\S*X\S* .*-auth \K\S+')
+  DISPLAY=":${n:-0}" XAUTHORITY="$XA" xhost +SI:localuser:"$DU" >/dev/null 2>&1
+  exec runuser -u "$DU" -- env DISPLAY=":${n:-0}" XAUTHORITY="$DH/.Xauthority" /usr/local/bin/wolf-res "$@"
+fi
+
+log "вызов: ${*:-<без аргументов>}"
+export DISPLAY="${DISPLAY:-:0}"
+[ -r "${XAUTHORITY:-}" ] || export XAUTHORITY="$HOME/.Xauthority"
+
+W=${1:-}; H=${2:-}; HZ=${3:-60}
+case "$W" in ''|*[!0-9]*) W=0 ;; esac
+case "$H" in ''|*[!0-9]*) H=0 ;; esac
+case "$HZ" in ''|*[!0-9]*) HZ=60 ;; esac
+[ "$HZ" -ge 24 ] || HZ=60
+if [ "$W" -gt 0 ] && [ "$H" -gt 0 ]; then
+  TARGET="${W}x${H}"
+else
+  TARGET=$BASE; W=${BASE%x*}; H=${BASE#*x}; HZ=60
+fi
+
+xr() { xrandr "$@" 2>/dev/null; }
+OUT=$(xr | awk '/ connected/{print $1; exit}')
+[ -n "$OUT" ] || { log "нет подключённого выхода (DISPLAY=$DISPLAY)"; exit 0; }
+cur() { xr | sed -nE "s/^$OUT connected (primary )?([0-9]+x[0-9]+)\+.*/\2/p" | head -1; }
+[ "$(cur)" = "$TARGET" ] && { log "$TARGET уже активно"; exit 0; }
+
+ok=0
+# 1) режим с таким именем уже есть у выхода (EDID или стандартный набор драйвера)
+if xr | grep -Eq "^[[:space:]]+$TARGET[[:space:]]"; then
+  { xr --output "$OUT" --mode "$TARGET" --rate "$HZ" || xr --output "$OUT" --mode "$TARGET"; } && ok=1
+fi
+# 2) иначе создаём на лету: сначала с частотой клиента, затем 60 Гц
+#    (cvt -r, reduced blanking, работает только на 60 Гц; для других частот — обычный CVT)
+if [ $ok = 0 ]; then
+  for hz in $(printf '%s\n' "$HZ" 60 | awk '!s[$0]++'); do
+    if [ "$hz" = 60 ]; then ML=$(cvt -r "$W" "$H" 60 2>/dev/null); else ML=$(cvt "$W" "$H" "$hz" 2>/dev/null); fi
+    NUMS=$(printf '%s\n' "$ML" | sed -n 's/^Modeline *"[^"]*" *//p')
+    [ -n "$NUMS" ] || continue
+    NAME="w${TARGET}_$hz"
+    xr --newmode "$NAME" $NUMS                   # уже существует — не страшно
+    xr --addmode "$OUT" "$NAME"
+    xr --output "$OUT" --mode "$NAME" && { ok=1; break; }
+  done
+fi
+
+if [ $ok = 1 ]; then log "установлено $(cur) (запрос ${TARGET}@${HZ})"
+else log "не удалось установить $TARGET — остаётся $(cur)"; fi
+exit 0
+RES
+fi
+
+# ================================= wolf-web.py =================================
+w /usr/local/bin/wolf-web.py <<'WEB'
+#!/usr/bin/env python3
+# Страница статуса (порт из WOLF_PORT, по умолчанию 8099; JSON: /json). Отдельный
+# процесс: только читает /var/lib/wolf/st/* и хвост лога, синхронизацию не блокирует.
+# Слушает все интерфейсы, наружу закрыта цепочкой WOLF_SUN — см. wolf firewall.
+# [v3.15] POST /cmd — команды от приложения vastgame вместо Tailscale SSH (в сетях Tailscale по
+# умолчанию SSH просит подтверждать вход в браузере раз в несколько часов). Выполняется только
+# короткий закрытый список команд и только от устройства ТОГО ЖЕ владельца в Tailscale, что и эта
+# машина: кто прислал, спрашиваем у самого Tailscale (tailscale whois) — без паролей и ключей.
+import os, time, html, glob, json, re, subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ST = '/var/lib/wolf/st/'
+PG = '/var/lib/wolf/pg/'
+def progress(n):
+    """[v4.6] Ход архива, если идёт: {done, total, speed} (байты, байт/с); файл старше 30 с — не идёт."""
+    try:
+        done, total, speed, ts = open(PG + n).read().split()
+        if time.time() - int(ts) > 30:
+            return None
+        return {'done': int(done), 'total': int(total), 'speed': int(speed)}
+    except Exception:
+        return None
+COLOR = {'ok': '#3fb950', 'up': '#58a6ff', 'down': '#58a6ff', 'wait': '#d29922', 'err': '#f85149'}
+def items():
+    out = []
+    for f in sorted(glob.glob(ST + '*')):
+        try:
+            with open(f, encoding='utf-8', errors='replace') as fh:
+                t, s, x = fh.read().strip().split('|', 2)
+            out.append((os.path.basename(f), int(t), s, x))
+        except Exception:
+            pass
+    return out
+def log_tail(n=8000):
+    try:
+        with open('/var/log/wolf.log', 'rb') as f:
+            f.seek(0, 2); f.seek(max(0, f.tell() - n))
+            return f.read().decode('utf-8', 'replace')
+    except Exception:
+        return ''
+def page():
+    its = items(); now = time.time()
+    err = sum(s == 'err' for _, _, s, _ in its)
+    busy = sum(s in ('up', 'down') for _, _, s, _ in its)
+    banner = (f'Ошибки: {err}' if err else
+              f'Идёт синхронизация: {busy}' if busy else 'Всё синхронизировано')
+    rows = ''.join(
+        f'<tr><td>{html.escape(n)}</td><td style="color:{COLOR.get(s, "#aaa")}">{html.escape(s)}</td>'
+        f'<td>{html.escape(x)}</td><td>{int(now - t)} с назад</td></tr>'
+        for n, t, s, x in its)
+    return ('<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5><title>wolf</title>'
+            '<style>body{font:14px system-ui;background:#0d1117;color:#e6edf3;margin:20px}'
+            'td{padding:4px 10px;border-bottom:1px solid #21262d}'
+            'pre{background:#010409;padding:10px;overflow:auto;font-size:12px}</style>'
+            f'<h2>{banner}</h2><table>{rows}</table><h3>Лог</h3><pre>{html.escape(log_tail())}</pre>')
+WOLF = '/usr/local/bin/wolf'
+# Имя архива игры: папки бывают с пробелами («sgame--The Blood of Dawnwalker»); без «/» и управляющих
+# символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
+ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,200}$')
+LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+PIN = re.compile(r'^\d{4}$')
+GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
+MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
+RESTORABLE = ('steam-state', 'steam-client', 'steam-cache')   # [v5.10] служебные — тоже можно повторить (не identity)
+PROG = re.compile(r'^(game|prog|pfx):[^\x00-\x1f]{1,400}$')   # [v5.4] программа игры (путь проверяет wolf-steam.py)
+ARGS = re.compile(r'^[^\x00-\x1f]{0,300}$')                     # [v5.6] параметры программы-загрузчика
+def command(c, a):
+    """Закрытый список: (команда, в фоне?) или None — такой команды нет."""
+    arg = a[0] if len(a) == 1 and isinstance(a[0], str) else ''
+    return {'ping': (['echo', 'ok'], False),
+            'time': (['date', '+%s'], False),
+            'finish': ([WOLF, 'finish'], False),                  # сам уходит в фон службой (v3.11)
+            'push-identity': ([WOLF, 'push', 'identity'], True),
+            'forget': ([WOLF, 'forget', arg], False) if ARCHIVE.match(arg) else None,
+            # [v5.10] «Повторить» у архива с ошибкой восстановления — скачать заново (в фоне: может идти минуты)
+            'restore': ([WOLF, 'restore', arg], True) if ARCHIVE.match(arg) or arg in RESTORABLE else None,
+            # [v4.6] ответ на вопрос о новой / удалённой игре: [new|del, архив игры, yes|no]
+            'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and isinstance(a[1], str) and a[2] in ('yes', 'no')
+                      and ((a[0] in ('new', 'del') and GAME.match(a[1])) or (a[0] == 'mod' and MOD.match(a[1]))) else None,
+            'sunshine-creds': ([WOLF, 'sunshine-creds', arg], False) if LOGIN.match(arg) else None,
+            'steamlink-check': ([WOLF, 'steamlink-check'], False) if not a else None,
+            'steamlink-pin': ([WOLF, 'steamlink-pin', arg], False) if PIN.match(arg) else None,
+            # [v5.4] программы игр: [номер, id] — запустить; [номер, id, on|off] — «вместе с игрой»
+            'prog-run': ([WOLF, 'prog', 'run', *a], False) if len(a) == 2 and str(a[0]).isdigit() and len(str(a[0])) <= 10
+                        and isinstance(a[1], str) and PROG.match(a[1]) else None,
+            'prog-auto': ([WOLF, 'prog', 'auto', *a], False) if len(a) == 3 and str(a[0]).isdigit() and len(str(a[0])) <= 10
+                         and isinstance(a[1], str) and PROG.match(a[1]) and a[2] in ('on', 'off') else None,
+            # [v5.6] [номер, id|-, параметры] — запускать игру через программу; [номер, id] — установить в игру
+            'prog-launch': ([WOLF, 'prog', 'launch', *a], False) if len(a) == 3 and str(a[0]).isdigit()
+                           and len(str(a[0])) <= 10 and isinstance(a[1], str) and (a[1] == '-' or PROG.match(a[1]))
+                           and isinstance(a[2], str) and ARGS.match(a[2]) else None,
+            'prog-install': ([WOLF, 'prog', 'install', *a], False) if len(a) == 2 and str(a[0]).isdigit()
+                            and len(str(a[0])) <= 10 and isinstance(a[1], str) and PROG.match(a[1]) else None}.get(c)
+def tsjson(sub, *args):
+    # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
+    return json.loads(subprocess.run(['tailscale', sub, '--json', *args], capture_output=True, text=True,
+                                     timeout=10).stdout)
+def peer(ip, port):
+    """Адрес для whois. [v4.0] В Docker Tailscale работает без /dev/net/tun и передаёт входящие
+    соединения с 127.0.0.1: настоящего отправителя Tailscale знает по адресу вместе с портом
+    (proxymap). Местная программа, пришедшая напрямую, такой записи не имеет — ей отказ, как и раньше."""
+    if ip in ('127.0.0.1', '::1'):
+        return f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
+    return ip
+def same_owner(ip, port=0):
+    """Прислал ли команду человек, которому принадлежит эта машина в Tailscale."""
+    try:
+        me = tsjson('status', '--peers=false')['Self']['UserID']
+        who = tsjson('whois', peer(ip, port))
+        return bool(me) and who['UserProfile']['ID'] == me and not (who.get('Node') or {}).get('Tags')
+    except Exception:
+        return False
+class H(BaseHTTPRequestHandler):
+    def reply(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code); self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_POST(self):
+        if self.path != '/cmd':
+            return self.reply(404, {'error': 'нет такой страницы'})
+        n = int(self.headers.get('Content-Length') or 0)
+        if not 0 < n <= 65536:
+            return self.reply(400, {'error': 'пустой или слишком большой запрос'})
+        try:
+            req = json.loads(self.rfile.read(n))
+            args = req.get('args') or []
+            spec = command(req.get('cmd'), args if isinstance(args, list) else [])
+        except Exception:
+            return self.reply(400, {'error': 'не JSON'})
+        if not spec:
+            return self.reply(400, {'error': 'нет такой команды'})
+        if not same_owner(*self.client_address[:2]):
+            return self.reply(403, {'error': 'устройство другого владельца в Tailscale'})
+        cmd, background = spec
+        if background:
+            subprocess.Popen(cmd, env={**os.environ, 'NOW': '1'}, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            return self.reply(200, {'code': 0, 'out': 'started'})
+        try:
+            r = subprocess.run(cmd, input=req.get('stdin') or '', capture_output=True, text=True, timeout=600)
+            return self.reply(200, {'code': r.returncode, 'out': (r.stdout + r.stderr)[-4000:]})
+        except subprocess.TimeoutExpired:
+            return self.reply(200, {'code': None, 'out': 'не закончилось за 10 минут'})
+    def do_GET(self):
+        if self.path.startswith('/json'):
+            body = json.dumps([dict(name=n, ts=t, state=s, text=x,
+                                    **({'progress': pg} if s in ('up', 'down') and (pg := progress(n)) else {}))
+                               for n, t, s, x in items()], ensure_ascii=False).encode()
+            ctype = 'application/json; charset=utf-8'
+        else:
+            body = page().encode(); ctype = 'text/html; charset=utf-8'
+        self.send_response(200); self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+ThreadingHTTPServer(('', int(os.environ.get('WOLF_PORT', '8099'))), H).serve_forever()
+WEB
+
+# ============================== wolf-shortcuts.py ==============================
+w /usr/local/bin/wolf-shortcuts.py <<'SHORTCUTS'
+#!/usr/bin/env python3
+# [v4.1] Игры из папки GAMES_DIR — в библиотеку Steam сторонними играми (shortcuts.vdf) с Proton.
+#   wolf-shortcuts.py ПАПКА_ИГР КОРЕНЬ_STEAM [--check]   (от пользователя рабочего стола; Steam должен быть
+#                       закрыт — при выходе он перезаписывает оба файла своими данными; --check — только сказать,
+#                       нужно ли что-то менять: код 3 — да, ничего не записывая)
+# Каждая подпапка — одна игра: главный .exe выбирается сам (самый верхний уровень, из них — самый большой;
+# установщики, деинсталляторы и отчёты об ошибках пропускаются). Номер игры — как считает сам Steam
+# (crc32 от "exe" + названия, старший бит), поэтому на любой машине он тот же, и сохранения Proton
+# (compatdata/<номер> → архив pfx--<номер>) остаются общими. Наши записи помечены тегом vastgame: их
+# убираем, когда папки больше нет; добавленные руками не трогаем (и папку с такой игрой пропускаем).
+# Proton — в config/config.vdf (CompatToolMapping): тот, что выбран «для всех игр», иначе Proton Experimental.
+# [v4.3] Steam Input по умолчанию выключен: в userdata/<id>/config/localconfig.vdf каждой игре без своего выбора —
+# UseSteamControllerConfig "0" (как «Отключить Steam Input» в её свойствах). В Docker с ним игры не видят геймпад
+# (живой случай 2026-09-26, The Blood of Dawnwalker); меню Steam и Big Picture геймпадом управляются и так.
+# Выбор человека в свойствах игры не трогаем. --steam-input — только это (до восстановления папки игр).
+# Код выхода: 0 — ничего не изменилось, 3 — изменилось (Steam нужно перезапустить), 1 — ошибка.
+import binascii, glob, os, re, struct, sys
+
+TAG = "vastgame"
+CHECK = "--check" in sys.argv
+VGRUN = "/usr/local/bin/vg-run"         # [v5.7] своя игра (паспорт .vastgame.json) — ярлык на запускатель, без Proton
+OWN = ".vastgame.json"
+
+
+def own_game(folder):
+    """[v5.7] Своя игра: в папке паспорт с exe внутри неё (как проверяет vg-run)."""
+    import json
+    try:
+        d = json.load(open(os.path.join(folder, OWN), encoding="utf-8"))
+        exe = d["exe"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(exe, str) or not exe or exe.startswith("/") or ".." in exe.split("/"):
+        return False
+    return os.path.realpath(os.path.join(folder, exe)).startswith(os.path.realpath(folder) + os.sep)
+SKIP = re.compile(r"unins|setup|install|redist|vcredist|vc_redist|dxsetup|dotnet|directx|crash|report|"
+                  r"easyanticheat|eac_|beservice|battleye|updater|launcherhelper|ue4prereq|ueprereq|prereq",
+                  re.I)
+
+
+# ------------------------------------------------ двоичный KeyValues (shortcuts.vdf)
+def bkv_read(data, i=0):
+    """{ключ: значение} из двоичного KeyValues; значение — dict, str или ('int', n) / ('u64', n)."""
+    out = {}
+    while True:
+        t = data[i]; i += 1
+        if t == 0x08:
+            return out, i
+        j = data.index(b"\0", i); key = data[i:j].decode("utf-8", "replace"); i = j + 1
+        if t == 0x00:
+            out[key], i = bkv_read(data, i)
+        elif t == 0x01:
+            j = data.index(b"\0", i); out[key] = data[i:j].decode("utf-8", "replace"); i = j + 1
+        elif t == 0x02:
+            out[key] = ("int", struct.unpack_from("<i", data, i)[0]); i += 4
+        elif t == 0x07:
+            out[key] = ("u64", struct.unpack_from("<Q", data, i)[0]); i += 8
+        else:
+            raise ValueError(f"неизвестный тип {t} в shortcuts.vdf")
+
+
+def bkv_write(d):
+    b = b""
+    for k, v in d.items():
+        kb = k.encode() + b"\0"
+        if isinstance(v, dict):
+            b += b"\x00" + kb + bkv_write(v)
+        elif isinstance(v, tuple) and v[0] == "u64":
+            b += b"\x07" + kb + struct.pack("<Q", v[1])
+        elif isinstance(v, tuple):
+            b += b"\x02" + kb + struct.pack("<i", v[1])
+        else:
+            b += b"\x01" + kb + str(v).encode() + b"\0"
+    return b + b"\x08"
+
+
+# ------------------------------------------------ текстовый KeyValues (config.vdf)
+def tkv_parse(text):
+    toks = re.findall(r'"((?:[^"\\]|\\.)*)"|([{}])', re.sub(r"(?m)^\s*//.*$", "", text))
+    pos = 0
+
+    def block():
+        nonlocal pos
+        out = []
+        while pos < len(toks):
+            s, br = toks[pos]; pos += 1
+            if br == "}":
+                return out
+            key = s
+            s2, br2 = toks[pos]; pos += 1
+            out.append([key, block() if br2 == "{" else s2])
+        return out
+    return block()
+
+
+def tkv_dump(items, depth=0):
+    tab, out = "\t" * depth, ""
+    for k, v in items:
+        if isinstance(v, list):
+            out += f'{tab}"{k}"\n{tab}{{\n{tkv_dump(v, depth + 1)}{tab}}}\n'
+        else:
+            out += f'{tab}"{k}"\t\t"{v}"\n'
+    return out
+
+
+def tkv_get(items, key, create=False):
+    for k, v in items:
+        if k.lower() == key.lower() and isinstance(v, list):
+            return v
+    if not create:
+        return None
+    new = []
+    items.append([key, new])
+    return new
+
+
+# ------------------------------------------------ игры
+def main_exe(folder):
+    """Главный .exe папки игры или None: самый верхний уровень (до 4 вглубь), из них — самый большой."""
+    best = None
+    base = folder.count(os.sep)
+    for root, dirs, files in os.walk(folder):
+        depth = root.count(os.sep) - base
+        if depth >= 4:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not SKIP.search(d)]
+        for f in files:
+            if not f.lower().endswith(".exe") or SKIP.search(f):
+                continue
+            p = os.path.join(root, f)
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            key = (depth, -size)
+            if best is None or key < best[0]:
+                best = (key, p)
+    return best and best[1]
+
+
+def appid(exe, name):
+    """Номер сторонней игры, как у Steam: crc32("\"exe\"" + название) со старшим битом (беззнаковый)."""
+    return (binascii.crc32((exe + name).encode()) & 0xFFFFFFFF) | 0x80000000
+
+
+def signed(n):
+    return n - (1 << 32) if n >= 1 << 31 else n
+
+
+def entry(name, exe_q, start_q, aid, opts=""):
+    return {"appid": ("int", signed(aid)), "AppName": name, "Exe": exe_q, "StartDir": start_q, "icon": "",
+            "ShortcutPath": "", "LaunchOptions": opts, "IsHidden": ("int", 0), "AllowDesktopConfig": ("int", 1),
+            "AllowOverlay": ("int", 1), "OpenVR": ("int", 0), "Devkit": ("int", 0), "DevkitGameID": "",
+            "DevkitOverrideAppID": ("int", 0), "LastPlayTime": ("int", 0), "FlatpakAppID": "",
+            "tags": {"0": TAG}}
+
+
+def unq(s):
+    return s.strip().strip('"')
+
+
+def sync_user(cfg_dir, games, changed_ids, own=()):
+    """Обновить shortcuts.vdf одного пользователя Steam. True — файл изменился. own — [(папка, название)] своих игр
+    (паспорт .vastgame.json): ярлык на vg-run с папкой в параметрах, без Proton (его запускает vg-run)."""
+    path = os.path.join(cfg_dir, "shortcuts.vdf")
+    try:
+        with open(path, "rb") as f:
+            root, _ = bkv_read(f.read(), 0)
+    except FileNotFoundError:
+        root = {}
+    except (ValueError, IndexError, struct.error) as e:
+        print(f"shortcuts: {path} не прочитан ({e}) — не трогаю", file=sys.stderr)
+        return False
+    lst = root.setdefault("shortcuts", {})
+    items = [lst[k] for k in sorted(lst, key=lambda x: int(x) if x.isdigit() else 0)]
+    ours = lambda e: TAG in (e.get("tags") or {}).values()
+    own_dirs = {f for f, _ in own}
+    vgrun = lambda e: unq(e.get("Exe") or e.get("exe") or "") == VGRUN
+    keep, change = [], False
+    for e in items:
+        exe = unq(e.get("Exe") or e.get("exe") or "")
+        if ours(e) and vgrun(e):                            # [v5.7] своя игра: папки или паспорта больше нет — убрать
+            if unq(e.get("LaunchOptions") or "") not in own_dirs:
+                change = True
+                continue
+        elif ours(e) and not os.path.isfile(exe):          # папку удалили — убрать и из Steam
+            change = True
+            continue
+        elif ours(e) and any(exe.startswith(f + os.sep) for f in own_dirs):   # стала своей игрой — прежний ярлык долой
+            change = True
+            continue
+        keep.append(e)
+    present = [unq(e.get("Exe") or e.get("exe") or "") for e in keep]
+    have_own = {unq(e.get("LaunchOptions") or "") for e in keep if vgrun(e)}
+    for folder, name in own:
+        if folder in have_own:
+            continue
+        exe_q = f'"{VGRUN}"'
+        keep.append(entry(name, exe_q, f'"{folder}/"', appid(exe_q, name), f'"{folder}"'))
+        change = True
+    for folder, name, exe in games:
+        if any(p == exe or p.startswith(folder + os.sep) for p in present):
+            continue                                        # уже есть (наша или добавлена руками)
+        exe_q, start_q = f'"{exe}"', f'"{os.path.dirname(exe)}/"'
+        aid = appid(exe_q, name)
+        keep.append(entry(name, exe_q, start_q, aid))
+        changed_ids.add(aid)
+        change = True
+    for e in keep:                                          # Proton — и нашим, добавленным раньше
+        if ours(e) and not vgrun(e):                        # своим играм Proton включает vg-run, не Steam
+            changed_ids.add(e["appid"][1] & 0xFFFFFFFF)
+    if change and not CHECK:
+        root["shortcuts"] = {str(n): e for n, e in enumerate(keep)}
+        tmp = path + ".vastgame-tmp"
+        with open(tmp, "wb") as f:
+            f.write(bkv_write(root))
+        os.replace(tmp, path)
+    return change
+
+
+def sync_proton(config_vdf, ids):
+    """Proton для наших игр в CompatToolMapping. True — файл изменился."""
+    if not ids or not os.path.isfile(config_vdf):
+        return False
+    with open(config_vdf, encoding="utf-8", errors="replace") as f:
+        items = tkv_parse(f.read())
+    store = tkv_get(items, "InstallConfigStore", True)
+    steam = tkv_get(tkv_get(tkv_get(store, "Software", True), "Valve", True), "Steam", True)
+    mapping = tkv_get(steam, "CompatToolMapping", True)
+    default = next((dict(v).get("name") for k, v in mapping if k == "0" and isinstance(v, list)), None)
+    tool = default or "proton_experimental"
+    have = {k for k, v in mapping}
+    change = False
+    for aid in sorted(ids):
+        if str(aid) not in have:
+            mapping.append([str(aid), [["name", tool], ["config", ""], ["priority", "250"]]])
+            change = True
+    if change and not CHECK:
+        tmp = config_vdf + ".vastgame-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(tkv_dump(items))
+        os.replace(tmp, config_vdf)
+    return change
+
+
+# [v5.6] Сведения Steam об игре — appcache/appinfo.vdf (кэш Steam едет в облаке со steam-cache): настоящая папка
+# установки (у пробной FF14 — папка полной игры «FINAL FANTASY XIV Online»: паспорт с папкой «по названию» вёл к
+# «Не найден исполняемый файл», живой случай 2026-10-08) и для каких систем игра (нет Linux — включить ей Proton:
+# иначе Steam качает только общие файлы, без Windows-версии). Форматы 28 и 29 (с 29 ключи — номера в таблице строк).
+def _appinfo_kv(data, i, keys):
+    out = {}
+    while True:
+        t = data[i]; i += 1
+        if t == 0x08:
+            return out, i
+        if keys is None:
+            j = data.index(b"\0", i); key = data[i:j].decode("utf-8", "replace"); i = j + 1
+        else:
+            key = keys[struct.unpack_from("<I", data, i)[0]]; i += 4
+        if t == 0x00:
+            out[key], i = _appinfo_kv(data, i, keys)
+        elif t == 0x01:
+            j = data.index(b"\0", i); out[key] = data[i:j].decode("utf-8", "replace"); i = j + 1
+        elif t in (0x02, 0x03, 0x04, 0x06):
+            out[key] = struct.unpack_from("<i", data, i)[0]; i += 4
+        elif t in (0x07, 0x0A):
+            out[key] = struct.unpack_from("<q", data, i)[0]; i += 8
+        else:
+            raise ValueError(f"тип {t} в appinfo.vdf")
+
+
+def appinfo(steam_root, appid):
+    """{installdir, oslist} игры из кэша Steam или None — Steam её ещё не знает (новый человек, пустой кэш)."""
+    try:
+        with open(os.path.join(steam_root, "appcache", "appinfo.vdf"), "rb") as f:
+            data = f.read()
+        magic = struct.unpack_from("<I", data, 0)[0]
+        if magic == 0x07564429:
+            off = struct.unpack_from("<q", data, 8)[0]
+            n = struct.unpack_from("<I", data, off)[0]
+            keys, j = [], off + 4
+            for _ in range(n):
+                k = data.index(b"\0", j); keys.append(data[j:k].decode("utf-8", "replace")); j = k + 1
+            i = 16
+        elif magic == 0x07564428:
+            keys, i = None, 8
+        else:
+            return None
+        while i + 8 <= len(data):
+            aid, size = struct.unpack_from("<II", data, i)
+            if aid == 0:
+                return None
+            if aid == int(appid):
+                kv = _appinfo_kv(data, i + 8 + 60, keys)[0].get("appinfo", {})
+                return {"installdir": str((kv.get("config") or {}).get("installdir") or ""),
+                        "oslist": str((kv.get("common") or {}).get("oslist") or "")}
+            i += 8 + size
+    except (OSError, ValueError, IndexError, struct.error, KeyError):
+        return None
+    return None
+
+
+def steam_input_off(steam_root):
+    """Steam Input «выключен» всем играм, у которых нет своего выбора. True — что-то изменилось."""
+    sa = os.path.join(steam_root, "steamapps")
+    ids = set()
+    for f in glob.glob(os.path.join(sa, "appmanifest_*.acf")) + glob.glob(os.path.join(sa, ".vastgame-hidden", "appmanifest_*.acf")):
+        m = re.search(r"appmanifest_(\d+)\.acf$", f)
+        if m:
+            ids.add(int(m.group(1)))
+    changed = False
+    users = os.path.join(steam_root, "userdata")
+    for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
+        cfg = os.path.join(users, u, "config")
+        if not (u.isdigit() and u != "0" and os.path.isdir(cfg)):
+            continue
+        mine = set(ids)
+        try:                                                # сторонние игры этого пользователя (и наши, и добавленные руками)
+            with open(os.path.join(cfg, "shortcuts.vdf"), "rb") as f:
+                for e in bkv_read(f.read(), 0)[0].get("shortcuts", {}).values():
+                    if isinstance(e.get("appid"), tuple):
+                        mine.add(e["appid"][1] & 0xFFFFFFFF)
+        except (OSError, ValueError, IndexError, struct.error):
+            pass
+        path = os.path.join(cfg, "localconfig.vdf")
+        if not mine or not os.path.isfile(path):            # файла ещё нет (Steam не входил) — не создаём
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            items = tkv_parse(f.read())
+        store = tkv_get(items, "UserLocalConfigStore")
+        if store is None:
+            continue
+        apps = tkv_get(store, "apps", True)
+        change = False
+        for aid in sorted(mine):
+            block = tkv_get(apps, str(aid), True)
+            if not any(k.lower() == "usesteamcontrollerconfig" for k, v in block):
+                block.append(["UseSteamControllerConfig", "0"])
+                change = True
+        if change and not CHECK:
+            tmp = path + ".vastgame-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(tkv_dump(items))
+            os.replace(tmp, path)
+        changed |= change
+    return changed
+
+
+# [v5.6] Прокладка vg-launch в параметрах запуска игр, которые запускаются через программу (есть HOME/.local/share/
+# vastgame/launch/НОМЕР или НОМЕР.once); у остальных наша прокладка убирается. Параметры — в localconfig.vdf:
+# UserLocalConfigStore/Software/Valve/Steam/apps/НОМЕР/LaunchOptions. Свои параметры человека сохраняются: прокладка
+# встаёт перед его %command% (нет %command% — его параметры идут игре после него) и убирается без следа.
+def _wrap_add(opt, wrap):
+    if wrap in opt:
+        return opt
+    if "%command%" in opt:
+        return opt.replace("%command%", f"{wrap} %command%", 1)
+    return f"{wrap} %command% {opt}".strip()
+
+
+def _wrap_del(opt, wrap):
+    out = opt.replace(f"{wrap} ", "").replace(wrap, "").strip()
+    return "" if out == "%command%" else out
+
+
+def launch_opts(steam_root, home):
+    wrap = os.path.join(home, ".local/share/vastgame/vg-launch")
+    d = os.path.join(home, ".local/share/vastgame/launch")
+    want = set()
+    for f in os.listdir(d) if os.path.isdir(d) else []:
+        m = re.fullmatch(r"(\d+)(\.once|\.env)?", f)
+        if m:
+            want.add(m.group(1))
+    changed = False
+    users = os.path.join(steam_root, "userdata")
+    for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
+        path = os.path.join(users, u, "config", "localconfig.vdf")
+        if not (u.isdigit() and u != "0" and os.path.isfile(path)):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            items = tkv_parse(f.read())
+        store = tkv_get(items, "UserLocalConfigStore")
+        if store is None:
+            continue
+        apps = tkv_get(tkv_get(tkv_get(tkv_get(store, "Software", True), "Valve", True), "Steam", True), "apps", True)
+        change = False
+        for aid, block in apps:
+            if not isinstance(block, list) or aid in want:
+                continue
+            for n, (k, v) in enumerate(block):
+                if k.lower() == "launchoptions" and isinstance(v, str) and wrap in v:
+                    new = _wrap_del(v, wrap)
+                    if new:
+                        block[n] = [k, new]
+                    else:
+                        del block[n]
+                    change = True
+                    break
+        for aid in sorted(want):
+            block = tkv_get(apps, aid, True)
+            n = next((i for i, (k, v) in enumerate(block) if k.lower() == "launchoptions" and isinstance(v, str)), None)
+            old = block[n][1] if n is not None else ""
+            new = _wrap_add(old, wrap)
+            if new != old:
+                if n is None:
+                    block.append(["LaunchOptions", new])
+                else:
+                    block[n] = [block[n][0], new]
+                change = True
+        if change and not CHECK:
+            tmp = path + ".vastgame-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(tkv_dump(items))
+            os.replace(tmp, path)
+        changed |= change
+    return changed, want
+
+
+def main(games_dir, steam_root):
+    if "--appinfo" in sys.argv:                            # [v5.6] --appinfo НОМЕР → «папка<TAB>системы» (или пусто)
+        info = appinfo(steam_root, sys.argv[sys.argv.index("--appinfo") + 1]) or {}
+        print(f"{info.get('installdir', '')}\t{info.get('oslist', '')}")
+        return 0
+    if "--proton-for" in sys.argv:                         # [v5.6] --proton-for НОМЕР — включить игре Proton
+        changed = sync_proton(os.path.join(steam_root, "config", "config.vdf"), [sys.argv[sys.argv.index("--proton-for") + 1]])
+        print(f"Proton для игры: {'включён' if changed else 'уже был'}")
+        return 3 if changed else 0
+    if "--launch-opts" in sys.argv:                        # [v5.6] --launch-opts HOME [--check]
+        changed, want = launch_opts(steam_root, sys.argv[sys.argv.index("--launch-opts") + 1])
+        if not CHECK:
+            print(f"запуск через программу: {', '.join(sorted(want)) or 'нет'}, параметры Steam изменены: "
+                  f"{'да' if changed else 'нет'}")
+        return 3 if changed else 0
+    if "--index" in sys.argv:                              # [v4.6] для списка игр приложения (wolf-games.py)
+        for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
+            folder = os.path.join(games_dir, d)
+            if not d.startswith(".") and os.path.isdir(folder) and own_game(folder):     # [v5.7] своя игра
+                name = d.replace("_", " ").strip()
+                print(f"game--{d}\t{appid(chr(34) + VGRUN + chr(34), name)}\t{name}")
+                continue
+            exe = None if d.startswith(".") or not os.path.isdir(folder) else main_exe(folder)
+            if exe:
+                name, quoted = d.replace("_", " ").strip(), '"' + exe + '"'     # как в sync_user (без \\ в f-строке: Python 3.10)
+                print(f"game--{d}\t{appid(quoted, name)}\t{name}")
+        return 0
+    if "--steam-input" in sys.argv:
+        changed = steam_input_off(steam_root)
+        if not CHECK:
+            print(f"steam input: выключен по умолчанию, изменено: {'да' if changed else 'нет'}")
+        return 3 if changed else 0
+    games, own = [], []
+    for d in sorted(os.listdir(games_dir)) if os.path.isdir(games_dir) else []:
+        folder = os.path.join(games_dir, d)
+        if d.startswith(".") or not os.path.isdir(folder):
+            continue
+        if own_game(folder):                               # [v5.7] своя игра — ярлык на vg-run
+            own.append((folder, d.replace("_", " ").strip()))
+            continue
+        exe = main_exe(folder)
+        if exe:
+            games.append((folder, d.replace("_", " ").strip(), exe))
+        else:
+            print(f"shortcuts: в «{d}» нет .exe — пропускаю", file=sys.stderr)
+    users = os.path.join(steam_root, "userdata")
+    changed, ids = False, set()
+    for u in sorted(os.listdir(users)) if os.path.isdir(users) else []:
+        cfg = os.path.join(users, u, "config")
+        if u.isdigit() and u != "0" and os.path.isdir(cfg):
+            changed |= sync_user(cfg, games, ids, own)
+    changed |= sync_proton(os.path.join(steam_root, "config", "config.vdf"), ids)
+    changed |= steam_input_off(steam_root)                 # и новым сторонним играм, и поставленным за сессию
+    if not CHECK:
+        print(f"shortcuts: игр в папке {len(games) + len(own)}, изменено: {'да' if changed else 'нет'}")
+    return 3 if changed else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1], sys.argv[2]))
+    except Exception as e:                                  # игры из папки — не повод ломать загрузку
+        print(f"shortcuts: ошибка {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+SHORTCUTS
+
+# =============================== wolf-parts.py =================================
+w /usr/local/bin/wolf-games.py <<'GAMES'
+#!/usr/bin/env python3
+# [v4.6] Список игр для приложения vastgame — какой архив какой игре принадлежит. Лежит в облаке файлом
+# vastgame-games.json: {"version": 1, "games": [{"archive": "sgame--ПАПКА", "appid": "123",
+# "name": "Название", "kind": "steam"|"folder", "tool": false}, ...]}. По нему приложение показывает одну строку
+# на игру (её файлы + сохранения pfx--<appid>) и прячет служебное (Proton, Steam Linux Runtime…).
+#   wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] < «game--ПАПКА\tномер\tназвание»   → новый JSON в stdout
+#       (игры Steam — из паспортов appmanifest_*.acf, в том числе спрятанных; прежние записи игр, которых
+#        на этой машине нет, сохраняются)
+#   wolf-games.py get ИНДЕКС.json АРХИВ appid|name                                  → поле или пусто
+import glob, json, os, re, sys
+
+HID = ".vastgame-hidden"
+TOOL = re.compile(r"^sgame--(Proton|SteamLinuxRuntime|Steam Linux Runtime|Steamworks Shared$|Steam Controller Configs$)")
+
+
+def acf(path):
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return {}
+    return {k: v for k, v in re.findall(r'^\s*"(appid|name|installdir)"\s+"(.*)"\s*$', text, re.M)}
+
+
+def load(path):
+    try:
+        games = json.load(open(path, encoding="utf-8")).get("games") or []
+        return [g for g in games if isinstance(g, dict) and isinstance(g.get("archive"), str)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def index(steamapps, old_path=None):
+    new = {}
+    for f in sorted(glob.glob(os.path.join(steamapps, "appmanifest_*.acf"))
+                    + glob.glob(os.path.join(steamapps, HID, "appmanifest_*.acf"))):
+        m = acf(f)
+        if m.get("installdir") and m.get("appid"):
+            a = "sgame--" + m["installdir"]
+            new[a] = {"archive": a, "appid": m["appid"], "name": m.get("name") or m["installdir"], "kind": "steam"}
+    for line in sys.stdin:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 3 and parts[0].startswith("game--"):
+            new[parts[0]] = {"archive": parts[0], "appid": parts[1], "name": parts[2], "kind": "folder"}
+    for g in load(old_path) if old_path else []:
+        new.setdefault(g["archive"], g)
+    games = []
+    for a in sorted(new):
+        g = dict(new[a])
+        g["tool"] = bool(TOOL.match(a))
+        games.append(g)
+    return json.dumps({"version": 1, "games": games}, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["index"]:
+        sys.stdout.write(index(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None))
+    elif sys.argv[1:2] == ["get"] and len(sys.argv) == 5:
+        for g in load(sys.argv[2]):
+            if g["archive"] == sys.argv[3]:
+                print(g.get(sys.argv[4]) or "")
+                break
+    else:
+        sys.exit("wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] | get ИНДЕКС.json АРХИВ appid|name")
+GAMES
+
+# ================================ vg-launch ====================================
+# [v5.6] Прокладка в параметрах запуска Steam («…/vg-launch %command%»): подменяет .exe игры — аргумент после
+# «…/proton ГЛАГОЛ» — на программу из launch/НОМЕР (строки: путь, параметры, id; .once — один раз: установщик).
+# Нет выбора или файла программы — игра запускается как обычно. Параметры делятся по пробелам, без оболочки.
+# [v5.7] Своя игра (папка Games с паспортом .vastgame.json): запуск через Proton без Steam, «диск C:» — .prefix в папке
+# игры (установщик ставит куда хочет — всё оказывается внутри папки; разведка 2026-10-09). То же, что делает Steam:
+# вход Steam Linux Runtime (по require_tool_appid Proton) → proton waitforexitandrun exe; в Docker вход — наша
+# пропускающая заплатка (VG=1). В Steam у такой игры ярлык на этот файл (без Proton) — видна в Big Picture и Steam Link.
+#   vg-run ПАПКА_ИГРЫ                      — запустить игру (exe и args из паспорта)
+#   vg-run ПАПКА_ИГРЫ --exe ПУТЬ [ПАРАМ…]  — любой .exe в её «диске C:» (установщик, лаунчер)
+w /usr/local/bin/vg-run <<'VGRUN'
+#!/usr/bin/env python3
+import json, os, re, shlex, sys, time
+
+MANIFEST = ".vastgame.json"
+
+
+def manifest(game):
+    """Паспорт игры: {"exe": путь от папки игры, "args": строка} — exe только внутри папки (без «..» и ссылок наружу)."""
+    try:
+        d = json.load(open(os.path.join(game, MANIFEST), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    exe = d.get("exe") if isinstance(d, dict) else None
+    if not isinstance(exe, str) or not exe or exe.startswith("/") or ".." in exe.split("/") or "\0" in exe:
+        return None
+    path = os.path.realpath(os.path.join(game, exe))
+    if not path.startswith(os.path.realpath(game) + os.sep):
+        return None
+    args = d.get("args") if isinstance(d.get("args"), str) else ""
+    return {**d, "exe": path, "args": args[:300]}
+
+
+def steam_root():
+    for p in (os.environ.get("STEAM_COMPAT_CLIENT_INSTALL_PATH"), os.path.expanduser("~/.steam/debian-installation"),
+              os.path.expanduser("~/.local/share/Steam"), os.path.expanduser("~/.steam/steam")):
+        if p and os.path.isdir(os.path.join(p, "steamapps")):
+            return os.path.realpath(p)
+    return None
+
+
+def _acf_dir(root, appid):
+    for sub in ("", ".vastgame-hidden"):
+        try:
+            m = re.search(r'"installdir"\s*"([^"]+)"', open(os.path.join(root, "steamapps", sub, f"appmanifest_{appid}.acf"),
+                                                             encoding="utf-8", errors="replace").read())
+            if m:
+                return os.path.join(root, "steamapps", "common", m.group(1))
+        except OSError:
+            pass
+    return None
+
+
+def proton(root):
+    """Proton, который выбран в Steam «для всех игр» (CompatToolMapping "0"), иначе Proton Experimental; и вход Steam
+    Linux Runtime, который ему нужен (require_tool_appid в toolmanifest.vdf)."""
+    common = os.path.join(root, "steamapps", "common")
+    names = []
+    try:
+        cfg = open(os.path.join(root, "config", "config.vdf"), encoding="utf-8", errors="replace").read()
+        m = re.search(r'"CompatToolMapping"\s*\{\s*"0"\s*\{[^}]*?"name"\s*"([^"]+)"', cfg)
+        if m:
+            names.append(m.group(1))
+    except OSError:
+        pass
+    dirs = [os.path.join(common, "Proton - Experimental")]
+    for n in names:                                     # proton_9 → «Proton 9.0», свои — compatibilitytools.d/n
+        dirs.insert(0, os.path.join(root, "compatibilitytools.d", n))
+        v = re.fullmatch(r"proton_(\d+)", n)
+        if v:
+            dirs.insert(1, os.path.join(common, f"Proton {v.group(1)}.0"))
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, "proton")):
+            tool = open(os.path.join(d, "toolmanifest.vdf"), encoding="utf-8", errors="replace").read() \
+                if os.path.isfile(os.path.join(d, "toolmanifest.vdf")) else ""
+            m = re.search(r'"require_tool_appid"\s*"(\d+)"', tool)
+            slr = _acf_dir(root, m.group(1)) if m else None
+            entry = slr and os.path.join(slr, "_v2-entry-point")
+            return os.path.join(d, "proton"), (entry if entry and os.path.isfile(entry) else None)
+    return None, None
+
+
+def command(game, exe=None, args=()):
+    """(argv, env, cwd) запуска или (None, причина)."""
+    game = os.path.realpath(game)
+    if exe is None:
+        m = manifest(game)
+        if not m:
+            return None, "нет паспорта .vastgame.json или в нём неверный exe"
+        exe, args = m["exe"], shlex.split(m["args"]) if m["args"] else []
+    if not os.path.isfile(exe):
+        return None, f"нет файла {exe}"
+    root = steam_root()
+    if not root:
+        return None, "нет Steam"
+    pr, entry = proton(root)
+    if not pr:
+        return None, "нет Proton"
+    env = dict(os.environ)
+    prefix = os.path.join(game, ".prefix")
+    os.makedirs(prefix, exist_ok=True)
+    link = os.path.join(prefix, "drive_c")
+    pfx_drive = os.path.join(prefix, "pfx", "drive_c")
+    if os.path.isdir(pfx_drive) and not os.path.exists(link):
+        try:
+            os.symlink("pfx/drive_c", link)
+        except OSError:
+            pass
+    env.update(STEAM_COMPAT_DATA_PATH=prefix, STEAM_COMPAT_CLIENT_INSTALL_PATH=root)
+    env.setdefault("SteamAppId", "0")
+    env.setdefault("SteamGameId", "0")
+    if os.path.exists("/opt/vastgame/real/steam"):     # Docker: вход Runtime — наша пропускающая заплатка
+        env.setdefault("VG", "1")
+    proton_cmd = [pr, "waitforexitandrun", exe, *args]
+    argv = [entry, "--verb=waitforexitandrun", "--", *proton_cmd] if entry else proton_cmd
+    return (argv, env, os.path.dirname(exe), exe), None
+
+
+# [2026-10-16] Star Citizen под Wine/Proton:
+# 1) системный курсор расходится с игрой (режим «F», mobiGlas, меню) — форсируем программный курсор (USER.cfg).
+# 2) Vulkan падает при создании логического устройства (ошибка 60101) — форсируем Direct3D 11 (USER.cfg и GraphicsSettings.json).
+# 3) RSI Launcher ищет $WINEPREFIX/drive_c напрямую (без pfx/) — делаем симлинк drive_c -> pfx/drive_c в корне .prefix.
+SC_EXES = ("rsi launcher.exe", "starcitizen.exe", "starcitizen_launcher.exe")
+SC_CHANNELS = ("LIVE", "PTU", "EPTU", "TECH-PREVIEW", "HOTFIX")
+SC_LINES = (
+    ("pl_pit.forceSoftwareCursor", "pl_pit.forceSoftwareCursor = 1"),
+    ("r.GraphicsRenderer", "r.GraphicsRenderer = 0"),
+)
+
+
+def sc_cursor(drive):
+    """Строки SC_LINES в USER.cfg каналов Star Citizen (LIVE — всегда, остальные — если скачаны). Своё значение человека
+    не трогаем. Также переключаем GraphicsRenderer на 0 (DirectX 11 / DXVK) в GraphicsSettings.json, если там стоит 1."""
+    base = os.path.join(drive, "Program Files", "Roberts Space Industries", "StarCitizen")
+    done = []
+    for ch in SC_CHANNELS:
+        d = os.path.join(base, ch)
+        if ch != "LIVE" and not os.path.isdir(d):
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "USER.cfg")
+            text = open(p, encoding="utf-8", errors="replace").read() if os.path.isfile(p) else ""
+            added = []
+            for key, val in SC_LINES:
+                pattern = r"^\s*" + re.escape(key).replace(r"\.", r"[._]") + r"\s*="
+                if not re.search(pattern, text, re.M | re.I):
+                    added.append(val)
+            if added:
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(("\n" if text and not text.endswith("\n") else "") + "\n".join(added) + "\n")
+            done.append(ch)
+        except OSError:
+            pass
+    try:
+        import glob, json
+        for gs in glob.glob(os.path.join(drive, "users", "*", "AppData", "Local", "star citizen", "*", "GraphicsSettings", "GraphicsSettings.json")):
+            try:
+                with open(gs, "r+", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("GraphicsSettings", {}).get("GraphicsRenderer") == 1:
+                        data["GraphicsSettings"]["GraphicsRenderer"] = 0
+                        f.seek(0)
+                        json.dump(data, f, indent=2)
+                        f.truncate()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return done
+
+
+def star_citizen(game, exe):
+    """Запуск RSI Launcher / Star Citizen — курсор и Direct3D 11 (sc_cursor), а также симлинк drive_c в корне .prefix
+    (RSI Launcher под Wine ищет $WINEPREFIX/drive_c напрямую, без подпапки pfx). «Диска C:» ещё нет (первый запуск:
+    его сейчас создаст Proton) — ждём его в отдельном процессе, чтобы не мешать Proton создавать префикс."""
+    if os.path.basename(exe).lower() not in SC_EXES:
+        return
+    prefix = os.path.join(game, ".prefix")
+    drive = os.path.join(prefix, "pfx", "drive_c")
+    link = os.path.join(prefix, "drive_c")
+    if os.path.isdir(os.path.join(drive, "windows")):
+        if not os.path.exists(link):
+            try:
+                os.symlink("pfx/drive_c", link)
+            except OSError:
+                pass
+        sc_cursor(drive)
+        return
+    if os.fork():
+        return
+    try:                                                # процесс-наблюдатель: без вывода, отдельно от игры
+        os.setsid()
+        nul = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(nul, fd)
+        for _ in range(360):                            # до 30 минут
+            time.sleep(5)
+            if os.path.isdir(os.path.join(drive, "windows")):
+                time.sleep(5)
+                if not os.path.exists(link):
+                    try:
+                        os.symlink("pfx/drive_c", link)
+                    except OSError:
+                        pass
+                sc_cursor(drive)
+                break
+    finally:
+        os._exit(0)
+
+
+def main(a):
+    if not a:
+        print("vg-run ПАПКА_ИГРЫ [--exe ПУТЬ [ПАРАМЕТРЫ…]]", file=sys.stderr)
+        return 2
+    game = a[0]
+    exe, args = (os.path.realpath(a[2]), a[3:]) if a[1:2] == ["--exe"] and len(a) >= 3 else (None, ())
+    cmd, why = command(game, exe, args)
+    try:
+        with open("/tmp/vastgame-launch.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} vg-run {os.path.basename(os.path.realpath(game))}: "
+                    f"{why or os.path.basename(cmd[3])}\n")
+    except OSError:
+        pass
+    if not cmd:
+        print(f"vg-run: {why}", file=sys.stderr)
+        return 1
+    argv, env, cwd, _ = cmd
+    try:
+        star_citizen(os.path.realpath(game), cmd[3])
+    except Exception:                                   # мелочь для одной игры не должна мешать запуску
+        pass
+    os.chdir(cwd)
+    os.execvpe(argv[0], argv, env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+VGRUN
+
+# [v5.7] Двойной щелчок по .exe/.msi/архиву на рабочем столе машины — помощник VastGame (окна zenity на языке
+# VastGame): установщик → своя игра Games/Название со своим «диском C:» (vg-run --exe); portable → перенести в Games;
+# архив → распаковать в Games; .exe внутри своей игры → запустить в её «диске C:». Паспорт игры .vastgame.json —
+# что запускать; ярлык в Steam обновляет wolf (запрос в ~/.local/share/vastgame/requests).
+w /usr/local/bin/vg-open <<'VGOPEN'
+#!/usr/bin/env python3
+import json, os, re, shutil, subprocess, sys, threading, time, zipfile
+
+HOME = os.path.expanduser("~")
+GD = os.environ.get("VG_GAMES") or os.path.join(HOME, "Downloads", "Games")
+PD = os.environ.get("VG_PROGRAMS") or os.path.join(HOME, "Downloads", "Programs")   # [v5.7] программы для игр
+STEAM = [os.environ["VG_STEAM"]] if os.environ.get("VG_STEAM") else \
+    [os.path.join(HOME, x) for x in (".steam/debian-installation", ".local/share/Steam", ".steam/steam")]
+PROC = os.environ.get("VG_PROC") or "/proc"
+STATE = os.path.join(HOME, ".local", "share", "vastgame")
+INST = os.path.join(STATE, "installers")              # [v5.7] установщики для «диска C:» игры Steam — не в облако
+REQ = os.path.join(STATE, "requests", "install")
+REQP = os.path.join(STATE, "requests", "prog")         # [v5.7] запустить / вместе с игрой / запуск через — машине
+# Загрузчики: игра запускается через них (Steam — вместо игры, с тем же Proton) — ставим «Запуск игры через» сами
+LOADERS = re.compile(r"^(skse64_loader|skse_loader|f4se_loader|sfse_loader|obse_loader|nvse_loader|modengine2?_launcher|"
+                     r"launchmod_.*|ersc_launcher|seamlesscoop.*launcher|xivlauncher)\.exe$", re.I)
+POLL = float(os.environ.get("VG_POLL") or 1)
+VGRUN = os.environ.get("VG_RUN") or "/usr/local/bin/vg-run"
+MANIFEST = ".vastgame.json"
+ARCHIVES = (".zip", ".7z", ".rar")
+INSTALLER = re.compile(r"setup|install|^ins[_-]|_ins\b", re.I)
+SKIP = re.compile(r"unins|setup|install|redist|vc_?redist|dxsetup|dotnet|directx|crash|report|update|helper|"
+                  r"webhelper|cefprocess|elevat|service|vulkan|prereq", re.I)
+SYSTEM_DIRS = re.compile(r"^(windows|program files( \(x86\))?/(common files|internet explorer|windows (media player|nt|"
+                         r"photo viewer)|microsoft|steam)|programdata/microsoft|users/[^/]+/appdata/local/(temp|microsoft)|"
+                         r"proton_shortcuts|openxr|vrclient)(/|$)", re.I)
+KNOWN = {"xivlauncher.exe": "XIVLauncher", "epicgameslauncher.exe": "Epic Games", "battle.net launcher.exe": "Battle.net",
+         "battle.net.exe": "Battle.net", "upc.exe": "Ubisoft Connect", "ubisoftconnect.exe": "Ubisoft Connect",
+         "eadesktop.exe": "EA app", "galaxyclient.exe": "GOG Galaxy", "riotclientservices.exe": "Riot Client",
+         "hoyoplay.exe": "HoYoPlay", "wutheringwaves.exe": "Wuthering Waves", "launcher.exe": None}
+# [v5.7] Программы для игр, которые узнаём сами (по имени файла или «Названию продукта»): менеджеры модов, загрузчики,
+# трейнеры, оверлеи — им не нужна своя игра в Games, они работают с игрой Steam
+MOD_TOOLS = re.compile(r"vortex|mod[ ._-]?organizer|\bmo2\b|fluffy|mod[ ._-]?manager|wemod|\bwand\b|reshade|xivlauncher|skse|f4se|sfse|obse|"
+                       r"nvse|mod[ ._-]?engine|seamless|\bersc\b|cheat[ ._-]?engine|trainer|r2modman|thunderstore|bepinex|melonloader|"
+                       r"special ?k|flawless ?widescreen|wabbajack|\bxedit\b|sseedit|fo4edit|bodyslide|reframework|"
+                       r"cyber ?engine|\bloot\b|wrye", re.I)
+STEAM_TOOLS = re.compile(r"^(proton|steam linux runtime|steamworks|steam controller|steamvr)", re.I)
+# [2026-10-15] Менеджеры модов: их запускают в любое время, без игры (готовят моды), — «вместе с игрой» им не нужно.
+# Служебные .exe установленных программ — в итоге установки не показываем (MO2: QtWebEngineProcess, helper, usvfs…)
+MANAGERS = re.compile(r"vortex|mod[ ._-]?organizer|\bmo2\b|fluffy|mod[ ._-]?manager|r2modman|thunderstore|wabbajack|\bloot\b|wrye", re.I)
+NOISE_EXE = re.compile(r"qtwebengineprocess|helper|crashpad|createdump|nxmhandler|usvfs|unins|update|elevat|notification|"
+                       r"squirrel|^7z|dotnet|vc_?redist|setup", re.I)
+
+T = {
+ "ru": {"title": "VastGame", "what": "Что это за файл?\n{file}", "kind.installer": "Установщик игры или лаунчера",
+        "kind.portable": "Игра без установки (portable)", "name": "Как назвать игру?\nПапка появится в Games, игра — в Steam.",
+        "exists": "Игра «{name}» уже есть. Поставить в неё?\n(Так ставят моды и дополнения с установщиком.)",
+        "installing": "Идёт установка «{name}». Пройди шаги установщика как обычно — путь можно не менять: всё ляжет в "
+                      "папку игры.", "none": "Установщик закончил, но новых программ не видно.\nЕсли установка ещё идёт — "
+                      "дождись конца и нажми «Проверить снова».", "again": "Проверить снова", "pick": "Что запускать у «{name}»?",
+        "move": "Перенести «{src}» в Games и добавить в Steam как «{name}»?", "unpack": "Распаковать «{file}» в Games как «{name}»?",
+        "unpacking": "Распаковываю…", "noexe": "В «{name}» не нашлось программ для запуска (.exe).",
+        "inside": "Запустить «{file}» в «диске C:» игры «{name}»?", "main": "Сделать «{file}» главной программой игры «{name}»?",
+        "done": "Готово: «{name}» добавлена.\nВ Steam она появится, когда закроются игры (Steam перезапустится сам).",
+        "play": "Играть сейчас", "ok": "Готово", "cancel": "Отмена", "bad": "Не получилось: {why}",
+        "choose": "Выбрать", "yes": "Да", "recommended": "(рекомендую)",
+        "purpose": "Что такое «{file}»?", "purpose.game": "Игра (или её лаунчер)",
+        "purpose.program": "Программа для игры — менеджер модов, загрузчик, трейнер",
+        "which": "Для какой игры «{file}»?",
+        "prog.done": "Готово: «{name}» — в папке Programs, уедет в облако сама.\nЗапуск — в VastGame, блок «Программы игры»{game}: "
+                     "«Запустить» (в любое время; трейнерам нужна запущенная игра) или «Вместе с игрой».",
+        "prog.installer": "Установщик «{name}» — в папке Programs.\nПоставь его в игру: VastGame, блок «Программы игры»{game} → "
+                          "«Установить в игру» (игра должна быть закрыта).",
+        "prog.inside": "«{file}» — программа игры «{game}».",
+        "prog.auto": "Запускать «{exe}» вместе с «{game}»?\n(Поменять можно в VastGame, блок «Программы игры».)",
+        "prog.auto.now": "«{game}» сейчас запущена — «{exe}» откроется сразу.",
+        "prog.auto.yes": "Да, вместе с игрой", "prog.auto.no": "Нет",
+        "prog.via": "«{game}» теперь запускается через «{exe}».\n(Поменять — VastGame, «Программы игры» → «Запуск игры».)",
+        "prog.already": "«{file}» уже в папке Programs.\nЗапуск — в VastGame, блок «Программы игры».",
+        "prog.unpack": "Распаковать «{file}» в Programs как «{name}»?",
+        "inst.close": "«{game}» сейчас запущена. Ставить можно только в закрытую игру — закрой её и нажми «Поставить».",
+        "inst.go": "Поставить",
+        "unpack.go": "Распаковать",
+        "prog.manager": "«{exe}» — менеджер модов: запускай его кнопкой «Запустить» в VastGame («Программы игры») в любое время, и без игры — он работает в «диске C:» «{game}».",
+        "inst.unpacking": "Ставлю «{name}» в «{game}»…\nУстановщик этой программы под Linux спотыкается — достаю программу из него сам.",
+        "inst.unpack_failed": "Не получилось достать «{name}» из установщика: {why}",
+        "game.unpacking": "Добавляю «{name}»…\nУстановщик этой игры под Linux спотыкается — достаю её из него сам.",
+        "bad.wand": "«{name}» — это Wand (бывший WeMod). Под Linux он не работает: окно остаётся чёрным, и Wand зависает. Это известная проблема самого Wand: его разработчики Linux не поддерживают.\n\nВместо него подойдут отдельные трейнеры FLiNG (flingtrainer.com): скачай трейнер для своей игры, положи его в Programs и запускай кнопкой «Запустить» рядом с игрой в окне VastGame.",
+        "bad.anyway": "Всё равно поставить",
+        "inst.prepare": "Готовлю установку «{name}» в «{game}»…",
+        "inst.wait": "Ставлю «{name}» в «{game}».\nОкно установщика откроется само (в первый раз — через пару минут: "
+                     "сначала ставятся библиотеки Visual C++). Пройди его шаги как обычно, путь не меняй.",
+        "inst.done": "Готово: «{name}» стоит в «{game}» ({exes}).\nЗапуск — в VastGame, блок «Программы игры»: «Запустить» "
+                     "или «Вместе с игрой». Уедет в облако вместе с сохранениями игры.",
+        "inst.none": "Установщик закончил, но новых программ в игре не видно. Если установка не прошла — открой установщик "
+                     "ещё раз.",
+        "inst.notinstalled": "«{game}» ещё не скачана Steam — ставить некуда. Дождись, пока Steam её скачает, и открой "
+                             "установщик снова.",
+        "inst.noanswer": "Машина не ответила. Попробуй ещё раз через минуту.",
+        "inst.timeout": "Установка идёт слишком долго. Когда закончится, программа появится в VastGame, блок «Программы игры».",},
+ "en": {"title": "VastGame", "what": "What is this file?\n{file}", "kind.installer": "Game or launcher installer",
+        "kind.portable": "Game without installation (portable)", "name": "What should the game be called?\nA folder appears in Games, the game appears in Steam.",
+        "exists": "«{name}» already exists. Install into it?\n(That's how mods and add-ons with an installer go.)",
+        "installing": "Installing «{name}». Go through the installer as usual — no need to change the path: everything lands in the game folder.",
+        "none": "The installer finished, but no new programs showed up.\nIf it's still installing, wait and press «Check again».",
+        "again": "Check again", "pick": "What should «{name}» start?",
+        "move": "Move «{src}» to Games and add it to Steam as «{name}»?", "unpack": "Unpack «{file}» into Games as «{name}»?",
+        "unpacking": "Unpacking…", "noexe": "No programs to start (.exe) found in «{name}».",
+        "inside": "Run «{file}» in the C: drive of «{name}»?", "main": "Make «{file}» the main program of «{name}»?",
+        "done": "Done: «{name}» is added.\nIt shows up in Steam once games are closed (Steam restarts by itself).",
+        "play": "Play now", "ok": "Done", "cancel": "Cancel", "bad": "That didn't work: {why}",
+        "choose": "Choose", "yes": "Yes", "recommended": "(recommended)",
+        "purpose": "What is «{file}»?", "purpose.game": "A game (or its launcher)",
+        "purpose.program": "A program for a game — mod manager, loader, trainer",
+        "which": "Which game is «{file}» for?",
+        "prog.done": "Done: «{name}» is in the Programs folder and goes to the cloud by itself.\nStart it in VastGame, "
+                     "«Game programs»{game}: «Start» (any time; trainers need the game running) or «With the game».",
+        "prog.installer": "The «{name}» installer is in the Programs folder.\nInstall it into the game: VastGame, «Game "
+                          "programs»{game} → «Install into the game» (the game must be closed).",
+        "prog.inside": "«{file}» is a program of «{game}».",
+        "prog.auto": "Start «{exe}» together with «{game}»?\n(You can change it in VastGame, «Game programs».)",
+        "prog.auto.now": "«{game}» is running — «{exe}» opens right away.",
+        "prog.auto.yes": "Yes, with the game", "prog.auto.no": "No",
+        "prog.via": "«{game}» now starts through «{exe}».\n(Change it in VastGame, «Game programs» → «Game start».)",
+        "prog.already": "«{file}» is already in the Programs folder.\nStart it in VastGame, «Game programs».",
+        "prog.unpack": "Unpack «{file}» into Programs as «{name}»?",
+        "inst.close": "«{game}» is running. Programs can only be installed into a closed game — close it and press «Install».",
+        "inst.go": "Install",
+        "unpack.go": "Unpack",
+        "prog.manager": "«{exe}» is a mod manager: start it with «Start» in VastGame («Game programs») any time, even without the game — it works in the «C: drive» of «{game}».",
+        "inst.unpacking": "Installing «{name}» into «{game}»…\nThis program's installer trips up on Linux — taking the program out of it myself.",
+        "inst.unpack_failed": "Couldn't take «{name}» out of its installer: {why}",
+        "game.unpacking": "Adding «{name}»…\nThis game's installer trips up on Linux — taking the game out of it myself.",
+        "bad.wand": "«{name}» is Wand (formerly WeMod). It doesn't work on Linux: the window stays black and Wand hangs. This is a known issue of Wand itself: its developers don't support Linux.\n\nStandalone FLiNG trainers (flingtrainer.com) work instead: download the trainer for your game, put it into Programs and start it with «Start» next to the game in the VastGame window.",
+        "bad.anyway": "Install anyway",
+        "inst.prepare": "Preparing to install «{name}» into «{game}»…",
+        "inst.wait": "Installing «{name}» into «{game}».\nThe installer window opens by itself (the first time — in a couple "
+                     "of minutes: Visual C++ libraries go first). Go through it as usual, don't change the path.",
+        "inst.done": "Done: «{name}» is installed in «{game}» ({exes}).\nStart it in VastGame, «Game programs»: «Start» or "
+                     "«With the game». It goes to the cloud with the game's saves.",
+        "inst.none": "The installer finished, but no new programs showed up in the game. If it didn't install — open the "
+                     "installer again.",
+        "inst.notinstalled": "Steam hasn't downloaded «{game}» yet — nothing to install into. Wait for the download and open "
+                             "the installer again.",
+        "inst.noanswer": "The machine didn't answer. Try again in a minute.",
+        "inst.timeout": "The installation takes too long. When it's done, the program shows up in VastGame, «Game programs».",},
+ "es": {"title": "VastGame", "what": "¿Qué es este archivo?\n{file}", "kind.installer": "Instalador de un juego o launcher",
+        "kind.portable": "Juego sin instalación (portable)", "name": "¿Cómo se llamará el juego?\nAparecerá una carpeta en Games y el juego en Steam.",
+        "exists": "«{name}» ya existe. ¿Instalar dentro?\n(Así se instalan mods y extras con instalador.)",
+        "installing": "Instalando «{name}». Sigue el instalador como siempre; no hace falta cambiar la ruta: todo queda en la carpeta del juego.",
+        "none": "El instalador terminó, pero no aparecieron programas nuevos.\nSi aún se está instalando, espera y pulsa «Comprobar otra vez».",
+        "again": "Comprobar otra vez", "pick": "¿Qué debe iniciar «{name}»?",
+        "move": "¿Mover «{src}» a Games y añadirlo a Steam como «{name}»?", "unpack": "¿Descomprimir «{file}» en Games como «{name}»?",
+        "unpacking": "Descomprimiendo…", "noexe": "No se encontraron programas (.exe) en «{name}».",
+        "inside": "¿Ejecutar «{file}» en la unidad C: de «{name}»?", "main": "¿Hacer de «{file}» el programa principal de «{name}»?",
+        "done": "Listo: «{name}» se añadió.\nAparecerá en Steam cuando se cierren los juegos (Steam se reinicia solo).",
+        "play": "Jugar ahora", "ok": "Listo", "cancel": "Cancelar", "bad": "No funcionó: {why}",
+        "choose": "Elegir", "yes": "Sí", "recommended": "(recomendado)",
+        "purpose": "¿Qué es «{file}»?", "purpose.game": "Un juego (o su launcher)",
+        "purpose.program": "Un programa para un juego: gestor de mods, cargador, trainer",
+        "which": "¿Para qué juego es «{file}»?",
+        "prog.done": "Listo: «{name}» está en la carpeta Programs y se sube a la nube sola.\nSe inicia en VastGame, "
+                     "«Programas del juego»{game}: «Iniciar» (cuando quieras; los entrenadores necesitan el juego abierto) o «Con el juego».",
+        "prog.installer": "El instalador de «{name}» está en la carpeta Programs.\nInstálalo en el juego: VastGame, "
+                          "«Programas del juego»{game} → «Instalar en el juego» (el juego debe estar cerrado).",
+        "prog.inside": "«{file}» es un programa de «{game}».",
+        "prog.auto": "¿Iniciar «{exe}» junto con «{game}»?\n(Se puede cambiar en VastGame, «Programas del juego».)",
+        "prog.auto.now": "«{game}» está abierto: «{exe}» se abre ahora mismo.",
+        "prog.auto.yes": "Sí, con el juego", "prog.auto.no": "No",
+        "prog.via": "«{game}» ahora se inicia con «{exe}».\n(Se cambia en VastGame, «Programas del juego» → «Inicio del juego».)",
+        "prog.already": "«{file}» ya está en la carpeta Programs.\nSe inicia en VastGame, «Programas del juego».",
+        "prog.unpack": "¿Descomprimir «{file}» en Programs como «{name}»?",
+        "inst.close": "«{game}» está abierto. Solo se puede instalar con el juego cerrado: ciérralo y pulsa «Instalar».",
+        "inst.go": "Instalar",
+        "unpack.go": "Descomprimir",
+        "prog.manager": "«{exe}» es un gestor de mods: ábrelo con «Iniciar» en VastGame («Programas del juego») cuando quieras, incluso sin el juego; funciona en el «disco C:» de «{game}».",
+        "inst.unpacking": "Instalando «{name}» en «{game}»…\nEl instalador de este programa falla en Linux: saco el programa de él yo mismo.",
+        "inst.unpack_failed": "No pude sacar «{name}» de su instalador: {why}",
+        "game.unpacking": "Añadiendo «{name}»…\nEl instalador de este juego falla en Linux: saco el juego de él yo mismo.",
+        "bad.wand": "«{name}» es Wand (antes WeMod). No funciona en Linux: la ventana se queda negra y Wand se cuelga. Es un problema conocido del propio Wand: sus desarrolladores no dan soporte a Linux.\n\nEn su lugar sirven los entrenadores independientes de FLiNG (flingtrainer.com): descarga el de tu juego, ponlo en Programs y ábrelo con «Iniciar» junto al juego en la ventana de VastGame.",
+        "bad.anyway": "Instalar de todos modos",
+        "inst.prepare": "Preparando la instalación de «{name}» en «{game}»…",
+        "inst.wait": "Instalando «{name}» en «{game}».\nLa ventana del instalador se abre sola (la primera vez, en un par de "
+                     "minutos: antes se instalan las bibliotecas Visual C++). Síguela como siempre, sin cambiar la ruta.",
+        "inst.done": "Listo: «{name}» está instalado en «{game}» ({exes}).\nSe inicia en VastGame, «Programas del juego»: "
+                     "«Iniciar» o «Con el juego». Se sube a la nube con las partidas del juego.",
+        "inst.none": "El instalador terminó, pero no aparecieron programas nuevos en el juego. Si no se instaló, abre el "
+                     "instalador otra vez.",
+        "inst.notinstalled": "Steam aún no descargó «{game}»: no hay dónde instalar. Espera la descarga y abre el instalador "
+                             "otra vez.",
+        "inst.noanswer": "La máquina no respondió. Inténtalo de nuevo en un minuto.",
+        "inst.timeout": "La instalación tarda demasiado. Cuando termine, el programa aparecerá en VastGame, «Programas del juego».",},
+}
+
+
+def lang():
+    try:
+        v = open(os.path.join(STATE, "lang")).read().strip()
+    except OSError:
+        v = ""
+    return v if v in T else "en"
+
+
+def t(key, **kw):
+    return T[lang()].get(key, T["en"][key]).format(**kw)
+
+
+# ---------------------------------------------------------------- решения (без окон — проверяются тестами)
+def kind(path):
+    """archive | installer | inside (в папке своей игры) | ask (exe: установщик или portable — спросить)."""
+    low = path.lower()
+    if low.endswith(ARCHIVES):
+        return "archive"
+    if game_of(path):
+        return "inside"
+    if is_installer(path):
+        return "installer"
+    return "ask"
+
+
+# [2026-10-15] Программы, которые под Linux/Proton не работают у всех (проблема самой программы) — сказать до установки,
+# а не после двадцати минут чёрного окна. Wand 12+ (бывший WeMod; его загрузчик WeMod-Setup ставит тот же Wand) — висит с
+# чёрным окном, --disable-gpu не помогает (форум WeMod: «Wand 12.1.0 hangs with black window on startup»; проверено вживую)
+def known_bad(path):
+    """Ключ текста предупреждения или None."""
+    if not path.lower().endswith(".exe"):
+        return None
+    data = _bytes(path)
+    prod = version_field(data, "ProductName").lower()
+    base = os.path.basename(path).lower()
+    if prod in ("wand", "wemod") or re.match(r"(wand|wemod)[-_ ]", base):
+        ver = re.match(r"(\d+)", version_field(data, "FileVersion") or "")
+        if prod == "wemod" and ver and int(ver.group(1)) < 12 and "setup" not in base:
+            return None                                   # старый WeMod 11 (не загрузчик) под Linux работал
+        return "bad.wand"
+    return None
+
+
+def is_tool(path):
+    """[v5.7] Знакомая программа для игр (менеджер модов, загрузчик, трейнер) — по имени файла или «Названию продукта»."""
+    return bool(MOD_TOOLS.search(os.path.basename(path)) or (path.lower().endswith(".exe") and MOD_TOOLS.search(product_name(path))))
+
+
+def under(path, base):
+    rp, b = os.path.realpath(path), os.path.realpath(base)
+    return rp.startswith(b + os.sep)
+
+
+def steam_root():
+    return next((r for r in STEAM if os.path.isdir(os.path.join(r, "steamapps"))), None)
+
+
+def steam_games():
+    """[v5.7] Игры Steam на машине: [{appid, name, dir}] по названию (служебное Steam — нет; папки игры нет — нет)."""
+    root, out = steam_root(), []
+    if not root:
+        return out
+    sa = os.path.join(root, "steamapps")
+    for f in sorted(os.listdir(sa)):
+        m = re.match(r"appmanifest_(\d+)\.acf$", f)
+        if not m:
+            continue
+        try:
+            text = open(os.path.join(sa, f), encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        name = re.search(r'"name"\s+"([^"]*)"', text)
+        d = re.search(r'"installdir"\s+"([^"]*)"', text)
+        if not d or "/" in d.group(1) or d.group(1) in ("", ".", ".."):
+            continue
+        g = {"appid": m.group(1), "name": name.group(1) if name else d.group(1), "dir": os.path.join(sa, "common", d.group(1))}
+        if os.path.isdir(g["dir"]) and not STEAM_TOOLS.match(g["name"]):
+            out.append(g)
+    return sorted(out, key=lambda g: g["name"].lower())
+
+
+def running_appids():
+    """Номера запущенных игр Steam (у их процессов в командной строке «AppId=N»)."""
+    out = set()
+    try:
+        pids = [d for d in os.listdir(PROC) if d.isdigit()]
+    except OSError:
+        return out
+    for d in pids:
+        try:
+            out |= set(re.findall(rb"AppId=(\d+)", open(os.path.join(PROC, d, "cmdline"), "rb").read()))
+        except OSError:
+            continue
+    return {x.decode() for x in out}
+
+
+def steam_game_of(path, games=None):
+    """Игра Steam, в папке которой лежит файл, или None."""
+    return next((g for g in games if under(path, g["dir"])), None) if games is not None else \
+        steam_game_of(path, steam_games())
+
+
+def game_choice(games, running):
+    """(игра, нужно ли спрашивать): запущенная — она; одна на машине — она; нет игр — (None, False); иначе спросить."""
+    run = [g for g in games if g["appid"] in running]
+    if run:
+        return run[0], False
+    if len(games) == 1:
+        return games[0], False
+    return None, len(games) > 1
+
+
+def game_of(path):
+    """Папка игры в Games, внутри которой лежит файл, или None."""
+    rp, gd = os.path.realpath(path), os.path.realpath(GD)
+    if not rp.startswith(gd + os.sep):
+        return None
+    top = rp[len(gd) + 1:].split(os.sep)[0]
+    return os.path.join(gd, top) if top and not top.startswith(".") else None
+
+
+def clean_name(s):
+    s = re.sub(r"\.(exe|msi|zip|7z|rar)$", "", s, flags=re.I)
+    s = re.sub(r"[_]+", " ", s)
+    s = re.sub(r"[-_ ]*(setup|installer|install|x64|x86|win64|win32|v?\d+(\.\d+)+)[-_ ]*", " ", s, flags=re.I)
+    s = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "", s)
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return s[:60] or "Game"
+
+
+def exes(folder, before=()):
+    """Новые программы своей игры (пути от папки): в её «диске C:» — кроме системных папок Windows, и в самой папке;
+    служебные (удаление, обновление, помощники) — нет. Знакомые лаунчеры — первыми, потом выше по папкам, крупнее."""
+    out = []
+    drive = os.path.join(folder, ".prefix", "pfx", "drive_c")
+    for base, rel0 in ((drive, ".prefix/pfx/drive_c/"), (folder, "")):
+        for root, dirs, files in os.walk(base):
+            r = os.path.relpath(root, base).replace(os.sep, "/")
+            r = "" if r == "." else r + "/"
+            if base == folder:
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+            dirs[:] = [d for d in dirs if not SYSTEM_DIRS.match(r + d)]
+            for f in files:
+                if not f.lower().endswith(".exe") or SKIP.search(f):
+                    continue
+                rel = rel0 + r + f
+                if rel in before:
+                    continue
+                try:
+                    size = os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    continue
+                low = f.lower()                           # launcher.exe — знакомый, только в папке HoYoPlay
+                known = low in KNOWN and (KNOWN[low] is not None or "hoyoplay" in r.lower())
+                out.append((not known, rel.count("/"), -size, rel))
+    return [x[3] for x in sorted(out)]
+
+
+def pe_gui(path):
+    """Оконная ли программа Windows: True — окно (игры, лаунчеры), False — консоль (утилиты), None — не понять."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+        if head[:2] != b"MZ":
+            return None
+        pe = int.from_bytes(head[0x3C:0x40], "little")
+        if head[pe:pe + 4] != b"PE\0\0":
+            return None
+        sub = int.from_bytes(head[pe + 24 + 68:pe + 24 + 70], "little")
+        return {2: True, 3: False}.get(sub)
+    except OSError:
+        return None
+
+
+# [2026-10-15] Установщик узнаём по содержимому, а не только по имени: «Wand-12.63.0.exe» (WeMod, 244 МБ) — установщик
+# Squirrel без «setup» в имени — лёг в Programs как готовая программа (живой случай). Признаки: метка сборщика
+# установщиков (NSIS, Inno, InstallShield, WiX), пакет Squirrel внутри («…-full.nupkg» и «RELEASES»), «Исходное имя»
+# или «Описание» файла со словами Setup/Install (у Wand — OriginalFilename «Setup.exe»). Сведения о версии бывают
+# в самом конце файла (у Wand — за 240 МБ данных), поэтому читаем начало и конец
+INSTALLER_MARKS = (b"NullsoftInst", b"Nullsoft.NSIS", b"Inno Setup Setup Data", b"InstallShield", b".wixburn",
+                   b"WixBundleManifest", b"Setup Factory", b"Advanced Installer", b"InstallAware", b"Clickteam Install")
+SETUP_NAME = re.compile(r"setup|install|установ", re.I)
+
+
+def _bytes(path, head=64 << 20, tail=4 << 20):
+    """Начало и конец файла (сведения о версии бывают в конце)."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(head)
+            size = os.fstat(f.fileno()).st_size
+            if size > head:
+                f.seek(max(head, size - tail))
+                data += f.read(tail)
+            return data
+    except OSError:
+        return b""
+
+
+def version_field(data, field):
+    """Поле сведений о версии файла Windows (ProductName, OriginalFilename…) из байтов файла, или ""."""
+    key = field.encode("utf-16-le") + b"\0\0"
+    i = data.find(key)                   # первые сведения — самой программы (дальше бывают встроенных модулей NSIS)
+    if i < 0:
+        return ""
+    i += len(key)
+    while i < len(data) - 1 and data[i:i + 2] == b"\0\0":
+        i += 2
+    j = i
+    while j < len(data) - 1 and data[j:j + 2] != b"\0\0":
+        j += 2
+    v = data[i:j].decode("utf-16-le", "replace").strip()
+    return v if 0 < len(v) <= 80 and v.isprintable() else ""
+
+
+def is_installer(path):
+    """.msi или «setup/install» в имени; .exe — метка сборщика установщиков, пакет Squirrel внутри или «Исходное
+    имя»/«Описание» файла со словами Setup/Install."""
+    low, base = path.lower(), os.path.basename(path)
+    if low.endswith(".msi") or INSTALLER.search(base):
+        return True
+    if not low.endswith(".exe"):
+        return False
+    data = _bytes(path)
+    if data[:2] != b"MZ":
+        return False
+    if any(m in data for m in INSTALLER_MARKS) or (b"-full.nupkg" in data and b"RELEASES" in data):
+        return True
+    return any(SETUP_NAME.search(version_field(data, f)) for f in ("OriginalFilename", "InternalName", "FileDescription"))
+
+
+def product_name(path):
+    """«Название продукта» из сведений о версии файла Windows (то, что видно в его «Свойствах»), или ""."""
+    return version_field(_bytes(path), "ProductName")
+
+
+def lnk_target(path):
+    """Куда ведёт ярлык Windows (.lnk): путь вида C:\\…\\x.exe или None."""
+    try:
+        data = open(path, "rb").read(65536)
+    except OSError:
+        return None
+    if data[:4] != b"\x4c\0\0\0":
+        return None
+    for enc, pat in (("latin-1", rb"[A-Za-z]:\\[^\x00]+?\.[eE][xX][eE]"),          # LinkInfo — путь к программе
+                     ("utf-16-le", rb"(?:[A-Za-z]\x00:\x00\\\x00(?:[^\x00]\x00)+?\.\x00[eE]\x00[xX]\x00[eE]\x00)")):
+        m = re.search(pat, data)
+        if m:
+            return m.group(0).decode(enc)
+    return None
+
+
+SHORTCUT_SKIP = re.compile(r"unins|uninstall|remove|help|readme|manual|website|web site|homepage|support|update|"
+                           r"license|changelog|удал|справк|сайт", re.I)
+
+
+def shortcuts(folder):
+    """{путь exe от папки игры: название ярлыка} — ярлыки, которые положил установщик (рабочий стол, меню «Пуск»)."""
+    drive = os.path.join(folder, ".prefix", "pfx", "drive_c")
+    out = {}
+    roots = [os.path.join(drive, "ProgramData", "Microsoft", "Windows", "Start Menu"),
+             os.path.join(drive, "users")]
+    for base in roots:
+        for root, dirs, files in os.walk(base):
+            low = root.lower()
+            if base.endswith("users") and not ("desktop" in low or "start menu" in low):
+                if "appdata" in low and "roaming" not in low:
+                    dirs[:] = []
+                continue
+            for f in files:
+                if not f.lower().endswith(".lnk") or SHORTCUT_SKIP.search(f):
+                    continue
+                win = lnk_target(os.path.join(root, f))
+                if not win or win[1:3] != ":\\":
+                    continue
+                rel = win_to_rel(folder, win)
+                if rel:
+                    out.setdefault(rel, f[:-4])
+    return out
+
+
+def win_to_rel(folder, win):
+    """C:\\Program Files\\X\\a.exe → путь от папки игры (как есть на диске, без учёта регистра), если файл есть."""
+    drive = win[0].upper()
+    parts = [x for x in win[3:].split("\\") if x]
+    if drive == "C":
+        base, rel = os.path.join(folder, ".prefix", "pfx", "drive_c"), ".prefix/pfx/drive_c"
+    elif drive == "Z":
+        real = "/" + "/".join(parts)
+        top = os.path.realpath(folder) + os.sep
+        return os.path.relpath(real, folder).replace(os.sep, "/") if os.path.realpath(real).startswith(top) \
+            and os.path.isfile(real) else None
+    else:
+        return None
+    cur = base
+    for part in parts:
+        try:
+            match = next((x for x in os.listdir(cur) if x.lower() == part.lower()), None)
+        except OSError:
+            return None
+        if not match:
+            return None
+        cur = os.path.join(cur, match)
+        rel += "/" + match
+    return rel if os.path.isfile(cur) else None
+
+
+def candidates(folder, before=()):
+    """[(путь от папки игры, подпись)] — что запускать: сначала ярлыки установщика, иначе программы; консольные
+    утилиты — только если оконных нет. Первая — рекомендуемая."""
+    sc = {k: v for k, v in shortcuts(folder).items() if k not in before}
+    found = exes(folder, before)
+    gui = lambda rel: pe_gui(os.path.join(folder, rel)) is not False
+    if sc:
+        order = sorted(sc, key=lambda r: (found.index(r) if r in found else len(found), r))
+        order = [r for r in order if gui(r)] or order
+        return [(r, sc[r]) for r in order]
+    pick_ = [r for r in found if gui(r)] or found
+    return [(r, label(r)) for r in pick_]
+
+
+def label(rel):
+    """«7zFM.exe — C:\\Program Files\\7-Zip» вместо технического пути."""
+    name, where = os.path.basename(rel), os.path.dirname(rel)
+    if where.startswith(".prefix/pfx/drive_c"):
+        where = "C:\\" + where[len(".prefix/pfx/drive_c"):].strip("/").replace("/", "\\")
+    return f"{name} — {where}" if where else name
+
+
+def default_name(path):
+    """Название игры по умолчанию: «Название продукта» файла, иначе — из имени файла."""
+    return clean_name(product_name(path) or os.path.basename(path))
+
+
+def write_manifest(folder, exe, how):
+    data = {"version": 1, "exe": exe, "args": "", "kind": how, "name": os.path.basename(folder), "added": int(time.time())}
+    tmp = os.path.join(folder, MANIFEST + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, os.path.join(folder, MANIFEST))
+
+
+def request_shortcuts():
+    d = os.path.join(STATE, "requests")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "shortcuts"), "w").close()
+
+
+def portable_plan(exe):
+    """(что переносить, название, путь exe от папки игры): папку с игрой — целиком; exe прямо в «Загрузках», на
+    рабочем столе или в домашней папке — только его (а не всю папку)."""
+    parent = os.path.dirname(os.path.realpath(exe))
+    general = {os.path.realpath(p) for p in (HOME, os.path.join(HOME, "Downloads"), os.path.join(HOME, "Desktop"),
+                                             GD, "/tmp")}
+    if parent in general or parent == "/":
+        return exe, clean_name(os.path.basename(exe)), os.path.basename(exe)
+    return parent, clean_name(os.path.basename(parent)), os.path.relpath(os.path.realpath(exe), parent).replace(os.sep, "/")
+
+
+def unique(name, base=GD):
+    n, i = name, 2
+    while os.path.exists(os.path.join(base, n)):
+        n, i = f"{name} {i}", i + 1
+    return n
+
+
+def unpack(archive, dest):
+    """Распаковать в dest (только внутрь); одна общая папка сверху — её содержимое поднимается в dest. [v5.7] Временная
+    папка — вне Games и Programs: машина не выгрузит недораспакованное."""
+    tmp = os.path.join(STATE, "unpack", f"{os.getpid()}-{os.path.basename(dest)}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    try:
+        _unpack(archive, tmp, dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _unpack(archive, tmp, dest):
+    if archive.lower().endswith(".zip"):
+        with zipfile.ZipFile(archive) as z:
+            for n in z.namelist():
+                if n.startswith(("/", "\\")) or ".." in n.replace("\\", "/").split("/"):
+                    raise ValueError(f"путь {n!r} в архиве")
+            z.extractall(tmp)
+    else:
+        tool = shutil.which("bsdtar") and ["bsdtar", "-xf", archive, "-C", tmp] or \
+            shutil.which("7z") and ["7z", "x", "-y", f"-o{tmp}", archive]
+        if not tool:
+            raise ValueError("нечем распаковать .7z/.rar (нет bsdtar и 7z)")
+        subprocess.run(tool, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for root, dirs, files in os.walk(tmp):
+            for x in dirs + files:
+                p = os.path.join(root, x)
+                if os.path.islink(p) and not os.path.realpath(p).startswith(os.path.realpath(tmp) + os.sep):
+                    os.unlink(p)                                  # ссылка наружу — нет
+    items = [x for x in os.listdir(tmp) if not x.startswith("__MACOSX")]
+    src = os.path.join(tmp, items[0]) if len(items) == 1 and os.path.isdir(os.path.join(tmp, items[0])) else tmp
+    shutil.move(src, dest)
+
+
+# ---------------------------------------------------------------- окна
+def z(*args):
+    r = subprocess.run(["zenity", "--title", t("title"), *args], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def ask(text, yes, no=None):
+    return z("--question", "--width=460", f"--text={text}", f"--ok-label={yes}", f"--cancel-label={no or t('cancel')}")[0] == 0
+
+
+def pick(text, items, labels=None):
+    rows = []
+    for i, it in enumerate(items):
+        rows += [str(i), labels[i] if labels else it]
+    code, out = z("--list", "--width=600", "--height=360", f"--text={text}", "--column=#", "--column=",
+                  "--hide-column=1", "--print-column=1", f"--ok-label={t('choose')}", f"--cancel-label={t('cancel')}",
+                  *rows)
+    return items[int(out)] if code == 0 and out.isdigit() and int(out) < len(items) else None
+
+
+def entry(text, value):
+    code, out = z("--entry", "--width=460", f"--text={text}", f"--entry-text={value}", f"--ok-label={t('ok')}",
+                  f"--cancel-label={t('cancel')}")
+    return clean_name(out) if code == 0 and out.strip() else None
+
+
+def info(text):
+    z("--info", "--width=460", f"--text={text}")
+
+
+class adding:
+    """Пока игра добавляется, машина о её папке не спрашивает и не выгружает её (метка с номером этого процесса)."""
+    def __init__(self, folder):
+        self.mark = os.path.join(STATE, "adding", os.path.basename(folder))
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.mark), exist_ok=True)
+        with open(self.mark, "w") as f:
+            f.write(str(os.getpid()))
+
+    def __exit__(self, *exc):
+        try:
+            os.remove(self.mark)
+        except OSError:
+            pass
+
+
+def finish(folder):
+    request_shortcuts()
+    name = os.path.basename(folder)
+    if ask(t("done", name=name), t("play"), t("ok")):
+        subprocess.Popen([VGRUN, folder], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def choose_exe(folder, before=()):
+    name = os.path.basename(folder)
+    while True:
+        found = candidates(folder, before)
+        if found:
+            if len(found) == 1:
+                exe = found[0][0]
+            else:
+                labels = [lab + (" " + t("recommended") if i == 0 else "") for i, (_, lab) in enumerate(found[:20])]
+                exe = pick(t("pick", name=name), [r for r, _ in found[:20]], labels)
+            if exe:
+                write_manifest(folder, exe, "installer" if exe.startswith(".prefix/") else "portable")
+                return True
+            return False
+        if not ask(t("none"), t("again")):
+            return False
+
+
+def do_installer(f):
+    payload = electron_payload(f)
+    name = entry(t("name"), app_name(f) if payload else default_name(f))
+    if not name:
+        return
+    folder = os.path.join(GD, name)
+    if os.path.exists(folder) and not ask(t("exists", name=name), t("ok")):
+        return
+    if payload and not os.path.exists(folder):
+        # [2026-10-16] Установщик electron-builder (RSI Launcher — Star Citizen): под Wine он видит себя «уже запущенным»
+        # и закрывается (живой случай: «RSI Launcher cannot be closed»). Программа внутри готова — достаём её сами
+        with adding(folder):
+            err = extract_app(f, payload, folder, t("game.unpacking", name=name))
+            if err:
+                shutil.rmtree(folder, ignore_errors=True)
+                info(t("inst.unpack_failed", name=name, why=err))
+                return
+            ok = choose_exe(folder)
+        if ok:
+            finish(folder)
+        return
+    if os.path.exists(folder):                            # ставим в уже добавленную — метка спрятала бы её («удалена?»)
+        before = set(exes(folder))
+        subprocess.run([VGRUN, folder, "--exe", f])
+        ok = choose_exe(folder, before)
+    else:
+        with adding(folder):
+            os.makedirs(folder)
+            before = set(exes(folder))
+            subprocess.run([VGRUN, folder, "--exe", f])
+            ok = choose_exe(folder, before)
+    if ok:
+        finish(folder)
+
+
+def do_portable(f):
+    src, name, rel = portable_plan(f)
+    name = unique(name)
+    if not ask(t("move", src=os.path.basename(src), name=name), t("ok")):
+        return
+    folder = os.path.join(GD, name)
+    if src == f:
+        os.makedirs(folder)
+        shutil.move(f, os.path.join(folder, os.path.basename(f)))
+    else:
+        shutil.move(src, folder)
+    write_manifest(folder, rel, "portable")
+    finish(folder)
+
+
+def do_archive(f):
+    name = unique(clean_name(os.path.basename(f)))
+    if not ask(t("unpack", file=os.path.basename(f), name=name), t("ok")):
+        return
+    folder = os.path.join(GD, name)
+    p = subprocess.Popen(["zenity", "--title", t("title"), "--progress", "--pulsate", "--no-cancel", "--auto-close",
+                          f"--text={t('unpacking')}"], stdin=subprocess.PIPE, text=True)
+    with adding(folder):
+        try:
+            unpack(f, folder)
+        finally:
+            p.stdin.close()
+            p.wait()
+        found = candidates(folder)
+        setups = [x for x in os.listdir(folder) if x.lower().endswith((".exe", ".msi")) and INSTALLER.search(x)]
+        if not found and setups:                          # в архиве установщик — ставить его в эту же игру
+            before = set(exes(folder))
+            subprocess.run([VGRUN, folder, "--exe", os.path.join(folder, setups[0])])
+            ok = choose_exe(folder, before)
+        elif not found:
+            info(t("noexe", name=name))
+            return
+        else:
+            ok = choose_exe(folder)
+    if ok:
+        finish(folder)
+
+
+def do_inside(f):
+    folder = game_of(f)
+    name = os.path.basename(folder)
+    if os.path.isfile(os.path.join(folder, MANIFEST)):
+        if ask(t("inside", file=os.path.basename(f), name=name), t("play")):
+            subprocess.Popen([VGRUN, folder, "--exe", f], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    if ask(t("main", file=os.path.basename(f), name=name), t("ok")):
+        write_manifest(folder, os.path.relpath(os.path.realpath(f), os.path.realpath(folder)).replace(os.sep, "/"), "portable")
+        finish(folder)
+
+
+# ---------------------------------------------------------------- [v5.7] программы для игр
+def choose_game(f):
+    games = steam_games()
+    g, need = game_choice(games, running_appids())
+    if need:
+        g = pick(t("which", file=os.path.basename(f)), games, [x["name"] for x in games])
+    return g
+
+
+def send(cmd, g, ident, value=""):
+    """Просьба машине о программе (wolf watch, раз в 5 с): run | auto (on/off) | launch (параметры)."""
+    os.makedirs(REQP, exist_ok=True)
+    name = f"{int(time.time() * 1000)}-{os.getpid()}-{cmd}"
+    tmp = os.path.join(REQP, "." + name)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"cmd": cmd, "appid": g["appid"], "id": ident, "value": value}, fh)
+    os.replace(tmp, os.path.join(REQP, name + ".json"))
+
+
+def main_program(folder):
+    """Главная программа в папке (путь от папки) или None: знакомые программы для модов — первыми."""
+    found = exes(folder)
+    return next((r for r in found if MOD_TOOLS.search(os.path.basename(r))), found[0] if found else None)
+
+
+def after_add(g, ident, text):
+    """[v5.7] Программа на месте: загрузчик — игра запускается через него (сами); иначе — «вместе с игрой?» и сразу
+    открыть, если игра идёт. Нет игры — только сообщение."""
+    if not g or not ident:
+        info(text)
+        return
+    exe = os.path.basename(ident.split(":", 1)[1])
+    if LOADERS.match(exe):
+        send("launch", g, ident, "")
+        info(text + "\n\n" + t("prog.via", game=g["name"], exe=exe))
+        return
+    if MANAGERS.search(exe) or MANAGERS.search(ident):
+        info(text + "\n\n" + t("prog.manager", exe=exe, game=g["name"]))
+        return
+    running = g["appid"] in running_appids()
+    q = text + "\n\n" + t("prog.auto", exe=exe, game=g["name"]) + ("\n" + t("prog.auto.now", game=g["name"], exe=exe) if running else "")
+    if ask(q, t("prog.auto.yes"), t("prog.auto.no")):
+        send("auto", g, ident, "on")
+    if running:
+        send("run", g, ident)
+
+
+def game_part(g):
+    return f" · {g['name']}" if g else ""
+
+
+def do_program(f, g):
+    """Программа для игры: архив — распаковать, .exe или его папку — перенести в Programs/Название; установщик — туда
+    же (ставится в игру из VastGame — «Установить в игру»). Папка Programs уезжает в облако сама."""
+    os.makedirs(PD, exist_ok=True)
+    low = f.lower()
+    if low.endswith(ARCHIVES):
+        name = unique(clean_name(os.path.basename(f)), PD)
+        if not ask(t("prog.unpack", file=os.path.basename(f), name=name), t("unpack.go")):
+            return
+        unpack(f, os.path.join(PD, name))
+    elif is_installer(f):
+        if g:                                             # [v5.7] шаг 4б — сразу в «диск C:» игры
+            return do_install(f, g)
+        name = unique(default_name(f), PD)
+        os.makedirs(os.path.join(PD, name))
+        shutil.move(f, os.path.join(PD, name, os.path.basename(f)))
+        info(t("prog.installer", name=name, game=game_part(g)))
+        return
+    else:
+        src, name, _ = portable_plan(f)
+        name = unique(clean_name(product_name(f) or name) if src == f else name, PD)
+        if src == f:
+            os.makedirs(os.path.join(PD, name))
+            shutil.move(f, os.path.join(PD, name, os.path.basename(f)))
+        else:
+            shutil.move(src, os.path.join(PD, name))
+    rel = main_program(os.path.join(PD, name))
+    after_add(g, f"prog:{name}/{rel}" if rel else None, t("prog.done", name=name, game=game_part(g)))
+
+
+def waiting(text, done, limit):
+    """Окно «идёт…» (без кнопки отмены), пока done() не вернёт не-None или не пройдёт limit секунд: итог done() или None."""
+    p = subprocess.Popen(["zenity", "--title", t("title"), "--progress", "--pulsate", "--no-cancel", "--auto-close",
+                          "--width=460", f"--text={text}"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, text=True)
+    try:
+        end = time.time() + limit
+        while time.time() < end:
+            r = done()
+            if r is not None:
+                return r
+            time.sleep(POLL)
+        return None
+    finally:
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
+        p.wait()
+
+
+def read(path):
+    try:
+        return open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+
+
+def electron_payload(f):
+    """Установщик electron-builder (NSIS): путь к готовой программе внутри («$PLUGINSDIR/app-64.7z») или None. Их проверка
+    «программа уже запущена» под Wine всегда «да» (cmd «tasklist | find» возвращает 0 и без совпадений — живой случай
+    2026-10-15, r2modman: «cannot be closed», установка прерывается) — программу достаём сами."""
+    if not shutil.which("7z") or not f.lower().endswith(".exe"):
+        return None
+    for extra in ([], ["-tNsis"]):
+        try:
+            r = subprocess.run(["7z", "l", *extra, "-slt", f], capture_output=True, text=True, timeout=60)
+            paths = re.findall(r"^Path = (\$PLUGINSDIR/app-(?:64|32)\.7z)$", r.stdout, re.M)
+            if paths:
+                return next((p for p in paths if "app-64" in p), paths[0])
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
+
+
+def game_drive(g):
+    """«Диск C:» игры Steam (compatdata/НОМЕР/pfx/drive_c) или None — Proton ещё не создал его."""
+    root = steam_root()
+    d = root and os.path.join(root, "steamapps", "compatdata", g["appid"], "pfx", "drive_c")
+    return d if d and os.path.isdir(d) else None
+
+
+def app_name(f):
+    """Название программы по имени установщика: «RSI Launcher-Setup-2.18.1.exe» → «RSI Launcher»."""
+    return clean_name(re.sub(r"[-_ ]?(setup|installer?)([-_ ]?v?[\d.]+)?$", "", os.path.splitext(os.path.basename(f))[0],
+                             flags=re.I)) or default_name(f)
+
+
+def extract_app(f, payload, dest, text):
+    """Достать готовую программу (payload — «$PLUGINSDIR/app-64.7z») из установщика electron-builder в dest, пока
+    видно окно «идёт…» с text. Ошибка (строкой) или None."""
+    tmp = os.path.join(STATE, "unpack", f"{os.getpid()}-app")
+    box = {}
+
+    def work():
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp)
+            subprocess.run(["7z", "e", "-y", f"-o{tmp}", f, payload], check=True, capture_output=True, timeout=1800)
+            os.makedirs(dest, exist_ok=True)
+            subprocess.run(["7z", "x", "-y", f"-o{dest}", os.path.join(tmp, os.path.basename(payload))], check=True,
+                           capture_output=True, timeout=1800)
+            box["ok"] = True
+        except (OSError, subprocess.SubprocessError) as e:
+            box["err"] = f"{type(e).__name__}"
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    waiting(text, lambda: True if not th.is_alive() else None, 3600)
+    th.join()
+    return None if box.get("ok") else (box.get("err") or "?")
+
+
+def do_unpack_app(f, g, payload, drive):
+    """Готовая программа из установщика electron-builder — в AppData/Local/Programs/НАЗВАНИЕ «диска C:» игры (туда же
+    ставит сам установщик «только для меня»)."""
+    name = app_name(f)
+    dest = os.path.join(drive, "users", "steamuser", "AppData", "Local", "Programs", name)
+    err = extract_app(f, payload, dest, t("inst.unpacking", name=name, game=g["name"]))
+    if err:
+        info(t("inst.unpack_failed", name=name, why=err))
+        return
+    exes = sorted((e for e in os.listdir(dest) if e.lower().endswith(".exe") and not NOISE_EXE.search(e)),
+                  key=lambda e: (e.lower() != name.lower() + ".exe", -os.path.getsize(os.path.join(dest, e))))
+    if not exes:
+        info(t("inst.none"))
+        return
+    rel = os.path.relpath(os.path.join(dest, exes[0]), drive).replace(os.sep, "/")
+    after_add(g, "pfx:" + rel, t("inst.done", name=name, game=g["name"], exes=exes[0]))
+
+
+def do_install(f, g):
+    """[v5.7] Установщик программы — в «диск C:» игры Steam: машина (wolf, раз в 5 с) запускает его через Steam вместо
+    игры, как «Установить в игру» в окне VastGame. Ставить можно только в закрытую игру."""
+    payload, drive = electron_payload(f), game_drive(g)
+    if payload and drive:
+        return do_unpack_app(f, g, payload, drive)
+    while g["appid"] in running_appids():
+        if not ask(t("inst.close", game=g["name"]), t("inst.go")):
+            return
+    name = unique(default_name(f), INST)
+    os.makedirs(os.path.join(INST, name))
+    shutil.copy2(f, os.path.join(INST, name, os.path.basename(f)))   # копия: твой файл остаётся, где был
+    os.makedirs(REQ, exist_ok=True)
+    a = g["appid"]
+    for x in (".res", ".done"):
+        try:
+            os.remove(os.path.join(REQ, a + x))
+        except OSError:
+            pass
+    tmp = os.path.join(REQ, f".{a}.req")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(f"{name}/{os.path.basename(f)}\n")
+    os.replace(tmp, os.path.join(REQ, a + ".req"))
+    res = waiting(t("inst.prepare", name=name, game=g["name"]), lambda: read(os.path.join(REQ, a + ".res")), 60)
+    if res is None:
+        try:
+            os.remove(os.path.join(REQ, a + ".req"))      # машина не взяла — не ставить потом неожиданно
+        except OSError:
+            pass
+        shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
+        info(t("inst.noanswer"))
+        return
+    res = res.strip()
+    if res != "prog: installing":
+        shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
+        info(t("inst.notinstalled", game=g["name"]) if res == "prog: notinstalled" else
+             t("inst.close", game=g["name"]) if res == "prog: running" else t("bad", why=res[:200]))
+        return
+    done = waiting(t("inst.wait", name=name, game=g["name"]), lambda: read(os.path.join(REQ, a + ".done")), 3600)
+    if done is None:
+        info(t("inst.timeout"))
+        return
+    shutil.rmtree(os.path.join(INST, name), ignore_errors=True)
+    try:
+        new = [x for x in json.loads(done).get("exes") or [] if isinstance(x, str)]
+    except (ValueError, AttributeError):
+        new = []
+    if not new:
+        info(t("inst.none"))
+        return
+    shown = [x for x in new if not NOISE_EXE.search(os.path.basename(x))] or new[:1]
+    main_ = next((x for x in shown if MOD_TOOLS.search(os.path.basename(x))), shown[0])
+    after_add(g, "pfx:" + main_, t("inst.done", name=name, game=g["name"], exes=", ".join(os.path.basename(x) for x in shown)))
+
+
+def main(a):
+    if not a or not os.path.isfile(a[0]):
+        return 2
+    f = os.path.realpath(a[0])
+    os.makedirs(GD, exist_ok=True)
+    try:
+        if not game_of(f):                               # [v5.7] своя игра в Games — как раньше; иначе: программа?
+            g = steam_game_of(f)
+            if g:
+                rel = os.path.relpath(f, os.path.realpath(g["dir"])).replace(os.sep, "/")
+                after_add(g, "game:" + rel, t("prog.inside", file=os.path.basename(f), game=g["name"]))
+                return 0
+            if under(f, PD):
+                info(t("prog.already", file=os.path.basename(f)))
+                return 0
+            bad = known_bad(f)
+            if bad and not ask(t(bad, name=os.path.basename(f)), t("bad.anyway")):
+                return 0
+            p = "program" if is_tool(f) else pick(t("purpose", file=os.path.basename(f)), ["game", "program"],
+                                                  [t("purpose.game"), t("purpose.program")])
+            if not p:
+                return 0
+            if p == "program":
+                g = choose_game(f)
+                if g is None and len(steam_games()) > 1:
+                    return 0                              # список был — человек нажал «Отмена»
+                do_program(f, g)
+                return 0
+    except Exception as e:
+        info(t("bad", why=f"{type(e).__name__}: {str(e)[:200]}"))
+        return 1
+    k = kind(f)
+    if k == "ask":
+        k = pick(t("what", file=os.path.basename(f)), ["installer", "portable"],
+                 [t("kind.installer"), t("kind.portable")])
+        if not k:
+            return 0
+    try:
+        {"archive": do_archive, "installer": do_installer, "portable": do_portable, "inside": do_inside}[k](f)
+    except Exception as e:
+        info(t("bad", why=f"{type(e).__name__}: {str(e)[:200]}"))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+VGOPEN
+
+w /usr/local/bin/vg-launch <<'VGLAUNCH'
+#!/bin/bash
+app=${SteamAppId:-${STEAM_COMPAT_APP_ID:-}}
+for x in "$@"; do case $x in AppId=*) app=${x#AppId=} ;; esac; done
+dir="$HOME/.local/share/vastgame/launch"
+conf=""
+if [ -n "$app" ] && [ -f "$dir/$app.once" ]; then
+  mv -f "$dir/$app.once" "$dir/$app.ran" && conf="$dir/$app.ran"
+elif [ -n "$app" ] && [ -f "$dir/$app" ]; then
+  conf="$dir/$app"
+fi
+# [v5.7] своё окружение игры (НОМЕР.env, KEY=VALUE) — не зависит от того, кто и как запустил Steam
+if [ -n "$app" ] && [ -f "$dir/$app.env" ]; then
+  while IFS='=' read -r k v; do [[ $k =~ ^[A-Z_][A-Z0-9_]*$ ]] && export "$k=$v"; done < "$dir/$app.env"
+fi
+args=("$@")
+if [ -n "$conf" ]; then
+  export PROTON_USE_XALIA=0     # [2026-10-15] помощник Xalia рисовал чёрные прямоугольники поверх кнопок установщиков
+  { IFS= read -r target; IFS= read -r extra; } < "$conf"
+  at=-1
+  for i in "${!args[@]}"; do case ${args[$i]} in */proton) at=$((i + 2)) ;; esac; done
+  ok=0; [ -f "$target" ] && ok=1
+  case $target in */steamapps/compatdata/"$app"/pfx/drive_c/windows/system32/*) ok=1 ;; esac   # префикс ещё создаётся
+  if [ "$ok" = 1 ] && [ "$at" -ge 0 ] && [ "$at" -lt "${#args[@]}" ]; then
+    read -r -a more <<< "$extra"
+    args=("${args[@]:0:$at}" "$target" "${more[@]}")
+    cd "$(dirname "$target")" || true
+    echo "$(date '+%F %T') $app: ${args[*]: -$((1 + ${#more[@]}))}" >> /tmp/vastgame-launch.log
+  else
+    echo "$(date '+%F %T') $app: не подменяю (файл ${target:-?}, proton ${at})" >> /tmp/vastgame-launch.log
+  fi
+fi
+exec "${args[@]}"
+VGLAUNCH
+
+# =============================== wolf-steam.py =================================
+w /usr/local/bin/wolf-steam.py <<'STEAMPY'
+#!/usr/bin/env python3
+# [v4.8] Игра из библиотеки VastGame — её качает и запускает сам Steam (проверено вживую 2026-10-01: паспорт
+# с StateFlags 1026 → Steam сам начал скачивание через 9 с после запуска; переключение аккаунта через
+# registry.vdf/loginusers.vdf — вход без пароля, если этим аккаунтом на машине уже входили).
+#   vgplay ПАПКА_СОСТОЯНИЯ        stdin — VG_PLAY (base64 JSON {appid, account, name}) → play.app/.acc/.name
+#   account STEAM STEAMID         войти этим аккаунтом при запуске Steam. 0 — он есть на машине (войдёт сам),
+#                                 3 — нет: Steam покажет окно входа (человек войдёт сам — QR или пароль)
+#   manifest STEAM APPID STEAMID НАЗВАНИЕ   паспорт игры: Steam сам скачает её при запуске. Игра уже на диске — не трогаем
+#   state STEAM APPID             «флаги скачано всего папка»: ход скачивания по файлам (Steam пишет в паспорт редко)
+#   seen STEAM ФАЙЛ               [v5.3] аккаунты (loginusers.vdf) и папки userdata при загрузке → ФАЙЛ (JSON)
+#   gone STEAM ФАЙЛ               [v5.3] при выключении (Steam закрыт): аккаунта нет в loginusers.vdf (из него вышли —
+#                                 за сессию или раньше) — убрать userdata/НОМЕР. ФАЙЛ (seen) — steam-state восстановлен
+#   logon STEAM STEAMID [С]       on — Steam вошёл этим аккаунтом, other — другим, off — не вошёл (по connection_log;
+#                                 С — unix-время: строки раньше не считаются). [v4.9] Вход засчитывается, даже если
+#                                 после него в журнале строки переподключения (живой случай 2026-10-01: Steam качал,
+#                                 а по последней строке выходило «не вошёл»)
+# STEAM — папка Steam (debian-installation и т.п.). Пароли и пропуска входа не читаются и не пишутся.
+import base64, json, os, re, shutil, sys, time
+from pathlib import Path
+
+BASE = 76561197960265728                       # steamid64 = BASE + номер аккаунта ([U:1:номер] в журналах Steam)
+
+
+def kv(text, key, value):
+    """Строка "key" "value" в блоке VDF: заменить или вставить сразу после первой «{»."""
+    pat = re.compile(r'("' + re.escape(key) + r'"\s*")[^"]*(")', re.I)
+    if pat.search(text):
+        return pat.sub(lambda m: m.group(1) + value + m.group(2), text, count=1)
+    i = text.index("{") + 1
+    return text[:i] + f'\n\t\t"{key}"\t\t"{value}"' + text[i:]
+
+
+def users(text):
+    """[(steamid, начало, конец блока)] из loginusers.vdf — блоки без вложенных скобок."""
+    return [(m.group(1), m.start(), m.end()) for m in re.finditer(r'"(\d{17})"\s*\{[^{}]*\}', text)]
+
+
+def account(root, sid):
+    lu = root / "config/loginusers.vdf"
+    text = lu.read_text(errors="replace") if lu.exists() else ""
+    name, out, pos = None, [], 0
+    for s, a, b in users(text):
+        blk = text[a:b]
+        me = s == sid
+        if me:
+            m = re.search(r'"AccountName"\s*"([^"]*)"', blk)
+            name = m.group(1) if m else None
+        blk = kv(kv(blk, "MostRecent", "1" if me else "0"), "AutoLogin", "1" if me else "0")
+        blk = kv(blk, "AllowAutoLogin", "1" if me else "0")
+        if me:
+            blk = kv(kv(blk, "WantsOfflineMode", "0"), "Timestamp", str(int(time.time())))
+        out += [text[pos:a], blk]
+        pos = b
+    if text:
+        lu.write_text("".join(out) + text[pos:])
+    reg = root.parent / "registry.vdf"
+    if not reg.exists():
+        reg = Path(os.path.expanduser("~/.steam/registry.vdf"))
+    if reg.exists():
+        r = reg.read_text(errors="replace")
+        if re.search(r'"AutoLoginUser"', r, re.I):
+            r = re.sub(r'("AutoLoginUser"\s*")[^"]*(")', lambda m: m.group(1) + (name or "") + m.group(2), r, flags=re.I)
+        else:
+            r = re.sub(r'("Valve"\s*\{\s*"Steam"\s*\{)', lambda m: m.group(1) + f'\n\t\t\t\t\t"AutoLoginUser"\t\t"{name or ""}"', r, flags=re.I)
+        reg.write_text(r)
+    if name:
+        print(f"Steam войдёт аккаунтом {name}")
+        return 0
+    print("этим аккаунтом на машине ещё не входили — Steam покажет окно входа")
+    return 3
+
+
+def userids(root):
+    """steamid из loginusers.vdf; None — файла нет или он не разобран (тогда ничего не удаляем)."""
+    try:
+        text = (root / "config/loginusers.vdf").read_text(errors="replace")
+    except OSError:
+        return None
+    ids = [s for s, _, _ in users(text)]
+    if not ids and "AccountName" in text:
+        return None
+    return ids
+
+
+def seen(root, rec):
+    ids = userids(root) or []
+    ud = root / "userdata"
+    dirs = sorted(d.name for d in ud.iterdir() if d.name.isdigit()) if ud.is_dir() else []
+    Path(rec).write_text(json.dumps({"users": ids, "dirs": dirs}))
+    print(f"аккаунтов Steam на машине: {len(ids)}")
+    return 0
+
+
+def gone(root, rec):
+    try:
+        json.loads(Path(rec).read_text())["users"]
+    except (OSError, ValueError, KeyError, TypeError):
+        print("аккаунты Steam: нет записи с загрузки — данные аккаунтов не трогаю")
+        return 0
+    now = userids(root)
+    if now is None:
+        print("аккаунты Steam: loginusers.vdf не прочитан — данные аккаунтов не трогаю")
+        return 0
+    nowacc = {str(int(s) - BASE) for s in now}
+    ud = root / "userdata"
+    for d in sorted(ud.iterdir()) if ud.is_dir() else []:
+        n = d.name
+        if not n.isdigit() or n == "0" or n in nowacc or d.is_symlink() or not d.is_dir():
+            continue
+        shutil.rmtree(d)
+        print(f"аккаунт Steam [U:1:{n}]: из него вышли — его данные (userdata) убраны, из облака уйдут со steam-state")
+    return 0
+
+
+def folder(name, appid):
+    d = re.sub(r"[^\w .()&'+-]", "", name or "", flags=re.U).strip(" .")[:80]
+    return d or f"app{appid}"
+
+
+def manifest(root, appid, sid, name, installdir=""):
+    sa = root / "steamapps"
+    acf, hid = sa / f"appmanifest_{appid}.acf", sa / ".vastgame-hidden" / f"appmanifest_{appid}.acf"
+    if not acf.exists() and hid.exists():
+        os.replace(hid, acf)                           # паспорт из облака (игра была на другой машине) — его данные точнее
+    if acf.exists():
+        text = acf.read_text(errors="replace")
+        m = re.search(r'"installdir"\s*"([^"]*)"', text)
+        if m and (sa / "common" / m.group(1)).is_dir():
+            print(f"{appid}: игра на диске — Steam сам проверит, нужно ли обновление")
+            return 0
+        acf.write_text(kv(kv(text, "StateFlags", "1026"), "LastOwner", sid))
+        print(f"{appid}: паспорт есть, файлов нет — Steam скачает игру заново")
+        return 0
+    sa.mkdir(parents=True, exist_ok=True)
+    acf.write_text('"AppState"\n{\n'
+                   f'\t"appid"\t\t"{appid}"\n\t"Universe"\t\t"1"\n\t"name"\t\t"{name.replace(chr(34), "")}"\n'
+                   f'\t"StateFlags"\t\t"1026"\n\t"installdir"\t\t"{installdir or folder(name, appid)}"\n'
+                   f'\t"LastOwner"\t\t"{sid}"\n}}\n')
+    print(f"{appid}: паспорт записан — Steam скачает игру сам")
+    return 0
+
+
+def size(p):
+    n = 0
+    for d, _, files in os.walk(p):
+        for f in files:
+            try:
+                n += os.lstat(os.path.join(d, f)).st_size
+            except OSError:
+                pass
+    return n
+
+
+def state(root, appid):
+    sa = root / "steamapps"
+    acf = sa / f"appmanifest_{appid}.acf"
+    text = acf.read_text(errors="replace") if acf.exists() else ""
+    get = lambda k: (re.search(r'"' + k + r'"\s*"([^"]*)"', text, re.I) or [None, ""])[1]
+    sf = get("StateFlags")
+    flags = int(sf) if sf.isdigit() else 0
+    d = get("installdir")
+    done = size(sa / "downloading" / appid) + (size(sa / "common" / d) if d else 0)
+    total = 0
+    try:                                               # «update started : download 0/A, … stage 0/B» — B: сколько ляжет на диск
+        with open(root / "logs/content_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode(errors="replace")
+        for m in re.finditer(rf"AppID {appid} update started : download \d+/(\d+).*?stage \d+/(\d+)", tail):
+            total = int(m.group(2)) or int(m.group(1))
+    except OSError:
+        pass
+    bts = get("BytesToStage")
+    total = total or (int(bts) if bts.isdigit() else 0)
+    print(flags, done, max(total, done) if total else 0, d)
+    return 0
+
+
+def logon(root, sid, since=0):
+    acc = int(sid) - BASE
+    try:
+        with open(root / "logs/connection_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        print("off")
+        return 0
+    me = other = False
+    for m in re.finditer(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[Logged On, [^\]]*\] \[U:1:(\d+)\]", tail, re.M):
+        try:
+            ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        if ts < since or m.group(2) == "0":
+            continue
+        if int(m.group(2)) == acc:
+            me = True
+        else:
+            other = True
+    print("on" if me else "other" if other else "off")
+    return 0
+
+
+# ------------------------------------------------- [v5.4] программы игр
+# Программы, которые нужны игре или модам (трейнеры, Cheat Engine и т.п.), запускаются РЯДОМ с игрой: тем же Proton, в
+# том же префиксе и в том же контейнере Steam Linux Runtime — иначе они не видят игру (проверено вживую 2026-10-03:
+# снаружи контейнера Wine не грузится, «proton run» мимо входа Steam Linux Runtime ронял игру). Берём команду и
+# окружение у процесса reaper этой игры («SteamLaunch AppId=N -- …/_v2-entry-point --verb=waitforexitandrun --
+# …/proton waitforexitandrun игра.exe»), меняем глагол на run и игру — на программу. PROTON_USE_XALIA=0: с помощником
+# окон Xalia трейнер умирал на старте (X Error BadMatch, X_GetDeviceButtonMapping).
+# Откуда программы: из папки игры — .exe, которых не было в чистой игре из Steam (снимок модов van/НОМЕР.tsv), id
+# «game:путь»; из папки Programs (PD) — все .exe в её подпапках, id «prog:папка/путь».
+PROG_SKIP = re.compile(r"unins|setup|install|redist|vc_?redist|dxsetup|dotnet|directx|crash|report|update", re.I)
+# [v5.6] Установщики (setup/install) из папки Programs не прячутся — их ставят «в игру»; лишнее — всегда мимо
+ALWAYS_SKIP = re.compile(r"unins|crash|report|update", re.I)
+# установщики, в том числе библиотеки Microsoft (Visual C++, .NET, DirectX): их просят моды и лаунчеры (Dalamud/XIVLauncher —
+# живой случай 2026-10-08), ставятся «в игру»
+SETUP = re.compile(r"setup|install|redist|dotnet|directx|ndp\d|windowsdesktop-runtime", re.I)
+# [2026-10-15] …и по содержимому, как помощник двойного щелчка (vg-open is_installer): «Wand-12.63.0.exe» — установщик
+# Squirrel без «setup» в имени (OriginalFilename «Setup.exe», пакет «…-full.nupkg» внутри); сведения о версии — в конце файла
+SETUP_MARKS = (b"NullsoftInst", b"Nullsoft.NSIS", b"Inno Setup Setup Data", b"InstallShield", b".wixburn",
+               b"WixBundleManifest", b"Setup Factory", b"Advanced Installer", b"InstallAware", b"Clickteam Install")
+
+
+def _setup_like(path):
+    try:
+        with open(path, "rb") as f:
+            data = f.read(64 << 20)
+            size = os.fstat(f.fileno()).st_size
+            if size > 64 << 20:
+                f.seek(max(64 << 20, size - (4 << 20)))
+                data += f.read()
+    except OSError:
+        return False
+    if data[:2] != b"MZ":
+        return False
+    if any(m in data for m in SETUP_MARKS) or (b"-full.nupkg" in data and b"RELEASES" in data):
+        return True
+    for fld in ("OriginalFilename", "InternalName", "FileDescription"):
+        k = fld.encode("utf-16-le") + b"\0\0"
+        i = data.rfind(k)
+        if i >= 0:
+            v = data[i + len(k):i + len(k) + 200].split(b"\0\0\0")[0].replace(b"\0", b"")
+            if re.search(rb"(?i)setup|install", v.lstrip()):
+                return True
+    return False
+# [v5.6] Из «диска C:» — только главные программы установленных приложений: в каждой папке приложения (Program Files/
+# ПРИЛОЖЕНИЕ, AppData/Local/Programs|Local|Roaming/ПРИЛОЖЕНИЕ, C:/ПАПКА) — .exe ближе всего к её верху, а не внутренности
+# (у XIVLauncher — current/XIVLauncher.exe, а не patcher/…, aria2c, Dalamud.Injector: живой случай 2026-10-08)
+APP_DIR = re.compile(r"^(program files[^/]*/[^/]+|users/[^/]+/appdata/local/programs/[^/]+|"
+                     r"users/[^/]+/appdata/(local|roaming)/[^/]+|(?!users/|program files|windows/|programdata/)[^/]+)/", re.I)
+# В «диске C:» префикса игры (drive_c) — только то, что поставили туда сами: служебное Wine и Proton — мимо, и
+# Microsoft (Edge и WebView2: их ставит себе лаунчер FF14 — 38 файлов, живой случай 2026-10-08)
+PFX_SKIP = re.compile(r"^(windows|programdata|program files[^/]*/(common files|internet explorer|windows[^/]*|steam|microsoft[^/]*)|"
+                      r"users/[^/]+/(temp|appdata/local/temp|appdata/local/microsoft))(/|$)", re.I)
+AUTO_DELAY = int(os.environ.get("VG_PROG_DELAY", "15"))   # с: после появления процесса игры — программы «вместе с игрой»
+PROC = "/proc"
+PROG_LOG = "/tmp/vastgame-programs.log"                 # вывод программ — разобрать, если не запустилась
+
+
+def _read(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _cmd(pid):
+    try:
+        return _read(f"{PROC}/{pid}/cmdline").split(b"\0")
+    except OSError:
+        return []
+
+
+def games_running():
+    """{номер игры: pid reaper} — игры, которые Steam запустил сейчас."""
+    out = {}
+    for d in os.listdir(PROC):
+        if not d.isdigit():
+            continue
+        c = _cmd(d)
+        if len(c) > 2 and c[0].endswith(b"/reaper") and b"SteamLaunch" in c:
+            for x in c:
+                if x.startswith(b"AppId=") and x[6:].isdigit():
+                    out[x[6:].decode()] = d
+    return out
+
+
+def _launch_parts(pid):
+    """(команда до proton включительно, путь игры, окружение) из reaper; None — игра не через Proton."""
+    c = [x.decode(errors="replace") for x in _cmd(pid) if x]
+    if "--" not in c:
+        return None
+    args = c[c.index("--") + 1:]
+    i = next((n for n, x in enumerate(args) if x.endswith("/proton")), None)
+    if i is None:
+        return None
+    try:
+        env = dict(e.split(b"=", 1) for e in _read(f"{PROC}/{pid}/environ").split(b"\0") if b"=" in e)
+    except OSError:
+        return None
+    env = {k.decode(errors="replace"): v.decode(errors="replace") for k, v in env.items()}
+    head = ["--verb=run" if x == "--verb=waitforexitandrun" else x for x in args[:i + 1]]
+    return head, args[-1], env
+
+
+def _offline_parts(root, appid):
+    """[2026-10-15] Команда и окружение, чтобы запустить программу в «диске C:» игры, когда сама игра не запущена:
+    менеджеры модов (MO2, Vortex, r2modman, Fluffy) запускают до игры — готовят моды. Proton — выбранный для этой игры
+    (CompatToolMapping НОМЕР), иначе «для всех игр» ("0"), иначе Proton Experimental; вход Steam Linux Runtime — по его
+    require_tool_appid (как vg-run). None — Proton не найден."""
+    root = Path(root)
+    try:
+        cfg = (root / "config" / "config.vdf").read_text(errors="replace")
+    except OSError:
+        cfg = ""
+    names = []
+    for key in (str(appid), "0"):
+        m = re.search(r'"CompatToolMapping"[\s\S]*?"' + key + r'"\s*\{[^}]*?"name"\s*"([^"]+)"', cfg)
+        if m:
+            names.append(m.group(1))
+    common = root / "steamapps" / "common"
+    dirs = []
+    for n in names:
+        known = {"proton_experimental": "Proton - Experimental", "proton_hotfix": "Proton Hotfix"}.get(n)
+        v = re.fullmatch(r"proton_(\d+)", n)
+        dirs += [common / known] if known else [common / f"Proton {v.group(1)}.0"] if v else [root / "compatibilitytools.d" / n]
+    dirs.append(common / "Proton - Experimental")
+    d = next((x for x in dirs if (x / "proton").is_file()), None)
+    if not d:
+        return None
+    try:
+        tool = (d / "toolmanifest.vdf").read_text(errors="replace")
+    except OSError:
+        tool = ""
+    m = re.search(r'"require_tool_appid"\s*"(\d+)"', tool)
+    slr = _game_dir(root, m.group(1)) if m else None
+    entry = slr / "_v2-entry-point" if slr else None
+    head = ([str(entry), "--verb=run", "--"] if entry and entry.is_file() else []) + [str(d / "proton")]
+    home = os.path.expanduser("~")
+    uid = os.getuid()
+    env = {"HOME": home, "USER": os.environ.get("USER") or os.path.basename(home), "LANG": "C.UTF-8",
+           "PATH": "/usr/local/bin:/usr/bin:/bin", "DISPLAY": ":0", "XAUTHORITY": os.path.join(home, ".Xauthority"),
+           "XDG_RUNTIME_DIR": f"/run/user/{uid}", "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
+           "STEAM_COMPAT_DATA_PATH": str(root / "steamapps" / "compatdata" / str(appid)),
+           "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(root), "SteamAppId": str(appid), "SteamGameId": str(appid)}
+    if os.path.exists("/opt/vastgame/real/steam"):            # Docker: вход Runtime — наша пропускающая заплатка
+        env["VG"] = "1"
+    return head, None, env
+
+
+def app_name(root, appid):
+    """[v5.7] Название игры: из паспорта Steam, у сторонних игр — из shortcuts.vdf (AppName рядом с её appid)."""
+    try:
+        m = re.search(r'"name"\s*"([^"]*)"', (root / "steamapps" / f"appmanifest_{appid}.acf").read_text(errors="replace"))
+        if m:
+            return m.group(1)[:200]
+    except OSError:
+        pass
+    want = (int(appid) - (1 << 32) if int(appid) >= 1 << 31 else int(appid)).to_bytes(4, "little", signed=True)
+    for f in sorted((root / "userdata").glob("*/config/shortcuts.vdf")):
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        for m in re.finditer(rb"\x02appid\x00" + re.escape(want), data, re.I):
+            n = re.search(rb"\x01AppName\x00([^\x00]*)\x00", data[m.end():m.end() + 600], re.I)
+            if n:
+                return n.group(1).decode("utf-8", "replace")[:200]
+    return ""
+
+
+def _game_dir(root, appid):
+    acf = root / "steamapps" / f"appmanifest_{appid}.acf"
+    try:
+        m = re.search(r'"installdir"\s*"([^"]*)"', acf.read_text(errors="replace"))
+    except OSError:
+        return None
+    d = root / "steamapps" / "common" / m.group(1) if m else None
+    return d if d and d.is_dir() else None
+
+
+def _exes(base, depth, setups=False, skip_dirs=None):
+    """Относительные пути .exe; setups — и установщики (кроме служебного); skip_dirs — папки, куда не заходить."""
+    for d, dirs, files in os.walk(base):
+        rel = os.path.relpath(d, base).replace(os.sep, "/")
+        if skip_dirs and rel != "." and skip_dirs.search(rel):
+            dirs[:] = []
+            continue
+        if rel.count("/") >= depth:
+            dirs[:] = []
+        for f in files:
+            if f.lower().endswith(".exe") and not (ALWAYS_SKIP if setups else PROG_SKIP).search(f):
+                yield os.path.relpath(os.path.join(d, f), base)
+
+
+def _pfx(root, appid):
+    """«Диск C:» префикса Proton игры (compatdata/НОМЕР/pfx/drive_c) — туда ставят «Установить в игру»."""
+    d = root / "steamapps" / "compatdata" / str(appid) / "pfx" / "drive_c"
+    return d if d.is_dir() else None
+
+
+def programs(root, pd, sdir, appid):
+    """[{id, name, where}] — программы, которые можно запустить рядом с игрой appid."""
+    out = []
+    gd = _game_dir(root, appid)
+    van = Path(sdir, "van", f"{appid}.tsv")
+    if gd and van.exists():
+        clean = {ln.split("\t", 1)[0] for ln in van.read_text(errors="replace").splitlines()}
+        game = Path(sdir, "van", f"{appid}.game.tsv")              # [v5.6] файлы игры от её лаунчера — не программы
+        if game.exists():
+            clean |= {ln.split("\t", 1)[0] for ln in game.read_text(errors="replace").splitlines()}
+        for rel in sorted(_exes(gd, 6)):
+            if rel not in clean:
+                out.append({"id": "game:" + rel, "name": os.path.basename(rel), "where": "game"})
+    if os.path.isdir(pd):
+        for top in sorted(os.listdir(pd)):
+            if os.path.isdir(os.path.join(pd, top)):
+                for rel in sorted(_exes(os.path.join(pd, top), 3, setups=True)):
+                    out.append({"id": f"prog:{top}/{rel}", "name": os.path.basename(rel), "where": top,
+                                "setup": bool(SETUP.search(os.path.basename(rel)))
+                                         or _setup_like(os.path.join(pd, top, rel))})
+    pfx = _pfx(root, appid)
+    if pfx:                                                     # [v5.6] поставленное «в игру» самим человеком
+        for rel in sorted(_mine(pfx)):
+            if os.path.isfile(pfx / rel):
+                out.append({"id": "pfx:" + rel, "name": os.path.basename(rel), "where": "pfx"})
+    return out
+
+
+# [v5.6] В список из «диска C:» — только поставленное человеком через «Установить в игру», а не то, что поставила сама
+# игра или её лаунчер (Edge, лаунчеры Rockstar/EA/Ubisoft…). Перед установкой запоминаем главные программы «диска C:»,
+# после неё (Steam закрыл установщик) новые — «свои»; список — в самом «диске C:» (едет в облако с сохранениями)
+MINE = ".vastgame-installed.json"
+
+
+def _main_exes(pfx):
+    apps = {}
+    for r in _exes(pfx, 7, skip_dirs=PFX_SKIP):
+        r = r.replace(os.sep, "/")
+        m = APP_DIR.match(r)
+        if m:
+            apps.setdefault(m.group(1).lower(), []).append((r.count("/"), r))
+    return {r for items in apps.values() for d, r in items if d == min(x for x, _ in items)}
+
+
+def _mine(pfx):
+    try:
+        d = json.loads((pfx / MINE).read_text())
+        return {x for x in d.get("exes") or [] if isinstance(x, str) and "\0" not in x and ".." not in x.split("/")}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def install_done(root, sdir, appid, user=None, running=None, home=None):
+    """Установщик закончил (игра Steam больше не запущена): новые главные программы «диска C:» — «свои».
+    [v5.7] Пока запуск ещё ждёт очереди (launch/НОМЕР.once или .next — сначала ставятся библиотеки Visual C++, потом
+    установщик человека), установка не кончилась. Итог — и помощнику двойного щелчка (requests/install/НОМЕР.done)."""
+    before_f = Path(sdir, "van", f"{appid}.pfx.before")
+    if not before_f.exists():
+        return
+    if (running if running is not None else games_running()).get(str(appid)) or time.time() - before_f.stat().st_mtime < 10:
+        return
+    if home and any(Path(home, ".local/share/vastgame/launch", f"{appid}{x}").exists() for x in (".once", ".next")):
+        return
+    pfx = _pfx(root, appid)
+    new = set()
+    if pfx:
+        before = set(before_f.read_text().splitlines())
+        new = _main_exes(pfx) - before
+        if new:
+            f = pfx / MINE
+            f.write_text(json.dumps({"exes": sorted(_mine(pfx) | new)}, ensure_ascii=False))
+            _owner(f, user)
+            print(f"установлено в игру {appid}: " + ", ".join(sorted(os.path.basename(x) for x in new)))
+    before_f.unlink()
+    if home and Path(home, INST_REQ).is_dir():
+        done = Path(home, INST_REQ, f"{appid}.done")
+        _jsave(done, {"exes": sorted(new)})
+        _owner(done, user)
+
+
+INST = ".local/share/vastgame/installers"              # [v5.7] установщики от помощника двойного щелчка (не в облаке)
+INST_REQ = ".local/share/vastgame/requests/install"
+
+
+def _resolve(root, pd, appid, ident, must_exist=True, home=None):
+    """Путь к программе по id — только внутри папки игры, папки программ или «диска C:» игры (ни «..», ни ссылок
+    наружу). must_exist=False — при загрузке: игру Steam ещё не скачал, префикс ещё не создан — путь всё равно тот.
+    [v5.7] inst: — установщик, который положил помощник двойного щелчка (только при home)."""
+    kind, _, rel = str(ident).partition(":")
+    if kind == "inst":
+        base = Path(home, INST) if home else None
+    elif kind == "game":
+        base = _game_dir(root, appid)
+    elif kind == "prog":
+        base = Path(pd)
+    elif kind == "pfx":
+        base = _pfx(root, appid) or (None if must_exist else root / "steamapps" / "compatdata" / str(appid) / "pfx" / "drive_c")
+    else:
+        base = None
+    if not base or not rel or "\0" in rel:
+        return None
+    p = os.path.realpath(os.path.join(base, rel))
+    inside = p.startswith(os.path.realpath(base) + os.sep)
+    return p if inside and (os.path.isfile(p) or not must_exist) else None
+
+
+def _running(path):
+    """Программа уже запущена (её .exe в командной строке какого-нибудь процесса)."""
+    name = os.path.basename(path).lower().encode()
+    for d in os.listdir(PROC):
+        if d.isdigit() and any(x.lower().replace(b"\\", b"/").endswith(name) for x in _cmd(d)[:6]):
+            return True
+    return False
+
+
+def _game_path(pid):
+    """Путь игры из командной строки reaper (последний аргумент) — без окружения процесса."""
+    c = [x.decode(errors="replace") for x in _cmd(pid) if x]
+    return c[-1] if "--" in c else ""
+
+
+def launch(root, pd, appid, ident, user=None):
+    """Запустить программу рядом с игрой: «ok», «running» (уже запущена), «nogame», «noproton», «nofile».
+    Запускает от имени пользователя игры: окружение её процесса (/proc/N/environ) в контейнере Docker даже root не
+    читает (нет CAP_SYS_PTRACE — живой случай 2026-10-04: ответ «noproton» при запущенной игре), а свои процессы
+    пользователь читать может. Вызван от root — передаёт себя пользователю (runuser) и отдаёт его ответ."""
+    if os.getuid() == 0 and user:
+        import subprocess
+        r = subprocess.run(["runuser", "-u", user, "--", sys.executable, os.path.abspath(__file__), "progs-run",
+                            str(root), str(pd), user, str(appid), ident], capture_output=True, text=True, timeout=60)
+        m = re.search(r"prog: (\w+)", r.stdout)
+        return m.group(1) if m else "failed"
+    path = _resolve(root, pd, appid, ident)
+    if not path:
+        return "nofile"
+    pid = games_running().get(str(appid))
+    if pid:
+        parts = _launch_parts(pid)
+    elif _game_dir(Path(root), appid):
+        parts = _offline_parts(root, appid)                 # [2026-10-15] игра закрыта — в её «диске C:» без неё
+    else:
+        return "nogame"
+    if not parts:
+        return "noproton"
+    if _running(path):
+        return "running"
+    head, _, env = parts
+    env["PROTON_USE_XALIA"] = "0"
+    import subprocess
+    with open(PROG_LOG, "ab") as log:
+        log.write(f"\n== {time.strftime('%F %T')} {appid} {ident}\n".encode())
+        log.flush()
+        subprocess.Popen(head + ["run", path], env=env, cwd=os.path.dirname(path), stdout=log, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    return "ok"
+
+
+def _jload(path, default):
+    try:
+        d = json.loads(Path(path).read_text())
+        return d if isinstance(d, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def _jsave(path, data):
+    tmp = f"{path}.tmp"
+    Path(tmp).write_text(json.dumps(data, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
+# [v5.7] Просьбы помощника двойного щелчка (vg-open, от имени пользователя): requests/prog/*.json {cmd, appid, id, value}
+# — закрытый список: run (запустить рядом с игрой), auto (вместе с игрой: on|off), launch (запуск игры через неё,
+# value — параметры). Путь программы проверяет _resolve, как у просьб окна. Выбор помощника (auto, launch) — в
+# progs.helper: окно VastGame берёт его себе (в отчёте progs — поле helper) и отдаёт следующим машинам
+HELPER_ID = re.compile(r"^(game|prog|pfx):[^\x00-\x1f]{1,400}$")
+
+
+def helper_req(path):
+    """Разобрать просьбу: «cmd\tномер\tid\tvalue» или ничего (неверная — молча мимо)."""
+    try:
+        if os.path.islink(path):
+            return 1
+        d = json.loads(Path(path).read_text(encoding="utf-8")[:4096])
+    except (OSError, ValueError):
+        return 1
+    cmd, a, ident, v = (str(d.get(k) or "") for k in ("cmd", "appid", "id", "value"))
+    ok = a.isdigit() and HELPER_ID.match(ident) and "\t" not in ident and \
+        (cmd == "run" or cmd == "auto" and v in ("on", "off") or cmd == "launch" and re.match(r"^[^\x00-\x1f\t]{0,300}$", v))
+    if not ok:
+        return 1
+    print(f"{cmd}\t{a}\t{ident}\t{v}")
+    return 0
+
+
+def helper_note(sdir, appid, cmd, ident, value):
+    """Запомнить выбор помощника для окна VastGame: {номер: {t, auto: [id], launch: {id, args}}}."""
+    f = Path(sdir, "progs.helper")
+    d = _jload(f, {})
+    rec = d.setdefault(str(appid), {"auto": []})
+    if cmd == "auto":
+        rec["auto"] = [x for x in rec.get("auto") or [] if x != ident] + ([ident] if value == "on" else [])
+    elif cmd == "launch":
+        rec["launch"] = {"id": ident, "args": value}
+    rec["t"] = int(time.time())
+    _jsave(f, d)
+    return 0
+
+
+def set_auto(sdir, appid, ident, on):
+    """Тумблер «Вместе с игрой» (из приложения во время игры или из VG_SYNC при загрузке)."""
+    auto = _jload(Path(sdir, "progs.auto"), {})
+    cur = [x for x in auto.get(str(appid), []) if x != ident]
+    auto[str(appid)] = cur + ([ident] if on else [])
+    if not auto[str(appid)]:
+        auto.pop(str(appid))
+    _jsave(Path(sdir, "progs.auto"), auto)
+    return 0
+
+
+def tick(root, pd, sdir, user=None, now=None, home=None):
+    """Раз в 5 с (wolf watch): программы «вместе с игрой» — запустить, когда процесс игры прожил AUTO_DELAY с; список
+    программ запущенных игр (и игры из библиотеки) — в запись progs страницы статуса (меняется — переписать)."""
+    now = now or time.time()
+    running = games_running()
+    for f in Path(sdir, "van").glob("*.pfx.before") if Path(sdir, "van").is_dir() else []:   # [v5.6] установки «в игру»
+        install_done(root, sdir, f.name.split(".")[0], user, running, home)
+    dlt = Path(sdir, "dll.tick")                              # [2026-10-15] моды-подмены библиотек — раз в минуту
+    try:
+        last = dlt.stat().st_mtime
+    except OSError:
+        last = 0
+    if now - last >= 60:
+        dlt.touch()
+        dll_overrides(root, skip=set(running))
+    auto = _jload(Path(sdir, "progs.auto"), {})
+    stf = Path(sdir, "progs.state")
+    state = {k: v for k, v in _jload(stf, {}).items() if k in running.values()}
+    for appid, pid in running.items():
+        ids = auto.get(appid) or []
+        if not ids:
+            continue
+        rec = state.setdefault(pid, {"seen": 0, "done": []})
+        game = os.path.basename(_game_path(pid)).lower().encode()     # без окружения: root в Docker его не читает
+        up = game and any(_cmd(d)[:1] and _cmd(d)[0].lower().replace(b"\\", b"/").endswith(game)
+                          for d in os.listdir(PROC) if d.isdigit() and d != pid)
+        if not up:
+            continue
+        rec["seen"] = rec["seen"] or now
+        if now - rec["seen"] < AUTO_DELAY:
+            continue
+        for ident in ids:
+            if ident not in rec["done"]:
+                rec["done"].append(ident)
+                # [2026-10-15] Установщик «вместе с игрой» не запускаем: его ставят «в игру» один раз (живой случай —
+                # Wand-12.63.0.exe, пока его не узнавали по содержимому, был отмечен «вместе с игрой»)
+                path = _resolve(root, pd, appid, ident)
+                if path and (SETUP.search(os.path.basename(path)) or _setup_like(path)):
+                    print(f"программа {ident} для {appid}: установщик — вместе с игрой не запускаю")
+                    continue
+                print(f"программа {ident} для {appid}: {launch(root, pd, appid, ident, user)}")
+    _jsave(stf, state)
+    show = dict.fromkeys(running)
+    play = (Path(sdir, "play.app").read_text().strip() if Path(sdir, "play.app").exists() else "")
+    if play.isdigit():
+        show.setdefault(play)
+    for a in _jload(Path(sdir, "launch.sel"), {}):                # [v5.6] игры, которые запускаются через программу,
+        if str(a).isdigit() and _game_dir(root, str(a)):         # — если игра есть на этой машине (выбор едет на каждую)
+            show.setdefault(str(a))
+    helper = _jload(Path(sdir, "progs.helper"), {})              # [v5.7] выбор помощника двойного щелчка — окну
+    for a in helper:
+        if str(a).isdigit():
+            show.setdefault(str(a))
+    cache = _jload(Path(sdir, "progs.cache"), {})              # папка игры большая — обходить не чаще раза в 30 с
+    for a in show:
+        if now - (cache.get(a) or {}).get("t", 0) > 30:
+            cache[a] = {"t": now, "list": programs(root, pd, sdir, a)}
+    _jsave(Path(sdir, "progs.cache"), {a: v for a, v in cache.items() if a in show})
+    report = {a: {"running": a in running, "auto": auto.get(a) or [], "progs": cache[a]["list"],
+                  "installed": bool(_game_dir(root, a)), "launch": launch_choice(home, a) if home else None,
+                  "name": app_name(root, a), **({"helper": helper[a]} if a in helper else {})}
+              for a in show}
+    text = json.dumps(report, ensure_ascii=False, sort_keys=True)
+    st = Path(sdir, "st", "progs")
+    old = st.read_text().split("|", 2)[2].strip() if st.exists() else ""
+    if text != old:
+        st.write_text(f"{int(now)}|ok|{text}\n")
+    return 0
+
+
+# ------------------------------------------------- [v5.6] запуск игры через программу, установка в игру
+LAUNCH_REL = ".local/share/vastgame/launch"
+
+
+def _owner(path, user):
+    """Файлы выбора — пользователю: прокладка (его процесс) переименовывает .once после запуска."""
+    if user and os.getuid() == 0:
+        import pwd
+        pw = pwd.getpwnam(user)
+        os.chown(path, pw.pw_uid, pw.pw_gid)
+
+
+def _write_conf(home, user, appid, name, path, args, ident):
+    d = Path(home, LAUNCH_REL)
+    d.mkdir(parents=True, exist_ok=True)
+    _owner(d, user)
+    f = d / name
+    f.write_text(f"{path}\n{args}\n{ident}\n")
+    _owner(f, user)
+
+
+def mods_on(sdir, appid):
+    """Тумблер «Моды» у игры включён (VG_SYNC → sel.mods_on): только тогда игра запускается через программу —
+    «игра с модами, как я её настроил»; выключен — как обычно (решение Алексея 2026-10-08)."""
+    try:
+        if str(appid) in Path(sdir, "sel.mods_on").read_text().split():
+            return True
+    except OSError:
+        pass
+    if not Path(sdir, "sel.mods_all").exists():              # [v5.7] «С модами» у всех, кроме «Без модов»
+        return False
+    try:
+        return str(appid) not in Path(sdir, "sel.mods_no").read_text().split()
+    except OSError:
+        return True
+
+
+def launch_set(root, pd, home, user, appid, ident, args, sdir=None):
+    """Запускать игру через программу ident («-» — как обычно). «ok» | «nofile» | «modsoff» (у игры выключены
+    «Моды» — выбор запомнит окно, сработает при включённых)."""
+    f = Path(home, LAUNCH_REL, str(appid))
+    if ident == "-":
+        f.unlink(missing_ok=True)
+        return "ok"
+    path = _resolve(root, pd, appid, ident)
+    if not path:
+        return "nofile"
+    if sdir and not mods_on(sdir, appid):
+        f.unlink(missing_ok=True)
+        return "modsoff"
+    _write_conf(home, user, appid, str(appid), path, re.sub(r"[\x00-\x1f]", " ", args or "")[:300], ident)
+    return "ok"
+
+
+def install_set(root, pd, home, user, appid, ident, sdir=None):
+    """Один раз запустить установщик ident в префиксе игры: «ok» | «running» (игра запущена) | «notinstalled» (Steam
+    её ещё не установил — запускать нечем) | «nofile»."""
+    if str(appid) in games_running():
+        return "running"
+    if not _game_dir(root, appid):
+        return "notinstalled"
+    path = _resolve(root, pd, appid, ident, home=home)
+    if not path:
+        return "nofile"
+    _write_conf(home, user, appid, f"{appid}.once", path, "", ident)
+    pfx = _pfx(root, appid)                                    # что было в «диске C:» до установки
+    Path(sdir or Path(home), "van").mkdir(parents=True, exist_ok=True)
+    Path(sdir or Path(home), "van", f"{appid}.pfx.before").write_text("\n".join(sorted(_main_exes(pfx))) if pfx else "")
+    return "ok"
+
+
+def launch_boot(root, pd, home, sel_path, user=None):
+    """Загрузка: выбор из VG_SYNC (launch.sel) → launch/НОМЕР (путь — даже если игры и префикса ещё нет)."""
+    sel = _jload(Path(sel_path), {})
+    done = []
+    for appid, v in sel.items():
+        if not mods_on(os.path.dirname(sel_path), appid):
+            done.append(f"{appid} как обычно (выключены «Моды»)")
+            continue
+        path = _resolve(root, pd, appid, v.get("id", ""), must_exist=False) if str(appid).isdigit() else None
+        if path:
+            _write_conf(home, user, appid, str(appid), path, re.sub(r"[\x00-\x1f]", " ", v.get("args") or "")[:300], v["id"])
+            done.append(f"{appid} через {os.path.basename(path)}")
+    print("запуск через программу: " + (", ".join(done) or "нет"))
+    return 0
+
+
+def pfx_tweaks(root):
+    """«Показывать скрытые» (ShowDotFiles) в реестре каждого «диска C:» игр (user.reg; Steam закрыт — Wine не запущен)."""
+    done = 0
+    for reg in sorted(Path(root, "steamapps", "compatdata").glob("*/pfx/user.reg")):
+        try:
+            text = reg.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            continue
+        if '"ShowDotFiles"' in text:
+            continue
+        m = re.search(r"^\[Software\\\\Wine\] \d+\n(#time=[0-9a-f]+\n)?", text, re.M)
+        if m:
+            text = text[:m.end()] + '"ShowDotFiles"="Y"\n' + text[m.end():]
+        else:
+            text = text.rstrip("\n") + f'\n\n[Software\\\\Wine] {int(time.time())}\n"ShowDotFiles"="Y"\n'
+        tmp = reg.with_suffix(".reg.tmp")
+        tmp.write_text(text, encoding="utf-8", errors="surrogateescape")
+        os.replace(tmp, reg)
+        done += 1
+    print(f"скрытые папки в окнах выбора: включено в {done}")
+    dll_overrides(root)
+    return 0
+
+
+# [2026-10-15] Моды-«подмены» библиотек (ReShade — dxgi/d3d9/opengl32, ASI Loader — dinput8/winmm/version/dsound, BepInEx —
+# winhttp, SpecialK, плагины в папке игры): на Windows библиотека из папки программы важнее системной, а в Proton для этих
+# имён по умолчанию берётся встроенная Wine — мод молча не работает. Как на Windows: для .exe из той же папки — «сначала
+# своя, потом встроенная» (native,builtin) в реестре «диска C:» игры: Software\Wine\AppDefaults\ИГРА.exe\DllOverrides.
+# Без файла мода «своей» нет — Wine берёт встроенную, так что лишняя запись ничего не ломает. Пишем, пока игра закрыта
+PROXY_DLLS = {"dinput8", "dinput", "winmm", "version", "xinput1_3", "xinput1_4", "xinput9_1_0", "dsound", "d3d8", "d3d9",
+              "d3d10", "d3d10_1", "d3d11", "dxgi", "ddraw", "opengl32", "winhttp", "wininet", "msacm32", "msvfw32",
+              "dbghelp", "xlive", "binkw32", "d3dcompiler_47"}
+
+
+# Служебное Steam (Proton, Steam Linux Runtime…) Steam тоже ставит «играми» — у Proton в папке все системные программы
+# и библиотеки Wine (живой случай 2026-10-15: в «диск C:» самого Proton записались подмены для 119 программ Wine)
+DLL_SKIP_APPS = re.compile(r"^(proton|steam linux runtime|steamworks|steam controller|steamvr)", re.I)
+DLL_SKIP_DIRS = {"system32", "syswow64", "wine", "drive_c", "pfx"}
+
+
+def _proxies(gd, depth=6):
+    """{exe: {dll, …}}: .exe и «подменные» библиотеки в одной папке игры. Больше 6 «подменных» в одной папке — это
+    системные библиотеки (Wine, Windows), а не мод — мимо."""
+    out = {}
+    base = len(Path(gd).parts)
+    for d, dirs, files in os.walk(gd):
+        dirs[:] = [x for x in dirs if x.lower() not in DLL_SKIP_DIRS]
+        if len(Path(d).parts) - base >= depth:
+            dirs[:] = []
+        low = {f.lower(): f for f in files}
+        dlls = {n[:-4] for n in low if n.endswith(".dll") and n[:-4] in PROXY_DLLS}
+        if not dlls or len(dlls) > 6:
+            continue
+        for n, f in low.items():
+            if n.endswith(".exe") and not ALWAYS_SKIP.search(n):
+                out.setdefault(f, set()).update(dlls)
+    return out
+
+
+def _reg_overrides(text, want):
+    """user.reg с записями native,builtin для {exe: {dll}} — (текст, сколько добавлено)."""
+    added = 0
+    for exe, dlls in sorted(want.items()):
+        key = "Software\\\\Wine\\\\AppDefaults\\\\" + exe.replace("\\", "") + "\\\\DllOverrides"
+        m = re.search(r"^\[" + re.escape(key) + r"\][^\n]*\n", text, re.M | re.I)
+        if not m:
+            text = text.rstrip("\n") + f"\n\n[{key}] {int(time.time())}\n"
+            m = re.search(r"^\[" + re.escape(key) + r"\][^\n]*\n", text, re.M | re.I)
+        end = text.find("\n\n", m.end())
+        end = len(text) if end < 0 else end
+        block = text[m.end():end]
+        for dll in sorted(dlls):
+            if re.search(r'^"' + re.escape(dll) + r'"=', block, re.M | re.I):
+                continue
+            block += f'"{dll}"="native,builtin"\n'
+            added += 1
+        text = text[:m.end()] + block + text[end:]
+    return text, added
+
+
+def dll_overrides(root, skip=()):
+    """Записи «сначала своя библиотека» для модов-подмен во всех играх Steam с «диском C:» (кроме запущенных)."""
+    total = 0
+    for acf in sorted(Path(root, "steamapps").glob("appmanifest_*.acf")):
+        appid = acf.name[12:-4]
+        reg = Path(root, "steamapps", "compatdata", appid, "pfx", "user.reg")
+        gd = _game_dir(Path(root), appid)
+        if appid in skip or not gd or not reg.is_file():
+            continue
+        try:
+            name = re.search(r'"name"\s*"([^"]*)"', acf.read_text(errors="replace"))
+        except OSError:
+            continue
+        if name and DLL_SKIP_APPS.match(name.group(1)):
+            continue
+        want = _proxies(gd)
+        if not want:
+            continue
+        try:
+            text = reg.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            continue
+        new, added = _reg_overrides(text, want)
+        if added:
+            tmp = reg.with_suffix(".reg.tmp")
+            tmp.write_text(new, encoding="utf-8", errors="surrogateescape")
+            os.replace(tmp, reg)
+            total += added
+            print(f"моды-подмены библиотек: {appid} — " + ", ".join(f"{e}: {'/'.join(sorted(d))}" for e, d in want.items()))
+    return total
+
+
+def launch_choice(home, appid):
+    """{id, args} — через что запускается игра (для страницы статуса) или None."""
+    try:
+        path, args, ident = (Path(home, LAUNCH_REL, str(appid)).read_text().split("\n") + ["", "", ""])[:3]
+    except OSError:
+        return None
+    return {"id": ident, "args": args} if ident else None
+
+
+def vgplay(sdir):
+    try:
+        d = json.loads(base64.b64decode(sys.stdin.read().strip()))
+        appid, sid, name = str(d["appid"]), str(d["account"]), str(d.get("name") or "")
+    except Exception:
+        print("VG_PLAY не разобран")
+        return 1
+    if not (appid.isdigit() and len(appid) <= 10 and re.fullmatch(r"7656\d{13}", sid)):
+        print("VG_PLAY: непонятная игра или аккаунт")
+        return 1
+    name = re.sub(r"[\x00-\x1f]", "", name)[:200]
+    for k, v in (("play.app", appid), ("play.acc", sid), ("play.name", name),
+                 ("play.mods", "1" if d.get("mods") else "0")):          # [v5.0] наложить моды из облака
+        Path(sdir, k).write_text(v)
+    print(f"игра для запуска: {name or appid} ({appid})")
+    return 0
+
+
+def _ws_eval(ws_url, expr):
+    """Выполнить выражение JavaScript в контексте страницы CEF по WebSocket (RFC 6455, только stdlib)."""
+    import socket, struct
+    from urllib.parse import urlparse
+    u = urlparse(ws_url)
+    host = u.hostname or "127.0.0.1"
+    port = u.port or 8080
+    path = u.path or "/"
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection((host, port), timeout=5) as s:
+        req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+               f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        s.sendall(req.encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        hdr, rest = buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in hdr.splitlines()[0]:
+            return None
+        payload = json.dumps({"id": 1, "method": "Runtime.evaluate",
+                              "params": {"expression": expr, "returnByValue": True}}).encode()
+        mask = os.urandom(4)
+        n = len(payload)
+        head = bytearray([0x81])
+        if n < 126:
+            head.append(0x80 | n)
+        elif n < 65536:
+            head.append(0x80 | 126)
+            head.extend(struct.pack("!H", n))
+        else:
+            head.append(0x80 | 127)
+            head.extend(struct.pack("!Q", n))
+        head.extend(mask)
+        head.extend(b ^ mask[i & 3] for i, b in enumerate(payload))
+        s.sendall(bytes(head))
+        while True:
+            while len(rest) < 2:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return None
+                rest += chunk
+            b0, b1 = rest[0], rest[1]
+            ln = b1 & 0x7F
+            idx = 2
+            if ln == 126:
+                while len(rest) < 4:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        return None
+                    rest += chunk
+                ln = struct.unpack("!H", rest[2:4])[0]
+                idx = 4
+            elif ln == 127:
+                while len(rest) < 10:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        return None
+                    rest += chunk
+                ln = struct.unpack("!Q", rest[2:10])[0]
+                idx = 10
+            if b1 & 0x80:
+                idx += 4
+            while len(rest) < idx + ln:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return None
+                rest += chunk
+            frame = rest[idx:idx + ln]
+            rest = rest[idx + ln:]
+            if (b0 & 0x0F) == 1:
+                msg = json.loads(frame.decode("utf-8", "replace"))
+                if msg.get("id") == 1:
+                    return ((msg.get("result") or {}).get("result") or {}).get("value")
+
+
+def active_account(root):
+    """Текущий аккаунт Steam (steamid64): из connection_log.txt (последний вход) или AutoLogin/MostRecent в loginusers.vdf."""
+    if not root:
+        return ""
+    root = Path(root)
+    last_acc = None
+    try:
+        with open(root / "logs/connection_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode(errors="replace")
+        for m in re.finditer(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[Logged On, [^\]]*\] \[U:1:(\d+)\]", tail, re.M):
+            if m.group(2) != "0":
+                last_acc = str(BASE + int(m.group(2)))
+    except OSError:
+        pass
+    if last_acc:
+        return last_acc
+    try:
+        text = (root / "config/loginusers.vdf").read_text(errors="replace")
+        for sid, a, b in users(text):
+            if re.search(r'"(?:AutoLogin|MostRecent)"\s*"1"', text[a:b], re.I):
+                return sid
+    except OSError:
+        pass
+    return ""
+
+
+def _streaming_pin_needed(root, window_sec=90):
+    """Есть ли в streaming_log.txt свежий запрос PIN или отказ по авторизации от Steam Link."""
+    if not root:
+        return False
+    try:
+        with open(Path(root) / "logs/streaming_log.txt", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        return False
+    cutoff = time.time() - window_sec
+    need = False
+    for m in re.finditer(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]\s+(.*)$", tail, re.M):
+        try:
+            ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        if ts < cutoff:
+            continue
+        ln = m.group(2)
+        if re.search(r"PINRequired|Unauthorized|AuthorizationRequest|RemoteDeviceAuthorization", ln, re.I):
+            need = True
+        elif re.search(r"k_ERemoteDeviceStreamingSuccess|StartStreaming|AuthorizationConfirmed", ln, re.I):
+            need = False
+    return need
+
+
+def _account_has_device(root, sid):
+    """Есть ли у аккаунта sid (steamid64) привязанное устройство Steam Link в userdata/<id>/config/localconfig.vdf."""
+    if not root or not re.fullmatch(r"7656\d{13}", str(sid or "")):
+        return False
+    uid = int(sid) - BASE
+    lc = Path(root) / "userdata" / str(uid) / "config/localconfig.vdf"
+    try:
+        text = lc.read_text(errors="replace")
+    except OSError:
+        return False
+    for m in re.finditer(r'"streaming"\s*\{', text, re.I):
+        depth, i, n = 0, m.start(), len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    blk = text[m.start():i + 1]
+                    if re.search(r'"Devices"\s*\{[^{}]*\{[^{}]*"(?:DeviceName|Key)"\s*"[^"]+"', blk, re.I):
+                        return True
+                    break
+            i += 1
+    return False
+
+
+def pin_check(root=None, port=8080):
+    """Проверить состояние Steam для Steam Link: «check: ok|pin|nologin|nosteam [steamid64]».
+    Проверяет наличие привязанных устройств в userdata/<id>/config/localconfig.vdf ("streaming" -> "Devices")
+    и ставит в CEF перехватчик RegisterForRemoteDeviceAuthorizationRequested."""
+    import urllib.request
+    sid = active_account(root)
+    expr = (
+        "(function(){"
+        "if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
+        "if (!window.__vg_rp_hooked && SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationRequested) {"
+        "  window.__vg_rp_hooked = true;"
+        "  try { SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationRequested(function(){ window.__vg_rp_pin_req = Date.now(); }); } catch(e){}"
+        "  try { if (SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationCancelled) SteamClient.RemotePlay.RegisterForRemoteDeviceAuthorizationCancelled(function(){ window.__vg_rp_pin_req = 0; }); } catch(e){}"
+        "}"
+        "var u = (typeof App !== 'undefined' && App.m_CurrentUser && App.m_CurrentUser.strSteamID) ? String(App.m_CurrentUser.strSteamID) : '';"
+        "var p = (window.__vg_rp_pin_req && (Date.now() - window.__vg_rp_pin_req < 120000)) ? 'pin' : (window.__vg_rp_paired_acc && window.__vg_rp_paired_acc === u ? 'paired' : 'ok');"
+        "return p + ' ' + u;"
+        "})()"
+    )
+    targets = None
+    for path in ("/json", "/json/list"):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
+                targets = json.loads(r.read().decode("utf-8", "replace"))
+            break
+        except Exception:
+            continue
+    if not isinstance(targets, list) or not targets:
+        if _streaming_pin_needed(root):
+            print(f"check: pin {sid}".strip())
+            return 0
+        if sid and _account_has_device(root, sid):
+            print(f"check: ok {sid}")
+            return 0
+        print(f"check: nosteam {sid}".strip())
+        return 0
+    ordered = sorted(targets, key=lambda t: (0 if "SharedJSContext" in (t.get("title") or "") else
+                                             1 if "SP" in (t.get("title") or "") else 2))
+    for t in ordered:
+        ws = t.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            res = _ws_eval(ws, expr)
+            if isinstance(res, str) and (res.startswith("ok ") or res.startswith("paired ") or res.startswith("pin ")):
+                st, _, u = res.partition(" ")
+                u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
+                if st in ("ok", "paired"):
+                    if _streaming_pin_needed(root):
+                        st = "pin"
+                    elif st == "paired" or _account_has_device(root, u):
+                        st = "ok"
+                    else:
+                        st = "pin"
+                print(f"check: {st} {u}".strip())
+                return 0
+        except Exception:
+            continue
+    if _streaming_pin_needed(root):
+        print(f"check: pin {sid}".strip())
+        return 0
+    if sid and _account_has_device(root, sid):
+        print(f"check: ok {sid}")
+        return 0
+    print(f"check: nologin {sid}".strip())
+    return 0
+
+
+def pin(code, root=None, port=8080, wait=15):
+    """Авторизовать устройство Steam Link по 4-значному PIN-коду через CEF Remote Debugging клиента Steam
+    (127.0.0.1:8080). Печатает «pin: ok [steamid64]», «pin: nologin» (Steam открыт на окне входа) или «pin: nosteam»."""
+    import urllib.request
+    code = str(code or "").strip()
+    if not re.fullmatch(r"\d{4}", code):
+        print("pin: invalid")
+        return 2
+    sid = active_account(root)
+    expr = (
+        f"(function(){{"
+        f"if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
+        f"if (SteamClient.RemotePlay.SetRemotePlayEnabled) SteamClient.RemotePlay.SetRemotePlayEnabled(true);"
+        f"SteamClient.RemotePlay.SetRemoteDeviceAuthorized(true, {json.dumps(code)});"
+        f"window.__vg_rp_pin_req = 0;"
+        f"var u = (typeof App !== 'undefined' && App.m_CurrentUser && App.m_CurrentUser.strSteamID) ? String(App.m_CurrentUser.strSteamID) : '';"
+        f"window.__vg_rp_paired_acc = u;"
+        f"return 'ok ' + u;"
+        f"}})()"
+    )
+    deadline = time.time() + max(1, wait)
+    saw_cef = False
+    while True:
+        targets = None
+        for path in ("/json", "/json/list"):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
+                    targets = json.loads(r.read().decode("utf-8", "replace"))
+                break
+            except Exception:
+                continue
+        if isinstance(targets, list) and targets:
+            saw_cef = True
+            ordered = sorted(targets, key=lambda t: (0 if "SharedJSContext" in (t.get("title") or "") else
+                                                     1 if "SP" in (t.get("title") or "") else 2))
+            for t in ordered:
+                ws = t.get("webSocketDebuggerUrl")
+                if not ws:
+                    continue
+                try:
+                    res = _ws_eval(ws, expr)
+                    if isinstance(res, str) and res.startswith("ok"):
+                        _, _, u = res.partition(" ")
+                        u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
+                        print(f"pin: ok {u}".strip())
+                        return 0
+                except Exception:
+                    continue
+        if time.time() >= deadline:
+            break
+        time.sleep(1)
+    print("pin: nologin" if saw_cef else "pin: nosteam")
+    return 1
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["vgplay"] and len(a) == 2:
+            sys.exit(vgplay(a[1]))
+        if a[:1] == ["pin-check"] and len(a) in (1, 2, 3):
+            sys.exit(pin_check(a[1] if len(a) >= 2 else None, int(a[2]) if len(a) == 3 and a[2].isdigit() else 8080))
+        if a[:1] == ["pin"] and len(a) in (2, 3):
+            sys.exit(pin(a[1], a[2] if len(a) == 3 else None))
+        if a[:1] == ["account"] and len(a) == 3:
+            sys.exit(account(Path(a[1]), a[2]))
+        if a[:1] == ["manifest"] and len(a) in (5, 6) and a[2].isdigit():
+            d = a[5] if len(a) == 6 else ""                    # [v5.6] настоящая папка из сведений Steam
+            ok = re.fullmatch(r'[^/\\\x00-\x1f"]{1,200}', d) and d not in (".", "..")
+            sys.exit(manifest(Path(a[1]), a[2], a[3], a[4], d if ok else ""))
+        if a[:1] == ["state"] and len(a) == 3 and a[2].isdigit():
+            sys.exit(state(Path(a[1]), a[2]))
+        # [v5.4] программы игр: progs-tick STEAM PD S ПОЛЬЗОВАТЕЛЬ; progs-run STEAM PD ПОЛЬЗОВАТЕЛЬ НОМЕР ID;
+        # progs-auto S НОМЕР ID on|off
+        if a[:1] == ["progs-tick"] and len(a) in (5, 6):
+            sys.exit(tick(Path(a[1]), a[2], a[3], a[4], home=a[5] if len(a) == 6 else None))
+        # [v5.6] launch-set STEAM PD HOME ПОЛЬЗОВАТЕЛЬ НОМЕР ID|- ПАРАМЕТРЫ [S]; install-set STEAM PD HOME ПОЛЬЗОВАТЕЛЬ НОМЕР ID;
+        # launch-boot STEAM PD HOME launch.sel ПОЛЬЗОВАТЕЛЬ; running [НОМЕР] — код 0, если игра (любая) запущена
+        if a[:1] == ["launch-set"] and len(a) in (8, 9) and a[5].isdigit():
+            print(f"prog: {launch_set(Path(a[1]), a[2], a[3], a[4], a[5], a[6], a[7], a[8] if len(a) == 9 else None)}")
+            sys.exit(0)
+        if a[:1] == ["install-set"] and len(a) in (7, 8) and a[5].isdigit():
+            print(f"prog: {install_set(Path(a[1]), a[2], a[3], a[4], a[5], a[6], a[7] if len(a) == 8 else None)}")
+            sys.exit(0)
+        if a[:1] == ["launch-boot"] and len(a) == 6:
+            sys.exit(launch_boot(Path(a[1]), a[2], a[3], a[4], a[5]))
+        if a[:1] == ["pfx-tweaks"] and len(a) == 2:
+            sys.exit(pfx_tweaks(Path(a[1])))
+        if a[:1] == ["running"] and len(a) in (1, 2):
+            r = games_running()
+            sys.exit(0 if (a[1] in r if len(a) == 2 else r) else 1)
+        if a[:1] == ["progs-run"] and len(a) == 6 and a[4].isdigit():
+            r = launch(Path(a[1]), a[2], a[4], a[5], a[3])
+            print(f"prog: {r}")
+            sys.exit(0 if r in ("ok", "running") else 3)
+        if a[:1] == ["helper-req"] and len(a) == 2:
+            sys.exit(helper_req(a[1]))
+        if a[:1] == ["helper-note"] and len(a) == 6 and a[2].isdigit() and a[3] in ("auto", "launch"):
+            sys.exit(helper_note(a[1], a[2], a[3], a[4], a[5]))
+        if a[:1] == ["progs-auto"] and len(a) == 5 and a[2].isdigit() and a[4] in ("on", "off"):
+            sys.exit(set_auto(a[1], a[2], a[3], a[4] == "on"))
+        if a[:1] in (["seen"], ["gone"]) and len(a) == 3:
+            sys.exit((seen if a[0] == "seen" else gone)(Path(a[1]), a[2]))
+        if a[:1] == ["logon"] and len(a) in (3, 4) and a[2].isdigit():
+            sys.exit(logon(Path(a[1]), a[2], int(a[3]) if len(a) == 4 and a[3].isdigit() else 0))
+    except (OSError, ValueError) as e:
+        print(f"wolf-steam: ошибка {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-steam.py vgplay|account|manifest|state|seen|gone|logon|progs-tick|progs-run|progs-auto|"
+             "launch-set|install-set|launch-boot|running …")
+STEAMPY
+
+# ================================ wolf-mods.py =================================
+w /usr/local/bin/wolf-mods.py <<'MODS'
+#!/usr/bin/env python3
+# [v5.0] Моды игр Steam. Игру качает Steam (чистую), моды — то, что потом появилось или изменилось в её папке, —
+# хранятся в облаке отдельным архивом mod--НОМЕР--Название.tar.zst (только эти файлы; удалённые файлы игры — списком).
+# Как мод устроен, неважно: сохраняется результат на диске (папка Proton с менеджерами и библиотеками уезжает и так —
+# это сохранения pfx--).
+#   snap ПАПКА СНИМОК                   запомнить чистую игру: «путь размер время» каждого файла (Steam только что поставил)
+#   diff ПАПКА СНИМОК                   «сколько отпечаток мусор»: изменённые/новые/удалённые файлы; мусор=1 — только логи,
+#                                       дампы и кэши (не повод спрашивать человека)
+#   pack ПАПКА СНИМОК АРХИВ НОМЕР СБОРКА  упаковать моды (zstd) → «сколько отпечаток»; 0 — модов нет, архив не создан
+#   apply ПАПКА                         stdin — распакованный tar модов: наложить поверх игры, удалить удалённое → «сколько отпечаток»
+#   arch НОМЕР ПАСПОРТ [ВИД]            имя архива: mod--НОМЕР--Название (из паспорта Steam); ВИД lgame — архив игры,
+#                                       [v5.7] gsave — данные игры
+# [v5.6] Игры, которые докачивает их собственный лаунчер (FF14, MMO…): файлы лаунчера — слой «игра» (СНИМОК.game.tsv),
+# моды считаются поверх «чистая игра из Steam + слой игры». Слой копится наблюдением (track, раз в 30 с): пока игра
+# запущена из Steam и не работает программа из папки Programs, изменения в папке игры — её файлы; но только у игры,
+# в которой так появилось больше LAUNCHER_BYTES (иначе — обычная игра: у неё и сохранения бывают в папке, они — моды).
+#   track ПАПКА СНИМОК ИГРА_ЗАПУЩЕНА PROGRAMS   шаг наблюдения (ИГРА_ЗАПУЩЕНА 1/0)
+#   claim ПАПКА СНИМОК                  всё, что сейчас поверх чистой игры, — файлы игры (после восстановления архива игры)
+#   man ПАПКА СНИМОК [data]             список файлов слоя игры для архива lgame-- (формат find wolf: путь, тип, размер, время);
+#                                       data — слоя «данные игры» для gsave-- (без мусора)
+# [v5.7] Три вида изменений в папке игры (решение Алексея 2026-10-10: моды — без хлама): при закрытой игре — моды
+# (человек положил мод, запустил установщик или менеджер модов); запущенная игра написала сама — «данные игры»
+# (сохранения и настройки в папке игры; СНИМОК.pend.tsv): архив gsave--, всегда, в обоих режимах, без журналов, дампов
+# и кэша; больше LAUNCHER_BYTES — слой «игра» (лаунчер докачивает). Запущенная игра изменила файл, который уже был
+# модом (настройки ReShade из игры), — изменение остаётся модом. Журналы и дампы не попадают и в моды.
+#   claim ПАПКА СНИМОК data             всё, что сейчас поверх «чистая игра + слой игры», — данные игры (после gsave--)
+import hashlib, io, json, os, re, stat, subprocess, sys, tarfile
+
+META = ".vastgame-mod.json"
+JUNK_DIRS = {"logs", "log", "crashes", "crashdumps", "crash", "cache", "caches", "shadercache", "__pycache__", "temp", "tmp",
+             ".sentry-native", "sentry", "crashpad", "crashreports", "crashreporter"}    # [v5.7] отчёты о сбоях
+JUNK_EXT = (".log", ".dmp", ".mdmp", ".tmp", ".etl")
+
+
+def walk(root):
+    """{путь: (размер, время)} — файлы и ссылки (каталоги не храним: их создаёт распаковка)."""
+    out = {}
+    for d, dirs, files in os.walk(root):
+        for name in files + [x for x in dirs if os.path.islink(os.path.join(d, x))]:
+            p = os.path.join(d, name)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            # у ссылки время не сравниваем: распаковка ставит ей «сейчас», а не время из архива (отпечаток бы не совпал)
+            out[os.path.relpath(p, root)] = (st.st_size, 0 if stat.S_ISLNK(st.st_mode) else int(st.st_mtime))
+    return out
+
+
+def snap(root, out):
+    tmp = out + ".tmp"
+    with open(tmp, "w") as f:
+        for rel, (size, mt) in sorted(walk(root).items()):
+            if "\t" not in rel and "\n" not in rel:
+                f.write(f"{rel}\t{size}\t{mt}\n")
+    os.replace(tmp, out)
+    return 0
+
+
+def load(path):
+    base = {}
+    with open(path) as f:
+        for line in f:
+            rel, size, mt = line.rstrip("\n").split("\t")
+            base[rel] = (int(size), int(mt))
+    return base
+
+
+# ------------------------------------------------------- [v5.6] слой «игра» (файлы лаунчера)
+LAUNCHER_BYTES = int(os.environ.get("WOLF_LAUNCHER_BYTES", 1 << 30))   # столько появилось при запущенной игре — лаунчерная
+
+
+def side(snapf, ext):
+    return snapf[:-4] + ext if snapf.endswith(".tsv") else snapf + ext
+
+
+def load_opt(path):
+    try:
+        return load(path)
+    except (OSError, ValueError):
+        return {}
+
+
+def save(path, d):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for rel, (size, mt) in sorted(d.items()):
+            if "\t" not in rel and "\n" not in rel:
+                f.write(f"{rel}\t{size}\t{mt}\n")
+    os.replace(tmp, path)
+
+
+def baseline(snapf, data=True):
+    """Чистая игра из Steam с наложенным слоем игры и [v5.7] данными игры (размер -1 — удалён при запущенной игре)."""
+    base = load(snapf)
+    for ext in (".game.tsv", ".pend.tsv") if data else (".game.tsv",):
+        for rel, v in load_opt(side(snapf, ext)).items():
+            if v[0] < 0:
+                base.pop(rel, None)
+            else:
+                base[rel] = v
+    return base
+
+
+def _programs_running(pd):
+    """Работает ли программа из папки Programs (менеджер модов и т.п.): её изменения — моды, а не файлы игры."""
+    if not pd:
+        return False
+    roots = {x.lower().rstrip("/") + "/" for x in (pd, os.path.realpath(pd)) if x.strip("/")}
+    for d in os.listdir("/proc") if roots else []:
+        if not d.isdigit():
+            continue
+        try:
+            arg0 = open(f"/proc/{d}/cmdline", "rb").read().split(b"\0")[0].decode(errors="replace")
+        except OSError:
+            continue
+        a = arg0.replace("\\", "/").lower()
+        if a[1:3] == ":/":                                       # путь Windows: Z:\home\… — диск Z: это корень Linux
+            a = a[2:]
+        if any(a.startswith(r) for r in roots):
+            return True
+    return False
+
+
+def track(root, snapf, running, pd):
+    """Шаг наблюдения: изменения с прошлого шага при запущенной игре — в слой игры (или в «пока неясно»)."""
+    seen_f = side(snapf, ".seen.tsv")
+    if not os.path.exists(seen_f) and not running:
+        return 0
+    now = walk(root)
+    if not os.path.exists(seen_f):
+        save(seen_f, now)                                          # игру только что запустили — точка отсчёта
+        return 0
+    seen = load_opt(seen_f)
+    changed = {r: v for r, v in now.items() if seen.get(r) != v and r != META}
+    gone = [r for r in seen if r not in now]
+    if running:
+        save(seen_f, now)
+    else:
+        os.remove(seen_f)                                          # последний отрезок — и наблюдение до следующего запуска
+    if not changed and not gone or _programs_running(pd):
+        return 0
+    # [v5.7] файл, который до этого отрезка был модом (не совпадал с «чистая игра + слой игры + данные игры»), остаётся
+    # модом: запущенная игра поменяла настройки мода — это часть мода, а не данные игры
+    base = baseline(snapf)
+    changed = {r: v for r, v in changed.items() if r not in seen or seen[r] == base.get(r)}
+    gone = [r for r in gone if seen[r] == base.get(r)]
+    if not changed and not gone:
+        return 0
+    van = load(snapf)
+    game_f, pend_f, mark = side(snapf, ".game.tsv"), side(snapf, ".pend.tsv"), side(snapf, ".ltype")
+    known = os.path.exists(mark)
+    layer = load_opt(game_f if known else pend_f)
+    layer.update(changed)
+    for r in gone:
+        if r in van:
+            layer[r] = (-1, 0)
+        else:
+            layer.pop(r, None)
+    if not known and sum(v[0] for v in layer.values() if v[0] > 0) > LAUNCHER_BYTES:
+        open(mark, "w").close()                                    # игра докачивает себя сама
+        game = load_opt(game_f)
+        game.update(layer)
+        save(game_f, game)
+        if os.path.exists(pend_f):
+            os.remove(pend_f)
+        print(f"игра докачивает себя сама: её файлы — отдельно от модов ({len(game)})")
+        return 0
+    save(game_f if known else pend_f, layer)
+    return 0
+
+
+def claim(root, snapf, layer="game"):
+    """Всё, что сейчас поверх чистой игры, — файлы игры (восстановили архив игры, модов ещё не накладывали).
+    [v5.7] layer data — поверх «чистая игра + слой игры»: данные игры (восстановили gsave--, модов ещё нет)."""
+    if layer == "data":
+        base, now = baseline(snapf, data=False), walk(root)
+        got = {r: v for r, v in now.items() if base.get(r) != v and r != META}
+        save(side(snapf, ".pend.tsv"), got)
+        print(len(got))
+        return 0
+    van, now = load(snapf), walk(root)
+    game = {r: v for r, v in now.items() if van.get(r) != v and r != META}
+    game.update({r: (-1, 0) for r in van if r not in now})
+    save(side(snapf, ".game.tsv"), game)
+    open(side(snapf, ".ltype"), "w").close()
+    print(len(game))
+    return 0
+
+
+def man(root, snapf, layer="game"):
+    """Файлы слоя игры, которые есть на диске, — для архива lgame-- (как F в wolf: путь\tтип\tразмер\tвремя\tссылка).
+    [v5.7] layer data — данные игры для gsave--, без журналов, дампов и кэша."""
+    out = sys.stdout.buffer
+    for rel, v in sorted(load_opt(side(snapf, ".game.tsv" if layer == "game" else ".pend.tsv")).items()):
+        if v[0] < 0 or layer == "data" and junk(rel):
+            continue
+        p = os.path.join(root, rel)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        link = os.readlink(p) if stat.S_ISLNK(st.st_mode) else ""
+        kind = "l" if link else "f"
+        out.write(f"{p}\t{kind}\t{st.st_size}\t{st.st_mtime:.10f}\t{link}\0".encode())
+    return 0
+
+
+def junk(rel):
+    parts = rel.lower().split("/")
+    return parts[-1].endswith(JUNK_EXT) or parts[-1].startswith("crash") or any(p in JUNK_DIRS for p in parts[:-1])
+
+
+def changes(root, snapf):
+    base, now = baseline(snapf), walk(root)                        # [v5.6] файлы лаунчера — не моды; [v5.7] данные игры — тоже
+    # [v5.7] журналы, дампы, кэш и отчёты о сбоях — не моды, даже если появились при закрытой игре
+    files = sorted(r for r, v in now.items() if base.get(r) != v and r != META and not junk(r))
+    deleted = sorted(r for r in base if r not in now)
+    h = hashlib.sha1()
+    for r in files:
+        h.update(f"+{r}\t{now[r][0]}\t{now[r][1]}\n".encode())
+    for r in deleted:
+        h.update(f"-{r}\n".encode())
+    return files, deleted, now, ("0" if not files and not deleted else h.hexdigest()[:16])
+
+
+def diff(root, snapf):
+    files, deleted, _, fp = changes(root, snapf)
+    only_junk = int(bool(files) and not deleted and all(junk(r) for r in files))
+    print(len(files) + len(deleted), fp, only_junk)
+    return 0
+
+
+def pack(root, snapf, out, appid, build):
+    files, deleted, now, fp = changes(root, snapf)
+    if not files and not deleted:
+        print(0, fp)
+        return 0
+    meta = json.dumps({"version": 1, "appid": appid, "build": build, "fp": fp, "deleted": deleted,
+                       "files": len(files), "bytes": sum(now[r][0] for r in files)}).encode()
+    p = subprocess.Popen(["zstd", "-q", "-f", "-T0", "-3", "-o", out], stdin=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=p.stdin, mode="w|", format=tarfile.PAX_FORMAT) as t:
+            info = tarfile.TarInfo(META)
+            info.size, info.mode = len(meta), 0o644
+            t.addfile(info, io.BytesIO(meta))
+            for r in files:
+                t.add(os.path.join(root, r), arcname=r, recursive=False)
+    finally:
+        p.stdin.close()
+    if p.wait() != 0:
+        raise OSError("zstd не упаковал моды")
+    print(len(files) + len(deleted), fp)
+    return 0
+
+
+def safe(rel):
+    """Путь внутри папки игры: не абсолютный, без «..», без управляющих символов."""
+    n = os.path.normpath(rel)
+    return bool(rel) and not os.path.isabs(rel) and n != ".." and not n.startswith("../") \
+        and not re.search(r"[\x00-\x1f]", rel)
+
+
+def apply(root):
+    meta, count = {}, 0
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
+        for m in t:
+            if m.name == META:
+                meta = json.loads(t.extractfile(m).read())
+                continue
+            if not safe(m.name) or not (m.isfile() or m.isdir() or m.issym()):
+                print(f"пропущен небезопасный файл: {m.name!r}", file=sys.stderr)
+                continue
+            if m.issym() and (os.path.isabs(m.linkname) or not safe(os.path.join(os.path.dirname(m.name), m.linkname))):
+                print(f"пропущена ссылка наружу: {m.name!r}", file=sys.stderr)
+                continue
+            dest = os.path.join(root, m.name)
+            if os.path.islink(dest) or (m.issym() and os.path.lexists(dest)):
+                os.remove(dest)
+            t.extract(m, root, set_attrs=True)
+            count += not m.isdir()
+    for rel in meta.get("deleted") or []:
+        if safe(rel):
+            p = os.path.join(root, rel)
+            if os.path.isfile(p) or os.path.islink(p):
+                os.remove(p)
+                count += 1
+    print(count, meta.get("fp") or "0")
+    return 0
+
+
+def arch(appid, acf, kind="mod"):
+    name = ""
+    try:
+        m = re.search(r'"name"\s*"([^"]*)"', open(acf, errors="replace").read())
+        name = m.group(1) if m else ""
+    except OSError:
+        pass
+    name = re.sub(r"[^\w .()&'+-]", "", name, flags=re.U).strip(" .")[:80] or f"app{appid}"
+    print(f"{kind}--{appid}--{name}")
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["snap"] and len(a) == 3:
+            sys.exit(snap(a[1], a[2]))
+        if a[:1] == ["diff"] and len(a) == 3:
+            sys.exit(diff(a[1], a[2]))
+        if a[:1] == ["pack"] and len(a) == 6 and a[4].isdigit():
+            sys.exit(pack(a[1], a[2], a[3], a[4], a[5]))
+        if a[:1] == ["apply"] and len(a) == 2:
+            sys.exit(apply(a[1]))
+        if a[:1] == ["arch"] and len(a) in (3, 4) and a[1].isdigit() and (len(a) == 3 or a[3] in ("mod", "lgame", "gsave")):
+            sys.exit(arch(*a[1:]))
+        if a[:1] == ["track"] and len(a) == 5 and a[3] in ("0", "1"):
+            sys.exit(track(a[1], a[2], a[3] == "1", a[4]))
+        if a[:1] == ["claim"] and (len(a) == 3 or len(a) == 4 and a[3] == "data"):
+            sys.exit(claim(*a[1:]))
+        if a[:1] == ["man"] and (len(a) == 3 or len(a) == 4 and a[3] == "data"):
+            sys.exit(man(*a[1:]))
+    except (OSError, ValueError, tarfile.TarError) as e:
+        print(f"wolf-mods: ошибка {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-mods.py snap|diff|pack|apply|arch|track|claim|man …")
+MODS
+
+# ============================== wolf-recipes.py ================================
+w /usr/local/bin/wolf-recipes.py <<'RECIPES'
+#!/usr/bin/env python3
+# [v5.6] «Рецепты» — готовые наборы модов для конкретных игр, которые человек включает одним переключателем в окне
+# (VG_SYNC "recipes": {номер: [рецепт]}). Всё ставится в «диск C:» игры — едет в облако с её сохранениями (pfx--),
+# так что на следующих машинах рецепт только проверяет обновления. Рецепт сам — без запуска игры: настройки,
+# плагины и переводы — файлами; программы-установщики запускает wolf (recipe_play) через Steam той же прокладкой.
+#
+# ff14-ru — русский перевод FINAL FANTASY XIV от xivrus.ru (пробная 312060 и полная 39210): XIVLauncher (лаунчер
+# сообщества) + Dalamud (плагины) + Penumbra (подмена файлов игры на лету) + пакет перевода. Как у Алексея после
+# ручной установки 2026-10-08 (сверено по его архиву): настройки XIVLauncher (путь к игре, пробная/полная, язык игры
+# английский — перевод заменяет английские файлы, Dalamud включён), список плагинов SeaOfStars в Dalamud,
+# «ждать плагины при запуске», Penumbra с папкой модов C:\FFXIVMods, мод «XIV Rus» включён с настройками по умолчанию.
+# Перевод — релиз GitHub xivrus/xiv_ru_weblate (release.pmp — zip папки мода); новая версия — старая папка удаляется
+# целиком (так требует xivrus). XIVLauncher, Dalamud и Penumbra потом обновляются сами.
+#   wolf-recipes.py ff14-ru DRIVE_C НОМЕР ПАПКА_ИГРЫ КЭШ   — настройки, Penumbra, перевод (игра и Steam-лаунчер закрыты)
+#   wolf-recipes.py ff14-ru-mark DRIVE_C                   — XIVLauncher в список «своих» программ игры
+import json
+import os
+import re
+import shutil
+import sys
+import time
+import urllib.request
+import uuid
+import zipfile
+from pathlib import Path
+
+ROAM = "users/steamuser/AppData/Roaming/XIVLauncher"
+XIVL_EXE = "users/steamuser/AppData/Local/XIVLauncher/current/XIVLauncher.exe"
+MODDIR, MODDIR_WIN = "FFXIVMods", "C:\\FFXIVMods"
+SEA = "https://raw.githubusercontent.com/Ottermandias/SeaOfStars/main/repo.json"
+XIVRUS = "https://api.github.com/repos/xivrus/xiv_ru_weblate/releases/latest"
+FT = {"312060": True, "39210": False}              # пробная / полная
+UA = {"User-Agent": "vastgame"}
+
+
+def fetch(url, dest=None, timeout=60):
+    """Ответ по url (bytes) или, с dest, — в файл. Подменяется в тестах."""
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        if dest is None:
+            return r.read()
+        tmp = Path(str(dest) + ".part")
+        with open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        os.replace(tmp, dest)
+        return dest
+
+
+def _load(p, default):
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return default
+
+
+def _save(p, data, indent=2):
+    p = Path(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".vgtmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+# --- XIVLauncher: launcherConfigV3.json (все значения — строки). Главное — всегда; остальное — если не задано
+def launcher_config(c, appid, installdir):
+    p = Path(c, ROAM, "launcherConfigV3.json")
+    d = _load(p, {})
+    d.update({"GamePath": "Z:\\home\\user\\SteamGames\\" + installdir, "IsFt": "true" if FT[appid] else "false",
+              "Language": "English", "InGameAddonEnabled": "true"})
+    for k, v in {"InGameAddonLoadMethod": "EntryPoint", "LauncherLanguage": "English", "AddonList": "[]",
+                 "EncryptArguments": "true", "AskBeforePatchInstall": "true", "DpiAwareness": "Unaware",
+                 "ExitLauncherAfterGameExit": "true", "AutoStartSteam": "false", "VersionUpgradeLevel": "2",
+                 "HasShownAutoLaunchDisclaimer": "true", "HasComplainedAboutAdmin": "true", "KeepPatches": "false",
+                 "PatchPath": "C:\\users\\steamuser\\AppData\\Roaming\\XIVLauncher\\patches"}.items():
+        d.setdefault(k, v)
+    _save(p, d)
+    return "настройки XIVLauncher"
+
+
+# --- Dalamud: dalamudConfig.json (Newtonsoft с $type — как пишет сам Dalamud)
+T_REPOS = "System.Collections.Generic.List`1[[Dalamud.Configuration.ThirdPartyRepoSettings, Dalamud]], System.Private.CoreLib"
+T_REPO = "Dalamud.Configuration.ThirdPartyRepoSettings, Dalamud"
+T_PROFILE = "Dalamud.Plugin.Internal.Profiles.ProfileModelV1, Dalamud"
+T_PCHARS = ("System.Collections.Generic.List`1[[Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Character, "
+            "Dalamud]], System.Private.CoreLib")
+T_PLUGINS = ("System.Collections.Generic.List`1[[Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Plugin, "
+             "Dalamud]], System.Private.CoreLib")
+T_PLUGIN = "Dalamud.Plugin.Internal.Profiles.ProfileModelV1+ProfileModelV1Plugin, Dalamud"
+
+
+def dalamud_config(c, plugin_id):
+    p = Path(c, ROAM, "dalamudConfig.json")
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        d = {"$type": "Dalamud.Configuration.Internal.DalamudConfiguration, Dalamud"}
+    repos = d.get("ThirdRepoList")
+    if not isinstance(repos, dict) or not isinstance(repos.get("$values"), list):
+        repos = d["ThirdRepoList"] = {"$type": T_REPOS, "$values": []}
+    mine = next((r for r in repos["$values"] if isinstance(r, dict) and r.get("Url") == SEA), None)
+    if mine:
+        mine["IsEnabled"] = True
+    else:
+        repos["$values"].append({"$type": T_REPO, "Url": SEA, "IsEnabled": True})
+    d["ThirdRepoSpeedbumpDismissed"] = True        # «я понимаю риск сторонних плагинов» — человек включил перевод
+    d["IsResumeGameAfterPluginLoad"] = True        # игра ждёт плагины: иначе часть интерфейса без перевода
+    prof = d.get("DefaultProfile")
+    if not isinstance(prof, dict) or not isinstance((prof.get("Plugins") or {}).get("$values"), list):
+        prof = d["DefaultProfile"] = {"$type": T_PROFILE, "p": None, "e4c": False,
+                                      "pc": {"$type": T_PCHARS, "$values": []}, "e": True, "c": 0,
+                                      "Plugins": {"$type": T_PLUGINS, "$values": []},
+                                      "id": "00000000-0000-0000-0000-000000000000", "n": "DEFAULT"}
+    plugins = prof["Plugins"]["$values"]
+    have = next((x for x in plugins if isinstance(x, dict) and x.get("InternalName") == "Penumbra"), None)
+    if have is None:
+        plugins.append({"$type": T_PLUGIN, "InternalName": "Penumbra", "WorkingPluginId": plugin_id, "IsEnabled": True})
+    _save(p, d)
+    return "настройки Dalamud"
+
+
+# --- Penumbra: плагин из списка SeaOfStars (как ставит сам Dalamud: zip в installedPlugins/Имя/версия + манифест)
+def penumbra_plugin(c, cache):
+    base = Path(c, ROAM, "installedPlugins", "Penumbra")
+    for m in sorted(base.glob("*/Penumbra.json")):
+        if (m.parent / "Penumbra.dll").exists():
+            return _load(m, {}).get("WorkingPluginId") or str(uuid.uuid4()), "Penumbra уже стоит"
+    repo = json.loads(fetch(SEA))
+    e = next(x for x in repo if isinstance(x, dict) and x.get("InternalName") == "Penumbra")
+    ver = str(e["AssemblyVersion"])
+    if not re.fullmatch(r"[0-9.]{1,20}", ver):
+        raise ValueError(f"версия Penumbra {ver!r}")
+    z = fetch(e["DownloadLinkInstall"], Path(cache, "Penumbra.zip"), timeout=300)
+    dest = base / ver
+    _unzip(z, dest)
+    pid = str(uuid.uuid4())
+    man = {"Disabled": False, "Testing": False, "ScheduledForDeletion": False, "InstalledFromUrl": SEA,
+           "WorkingPluginId": pid, "IsThirdParty": True}
+    man.update({k: v for k, v in e.items() if k not in ("DownloadCount", "LastUpdate", "IsHide", "IsTestingExclusive")})
+    man.update({"IsHide": False, "IsTestingExclusive": False, "DownloadLinkInstall": None, "DownloadLinkUpdate": None,
+                "DownloadLinkTesting": None})
+    _save(dest / "Penumbra.json", man)
+    os.unlink(z)
+    return pid, f"Penumbra {ver} поставлена"
+
+
+def penumbra_config(c):
+    p = Path(c, ROAM, "pluginConfigs", "Penumbra", "config", "penumbra.json")
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        d = {"Version": 100, "Timestamp": int(time.time() * 1000)}
+    if not d.get("ModDirectory"):
+        d["ModDirectory"] = MODDIR_WIN
+        _save(p, d, indent="\t")
+    return d["ModDirectory"]
+
+
+def _unzip(z, dest):
+    """Распаковать zip в dest — только внутрь (ни абсолютных путей, ни «..»)."""
+    dest = Path(dest)
+    with zipfile.ZipFile(z) as zf:
+        for n in zf.namelist():
+            parts = n.replace("\\", "/").split("/")
+            if n.startswith(("/", "\\")) or ".." in parts or re.match(r"^[A-Za-z]:", n):
+                raise ValueError(f"путь {n!r} в архиве")
+        tmp = dest.with_name(dest.name + ".vgtmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        zf.extractall(tmp)
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+
+
+def _mod_dir(c, moddir):
+    """Папка мода перевода в папке модов Penumbra (C:\\FFXIVMods → Linux-путь) — по сайту xivrus в meta.json."""
+    root = Path(c, *moddir[3:].split("\\")) if moddir.upper().startswith("C:\\") else Path(c, MODDIR)
+    for m in sorted(root.glob("*/meta.json")):
+        meta = _load(m, {})
+        if "xivrus" in str(meta.get("Website") or "") or meta.get("Name") == "XIV Rus":
+            return root, m.parent, str(meta.get("Version") or "")
+    return root, None, ""
+
+
+def _defaults(mod):
+    """Настройки мода по умолчанию — из его групп (как выставляет Penumbra при включении)."""
+    out = {}
+    for g in sorted(mod.glob("group_*.json")):
+        d = _load(g, {})
+        if d.get("Name"):
+            out[d["Name"]] = int(d.get("DefaultSettings") or 0)
+    return out
+
+
+def penumbra_enable(c, name, settings):
+    """Мод включён в коллекции по умолчанию (её нет — создать, как Penumbra при первом запуске)."""
+    pc = Path(c, ROAM, "pluginConfigs", "Penumbra")
+    act = _load(pc / "active_collections.json", None)
+    cid = act.get("Default") if isinstance(act, dict) else None
+    f = pc / "collections" / f"{cid}.json" if cid else None
+    col = _load(f, None) if f else None
+    if not isinstance(col, dict):
+        cid = cid or str(uuid.uuid4())
+        f = pc / "collections" / f"{cid}.json"
+        col = {"Version": 2, "Id": cid, "Name": "Default", "Settings": {}, "Inheritance": []}
+    if not isinstance(act, dict):
+        act = {"Version": 2, "Default": cid, "Interface": cid, "Current": cid, "Individuals": []}
+        _save(pc / "active_collections.json", act, indent="\t")
+    st = col.setdefault("Settings", {})
+    if name in st and isinstance(st[name], dict):
+        return False                                 # уже есть — выбор человека не трогаем
+    st[name] = {"Settings": settings, "Priority": 0, "Enabled": True}
+    _save(f, col, indent=1)
+    return True
+
+
+def translation(c, cache, moddir):
+    rel = json.loads(fetch(XIVRUS))
+    ver = str(rel.get("tag_name") or "").lstrip("v")
+    asset = next((a for a in rel.get("assets") or [] if str(a.get("name", "")).endswith(".pmp")), None)
+    if not ver or not asset:
+        raise ValueError("в релизе xivrus нет .pmp")
+    root, old, have = _mod_dir(c, moddir)
+    if old and have == ver:
+        return f"перевод {ver} — последний"
+    pmp = fetch(asset["browser_download_url"], Path(cache, "xivrus.pmp"), timeout=1800)
+    with zipfile.ZipFile(pmp) as zf:
+        meta = json.loads(zf.read("meta.json").decode("utf-8-sig"))
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(meta.get("Name") or "XIV Rus")).strip(" .") or "XIV Rus"
+    if old:
+        shutil.rmtree(old)                             # «перед установкой новой версии удалить старую» (xivrus)
+    root.mkdir(parents=True, exist_ok=True)
+    _unzip(pmp, root / name)
+    os.unlink(pmp)
+    on = penumbra_enable(c, name, _defaults(root / name))
+    return f"перевод {have + ' → ' if have else ''}{ver}{', включён' if on else ''}"
+
+
+def ff14_ru(c, appid, installdir, cache):
+    if appid not in FT:
+        print(f"ff14-ru: {appid} — не FINAL FANTASY XIV")
+        return 2
+    Path(cache).mkdir(parents=True, exist_ok=True)
+    done = [launcher_config(c, appid, installdir)]
+    pid, msg = penumbra_plugin(c, cache)
+    done += [dalamud_config(c, pid), msg]
+    moddir = penumbra_config(c)
+    try:
+        done.append(translation(c, cache, moddir))
+    except Exception as e:                             # нет связи с GitHub — перевод остаётся прежним
+        done.append(f"перевод не обновлён ({type(e).__name__}: {str(e)[:120]})")
+    print("; ".join(done))
+    return 0
+
+
+def mark(c):
+    """XIVLauncher — в «свои» программы игры (C:/.vastgame-installed.json, как после «Установить в игру»)."""
+    if not Path(c, XIVL_EXE).exists():
+        return 1
+    p = Path(c, ".vastgame-installed.json")
+    d = _load(p, {})
+    exes = sorted(set(x for x in d.get("exes") or [] if isinstance(x, str)) | {XIVL_EXE})
+    _save(p, {"exes": exes}, indent=None)
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["ff14-ru"] and len(a) == 5 and a[2].isdigit() and "/" not in a[3] and a[3] not in ("", ".", ".."):
+            sys.exit(ff14_ru(a[1], a[2], a[3], a[4]))
+        if a[:1] == ["ff14-ru-mark"] and len(a) == 2:
+            sys.exit(mark(a[1]))
+    except Exception as e:
+        print(f"wolf-recipes: ошибка {type(e).__name__}: {str(e)[:300]}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit("wolf-recipes.py ff14-ru DRIVE_C НОМЕР ПАПКА КЭШ | ff14-ru-mark DRIVE_C")
+RECIPES
+
+w /usr/local/bin/wolf-parts.py <<'PARTS'
+#!/usr/bin/env python3
+# [v4.4] Большие архивы в облаке — частями, параллельно. Google Drive отдаёт и принимает один файл одним потоком
+# (~25 МБ/с): игра на 50 ГБ восстанавливалась 35+ минут (живой случай 2026-09-26). Теперь архив больше одной части
+# хранится частями по WOLF_PART_MB (512) МБ и оглавлением; части качаются и выгружаются по WOLF_PART_PAR (4) сразу.
+#   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]        — поток со stdin в ОБЛАКО/ОБЪЕКТ
+#   wolf-parts.py get ОБЛАКО ОБЪЕКТ                     — архив из частей в stdout, по порядку
+#   wolf-parts.py cat ОБЛАКО ОБЪЕКТ РАЗМЕР MD5           — [v4.5] одиночный файл в stdout, так же кусками
+#   wolf-parts.py rm  ОБЛАКО ОБЪЕКТ [--no-trash] [--all] — удалить объект во всех видах (--all — и его дельты)
+# Как хранится ОБЪЕКТ (например, sgame--Игра.tar.zst или его дельта sgame--Игра.tar.zst.1a2b3c4d):
+#   * меньше одной части — одним файлом ОБЪЕКТ, как раньше (ОБЪЕКТ.part → переименование);
+#   * больше — части ОБЪЕКТ.g<поколение>-0000, -0001, … и оглавление ОБЪЕКТ.parts (имена, MD5, размеры).
+#     Версия объекта — MD5 оглавления. Новая версия появляется только целиком: сначала все части нового
+#     поколения, затем оглавление (ОБЪЕКТ.parts.new → ОБЪЕКТ.parts), и только потом удаляются старые части и
+#     прежний одиночный файл. Оборвалось посередине — в облаке остаётся прежняя целая версия.
+#   * ставший однажды частями объект частями и остаётся (даже маленький): иначе одиночный файл и старое
+#     оглавление могли бы разойтись; при обоих видах верным считается оглавление.
+# Скачивание (v4.5) — кусками по WOLF_RANGE_MB (64) МБ, до WOLF_RANGE_PAR (8) сразу (rclone cat --offset --count),
+# в памяти и по порядку прямо в распаковку, без временных файлов: раньше части ложились на диск, а распаковка писала
+# их ещё раз — на медленном диске это 20 МБ/с (живой случай 2026-09-26). Так же, кусками, качаются и большие
+# одиночные архивы, выгруженные до v4.4, — им не нужно заново выгружаться частями. Кусок, который не скачался,
+# повторяется целиком: в распаковку он ещё не ушёл. В памяти у всех процессов вместе — не больше
+# WOLF_RANGE_SLOTS (12) кусков (замки .ramN).
+# Выгрузка: части ждут отправки во временной папке; сколько их там у всех процессов вместе — ограничено:
+# WOLF_PART_SLOTS (6) мест, замки .slotN. Свободно меньше, чем нужно всем местам сразу с запасом, — часть идёт
+# прямо из потока в облако одним потоком, как до v4.4: медленнее, зато без временных файлов; архив, ещё не
+# хранившийся частями, выгружается тогда одним файлом.
+# Каждая часть проверяется: rclone сверяет MD5 после передачи, скачивание — ещё и с оглавлением (одиночный файл —
+# с MD5 из списка облака).
+# Имена частей начинаются с «ОБЪЕКТ.» — прежние wolf forget и приложение на Mac удаляют и считают их вместе с архивом.
+# Код выхода: 0 — готово, 1 — не получилось (прежняя версия в облаке не тронута).
+import concurrent.futures as cf
+import fcntl
+import hashlib
+import itertools
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+MB = 1024 * 1024
+PART = int(os.environ.get("WOLF_PART_BYTES") or int(os.environ.get("WOLF_PART_MB") or 512) * MB)
+PAR = max(1, int(os.environ.get("WOLF_PART_PAR") or 4))        # частей одного архива одновременно
+SLOTS = max(1, int(os.environ.get("WOLF_PART_SLOTS") or 6))    # частей на диске у всех процессов вместе
+TMP = os.environ.get("WOLF_TMP") or "/var/tmp/wolf"
+BLOCK = 8 * MB
+RESERVE = 512 * MB                   # не занимать частями последние полгигабайта диска
+MINFREE = int(os.environ.get("WOLF_PART_MINFREE") or SLOTS * PART + RESERVE)   # свободно меньше — без временных файлов
+TRIES = 3                            # попыток на часть (поверх повторов самого rclone)
+WAIT = float(os.environ.get("WOLF_PART_WAIT") or 5)   # пауза перед повтором, с (растёт с каждой попыткой)
+RANGE = int(os.environ.get("WOLF_RANGE_BYTES") or int(os.environ.get("WOLF_RANGE_MB") or 64) * MB)
+WINDOW = max(1, int(os.environ.get("WOLF_RANGE_PAR") or 8))      # кусков одного архива в пути одновременно
+RSLOTS = max(1, int(os.environ.get("WOLF_RANGE_SLOTS") or 12))   # кусков в памяти у всех процессов вместе
+RC_READ = ["--timeout=60s", "--contimeout=15s"]   # соединение зависло — ошибка через минуту и повтор куска
+# [2026-10-15] …а если данные идут по капле, rclone не считает это зависанием (живой случай, Корея RTX 2060: 27 МБ первого
+# куска за 7.5 минуты, остальные куски давно готовы и ждут его — машина не готова). Кусок не успел быстрее
+# SLOW_KBPS — оборвать и взять заново (новое соединение обычно быстрое); последняя попытка — без срока
+SLOW_RATE = int(os.environ.get("WOLF_SLOW_KBPS") or 512) * 1024
+SLOW_MIN = float(os.environ.get("WOLF_SLOW_MIN_SEC") or 60)
+RC = ["rclone", "--retries=5", "--low-level-retries=20", "--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200",
+      "--drive-acknowledge-abuse", "--drive-chunk-size=64M"]         # [v5.14] помеченный Drive архив тоже скачивается
+HEAD = "vastgame-parts 1"
+
+
+def log(msg):
+    print(f"parts: {msg}", file=sys.stderr, flush=True)
+
+
+class Progress:
+    """[v4.6] Ход для приложения: файл WOLF_PG — «сделано всего скорость время» (байты, байт/с), не чаще раза в
+    секунду, заменой файла целиком. Нет WOLF_PG — ничего не пишет."""
+
+    def __init__(self, total=0):
+        self.path, self.total, self.done = os.environ.get("WOLF_PG") or None, total, 0
+        self.tw, self.wdone, self.speed = time.time(), 0, 0.0
+
+    def add(self, n):
+        self.done += n
+        now = time.time()
+        if self.path and now - self.tw >= 1:
+            now_speed = (self.done - self.wdone) / (now - self.tw)
+            self.speed = now_speed if not self.speed else self.speed * 0.6 + now_speed * 0.4
+            self.tw, self.wdone = now, self.done
+            self.write(now)
+
+    def write(self, now=None):
+        if not self.path:
+            return
+        try:
+            with open(self.path + ".tmp", "w") as f:
+                f.write(f"{self.done} {self.total} {self.speed:.0f} {int(now or time.time())}\n")
+            os.replace(self.path + ".tmp", self.path)
+        except OSError:
+            pass
+
+
+def count():
+    """Поток stdin → stdout без изменений, с ходом (WOLF_PG, всего — WOLF_PG_TOTAL): между tar и zstd при выгрузке."""
+    pg = Progress(int(os.environ.get("WOLF_PG_TOTAL") or 0))
+    src, out = sys.stdin.buffer, sys.stdout.buffer
+    try:
+        while True:
+            b = src.read(BLOCK)
+            if not b:
+                break
+            out.write(b)
+            pg.add(len(b))
+        out.flush()
+    except BrokenPipeError:
+        return 1
+    pg.write()
+    return 0
+
+
+def argv(*args, trash=False):
+    return [*RC, f"--drive-use-trash={'true' if trash else 'false'}", *args]
+
+
+def rclone(*args, trash=False):
+    return subprocess.run(argv(*args, trash=trash), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def why(r):
+    """Последняя строка ошибки rclone — для журнала."""
+    lines = r.stderr.decode("utf-8", "replace").strip().splitlines()
+    return lines[-1][-300:] if lines else f"код {r.returncode}"
+
+
+def names(remote):
+    """Имена файлов в папке облака или None (облако не ответило). Папки нет (код 3) — пусто: выгрузка её создаст."""
+    r = rclone("lsf", "--files-only", remote)
+    if r.returncode == 3:
+        return []
+    return r.stdout.decode("utf-8", "replace").splitlines() if r.returncode == 0 else None
+
+
+def same(remote, name, md5):
+    """Файл в облаке — с этим MD5. Нужно, когда rclone сообщил об ошибке, а дело на самом деле сделано
+    (ответ сервера потерялся): не принять удачу за сбой и не удалить только что записанное."""
+    r = rclone("md5sum", f"{remote}/{name}")
+    return r.returncode == 0 and r.stdout.decode("utf-8", "replace").split()[:1] == [md5]
+
+
+def md5_of(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while b := f.read(BLOCK):
+            h.update(b)
+    return h.hexdigest()
+
+
+def part_re(obj):
+    return re.compile(re.escape(obj) + r"\.g([0-9a-f]{8})-\d{4}")
+
+
+def roomy():
+    """Места на диске хватит всем частям всех процессов сразу, с запасом."""
+    return shutil.disk_usage(TMP).free >= MINFREE
+
+
+def slot(wait=True, kind="slot"):
+    """Место под часть на диске (kind="slot", WOLF_PART_SLOTS мест) или под кусок в памяти (kind="ram",
+    WOLF_RANGE_SLOTS) — общее на все процессы (замок .<kind>N): открытый файл-замок, закрыть — освободить.
+    None — все места заняты (при wait=False)."""
+    while True:
+        for k in range(SLOTS if kind == "slot" else RSLOTS):
+            f = open(os.path.join(TMP, f".{kind}{k}"), "a")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return f
+            except OSError:
+                f.close()
+        if not wait:
+            return None
+        time.sleep(0.5)
+
+
+def delete(remote, files, trash):
+    """Удалить файлы, параллельно. Оглавления — первыми: не удалились — части не трогаем, объект остаётся целым.
+    True — всё удалено."""
+    def one(f):
+        return rclone("deletefile", f"{remote}/{f}", trash=trash).returncode == 0
+    with cf.ThreadPoolExecutor(8) as ex:
+        for group in ([f for f in files if f.endswith(".parts")], [f for f in files if not f.endswith(".parts")]):
+            if not all(list(ex.map(one, group))):
+                return False
+    return True
+
+
+def read_part(src, path):
+    """Прочитать из src до PART байт в файл path. (md5, размер, поток кончился)."""
+    h, n = hashlib.md5(), 0
+    with open(path, "wb") as f:
+        while n < PART:
+            b = src.read(min(BLOCK, PART - n))
+            if not b:
+                return h.hexdigest(), n, True
+            f.write(b)
+            h.update(b)
+            n += len(b)
+    return h.hexdigest(), n, False
+
+
+def rcat(src, dest, limit=None, first=b""):
+    """Поток прямо в облако, без временного файла (на диске мало места): first, затем src — до limit байт
+    (None — до конца). Одна попытка: поток не перечитать. (успех, md5, размер, поток кончился)."""
+    p = subprocess.Popen(argv("rcat", "--drive-chunk-size=128M", dest), stdin=subprocess.PIPE,
+                         stdout=subprocess.DEVNULL)
+    h, n, eof, b = hashlib.md5(), 0, False, first
+    try:
+        while True:
+            if b:
+                p.stdin.write(b)
+                h.update(b)
+                n += len(b)
+            want = BLOCK if limit is None else min(BLOCK, limit - n)
+            if want <= 0:
+                break
+            b = src.read(want)
+            if not b:
+                eof = True
+                break
+    except BrokenPipeError:
+        pass                                               # rclone упал — скажет код выхода
+    finally:
+        try:
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+    return p.wait() == 0, h.hexdigest(), n, eof
+
+
+def upload(path, remote, name):
+    try:
+        for i in range(TRIES):
+            r = rclone("copyto", path, f"{remote}/{name}")
+            if r.returncode == 0:
+                return True
+            log(f"{name}: {why(r)}")
+            time.sleep(WAIT * (i + 1))
+        return False
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def put_single(remote, obj, path=None, md5=None, src=None):
+    """Одним файлом, как до v4.4: ОБЪЕКТ.part → переименование в ОБЪЕКТ (прежний — в корзину).
+    path (и его md5) — файл на диске; src — прямо из потока (на диске мало места)."""
+    part = f"{remote}/{obj}.part"
+    rclone("deletefile", part)                            # хвост прерванной выгрузки
+    if path:
+        ok = rclone("copyto", path, part).returncode == 0
+    else:
+        ok, md5, _, _ = rcat(src, part)
+    ok = ok and (rclone("moveto", part, f"{remote}/{obj}", trash=True).returncode == 0 or same(remote, obj, md5))
+    if not ok:
+        rclone("deletefile", part)
+        log(f"{obj}: выгрузка одним файлом не удалась — прежняя версия в облаке не тронута")
+    return 0 if ok else 1
+
+
+def put_parts(remote, obj, have, trash, tmp, src, ahead):
+    """Части нового поколения, по PAR сразу; потом оглавление; потом уборка прежней версии.
+    ahead — первая часть, уже прочитанная на диск: (путь, md5, размер, замок места)."""
+    t0, gen = time.time(), secrets.token_hex(4)
+    parts, futures, ok = [], [], True
+    mine = threading.Semaphore(PAR)
+
+    def send(path, name, lock):
+        try:
+            return upload(path, remote, name)
+        finally:
+            lock.close()
+            mine.release()
+
+    try:
+        with cf.ThreadPoolExecutor(PAR) as ex:
+            for i in itertools.count():
+                name = f"{obj}.g{gen}-{i:04d}"
+                mine.acquire()
+                if any(f.done() and not f.result() for f in futures):
+                    mine.release()
+                    ok = False
+                    break
+                if ahead or roomy():
+                    if ahead:
+                        (path, md5, size, lock), ahead, last = ahead, None, False
+                    else:
+                        lock, path = slot(), os.path.join(tmp, str(i))
+                        md5, size, last = read_part(src, path)
+                        if size == 0 and parts:           # поток кончился ровно на границе части
+                            os.remove(path)
+                            lock.close()
+                            mine.release()
+                            break
+                    parts.append((name, md5, size))
+                    futures.append(ex.submit(send, path, name, lock))
+                else:
+                    # на диске мало места — эта часть прямо из потока, одним потоком
+                    mine.release()
+                    first = src.read(min(BLOCK, PART))
+                    if not first and parts:
+                        break
+                    good, md5, size, last = rcat(src, f"{remote}/{name}", PART, first)
+                    parts.append((name, md5, size))
+                    if not good:
+                        log(f"{name}: выгрузка из потока не удалась")
+                        ok = False
+                        break
+                if last:
+                    break
+            ok = all([f.result() for f in futures]) and ok
+    except OSError as e:
+        log(f"{obj}: {e}")
+        ok = False
+    if not ok:
+        delete(remote, [n for n, _, _ in parts], trash=False)
+        log(f"{obj}: выгрузка частей не удалась — прежняя версия в облаке не тронута")
+        return 1
+
+    index = os.path.join(tmp, "index")
+    total = sum(s for _, _, s in parts)
+    with open(index, "w") as f:
+        f.write(f"{HEAD}\n{total}\n" + "".join(f"{n}\t{m}\t{s}\n" for n, m, s in parts))
+    committed = (rclone("copyto", index, f"{remote}/{obj}.parts.new").returncode == 0
+                 and rclone("moveto", f"{remote}/{obj}.parts.new", f"{remote}/{obj}.parts", trash=True).returncode == 0)
+    if not committed and not same(remote, f"{obj}.parts", md5_of(index)):
+        delete(remote, [n for n, _, _ in parts] + [f"{obj}.parts.new"], trash=False)
+        log(f"{obj}: оглавление не записалось — прежняя версия в облаке не тронута")
+        return 1
+    # новая версия записана — старые части и прежний одиночный файл больше не нужны
+    pr = part_re(obj)
+    old = [n for n in have if (m := pr.fullmatch(n)) and m.group(1) != gen]
+    if obj in have:
+        old.append(obj)
+    if not delete(remote, old, trash):
+        log(f"{obj}: не все старые части удалились (уберутся при следующей выгрузке)")
+    dt = max(time.time() - t0, 0.001)
+    log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
+    return 0
+
+
+def put(remote, obj, trash):
+    have = names(remote)
+    if have is None:
+        log(f"{obj}: облако не ответило")
+        return 1
+    os.makedirs(TMP, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
+    src = sys.stdin.buffer
+    try:
+        ahead = None
+        if f"{obj}.parts" not in have:
+            if not roomy():
+                log(f"{obj}: мало места на диске — одним файлом, одним потоком")
+                return put_single(remote, obj, src=src)
+            lock, first = slot(), os.path.join(tmp, "first")
+            md5, size, eof = read_part(src, first)
+            if eof:                                        # меньше одной части — одним файлом, как всегда
+                try:
+                    return put_single(remote, obj, path=first, md5=md5)
+                finally:
+                    lock.close()
+            ahead = (first, md5, size, lock)
+        return put_parts(remote, obj, have, trash, tmp, src, ahead)
+    except OSError as e:
+        log(f"{obj}: {e} — прежняя версия в облаке не тронута")
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def parse_index(text, obj):
+    lines = text.splitlines()
+    if len(lines) < 3 or lines[0] != HEAD:
+        raise ValueError("не оглавление частей")
+    parts = []
+    for ln in lines[2:]:
+        n, m, s = ln.split("\t")
+        if not n.startswith(obj + "."):
+            raise ValueError(f"чужая часть в оглавлении: {n}")
+        parts.append((n, m, int(s)))
+    if sum(s for _, _, s in parts) != int(lines[1]):
+        raise ValueError("размеры частей не сходятся с оглавлением")
+    return parts
+
+
+def fetch(remote, name, off, cnt):
+    """cnt байт файла name с позиции off — в память. Кусок ещё не ушёл в распаковку, поэтому при сбое его просто
+    повторяем целиком (одним потоком так было нельзя: оборвалось на 30-м гигабайте — всё сначала)."""
+    buf = bytearray(cnt)
+    for i in range(TRIES):
+        p = subprocess.Popen(argv("cat", *RC_READ, f"--offset={off}", f"--count={cnt}", f"{remote}/{name}"),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        slow = threading.Event()
+        timer = None
+        if i < TRIES - 1:                                   # последняя попытка — без срока: медленно, но докачать
+            def cut(p=p):
+                slow.set()
+                p.kill()
+            timer = threading.Timer(max(SLOW_MIN, cnt / SLOW_RATE), cut)
+            timer.daemon = True
+            timer.start()
+        view, n = memoryview(buf), 0
+        while n < cnt and (k := p.stdout.readinto(view[n:])):
+            n += k
+        view.release()
+        extra = p.stdout.read(1)
+        err = p.stderr.read().decode("utf-8", "replace").strip()
+        code = p.wait()
+        if timer:
+            timer.cancel()
+        if code == 0 and n == cnt and not extra and not slow.is_set():
+            return buf
+        log(f"{name} [{off}+{cnt}]: " + (f"слишком медленно ({n} байт) — беру заново" if slow.is_set() else
+                                         err.splitlines()[-1][-300:] if err else f"код {code}, байт {n}"))
+        time.sleep(WAIT * (i + 1))
+    return None
+
+
+def stream(remote, segs, out):
+    """Сегменты (имя, размер, md5) по порядку — кусками по RANGE, до WINDOW сразу — в out; каждый сегмент
+    сверяется с md5. В памяти — не больше WINDOW кусков у процесса и RSLOTS у всех вместе.
+    None — всё сошлось, иначе текст ошибки."""
+    ranges = [(si, off, min(RANGE, size - off)) for si, (_, size, _) in enumerate(segs) for off in range(0, size, RANGE)]
+    hashes = [hashlib.md5() for _ in segs]
+    pg = Progress(sum(size for _, size, _ in segs))           # [v4.6] ход скачивания для приложения
+    futures, locks, nxt = {}, {}, 0
+    with cf.ThreadPoolExecutor(WINDOW) as ex:
+        def start(k, lock):
+            si, off, cnt = ranges[k]
+            locks[k] = lock
+            futures[k] = ex.submit(fetch, remote, segs[si][0], off, cnt)
+
+        def fill():                                        # вперёд, пока есть свободные места в памяти
+            nonlocal nxt
+            while nxt < len(ranges) and len(futures) < WINDOW:
+                lock = slot(wait=False, kind="ram")
+                if lock is None:
+                    return
+                start(nxt, lock)
+                nxt += 1
+
+        fill()
+        for k, (si, off, cnt) in enumerate(ranges):
+            if k not in futures:                           # места в памяти держат другие архивы — подождать
+                start(k, slot(kind="ram"))
+                nxt = k + 1
+            buf = futures.pop(k).result()
+            try:
+                if buf is None:
+                    return f"{segs[si][0]}: кусок {off}+{cnt} не скачался"
+                out.write(buf)
+                hashes[si].update(buf)
+                pg.add(len(buf))
+            finally:
+                locks.pop(k).close()
+            if off + cnt == segs[si][1] and hashes[si].hexdigest() != segs[si][2]:
+                return f"{segs[si][0]}: не сходится MD5"
+            fill()
+    for si, (name, size, md5) in enumerate(segs):          # пустые сегменты: кусков у них нет
+        if size == 0 and hashes[si].hexdigest() != md5:
+            return f"{name}: не сходится MD5"
+    pg.write()                                             # итог — даже если всё уложилось в секунду
+    return None
+
+
+def read(remote, obj, segs):
+    """Сегменты — в stdout (в распаковку). 0 — всё скачалось и сошлось."""
+    os.makedirs(TMP, exist_ok=True)                       # замки мест в памяти лежат во временной папке
+    t0 = time.time()
+    try:
+        err = stream(remote, segs, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        err = "распаковка прервалась"
+    except OSError as e:
+        err = str(e)
+    if err:
+        if err == "распаковка прервалась":                # не ругаться ещё раз при выходе, дописывая stdout
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        log(f"{obj}: {err}")
+        return 1
+    total = sum(s for _, s, _ in segs)
+    dt = max(time.time() - t0, 0.001)
+    log(f"{obj}: {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с), частей {len(segs)}")
+    return 0
+
+
+def get(remote, obj):
+    r = rclone("cat", f"{remote}/{obj}.parts")
+    try:
+        parts = parse_index(r.stdout.decode("utf-8", "replace"), obj) if r.returncode == 0 else None
+    except ValueError as e:
+        log(f"{obj}: {e}")
+        return 1
+    if not parts:
+        log(f"{obj}: оглавление частей не прочиталось")
+        return 1
+    return read(remote, obj, [(n, s, m) for n, m, s in parts])
+
+
+def cat(remote, obj, size, md5):
+    """Одиночный файл (архив меньше части или выгруженный до v4.4) — тоже кусками, в несколько потоков."""
+    return read(remote, obj, [(obj, int(size), md5)])
+
+
+def rm(remote, obj, trash, everything):
+    have = names(remote)
+    if have is None:
+        return 1
+    if everything:                                         # и все дельты с их частями: всё, что начинается с «ОБЪЕКТ.»
+        victims = [n for n in have if n == obj or n.startswith(obj + ".")]
+    else:
+        pr = part_re(obj)
+        victims = [n for n in have if n in (obj, f"{obj}.part", f"{obj}.parts", f"{obj}.parts.new")
+                   or pr.fullmatch(n)]
+    return 0 if delete(remote, victims, trash) else 1
+
+
+def main(args):
+    if args[1:2] == ["count"]:
+        return count()
+    if len(args) < 4 or args[1] not in ("put", "get", "cat", "rm") or (args[1] == "cat" and len(args) < 6):
+        print("usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash] [--all] | cat REMOTE OBJECT SIZE MD5",
+              file=sys.stderr)
+        return 2
+    cmd, remote, obj, flags = args[1], args[2].rstrip("/"), args[3], args[4:]
+    if cmd == "cat":
+        return cat(remote, obj, flags[0], flags[1])
+    trash = "--no-trash" not in flags
+    if cmd == "put":
+        return put(remote, obj, trash)
+    if cmd == "get":
+        return get(remote, obj)
+    return rm(remote, obj, trash, "--all" in flags)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+PARTS
+
+# ================================== Docker (v4.0) ==============================
+# Без systemd: всё — один процесс «wolf supervise» (страница статуса, наблюдение за играми,
+# загрузка и таймеры) в своей группе процессов. Повторный запуск скрипта снимает прежнюю группу
+# целиком и начинает заново (загрузка — снова: гейты boot-done/boot-started снимаются).
+# Steam и Sunshine живут в своих сессиях — их это не задевает.
+if [ "$WM" = docker ]; then
+  p=$(cat /run/wolf/supervise.pid 2>/dev/null)
+  # только если это и правда прежний «wolf supervise» (номер мог достаться другому процессу)
+  if [ -n "$p" ] && tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'wolf supervise'; then
+    kill -- "-$p" 2>/dev/null; sleep 1
+  fi
+  rm -f /run/wolf/boot-done /run/wolf/boot-started
+  setsid /usr/local/bin/wolf supervise </dev/null >>/var/log/wolf-supervise.log 2>&1 &
+  echo $! > /run/wolf/supervise.pid
+  echo "=== wolf v4.4 (Docker) запущен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
+  exit 0
+fi
+
+# =================================== systemd ===================================
+cat > /etc/systemd/system/wolf-boot.service <<'EOF'
+[Unit]
+Description=wolf: восстановление из облака и запуск Steam/Sunshine
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+KillMode=process
+ExecStart=/usr/local/bin/wolf boot
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# [HARDENING #4] Переприменение изоляции после поднятия Tailscale
+cat > /etc/systemd/system/wolf-firewall.service <<'EOF'
+[Unit]
+Description=wolf: изоляция портов Sunshine и статуса (только Tailscale)
+After=tailscaled.service network-online.target
+Wants=tailscaled.service network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/wolf firewall
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/wolf-final.service <<EOF
+[Unit]
+Description=wolf: финальная синхронизация при выключении
+Wants=network-online.target
+After=network-online.target wolf-boot.service display-manager.service user@${UI}.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/bin/wolf shutdown
+TimeoutStopSec=900
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Порт подставляется здесь же, чтобы совпадал с правилом iptables
+cat > /etc/systemd/system/wolf-web.service <<EOF
+[Unit]
+Description=wolf: страница статуса (порт $WP)
+After=network.target
+[Service]
+Environment=WOLF_PORT=$WP
+ExecStart=/usr/bin/python3 /usr/local/bin/wolf-web.py
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Выгрузка сохранений сразу после выхода из игры (на минимальном приоритете)
+cat > /etc/systemd/system/wolf-watch.service <<'EOF'
+[Unit]
+Description=wolf: выгрузка сохранений сразу после выхода из игры
+After=wolf-boot.service
+[Service]
+ExecStart=/usr/local/bin/wolf watch
+Restart=always
+RestartSec=10
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# [HARDENING #5] Таймеры не запускаются до завершения boot (гейт по /run/wolf/boot-done)
+for t in "state 5 $SMIN" "games 12 $GMIN"; do
+  read -r a b c <<< "$t"
+  cat > "/etc/systemd/system/wolf-$a.service" <<EOF
+[Unit]
+Description=wolf: синхронизация ($a)
+After=network-online.target wolf-boot.service
+ConditionPathExists=/run/wolf/boot-done
+[Service]
+Type=oneshot
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+ExecStart=/usr/local/bin/wolf $a
+EOF
+  cat > "/etc/systemd/system/wolf-$a.timer" <<EOF
+[Unit]
+Description=wolf: таймер синхронизации ($a)
+[Timer]
+OnBootSec=${b}min
+OnUnitActiveSec=${c}min
+[Install]
+WantedBy=timers.target
+EOF
+done
+
+# =========================== очистка наследия v1/v2 ===========================
+pkill -f wolf-resolution.sh 2>/dev/null
+systemctl disable wolf-shutdown-sync.service 2>/dev/null
+DESK=$(runuser -u "$DU" -- xdg-user-dir DESKTOP 2>/dev/null || true)
+[ -n "$DESK" ] || DESK="$DH/Desktop"
+rm -f /etc/systemd/system/wolf-shutdown-sync.service \
+      /usr/local/bin/{wolf-common,wolf-restore,wolf-backup,force-res,wolf-resolution,wolf-res}.sh \
+      "$DESK/Set_1920x1200.desktop" "$DESK/wolf-res.desktop" 2>/dev/null
+
+# ==================================== запуск ===================================
+systemctl daemon-reload
+systemctl enable wolf-boot.service wolf-firewall.service wolf-final.service \
+                 wolf-web.service wolf-watch.service wolf-state.timer wolf-games.timer
+systemctl start wolf-final.service wolf-state.timer wolf-games.timer
+systemctl restart wolf-web.service
+systemctl start --no-block wolf-firewall.service
+systemctl start --no-block wolf-boot.service
+systemctl restart --no-block wolf-watch.service
+echo "=== wolf v4.4 установлен. Ход: tail -f /var/log/wolf.log | статус: http://<tailscale-ip>:$WP"
