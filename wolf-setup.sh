@@ -2096,7 +2096,13 @@ steamlink_check() {
   [ -n "$SR" ] || sr
   xenv
   pgrep -x steam >/dev/null || steam_go
-  python3 /usr/local/bin/wolf-steam.py pin-check "$DH/$SR" 2>&1
+  # Аргументы — от нового приложения: номер устройства, имя компьютера, уже привязанные здесь аккаунты.
+  # Без них (старое приложение) проверка прежняя: любое устройство аккаунта.
+  if [ $# -ge 1 ]; then
+    python3 /usr/local/bin/wolf-steam.py pin-check "$DH/$SR" 8080 "${1:--}" "${2:--}" "${3:--}" 2>&1
+  else
+    python3 /usr/local/bin/wolf-steam.py pin-check "$DH/$SR" 2>&1
+  fi
 }
 
 steamlink_pin() {
@@ -2373,7 +2379,7 @@ case ${1:-} in
   boot)                                      boot ;;
   finish)                                    finish_start ;;
   sunshine-creds)                            shift; sunshine_creds "$@" ;;
-  steamlink-check)                           steamlink_check ;;
+  steamlink-check)                           shift; steamlink_check "$@" ;;
   steamlink-pin)                             shift; steamlink_pin "$@" ;;
   prog)                                      shift; prog_cmd "$@" ;;
   finish-run)                                finish_run ;;
@@ -2519,6 +2525,9 @@ WOLF = '/usr/local/bin/wolf'
 ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,200}$')
 LOGIN = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 PIN = re.compile(r'^\d{4}$')
+SL_ID = re.compile(r'^(-|[0-9a-fA-F]{8,64}(,[0-9a-fA-F]{8,64}){0,7})$')
+SL_NAME = re.compile(r'^[^\x00-\x1f/]{1,80}$')
+SL_KNOWN = re.compile(r'^(-|7656\d{13}(,7656\d{13}){0,7})$')
 GAME = re.compile(r'^s?game--[^/\x00-\x1f]{1,200}$')
 MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохранять моды?» — по номеру игры
 RESTORABLE = ('steam-state', 'steam-client', 'steam-cache')   # [v5.10] служебные — тоже можно повторить (не identity)
@@ -2538,7 +2547,9 @@ def command(c, a):
             'answer': ([WOLF, 'answer', *a], False) if len(a) == 3 and isinstance(a[1], str) and a[2] in ('yes', 'no')
                       and ((a[0] in ('new', 'del') and GAME.match(a[1])) or (a[0] == 'mod' and MOD.match(a[1]))) else None,
             'sunshine-creds': ([WOLF, 'sunshine-creds', arg], False) if LOGIN.match(arg) else None,
-            'steamlink-check': ([WOLF, 'steamlink-check'], False) if not a else None,
+            'steamlink-check': ([WOLF, 'steamlink-check', *a], False) if not a or (
+                len(a) == 3 and all(isinstance(x, str) for x in a) and SL_ID.match(a[0])
+                and SL_NAME.match(a[1]) and SL_KNOWN.match(a[2])) else None,
             'steamlink-pin': ([WOLF, 'steamlink-pin', arg], False) if PIN.match(arg) else None,
             # [v5.4] программы игр: [номер, id] — запустить; [номер, id, on|off] — «вместе с игрой»
             'prog-run': ([WOLF, 'prog', 'run', *a], False) if len(a) == 2 and str(a[0]).isdigit() and len(str(a[0])) <= 10
@@ -5537,37 +5548,100 @@ def _streaming_pin_needed(root, window_sec=90):
     return need
 
 
-def _account_has_device(root, sid):
-    """Есть ли у аккаунта sid (steamid64) привязанное устройство Steam Link в userdata/<id>/config/localconfig.vdf."""
+def _brace_block(text, open_brace):
+    depth = 0
+    for i in range(open_brace, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace:i + 1]
+    return ""
+
+
+def _norm_name(name):
+    """Имя компьютера и DeviceName из Steam сравниваются без регистра, пробелов и «.local»."""
+    s = (name or "").strip().lower()
+    s = re.sub(r"\.local$", "", s)
+    return re.sub(r"[\s_\-.'’]+", "", s)
+
+
+def _devices(root, sid):
+    """Устройства Remote Play этого аккаунта: {номер: имя} из localconfig.vdf.
+    Номер пропадает из списка, когда устройство удаляют в настройках Steam."""
     if not root or not re.fullmatch(r"7656\d{13}", str(sid or "")):
-        return False
+        return {}
     uid = int(sid) - BASE
     lc = Path(root) / "userdata" / str(uid) / "config/localconfig.vdf"
     try:
         text = lc.read_text(errors="replace")
     except OSError:
-        return False
-    for m in re.finditer(r'"streaming"\s*\{', text, re.I):
-        depth, i, n = 0, m.start(), len(text)
-        while i < n:
-            ch = text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    blk = text[m.start():i + 1]
-                    if re.search(r'"Devices"\s*\{[^{}]*\{[^{}]*"(?:DeviceName|Key)"\s*"[^"]+"', blk, re.I):
-                        return True
-                    break
-            i += 1
-    return False
+        return {}
+    sm = re.search(r'"streaming"\s*\{', text, re.I)
+    if not sm:
+        return {}
+    stream = _brace_block(text, sm.end() - 1)
+    dm = re.search(r'"Devices"\s*\{', stream, re.I)
+    if not dm:
+        return {}
+    block = _brace_block(stream, dm.end() - 1)
+    out = {}
+    for k in re.finditer(r'"([0-9a-fA-F]{8,64})"\s*\{', block):
+        body = _brace_block(block, k.end() - 1)
+        nm = re.search(r'"DeviceName"\s*"([^"]*)"', body)
+        out[k.group(1).lower()] = nm.group(1) if nm else ""
+    return out
 
 
-def pin_check(root=None, port=8080):
-    """Проверить состояние Steam для Steam Link: «check: ok|pin|nologin|nosteam [steamid64]».
-    Проверяет наличие привязанных устройств в userdata/<id>/config/localconfig.vdf ("streaming" -> "Devices")
-    и ставит в CEF перехватчик RegisterForRemoteDeviceAuthorizationRequested."""
+def _split_ids(raw):
+    if not raw or raw == "-":
+        return []
+    return [x.lower() for x in str(raw).split(",") if re.fullmatch(r"[0-9a-fA-F]{8,64}", x)]
+
+
+def _split_known(raw):
+    if not raw or raw == "-":
+        return set()
+    return {x for x in str(raw).split(",") if re.fullmatch(r"7656\d{13}", x)}
+
+
+def _device_decision(devices, ids, name, known, sid):
+    """Нужен ли PIN этому компьютеру.
+
+    ok и номер — это устройство есть в Remote Play. pin — его нет: компьютер ещё не
+    привязывали или запись удалили в настройках Steam. Чужое устройство в списке
+    не считается привязкой этого компьютера. Свой номер, которого в списке уже нет,
+    не подменяется другим устройством с похожим именем."""
+    for i in ids:
+        if i in devices:
+            return "ok", i
+    if ids:
+        return "pin", ""
+    if sid in known:
+        nn = _norm_name(name)
+        hits = [i for i, n in devices.items() if nn and _norm_name(n) == nn]
+        if len(hits) == 1:
+            return "ok", hits[0]
+        if len(devices) == 1:
+            only = next(iter(devices))
+            if not _norm_name(devices[only]) or _norm_name(devices[only]) == nn:
+                return "ok", only
+    return "pin", ""
+
+
+def _account_has_device(root, sid):
+    """Есть ли у аккаунта хотя бы одно устройство. Для старого вызова pin-check без номера компьютера."""
+    return bool(_devices(root, sid))
+
+
+def pin_check(root=None, port=8080, device_ids="", name="", known=""):
+    """Проверить Steam Link: «check: ok|pin|nologin|nosteam [steamid64] [номер устройства]».
+
+    Без номера компьютера (старое приложение) — как раньше: любое устройство аккаунта даёт ok.
+    С номером — ok только если в Remote Play есть именно это устройство. Несколько компьютеров
+    привязываются отдельно. Удалили запись в настройках Steam — этот компьютер снова получает pin."""
     import urllib.request
     sid = active_account(root)
     expr = (
@@ -5591,14 +5665,23 @@ def pin_check(root=None, port=8080):
             break
         except Exception:
             continue
+    asked = bool(device_ids or name or known)
     if not isinstance(targets, list) or not targets:
-        if _streaming_pin_needed(root):
-            print(f"check: pin {sid}".strip())
+        if not asked:
+            if _streaming_pin_needed(root):
+                print(f"check: pin {sid}".strip())
+                return 0
+            if sid and _account_has_device(root, sid):
+                print(f"check: ok {sid}")
+                return 0
+            print(f"check: nosteam {sid}".strip())
             return 0
-        if sid and _account_has_device(root, sid):
-            print(f"check: ok {sid}")
+        devices = _devices(root, sid)
+        st, did = _device_decision(devices, _split_ids(device_ids), name, _split_known(known), sid)
+        if st == "pin" and not devices and not _streaming_pin_needed(root):
+            print(f"check: nosteam {sid}".strip())
             return 0
-        print(f"check: nosteam {sid}".strip())
+        print(f"check: {st} {sid}{(' ' + did) if st == 'ok' and did else ''}".strip())
         return 0
     ordered = sorted(targets, key=lambda t: (0 if "SharedJSContext" in (t.get("title") or "") else
                                              1 if "SP" in (t.get("title") or "") else 2))
@@ -5611,24 +5694,34 @@ def pin_check(root=None, port=8080):
             if isinstance(res, str) and (res.startswith("ok ") or res.startswith("paired ") or res.startswith("pin ")):
                 st, _, u = res.partition(" ")
                 u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
-                if st in ("ok", "paired"):
-                    if _streaming_pin_needed(root):
-                        st = "pin"
-                    elif st == "paired" or _account_has_device(root, u):
-                        st = "ok"
-                    else:
-                        st = "pin"
-                print(f"check: {st} {u}".strip())
+                if not asked:
+                    if st in ("ok", "paired"):
+                        if _streaming_pin_needed(root):
+                            st = "pin"
+                        elif st == "paired" or _account_has_device(root, u):
+                            st = "ok"
+                        else:
+                            st = "pin"
+                    print(f"check: {st} {u}".strip())
+                    return 0
+                devices = _devices(root, u)
+                st, did = _device_decision(devices, _split_ids(device_ids), name, _split_known(known), u)
+                print(f"check: {st} {u}{(' ' + did) if st == 'ok' and did else ''}".strip())
                 return 0
         except Exception:
             continue
-    if _streaming_pin_needed(root):
-        print(f"check: pin {sid}".strip())
+    if not asked:
+        if _streaming_pin_needed(root):
+            print(f"check: pin {sid}".strip())
+            return 0
+        if sid and _account_has_device(root, sid):
+            print(f"check: ok {sid}")
+            return 0
+        print(f"check: nologin {sid}".strip())
         return 0
-    if sid and _account_has_device(root, sid):
-        print(f"check: ok {sid}")
-        return 0
-    print(f"check: nologin {sid}".strip())
+    devices = _devices(root, sid)
+    st, did = _device_decision(devices, _split_ids(device_ids), name, _split_known(known), sid)
+    print(f"check: {st} {sid}{(' ' + did) if st == 'ok' and did else ''}".strip())
     return 0
 
 
@@ -5641,6 +5734,7 @@ def pin(code, root=None, port=8080, wait=15):
         print("pin: invalid")
         return 2
     sid = active_account(root)
+    before = set(_devices(root, sid))
     expr = (
         f"(function(){{"
         f"if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
@@ -5676,7 +5770,10 @@ def pin(code, root=None, port=8080, wait=15):
                     if isinstance(res, str) and res.startswith("ok"):
                         _, _, u = res.partition(" ")
                         u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
-                        print(f"pin: ok {u}".strip())
+                        after = _devices(root, u)
+                        added = [i for i in after if i not in before]
+                        did = added[-1] if len(added) == 1 else ""
+                        print(f"pin: ok {u}{(' ' + did) if did else ''}".strip())
                         return 0
                 except Exception:
                     continue
@@ -5692,8 +5789,11 @@ if __name__ == "__main__":
     try:
         if a[:1] == ["vgplay"] and len(a) == 2:
             sys.exit(vgplay(a[1]))
-        if a[:1] == ["pin-check"] and len(a) in (1, 2, 3):
-            sys.exit(pin_check(a[1] if len(a) >= 2 else None, int(a[2]) if len(a) == 3 and a[2].isdigit() else 8080))
+        if a[:1] == ["pin-check"] and len(a) in (1, 2, 3, 6):
+            root = a[1] if len(a) >= 2 else None
+            port = int(a[2]) if len(a) >= 3 and str(a[2]).isdigit() else 8080
+            sys.exit(pin_check(root, port, a[3] if len(a) == 6 else "", a[4] if len(a) == 6 else "",
+                               a[5] if len(a) == 6 else ""))
         if a[:1] == ["pin"] and len(a) in (2, 3):
             sys.exit(pin(a[1], a[2] if len(a) == 3 else None))
         if a[:1] == ["account"] and len(a) == 3:
