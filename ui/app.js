@@ -7,6 +7,8 @@ const REFRESH_SEC = 15;
 const $ = (id) => document.getElementById(id);
 const DEMO = new URLSearchParams(location.search).get("demo");
 const api = () => window.pywebview.api;
+// pywebview кладёт связь со страницей после загрузки. Окно уже в фокусе раньше — тогда api() падает.
+function bridgeReady() { return !!(window.pywebview && window.pywebview.api); }
 
 let current = null;      // последние данные главного экрана
 let offersData = null;   // список машин на экране выбора
@@ -336,10 +338,13 @@ function renderAsks(list) {
 $("task-show").addEventListener("click", () => { if (current && current.task) startProgress(current.task.kind); });
 
 async function refresh() {
+  // Связи ещё нет — не рисовать красную строку и не спрашивать библиотеку (иначе полка замолчит на минуту).
+  if (!DEMO && !bridgeReady()) return;
   renderMainLibrary();
   try {
     render(DEMO ? demoState(DEMO) : await api().state(LANG));
   } catch (e) {
+    if (!DEMO && !bridgeReady()) return;
     render({ error: { text: t("app.error_state", { error: e }) } });
   }
 }
@@ -2308,6 +2313,7 @@ $("library-login").addEventListener("click", () => steamLogin($("library-login-m
 $("library-search").addEventListener("input", renderLibrary);
 let derpFocusAt = 0;
 window.addEventListener("focus", () => {
+  if (!DEMO && !bridgeReady()) return;
   if (!$("screen-library").hidden && libData && libData.accounts.length && Date.now() - libAt > LIB_STALE_MS) loadLibrary(true);
   // Вернулись со страницы оплаты Vast — баланс на экране обновить сразу, не ждать 15 секунд
   if (!DEMO && $("screen-progress").hidden) refresh();
@@ -2428,13 +2434,16 @@ $("lib-card").addEventListener("click", (e) => {
 });
 async function renderMainLibrary(force = false) {
   if (!force && Date.now() - libCardAt < 60000) return;
-  libCardAt = Date.now();
+  if (!DEMO && !bridgeReady()) return;
   let d = libData;
   if (!d) {
     try { d = DEMO ? demoLibrary() : await api().library(false); } catch (e) { return; }
     if (!d || d.error) return;
     if (!libData) libData = d;
   }
+  // Минута — только после удачного показа. Раньше метка ставилась до запроса: он падал без связи,
+  // и минуту баннер с полкой больше не спрашивались, хотя состояние машины уже было на экране.
+  libCardAt = Date.now();
   const card = $("lib-card"), strip = $("lib-strip");
   card.hidden = false;
   strip.innerHTML = "";
