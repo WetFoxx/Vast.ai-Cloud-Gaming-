@@ -1166,7 +1166,9 @@ class Api:
 
     def _open_moonlight(self, host, app):
         if moonlight.apps(host) is None:
-            # Moonlight ещё не связан с этой машиной — связать самим, без ручного PIN
+            # Moonlight ещё не связан с этой машиной — или помнит старый сертификат и не принимает новый
+            # (ошибка 401). Связать самим, без ручного PIN. Трансляцию без видимой связки не открывать:
+            # иначе Moonlight сам показывает серое окно с отказом сертификата.
             node = wolfnode.ts_node()
             for _ in range(2):                  # разовая заминка Tailscale (Windows, 2026-10-08) — ещё два раза
                 if node:
@@ -1176,15 +1178,22 @@ class Api:
             if not node:
                 settings.applog(f"moonlight: {host} — машины нет в Tailscale")
                 return {"error": {"key": "pair.no_machine", "params": {}, "text": "машины нет в Tailscale"}}
-            pairing.pair(host, node[1], on_notice=self._ssh_notice)
-            # Живой случай 2026-09-27 (друг): связка прошла, а трансляция сразу после неё не пошла, и Moonlight связку
-            # «не видел» — со второго нажатия (ещё одна связка) заработало. Теперь проверяем сами и повторяем за человека
-            if not self._sees_pairing(host):
-                settings.applog("moonlight: после связки Moonlight не видит машину — связываю ещё раз; журнал Moonlight: "
-                                + moonlight.log_tail())
+            paired = False
+            for attempt in range(2):
+                n = moonlight.forget(host)      # старый сертификат, иначе новая связка его не заменяет
+                if n:
+                    settings.applog(f"moonlight: стёр записей со старым сертификатом: {n}")
                 pairing.pair(host, node[1], on_notice=self._ssh_notice)
-                if not self._sees_pairing(host):
-                    settings.applog("moonlight: и после второй связки не видит; журнал Moonlight: " + moonlight.log_tail())
+                if self._sees_pairing(host):
+                    paired = True
+                    break
+                again = " — связываю ещё раз" if attempt == 0 else ""
+                settings.applog("moonlight: после связки Moonlight не видит машину" + again
+                                + "; журнал Moonlight: " + moonlight.log_tail())
+            if not paired:
+                settings.applog("moonlight: сертификат не совпал, трансляцию не открываю")
+                return {"error": {"key": "pair.cert", "params": {},
+                                  "text": "Moonlight не принял сертификат машины"}}
         args = self._stream_args()
         settings.applog(f"moonlight: трансляция {host} «{app}», разрешение/частота/битрейт: {args}")
         moonlight.stream(host, app, *args)

@@ -1224,6 +1224,7 @@ class TestMoonlight(unittest.TestCase):
         steps, seen = [], iter([None])                              # до связки не видит, после — видит
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
+             mock.patch.object(gui.moonlight, "forget", lambda host: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append(("pair", host, ip)) or True), \
              mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: steps.append(("stream", h, a)) or True), \
@@ -1236,6 +1237,7 @@ class TestMoonlight(unittest.TestCase):
         steps, seen, nodes = [], iter([None]), iter([None, (True, "100.1.1.1", "h")])
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
+             mock.patch.object(gui.moonlight, "forget", lambda host: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: next(nodes)), \
              mock.patch.object(gui.time, "sleep", lambda s: None), \
              mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append(("pair", ip)) or True), \
@@ -1250,6 +1252,7 @@ class TestMoonlight(unittest.TestCase):
         del APPLOG[:]
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
+             mock.patch.object(gui.moonlight, "forget", lambda host: None), \
              mock.patch.object(gui.moonlight, "log_tail", lambda n=12: "Warning: x"), \
              mock.patch.object(gui.time, "sleep", lambda s: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
@@ -1260,6 +1263,22 @@ class TestMoonlight(unittest.TestCase):
         self.assertEqual(steps, ["pair", "pair", "stream"])
         self.assertTrue(any("связываю ещё раз" in x and "Warning: x" in x for x in APPLOG), APPLOG)
 
+    def test_unseen_certificate_does_not_stream(self):
+        # Сертификат не совпал и после второй связки: серое окно Moonlight не открывать
+        steps = []
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: None), \
+             mock.patch.object(gui.moonlight, "forget", lambda host: steps.append("forget") or 1), \
+             mock.patch.object(gui.moonlight, "log_tail", lambda n=12: "SslHandshakeFailedError"), \
+             mock.patch.object(gui.time, "sleep", lambda s: None), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.pairing, "pair", lambda host, ip, on_notice=None: steps.append("pair") or True), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: steps.append("stream") or True), \
+             mock.patch.object(gui.settings, "set", lambda k, v: None):
+            result = gui.Api().open_moonlight("h", "Desktop")
+        self.assertEqual(result["error"]["key"], "pair.cert")
+        self.assertEqual(steps, ["forget", "pair", "forget", "pair"])
+
     def test_second_click_while_pairing_does_not_stream_twice(self):
         # Живой тест 2026-09-25: два нажатия во время связки → две трансляции, обе оборвались
         api, streams = gui.Api(), []
@@ -1268,6 +1287,7 @@ class TestMoonlight(unittest.TestCase):
             inside.set(); release.wait(5)
         with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
              mock.patch.object(gui.moonlight, "apps", lambda host: None), \
+             mock.patch.object(gui.moonlight, "forget", lambda host: None), \
              mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.pairing, "pair", slow_pair), \
              mock.patch.object(gui.moonlight, "log_tail", lambda n=12: ""), \
@@ -1278,8 +1298,10 @@ class TestMoonlight(unittest.TestCase):
             first.start(); inside.wait(5)
             self.assertEqual(api.open_moonlight("h", "Desktop"), {"ok": True, "busy": True})
             release.set(); first.join(5)
-            self.assertEqual(streams, ["Desktop"])
-            self.assertEqual(api.open_moonlight("h", "Desktop"), {"ok": True})   # потом — снова можно
+            self.assertEqual(streams, [])                 # связка так и не видна — трансляцию не открывать
+            again = api.open_moonlight("h", "Desktop")
+            self.assertNotEqual(again.get("busy"), True)  # замок снят, можно нажать ещё раз
+            self.assertEqual(again["error"]["key"], "pair.cert")
 
     def test_not_installed(self):
         with mock.patch.object(gui.moonlight, "path", lambda: None):

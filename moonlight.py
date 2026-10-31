@@ -18,6 +18,9 @@ import time
 import paths
 
 DEFAULT_APP = "Desktop"   # стандартное приложение Sunshine — рабочий стол
+# Имя, которое Sunshine называет Moonlight (wolf-setup, sunshine_name). Под ним Moonlight
+# хранит старый сертификат. Чужой компьютер с другим именем сюда не попадает.
+SUNSHINE_NAME = "vastai-gaming"
 # Разрешения на выбор (кроме родного — оно всегда первым); показываем не больше родного
 STANDARD = [(3840, 2160), (2560, 1600), (2560, 1440), (1920, 1200), (1920, 1080), (1680, 1050),
             (1600, 900), (1440, 900), (1280, 800), (1280, 720)]
@@ -60,6 +63,215 @@ def apps(host, timeout=25):
     names = [ln.strip() for ln in r.stdout.splitlines()
              if ln.strip() and not ln.startswith("Redirecting log output")]
     return names or None
+
+
+def without_stale(data, host, name=SUNSHINE_NAME):
+    """Копия настроек Moonlight без старых записей нашей машины.
+
+    data — плоский словарь как в настройках Moonlight: hosts.4.hostname, hosts.4.srvcert, …
+    Убираем запись, если её имя — name (сертификат от прошлой машины с тем же именем)
+    или адрес совпал с host. Остальные компьютеры и собственный сертификат Moonlight остаются.
+    Возвращает (новые данные, сколько записей убрано). Ноль — data тот же объект."""
+    indices = sorted({int(m.group(1)) for k in data if (m := re.match(r"hosts\.(\d+)\.", str(k)))})
+
+    def top(i):
+        prefix = f"hosts.{i}."
+        return {str(k)[len(prefix):]: v for k, v in data.items()
+                if str(k).startswith(prefix) and "." not in str(k)[len(prefix):]}
+
+    def drop(i):
+        fields = top(i)
+        hostname = str(fields.get("hostname") or "")
+        manual = str(fields.get("manualaddress") or "")
+        local = str(fields.get("localaddress") or "")
+        if name and hostname == name:
+            return True
+        return bool(host) and host in (manual, local)
+
+    kept = [i for i in indices if not drop(i)]
+    removed = len(indices) - len(kept)
+    if not removed:
+        return data, 0
+    mapping = {old: new for new, old in enumerate(kept, start=1)}
+    out = {}
+    for k, v in data.items():
+        m = re.match(r"hosts\.(\d+)\.(.*)", str(k))
+        if str(k) == "hosts.size":
+            continue
+        if not m:
+            out[k] = v
+            continue
+        old = int(m.group(1))
+        if old not in mapping:
+            continue
+        out[f"hosts.{mapping[old]}.{m.group(2)}"] = v
+    out["hosts.size"] = len(kept)
+    return out, removed
+
+
+def _quit_client():
+    """Закрыть окно Moonlight. Пока оно открыто, при выходе оно запишет старый сертификат обратно."""
+    if sys.platform == "darwin":
+        subprocess.run(["osascript", "-e", 'tell application "Moonlight" to quit'],
+                       capture_output=True, timeout=15)
+        for _ in range(40):
+            if subprocess.run(["pgrep", "-x", "Moonlight"], capture_output=True).returncode != 0:
+                return
+            time.sleep(0.25)
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/IM", "Moonlight.exe", "/T"], capture_output=True, timeout=15)
+
+
+def forget(host):
+    """Стереть в Moonlight старую запись нашей машины вместе с её сертификатом.
+
+    Иначе новая связка сертификат не заменяет: Moonlight сверяет старый и показывает
+    «Certificate verification failed (Error 401)». Другие компьютеры не трогает.
+    Возвращает, сколько записей стёрто."""
+    if not isinstance(host, str) or not host:
+        return 0
+    _quit_client()
+    if sys.platform == "darwin":
+        return _forget_mac(host)
+    if os.name == "nt":
+        return _forget_windows(host)
+    return 0
+
+
+def _forget_mac(host):
+    import plistlib
+    domain = "com.moonlight-stream.Moonlight"
+    try:
+        raw = subprocess.run(["defaults", "export", domain, "-"], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    if raw.returncode != 0 or not raw.stdout:
+        return 0
+    try:
+        data = plistlib.loads(raw.stdout)
+    except (ValueError, plistlib.InvalidFileException):
+        return 0
+    new, removed = without_stale(data, host)
+    if not removed:
+        return 0
+    tmp = os.path.join(tempfile.gettempdir(), "vastgame-moonlight.plist")
+    try:
+        with open(tmp, "wb") as f:
+            plistlib.dump(new, f, fmt=plistlib.FMT_XML)
+        r = subprocess.run(["defaults", "import", domain, tmp], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return removed if r.returncode == 0 else 0
+
+
+def _forget_windows(host):
+    """То же в реестре Windows (настройки Moonlight — QSettings)."""
+    import winreg
+    path = r"Software\Moonlight Game Streaming Project\Moonlight"
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_READ | winreg.KEY_WRITE)
+    except OSError:
+        return 0
+    try:
+        data = {}
+        _reg_flat(key, "", data)
+        if not any(str(k).startswith("hosts.") for k in data):
+            return 0
+        new, removed = without_stale(data, host)
+        if not removed:
+            return 0
+        _reg_delete_hosts(key)
+        _reg_write_hosts(key, {k: v for k, v in new.items() if str(k).startswith("hosts.")})
+        return removed
+    finally:
+        winreg.CloseKey(key)
+
+
+def _reg_flat(key, prefix, out):
+    import winreg
+    i = 0
+    while True:
+        try:
+            name, value, _typ = winreg.EnumValue(key, i)
+        except OSError:
+            break
+        i += 1
+        flat = (prefix + name).replace("\\", ".")
+        out[flat] = value
+    i = 0
+    while True:
+        try:
+            sub = winreg.EnumKey(key, i)
+        except OSError:
+            break
+        i += 1
+        with winreg.OpenKey(key, sub) as child:
+            _reg_flat(child, f"{prefix}{sub}.", out)
+
+
+def _reg_delete_hosts(key):
+    import winreg
+    # Значения с именем hosts\… на самом ключе и подключ hosts целиком.
+    names = []
+    i = 0
+    while True:
+        try:
+            name, _value, _typ = winreg.EnumValue(key, i)
+        except OSError:
+            break
+        i += 1
+        if name == "hosts" or name.startswith("hosts\\") or name.startswith("hosts."):
+            names.append(name)
+    for name in names:
+        winreg.DeleteValue(key, name)
+    try:
+        _reg_delete_tree(key, "hosts")
+    except OSError:
+        pass
+
+
+def _reg_delete_tree(key, sub):
+    import winreg
+    with winreg.OpenKey(key, sub, 0, winreg.KEY_READ | winreg.KEY_WRITE) as child:
+        while True:
+            try:
+                name = winreg.EnumKey(child, 0)
+            except OSError:
+                break
+            _reg_delete_tree(child, name)
+    winreg.DeleteKey(key, sub)
+
+
+def _reg_write_hosts(key, hosts):
+    import winreg
+    for flat, value in hosts.items():
+        parts = str(flat).split(".")
+        if len(parts) < 2:
+            continue
+        path, leaf = parts[:-1], parts[-1]
+        current = key
+        opened = []
+        try:
+            for part in path:
+                current = winreg.CreateKey(current, part)
+                opened.append(current)
+            if isinstance(value, bool):
+                value = int(value)
+            if isinstance(value, int) and not isinstance(value, bool):
+                winreg.SetValueEx(current, leaf, 0, winreg.REG_DWORD, int(value))
+            elif isinstance(value, (bytes, bytearray)):
+                winreg.SetValueEx(current, leaf, 0, winreg.REG_BINARY, bytes(value))
+            else:
+                winreg.SetValueEx(current, leaf, 0, winreg.REG_SZ, str(value))
+        finally:
+            for handle in reversed(opened):
+                winreg.CloseKey(handle)
 
 
 def streaming():
