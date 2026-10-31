@@ -24,7 +24,7 @@ Entras en Steam en la página del propio Steam, con un código QR o con usuario 
 
 Al pulsar un juego en la estantería o en la biblioteca se abre la lista de máquinas. En la ficha del juego, antes de alquilar, eliges «Con mods» o «Sin mods». «Máquina sin juego» alquila el escritorio y no inicia ningún juego.
 
-Después eliges la máquina y confirmas el precio. El programa la alquila, devuelve lo que hay en la nube, entra en la cuenta de Steam que toca, y Steam descarga e inicia el juego. Solo funciona una máquina a la vez. Otro juego en una máquina que ya está en marcha lo abres en Steam desde Moonlight. Para tomar otra máquina, pulsa primero «Terminar».
+Después eliges la máquina y confirmas el precio. El programa la alquila, devuelve lo que hay en la nube, entra en la cuenta de Steam que toca, y Steam descarga e inicia el juego.
 
 ## Biblioteca
 
@@ -32,9 +32,11 @@ En la pantalla principal hay una estantería con los últimos juegos. «Bibliote
 
 En la ficha del juego se ve con qué cuenta se iniciará, si los mods están activos y qué hay ya en la nube. Si el acceso a Steam ha caducado, la lista de juegos se queda, y en la cuenta aparece que hay que entrar de nuevo.
 
+![Biblioteca de juegos](docs/library.jpg)
+
 ## Lista de máquinas
 
-En cada máquina de la lista se ven la tarjeta, el precio por hora, el país, el ping y la velocidad de internet. Los filtros y el orden se recuerdan. El disco se elige con un control de 50 a 1000 GB, y el precio por hora ya incluye ese tamaño.
+En cada máquina de la lista se ven la tarjeta, el precio por hora, el país, el ping, la velocidad de internet y el precio del tráfico por TB. Los filtros y el orden se recuerdan. El disco se elige con un control de 50 a 1000 GB, y el precio por hora ya incluye ese tamaño.
 
 La pestaña Docker está abierta por defecto. Hay más máquinas, y normalmente están listas en uno a tres minutos. El mando no vibra, y Vast cobra aparte el tráfico de la transmisión. El filtro «Tráfico» deja los hosts en los que ese tráfico sale barato.
 
@@ -44,15 +46,19 @@ Hasta que no has jugado en una máquina concreta, el ping se muestra aproximado,
 
 Si Vast no levanta la máquina elegida en diez minutos, o en Docker no arrancan la pantalla o el codificador, el programa la borra y toma la siguiente que sirva de tu lista. Si no hay ninguna, vuelves a la lista. Cancelar el arranque borra la máquina si ya estaba alquilada.
 
+![Elegir una máquina](docs/machines.jpg)
+
 ## La transmisión
 
-La resolución por defecto es la nativa de tu monitor, y la tasa de bits está en automático: la calcula Moonlight. Los dos ajustes están en «Ajustes de transmisión», debajo del botón de inicio, y se recuerdan.
+La resolución por defecto es la nativa de tu monitor, y la tasa de bits está en automático: la calcula Moonlight. Los dos ajustes están en «Ajustes de transmisión», debajo del botón de inicio, y se recuerdan. Ahí se puede elegir la resolución y la tasa de bits. El ajuste más fino de la transmisión está en el propio Moonlight.
 
-Al lado está Steam Link. La primera vez que esa cuenta no está vinculada a tu ordenador, se abre la ventana de Steam Link y un campo para cuatro cifras. VastGame envía el código a Steam en la máquina y guarda el vínculo en la nube. Si no tienes el cliente, en Mac se abre la App Store, y en Windows el programa instala Steam Link él mismo.
+Al lado está Steam Link. La primera vez que esa cuenta no está vinculada a tu ordenador, se abre la ventana de Steam Link y un campo para cuatro cifras. VastGame envía el código a Steam en la máquina y guarda el vínculo en la nube. Si no tienes el cliente, en Mac se abre la App Store, y en Windows el programa instala Steam Link él mismo. Antes de jugar por Steam Link, conviene ajustar la transmisión en la aplicación Steam Link o en Steam en el host.
 
-Por la ventana de VastGame se puede mover uno con el mando y las flechas. Mientras Moonlight levanta el flujo, la pantalla queda cubierta por la ficha del juego.
+Por la ventana de VastGame se puede mover uno con el mando y las flechas.
 
 ## Mods
+
+!!!LOS MODS HAY QUE INSTALARLOS CON EL JUEGO CERRADO Y YA ACTUALIZADO!!!
 
 A la nube no va el juego en sí. Va la diferencia entre su carpeta y una instalación limpia de Steam: lo que añadiste, cambiaste o borraste mientras el juego estaba cerrado. Los registros y la caché no se llevan. El juego lo vuelve a descargar Steam en cada máquina.
 
@@ -98,6 +104,8 @@ Al lado está «Guardar el juego en la nube». Conviene activarlo en juegos con 
 
 ## Juegos que no son de Steam
 
+!!!VAST.AI NO APRUEBA EL USO DE TORRENTS Y HAY RIESGO DE BANEO, ASÍ QUE CONVIENE DESCARGAR LOS JUEGOS DE FUERA DE STEAM DE OTRA FORMA!!!
+
 En el escritorio de la máquina hay una carpeta Games. Ahí se pone un juego comprado fuera de Steam. Cuando aparece una carpeta nueva, VastGame pregunta por encima de todas las ventanas si hay que llevársela a la nube. Si respondes que sí, se sube a Google Drive y se descarga en las máquinas siguientes. Si respondes que no, se queda solo en esta máquina y desaparece con ella. Si no respondes, un juego nuevo se sube igual. Lo que ya está en la nube no se borra solo porque quites la carpeta en la máquina. Se quita en «Juegos en la nube», y otra vez son treinta días en la papelera de Drive.
 
 ## Partidas guardadas
@@ -107,6 +115,8 @@ Las partidas se van a la nube tanto mientras juegas como cuando pulsas «Termina
 Una partida se puede borrar en «Juegos en la nube». Si no hay copia en Steam Cloud, el juego no la devuelve, y el programa avisa de eso aparte.
 
 Si cierras sesión de una cuenta de Steam en la propia máquina, sus datos locales salen de la sesión en la nube y no vuelven a la siguiente máquina. Los archivos de partidas de los juegos no se tocan.
+
+![Juegos en la nube](docs/cloud.jpg)
 
 ## Cuando terminas
 

@@ -24,7 +24,7 @@ You sign in to Steam on Steam’s own page, with a QR code or with a login and p
 
 Pressing a game on the shelf or in the library opens the machine list. On the game card, before you rent, you choose With mods or Without mods. Machine without a game rents a desktop and does not launch a game.
 
-You then pick a machine and confirm the price. The app rents it, restores what is in the cloud, signs in to the right Steam account, and Steam downloads and starts the game. Only one machine runs at a time. Another game on a machine that is already up is launched in Steam through Moonlight. To take a different machine, press Finish first.
+You then pick a machine and confirm the price. The app rents it, restores what is in the cloud, signs in to the right Steam account, and Steam downloads and starts the game.
 
 ## Library
 
@@ -32,9 +32,11 @@ The home screen shows a shelf of recent games. Full library lists every game on 
 
 The game card shows which account will launch it, whether mods are on, and what is already in the cloud. If the Steam sign-in has expired, the game list stays, and the account is marked so you can sign in again.
 
+![Game library](docs/library.jpg)
+
 ## The machine list
 
-Each row shows the GPU, the hourly price, the country, the ping and the internet speed. Filters and sort order are remembered. Disk size is a slider from 50 to 1000 GB, and the hourly price includes that amount.
+Each row shows the GPU, the hourly price, the country, the ping, the internet speed and the traffic price per TB. Filters and sort order are remembered. Disk size is a slider from 50 to 1000 GB, and the hourly price includes that amount.
 
 The Docker tab is the default. There are more machines, and they are usually ready in one to three minutes. The gamepad does not rumble, and Vast bills stream traffic separately. The Traffic filter keeps hosts where that traffic is cheap.
 
@@ -44,15 +46,19 @@ Until you have played on a particular machine, the ping is an estimate from the 
 
 If Vast has not brought the chosen machine up within ten minutes, or the screen or the encoder fails to start on Docker, the app deletes it and takes the next suitable one from your list. If there is none, you return to the list. Cancel start deletes the machine if it has already been rented.
 
+![Choose a machine](docs/machines.jpg)
+
 ## The stream
 
-The default resolution is your monitor’s native resolution, and the bitrate is Auto, which Moonlight calculates. Both settings live under Stream settings below the launch button, and they are remembered.
+The default resolution is your monitor’s native resolution, and the bitrate is Auto, which Moonlight calculates. Both settings live under Stream settings below the launch button, and they are remembered. There you can choose the resolution and the bitrate. Deeper stream settings are in Moonlight itself.
 
-Steam Link is the button next to it. The first time this account is not paired with your computer, the Steam Link window opens and VastGame asks for the four-digit PIN. It sends the code to Steam on the machine and stores the pairing in the cloud. If the client is missing, the Mac App Store opens, and on Windows the app installs Steam Link itself.
+Steam Link is the button next to it. The first time this account is not paired with your computer, the Steam Link window opens and VastGame asks for the four-digit PIN. It sends the code to Steam on the machine and stores the pairing in the cloud. If the client is missing, the Mac App Store opens, and on Windows the app installs Steam Link itself. Before you play through Steam Link, set up the stream in the Steam Link app or in Steam on the host.
 
-You can move around the VastGame window with a gamepad and the arrow keys. While Moonlight is bringing the stream up, the screen is covered by the game’s title card.
+You can move around the VastGame window with a gamepad and the arrow keys.
 
 ## Mods
+
+!!!INSTALL MODS ONLY WHEN THE GAME IS CLOSED AND ALREADY UPDATED!!!
 
 What goes to the cloud is not the game itself. It is the difference between the game folder and a clean Steam install: files you added, changed or removed while the game was closed. Logs and cache are left out. Steam downloads the game again on every machine.
 
@@ -98,6 +104,8 @@ Keep the game in the cloud, next to it, is worth turning on for games that have 
 
 ## Games that are not from Steam
 
+!!!VAST.AI DOES NOT ALLOW TORRENTS, AND USING THEM CAN GET THE ACCOUNT BANNED. DOWNLOAD GAMES FROM OUTSIDE STEAM SOME OTHER WAY!!!
+
 The machine desktop has a Games folder. That is where a game bought outside Steam goes. When a new folder appears, VastGame asks, above every window, whether to take it to the cloud. Yes uploads it to Google Drive and downloads it on later machines. No leaves it only on this machine, and it disappears with the machine. If you do not answer, a new game is uploaded anyway. Something already in the cloud is not removed just because you delete the folder on the machine. You remove it in Games in the cloud, and it again sits in the Drive trash for thirty days.
 
 ## Saves
@@ -107,6 +115,8 @@ Saves go to the cloud both while you play and when you press Finish. That includ
 You can delete a save in Games in the cloud. If there is no copy in Steam Cloud, the game will not bring it back, and the app warns you about that separately.
 
 Signing out of a Steam account on the machine removes that account’s local data from the cloud session, so it does not come back next time. The save archives of the games are left alone.
+
+![Games in the cloud](docs/cloud.jpg)
 
 ## When you finish
 
