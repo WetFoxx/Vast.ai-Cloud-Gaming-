@@ -109,6 +109,26 @@ def without_stale(data, host, name=SUNSHINE_NAME):
     return out, removed
 
 
+def forget_plan(data, host):
+    """Что записать в настройки Moonlight и какие ключи стереть перед записью.
+
+    «defaults import» дописывает ключи и не удаляет старые: запись со старым сертификатом
+    остаётся на диске и всплывает, когда Moonlight увеличивает hosts.size. Непустой
+    hostsbackup Moonlight читает вместо hosts и возвращает тот же старый сертификат.
+    Возвращает (новые данные, ключи к удалению, сколько записей машины убрано)."""
+    new, removed = without_stale(data, host)
+    if not removed:
+        return data, [], 0
+
+    def backup(key):
+        s = str(key)
+        return s == "hostsbackup" or s.startswith("hostsbackup.")
+
+    cleaned = {k: v for k, v in new.items() if not backup(k)}
+    gone = [str(k) for k in data if backup(k) or (str(k).startswith("hosts.") and str(k) not in cleaned)]
+    return cleaned, gone, removed
+
+
 def _quit_client():
     """Закрыть окно Moonlight. Пока оно открыто, при выходе оно запишет старый сертификат обратно."""
     if sys.platform == "darwin":
@@ -152,9 +172,12 @@ def _forget_mac(host):
         data = plistlib.loads(raw.stdout)
     except (ValueError, plistlib.InvalidFileException):
         return 0
-    new, removed = without_stale(data, host)
+    new, gone, removed = forget_plan(data, host)
     if not removed:
         return 0
+    # import не стирает пропущенные ключи — их надо удалить до записи, иначе старый сертификат останется
+    for key in gone:
+        subprocess.run(["defaults", "delete", domain, key], capture_output=True, timeout=15)
     tmp = os.path.join(tempfile.gettempdir(), "vastgame-moonlight.plist")
     try:
         with open(tmp, "wb") as f:
@@ -183,7 +206,7 @@ def _forget_windows(host):
         _reg_flat(key, "", data)
         if not any(str(k).startswith("hosts.") for k in data):
             return 0
-        new, removed = without_stale(data, host)
+        new, _gone, removed = forget_plan(data, host)
         if not removed:
             return 0
         _reg_delete_hosts(key)
@@ -226,14 +249,15 @@ def _reg_delete_hosts(key):
         except OSError:
             break
         i += 1
-        if name == "hosts" or name.startswith("hosts\\") or name.startswith("hosts."):
+        if name in ("hosts", "hostsbackup") or name.startswith(("hosts\\", "hosts.", "hostsbackup\\", "hostsbackup.")):
             names.append(name)
     for name in names:
         winreg.DeleteValue(key, name)
-    try:
-        _reg_delete_tree(key, "hosts")
-    except OSError:
-        pass
+    for sub in ("hosts", "hostsbackup"):
+        try:
+            _reg_delete_tree(key, sub)
+        except OSError:
+            pass
 
 
 def _reg_delete_tree(key, sub):

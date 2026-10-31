@@ -1279,6 +1279,29 @@ class TestMoonlight(unittest.TestCase):
         self.assertEqual(result["error"]["key"], "pair.cert")
         self.assertEqual(steps, ["forget", "pair", "forget", "pair"])
 
+    def test_pair_error_is_retried_then_streams(self):
+        # Обрыв первой связки не должен ронять вызов: вторая попытка открывает трансляцию
+        calls = {"n": 0}
+
+        def pair(host, ip, on_notice=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise VastgameError("не вышло", key="pair.timeout")
+            return True
+
+        seen = iter([None])
+        with mock.patch.object(gui.moonlight, "path", lambda: "/x/Moonlight"), \
+             mock.patch.object(gui.moonlight, "apps", lambda host: next(seen, ["Desktop"])), \
+             mock.patch.object(gui.moonlight, "forget", lambda host: 0), \
+             mock.patch.object(gui.moonlight, "log_tail", lambda n=12: ""), \
+             mock.patch.object(gui.time, "sleep", lambda s: None), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.pairing, "pair", pair), \
+             mock.patch.object(gui.moonlight, "stream", lambda h, a, *opt: True), \
+             mock.patch.object(gui.settings, "set", lambda k, v: None):
+            self.assertEqual(gui.Api().open_moonlight("h", "Desktop"), {"ok": True})
+        self.assertEqual(calls["n"], 2)
+
     def test_second_click_while_pairing_does_not_stream_twice(self):
         # Живой тест 2026-09-25: два нажатия во время связки → две трансляции, обе оборвались
         api, streams = gui.Api(), []

@@ -1,5 +1,7 @@
 # tests/test_moonlight.py — какие записи Moonlight стирать перед новой связкой.
+import plistlib
 import unittest
+from unittest import mock
 
 import moonlight
 
@@ -70,3 +72,55 @@ class TestWithoutStale(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertEqual(new["hosts.size"], 0)
         self.assertNotIn("hosts.1.srvcert", new)
+
+
+class TestForgetPlan(unittest.TestCase):
+    def test_names_leftover_keys_and_backup(self):
+        data = hosts()
+        data["hostsbackup.1.hostname"] = "vastai-gaming"
+        data["hostsbackup.1.srvcert"] = b"backup-cert"
+        cleaned, gone, removed = moonlight.forget_plan(data, "vastai-gaming-6.tail.ts.net")
+        self.assertEqual(removed, 2)
+        self.assertIn("hosts.3.srvcert", gone)
+        self.assertIn("hosts.4.srvcert", gone)
+        self.assertIn("hosts.4.apps.1.name", gone)
+        self.assertIn("hostsbackup.1.hostname", gone)
+        self.assertIn("hostsbackup.1.srvcert", gone)
+        self.assertNotIn("hosts.1.hostname", gone)
+        self.assertEqual(cleaned["hosts.1.hostname"], "DESKTOP-NCBTFOS")
+        self.assertEqual(cleaned["certificate"], b"client-cert")
+        self.assertNotIn("hostsbackup.1.srvcert", cleaned)
+        self.assertNotIn("hosts.4.hostname", cleaned)
+
+    def test_mac_deletes_those_keys_before_import(self):
+        data = hosts()
+        data["hostsbackup.1.hostname"] = "vastai-gaming"
+        data["hostsbackup.1.srvcert"] = b"backup-cert"
+        blob = plistlib.dumps(data, fmt=plistlib.FMT_XML)
+        calls, imported = [], {}
+
+        def run(cmd, **kw):
+            calls.append(list(cmd))
+            class R:
+                returncode = 0
+                stdout = blob if len(cmd) > 1 and cmd[1] == "export" else b""
+            if len(cmd) > 1 and cmd[1] == "import":
+                with open(cmd[3], "rb") as f:
+                    imported["data"] = plistlib.loads(f.read())
+            return R()
+
+        with mock.patch.object(moonlight, "_quit_client", lambda: None), \
+             mock.patch.object(moonlight.subprocess, "run", run), \
+             mock.patch.object(moonlight.sys, "platform", "darwin"):
+            n = moonlight.forget("vastai-gaming-6.tail.ts.net")
+        self.assertEqual(n, 2)
+        deletes = [c[3] for c in calls if len(c) > 3 and c[1] == "delete"]
+        self.assertIn("hosts.4.srvcert", deletes)
+        self.assertIn("hostsbackup.1.srvcert", deletes)
+        self.assertNotIn("hosts.1.hostname", deletes)
+        kinds = [c[1] for c in calls]
+        self.assertLess(max(i for i, k in enumerate(kinds) if k == "delete"), kinds.index("import"))
+        self.assertEqual(imported["data"]["hosts.1.hostname"], "DESKTOP-NCBTFOS")
+        self.assertNotIn("hosts.3.hostname", imported["data"])
+        self.assertNotIn("hostsbackup.1.hostname", imported["data"])
+        self.assertEqual(imported["data"]["certificate"], b"client-cert")

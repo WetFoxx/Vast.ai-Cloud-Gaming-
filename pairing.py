@@ -4,6 +4,7 @@
 # Sunshine на машине. Здесь всё делает приложение:
 #   0. проверяет, что кабинет Sunshine принимает наш логин; нет — задаёт его и ждёт перезапуска Sunshine
 #      (ДО связки: перезапуск обрывает начатую связку);
+#   0.5. снимает клиентов, оставшихся от неудачных связок (иначе PIN принимается, а Moonlight не авторизован);
 #   1. придумывает PIN и запускает «Moonlight pair <машина> --pin PIN» — Moonlight ждёт подтверждения;
 #   2. отдаёт тот же PIN Sunshine через его API (https://<машина>:47990/api/pin, только через
 #      Tailscale) по логину кабинета Sunshine; новая Sunshine (с 2026.906) — вместе с номером связки;
@@ -134,6 +135,42 @@ def _pending(ip):
     return [p["id"] for p in items if isinstance(p, dict) and p.get("id")]
 
 
+def unpair_clients(ip):
+    """Снять всех клиентов Sunshine перед новой связкой.
+
+    Каждая неудачная попытка оставляет клиента «vastgame». С Sunshine 2026.906 PIN при этом
+    принимается, а сертификат Moonlight машина не признаёт — серое окно «Certificate verification
+    failed (Error 401)». Снятие всех клиентов — то же, что «Unpair All» в кабинете. Сразу после
+    этого идёт новая связка, так что накопленные записи запуску не мешают."""
+    try:
+        r = requests.post(f"https://{ip}:{PORT}/api/clients/unpair-all", json={}, auth=creds(),
+                          verify=False, timeout=15, allow_redirects=False)
+    except requests.RequestException:
+        applog("moonlight: старых клиентов Sunshine снять не удалось — нет связи")
+        return False
+    if _no_login(r) or r.status_code >= 400:
+        return False
+    try:
+        ok = bool(r.json().get("status"))
+    except ValueError:
+        return False
+    if ok:
+        applog("moonlight: старые клиенты Sunshine сняты")
+    return ok
+
+
+def _visible(host, wait=None):
+    """Moonlight уже видит машину: «list» печатает приложения. Выход процесса pair сам по себе
+    этого не значит — на Mac он закрывается через несколько секунд, ещё на запросе сертификата."""
+    end = time.time() + (PAIR_SETTLE if wait is None else wait)
+    while True:
+        if moonlight.apps(host) is not None:
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(2)
+
+
 def _cancel_stale(ip):
     """Перед связкой — отменить ожидающие связки. Прошлая неудачная попытка живёт в Sunshine ещё 5 минут,
     и новую с этого Mac Sunshine сразу отклоняет (409 «pairing session … already exists»).
@@ -186,10 +223,13 @@ def pair(host, ip, on_notice=None):
     applog(f"moonlight: связка с {host} ({ip})")
     t0 = time.time()
     try:
-        _pair(exe, host, ip, on_notice)
+        ok = _pair(exe, host, ip, on_notice)
     except VastgameError as e:
         applog(f"moonlight: связка не удалась за {time.time() - t0:.0f} с: {e}")
         raise
+    if not ok:
+        applog(f"moonlight: список приложений пуст, связки нет ({time.time() - t0:.0f} с)")
+        return False
     applog(f"moonlight: связано за {time.time() - t0:.0f} с")
     # Связка хранится в identity — выгрузить сразу, чтобы следующие машины были связаны без PIN.
     # </dev/null и скобки: команда уходит в фон на машине, и ssh не ждёт конца выгрузки
@@ -199,6 +239,7 @@ def pair(host, ip, on_notice=None):
 
 def _pair(exe, host, ip, on_notice):
     ensure_login(ip, on_notice)          # сначала логин кабинета (с перезапуском Sunshine), потом связка
+    unpair_clients(ip)                   # старые клиенты сняты до PIN, иначе новая связка снова не авторизована
     _cancel_stale(ip)
     pin = f"{secrets.randbelow(10000):04d}"
     with tempfile.NamedTemporaryFile("w+", suffix=".log") as log:
@@ -225,8 +266,8 @@ def _pair(exe, host, ip, on_notice):
                     p.wait(10)
                 except subprocess.TimeoutExpired:
                     p.kill()
-                if moonlight.apps(host) is not None:
-                    return
+                if _visible(host):
+                    return True
                 raise VastgameError("Moonlight не связался с машиной: связка не подтвердилась.", key="pair.failed",
                                     out="PIN принят, связка не видна")
             if p.poll() is None:
@@ -234,6 +275,8 @@ def _pair(exe, host, ip, on_notice):
             if p.returncode != 0:
                 out = paths.read_open_log(log).strip()[-200:]
                 raise VastgameError(f"Moonlight не связался с машиной: {out}", key="pair.failed", out=out)
+            # Код 0 — ещё не связка: процесс закрывается сам, пока запрос сертификата не закончен.
+            return _visible(host)
         finally:
             if p.poll() is None:
                 p.terminate()

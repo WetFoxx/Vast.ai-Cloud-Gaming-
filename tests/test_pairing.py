@@ -30,6 +30,14 @@ def setUpModule():
 
 LOG = []
 
+
+def _if_unpair(test, url):
+    """POST /api/clients/unpair-all — не PIN. Ответ как у Sunshine: status true."""
+    if not str(url).endswith("/api/clients/unpair-all"):
+        return None
+    test.order.append("unpair-all")
+    return FakeResponse(200, True)
+
 class FakeResponse:
     def __init__(self, code, status=None):
         self.status_code, self._status = code, status
@@ -50,6 +58,7 @@ class TestPair(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         for obj, name, value in [(pairing.moonlight, "path", lambda: str(exe)),
+                                 (pairing.moonlight, "apps", lambda host: ["Desktop"]),
                                  (pairing, "creds", lambda: ("vastgame", "secret")),
                                  (pairing, "ssh_run", self.fake_ssh),
                                  (pairing, "_later", lambda fn: fn()),   # фоновую выгрузку — сразу, для проверки
@@ -71,6 +80,9 @@ class TestPair(unittest.TestCase):
         return FakeResponse(200 if getattr(self, "creds_ok", False) else 401)
 
     def fake_post(self, url, json, auth, verify, timeout, **kw):
+        hit = _if_unpair(self, url)
+        if hit:
+            return hit
         self.posts.append(json["pin"])
         self.order.append("pin")
         if not getattr(self, "creds_ok", False):
@@ -91,7 +103,39 @@ class TestPair(unittest.TestCase):
         self.assertTrue(any("push identity" in c[0] for c in self.ssh))  # связка — сразу в облако
         # Логин задан ДО первого PIN: перезапуск Sunshine не обрывает связку
         self.assertLess(self.order.index("set-login"), self.order.index("pin"))
+        self.assertLess(self.order.index("unpair-all"), self.order.index("pin"))
         self.assertTrue(self.posts)
+
+    def test_exit_without_apps_is_not_paired(self):
+        # Moonlight закрывается с кодом 0, ещё не показав приложения. Это не связка:
+        # identity не выгружаем и «связано» не пишем — иначе следующая машина получит ту же кучу клиентов.
+        self.creds_ok = True
+        LOG.clear()
+        delete = getattr(self, "fake_delete", lambda *a, **k: FakeResponse(200, True))
+        with mock.patch.object(pairing.requests, "post", self.fake_post), \
+             mock.patch.object(pairing.requests, "delete", delete), \
+             mock.patch.object(pairing, "_visible", lambda host: False):
+            self.assertFalse(pairing.pair("h", "100.1.1.1"))
+        self.assertFalse(any("связано за" in x for x in LOG), LOG)
+        self.assertTrue(any("список приложений пуст" in x for x in LOG), LOG)
+        self.assertFalse(any("push identity" in c[0] for c in self.ssh))
+        self.assertIn("unpair-all", self.order)
+        if "pin" in self.order:
+            self.assertLess(self.order.index("unpair-all"), self.order.index("pin"))
+
+    def test_visible_waits_for_the_app_list(self):
+        # Список приложений появляется не в ту же секунду, что закрылся процесс pair.
+        clock = {"t": 0}
+        seen = iter([None, None, ["Desktop"]])
+        with mock.patch.object(pairing.time, "time", lambda: clock["t"]), \
+             mock.patch.object(pairing.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s)), \
+             mock.patch.object(pairing.moonlight, "apps", lambda host: next(seen)):
+            self.assertTrue(pairing._visible("h", wait=10))
+        clock["t"] = 0
+        with mock.patch.object(pairing.time, "time", lambda: clock["t"]), \
+             mock.patch.object(pairing.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s)), \
+             mock.patch.object(pairing.moonlight, "apps", lambda host: None):
+            self.assertFalse(pairing._visible("h", wait=4))
 
     def test_our_login_already_works(self):
         self.creds_ok = True
@@ -172,6 +216,9 @@ class TestPairNewSunshine(TestPair):
         return FakeJSON(200, {"status": True})
 
     def fake_post(self, url, json, auth, verify, timeout, **kw):
+        hit = _if_unpair(self, url)
+        if hit:
+            return hit
         self.bodies.append(dict(json))
         if "pairing_id" not in json:
             return FakeJSON(400, {"status": False, "error": "pairing_id must contain exactly 32 hexadecimal characters"})
@@ -218,6 +265,9 @@ class TestPairFreshSunshine(TestPairNewSunshine):
         return super().fake_get(url, auth, verify, timeout)
 
     def fake_post(self, url, json, auth, verify, timeout, **kw):
+        hit = _if_unpair(self, url)
+        if hit:
+            return hit
         if not self.creds_ok:
             self.bodies.append(dict(json))
             return self.welcome(kw, "POST")

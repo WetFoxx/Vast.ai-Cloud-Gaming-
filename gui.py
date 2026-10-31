@@ -1183,8 +1183,13 @@ class Api:
                 n = moonlight.forget(host)      # старый сертификат, иначе новая связка его не заменяет
                 if n:
                     settings.applog(f"moonlight: стёр записей со старым сертификатом: {n}")
-                pairing.pair(host, node[1], on_notice=self._ssh_notice)
-                if self._sees_pairing(host):
+                try:
+                    ok = pairing.pair(host, node[1], on_notice=self._ssh_notice)
+                except VastgameError as e:     # таймаут и обрыв — ещё одна попытка, а не тихий выход потока
+                    ok = False
+                    settings.applog(f"moonlight: {e}")
+                # pair сам снимает старых клиентов Sunshine и возвращает True, только если список приложений виден
+                if ok and self._sees_pairing(host):
                     paired = True
                     break
                 again = " — связываю ещё раз" if attempt == 0 else ""
