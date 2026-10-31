@@ -433,15 +433,24 @@ def log_tail(n=12):
 
 # ---- Steam Link
 def computer_name():
-    """Имя этого компьютера — так Steam Link обычно называется в Remote Play."""
+    """Имя этого компьютера — так Steam Link обычно называется в Remote Play (QHostInfo::localHostName / gethostname)."""
+    candidates = [socket.gethostname()]
     if sys.platform == "darwin":
-        try:
-            r = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True, timeout=5)
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return os.environ.get("COMPUTERNAME") or socket.gethostname()
+        for key in ("LocalHostName", "ComputerName"):
+            try:
+                r = subprocess.run(["scutil", "--get", key], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0 and r.stdout.strip():
+                    candidates.append(r.stdout.strip())
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        candidates.append(os.environ.get("COMPUTERNAME") or "")
+    for raw in candidates:
+        name = re.sub(r"\.local$", "", (raw or "").replace("\xa0", " ").strip(), flags=re.I)
+        name = re.sub(r"[\u2010-\u2015\u2212]+", "-", name).strip()
+        if name and name.lower() not in ("localhost", "localhost.localdomain"):
+            return name
+    return ""
 
 
 def steamlink_path():

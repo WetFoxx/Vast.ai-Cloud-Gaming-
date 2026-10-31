@@ -1370,9 +1370,32 @@ class TestMoonlight(unittest.TestCase):
             self.assertEqual(r6, {"ok": True, "need_pin": True, "account": "76561198000000001"})
         self.assertEqual(calls, [(None, True), (None, True), ((2560, 1600), False), (None, True),
                                  ((2560, 1600), False), (None, True)])
+        # Переключение на второй уже привязанный аккаунт, у которого номер устройства ещё не сохранён:
+        # номер первого аккаунта не мешает узнать второй по имени компьютера
+        saved = {"steamlink_paired": ["76561198000000001", "76561198000000002"],
+                 "steamlink_devices": {"76561198000000001": "a5f6d82b4ca3d79d"}}
+        seen_args = []
+        def run_multi(ip, cmd, args=(), **kw):
+            seen_args.append(list(args))
+            if args and args[0] == "a5f6d82b4ca3d79d":
+                return 0, "check: pin 76561198000000002\n"
+            return 0, "check: ok 76561198000000002 bbbbbbbbbbbbbbbb\n"
+        with mock.patch.object(gui.moonlight, "steamlink_path", lambda: "/Applications/Steam Link.app/Contents/MacOS/Steam Link"), \
+             mock.patch.object(gui.moonlight, "native_display", lambda: {"w": 2560, "h": 1600, "fps": 60}), \
+             mock.patch.object(gui.moonlight, "steamlink_stream", lambda size=None, windowed=False: True), \
+             mock.patch.object(gui.moonlight, "computer_name", lambda: "MacBook-Air-WetFox"), \
+             mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
+             mock.patch.object(gui.wolfnode, "run", run_multi), \
+             mock.patch.object(gui.settings, "get", lambda k, d=None: saved.get(k, d)), \
+             mock.patch.object(gui.settings, "set", lambda k, v: saved.__setitem__(k, v)):
+            r7 = gui.Api().open_steamlink(False)
+            self.assertEqual(r7, {"ok": True, "need_pin": False, "account": "76561198000000002"})
+            self.assertEqual(saved["steamlink_devices"]["76561198000000002"], "bbbbbbbbbbbbbbbb")
+            self.assertEqual(seen_args[0][0], "a5f6d82b4ca3d79d")
+            self.assertEqual(seen_args[1][0], "-")
 
     def test_pair_steamlink(self):
-        saved = {}
+        saved = {"steamlink_devices": {"76561198000000001": "deadbeef12345678"}}
         self.assertEqual(gui.Api().pair_steamlink("12a")["error"]["key"], "steamlink.pin.invalid")
         with mock.patch.object(gui.wolfnode, "ts_node", lambda: None), \
              mock.patch.object(gui.time, "sleep", lambda s: None):
@@ -1380,9 +1403,15 @@ class TestMoonlight(unittest.TestCase):
         with mock.patch.object(gui.wolfnode, "ts_node", lambda: (True, "100.1.1.1", "h")), \
              mock.patch.object(gui.settings, "get", lambda k, d=None: saved.get(k, d)), \
              mock.patch.object(gui.settings, "set", lambda k, v: saved.__setitem__(k, v)), \
-             mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args, **kw: (0, "pin: ok 76561198000000001\n") if args == ["1234"] else (1, "pin: nologin\n")):
+             mock.patch.object(gui.wolfnode, "run", lambda ip, cmd, args, **kw: (
+                 (0, "pin: ok 76561198000000001\n") if args == ["1234"] else
+                 (0, "pin: ok 76561198000000001 c0ffee1234567890\n") if args == ["9999"] else
+                 (1, "pin: nologin\n"))):
             self.assertEqual(gui.Api().pair_steamlink("1234"), {"ok": True, "account": "76561198000000001"})
             self.assertEqual(saved.get("steamlink_paired"), ["76561198000000001"])
+            self.assertEqual(saved.get("steamlink_devices"), {})
+            self.assertEqual(gui.Api().pair_steamlink("9999"), {"ok": True, "account": "76561198000000001"})
+            self.assertEqual(saved.get("steamlink_devices"), {"76561198000000001": "c0ffee1234567890"})
             self.assertEqual(gui.Api().pair_steamlink("5678")["error"]["key"], "steamlink.pin.nologin")
 
 

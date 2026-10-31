@@ -5565,7 +5565,7 @@ def _norm_name(name):
     """Имя компьютера и DeviceName из Steam сравниваются без регистра, пробелов и «.local»."""
     s = (name or "").strip().lower()
     s = re.sub(r"\.local$", "", s)
-    return re.sub(r"[\s_\-.'’]+", "", s)
+    return re.sub(r"[\s_\-\u2010-\u2015\u2212.'’]+", "", s)
 
 
 def _devices(root, sid):
@@ -5705,7 +5705,10 @@ def pin_check(root=None, port=8080, device_ids="", name="", known=""):
                     print(f"check: {st} {u}".strip())
                     return 0
                 devices = _devices(root, u)
+                cef_paired = (st == "paired")
                 st, did = _device_decision(devices, _split_ids(device_ids), name, _split_known(known), u)
+                if st == "pin" and cef_paired and not _split_ids(device_ids) and u in _split_known(known):
+                    st = "ok"
                 print(f"check: {st} {u}{(' ' + did) if st == 'ok' and did else ''}".strip())
                 return 0
         except Exception:
@@ -5734,7 +5737,12 @@ def pin(code, root=None, port=8080, wait=15):
         print("pin: invalid")
         return 2
     sid = active_account(root)
-    before = set(_devices(root, sid))
+    before = {sid: set(_devices(root, sid))} if sid else {}
+    if root and (Path(root) / "userdata").is_dir():
+        for d in (Path(root) / "userdata").iterdir():
+            if d.name.isdigit():
+                s = str(BASE + int(d.name))
+                before[s] = set(_devices(root, s))
     expr = (
         f"(function(){{"
         f"if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
@@ -5770,9 +5778,20 @@ def pin(code, root=None, port=8080, wait=15):
                     if isinstance(res, str) and res.startswith("ok"):
                         _, _, u = res.partition(" ")
                         u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
-                        after = _devices(root, u)
-                        added = [i for i in after if i not in before]
-                        did = added[-1] if len(added) == 1 else ""
+                        prev = before.get(u, set())
+                        did = ""
+                        for attempt in range(6):
+                            after = _devices(root, u)
+                            added = [i for i in after if i not in prev]
+                            if len(added) == 1:
+                                did = added[0]
+                                break
+                            if not added and len(after) == 1 and not prev:
+                                did = next(iter(after))
+                                break
+                            if not root or attempt == 5:
+                                break
+                            time.sleep(0.5)
                         print(f"pin: ok {u}{(' ' + did) if did else ''}".strip())
                         return 0
                 except Exception:

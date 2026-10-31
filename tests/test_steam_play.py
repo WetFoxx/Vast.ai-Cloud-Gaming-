@@ -243,16 +243,17 @@ class TestStateAndLogon(unittest.TestCase):
                 for i, n in ids)
             lc.write_text('"UserLocalConfigStore"\n{\n\t"streaming"\n\t{\n\t\t"Devices"\n\t\t{\n' + body + '\t\t}\n\t}\n}\n')
 
-        write([(mac, "MacBook-Air.local"), (win, "Desktop")])
+        write([(mac, "MacBook-Air-WetFox.local"), (win, "Desktop")])
         ask = lambda *extra: py("pin-check", root, 19, *extra)[1].strip()
         self.assertEqual(ask("-", "Other-PC", "-"), f"check: pin {B}")
         self.assertEqual(ask(win, "Desktop", "-"), f"check: ok {B} {win}")
-        self.assertEqual(ask("-", "MacBook Air", B), f"check: ok {B} {mac}")
+        self.assertEqual(ask("-", "MacBook-Air-WetFox", B), f"check: ok {B} {mac}")
+        self.assertEqual(ask("-", "MacBook Air\xa0— WetFox", B), f"check: ok {B} {mac}")
         (root / "logs/streaming_log.txt").write_text(
             f"{at} Remote Client service connection status: k_ERemoteDeviceAuthorizationNeedsPIN\n")
-        self.assertEqual(ask(mac, "MacBook Air", B), f"check: ok {B} {mac}")
+        self.assertEqual(ask(mac, "MacBook-Air-WetFox", B), f"check: ok {B} {mac}")
         write([(win, "Desktop")])
-        self.assertEqual(ask(mac, "MacBook Air", B), f"check: pin {B}")
+        self.assertEqual(ask(mac, "MacBook-Air-WetFox", B), f"check: pin {B}")
         self.assertEqual(ask(win, "Desktop", "-"), f"check: ok {B} {win}")
 
 

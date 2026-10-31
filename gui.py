@@ -1215,12 +1215,18 @@ class Api:
         return False
 
     # ---- Steam Link
-    def _steamlink_args(self):
+    def _steamlink_args(self, account=""):
         """Что сказать машине про этот компьютер: номера уже привязанных здесь устройств,
         имя компьютера и аккаунты, для которых PIN здесь уже вводили."""
         devs = settings.get("steamlink_devices") or {}
-        ids = [v.lower() for v in devs.values()
-               if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F]{8,64}", v)]
+        if account:
+            raw_ids = [devs[account]] if account in devs else []
+        else:
+            raw_ids = list(devs.values())
+        ids = []
+        for v in raw_ids:
+            if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F]{8,64}", v) and v.lower() not in ids:
+                ids.append(v.lower())
         known = [str(x) for x in (settings.get("steamlink_paired") or [])
                  if re.fullmatch(r"7656\d{13}", str(x))]
         name = moonlight.computer_name() or "-"
@@ -1247,7 +1253,18 @@ class Api:
                       out or "")
         if not m:
             return "", "", ""
-        return m.group(1), m.group(2) or "", (m.group(3) or "").lower()
+        status, account, device_id = m.group(1), m.group(2) or "", (m.group(3) or "").lower()
+        devs = settings.get("steamlink_devices") or {}
+        paired = settings.get("steamlink_paired") or []
+        if status == "pin" and account and devs and account not in devs and account in paired:
+            code, out = wolfnode.run(node[1], "steamlink-check", self._steamlink_args(account),
+                                     timeout=20, on_notice=self._ssh_notice)
+            settings.applog(f"steamlink-check ({account}): код={code}, ответ={(out or '').strip()!r}")
+            m = re.search(r"check:\s*(ok|pin|nologin|nosteam)(?:\s+(7656\d{13}))?(?:\s+([0-9a-fA-F]{8,64}))?",
+                          out or "")
+            if m:
+                status, account, device_id = m.group(1), m.group(2) or "", (m.group(3) or "").lower()
+        return status, account, device_id
 
     @staticmethod
     def _steamlink_needs_pin(status, account, device_id):
@@ -1285,6 +1302,15 @@ class Api:
         devs = dict(settings.get("steamlink_devices") or {})
         if devs.get(account) != device_id.lower():
             devs[account] = device_id.lower()
+            settings.set("steamlink_devices", devs)
+
+    @staticmethod
+    def _forget_steamlink_device(account):
+        if not account:
+            return
+        devs = dict(settings.get("steamlink_devices") or {})
+        if account in devs:
+            del devs[account]
             settings.set("steamlink_devices", devs)
 
     def open_steamlink(self, windowed=False):
@@ -1339,7 +1365,10 @@ class Api:
         device_id = (m.group(3) or "").lower() if m else ""
         if res == "ok":
             self._remember_steamlink_account(account)
-            self._remember_steamlink_device(account, device_id)
+            if device_id:
+                self._remember_steamlink_device(account, device_id)
+            else:
+                self._forget_steamlink_device(account)
             return {"ok": True, "account": account}
         if res == "nologin":
             return {"error": {"key": "steamlink.pin.nologin", "params": {}, "text": "в Steam на машине ещё не выполнен вход"}}

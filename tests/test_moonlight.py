@@ -124,3 +124,23 @@ class TestForgetPlan(unittest.TestCase):
         self.assertNotIn("hosts.3.hostname", imported["data"])
         self.assertNotIn("hostsbackup.1.hostname", imported["data"])
         self.assertEqual(imported["data"]["certificate"], b"client-cert")
+
+
+class TestComputerName(unittest.TestCase):
+    def test_prefers_hostname_and_strips_local(self):
+        with mock.patch.object(moonlight.socket, "gethostname", lambda: "MacBook-Air-WetFox.local"), \
+             mock.patch.object(moonlight.sys, "platform", "darwin"), \
+             mock.patch.object(moonlight.subprocess, "run",
+                               lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "MacBook Air\xa0— WetFox\n"})()):
+            self.assertEqual(moonlight.computer_name(), "MacBook-Air-WetFox")
+
+    def test_normalizes_unicode_dashes_and_nbsp_in_fallback(self):
+        with mock.patch.object(moonlight.socket, "gethostname", lambda: "localhost"), \
+             mock.patch.object(moonlight.sys, "platform", "darwin"), \
+             mock.patch.object(moonlight.subprocess, "run",
+                               lambda cmd, **kw: type("R", (), {
+                                   "returncode": 0 if cmd[-1] == "ComputerName" else 1,
+                                   "stdout": "MacBook Air\xa0— WetFox\n" if cmd[-1] == "ComputerName" else "",
+                               })()):
+            self.assertEqual(moonlight.computer_name(), "MacBook Air - WetFox")
+
