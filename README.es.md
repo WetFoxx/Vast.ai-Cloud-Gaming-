@@ -4,9 +4,7 @@
 
 > **Beta.** Ya hay gente usándola, y todavía cambia. Si algo se rompe, escríbelo en [Issues](https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/issues).
 
-VastGame sirve para jugar en una máquina alquilada de [Vast.ai](https://vast.ai) sin montarla de nuevo cada vez. Pulsas un juego de tu biblioteca de Steam y se abre la lista de máquinas. La máquina la eliges tú y confirmas el precio. Después del alquiler, Steam en la máquina descarga el juego y lo inicia, y Moonlight se abre solo. Las partidas, la sesión de Steam, los mods y los programas quedan en tu Google Drive y vuelven en la siguiente máquina. «Terminar» sube todo eso primero y solo entonces borra la máquina. Mientras no hay máquina, no se cobra nada.
-
-El programa elige otra máquina por su cuenta solo cuando la que elegiste no arranca. Entonces la borra y toma la siguiente de tu lista que no sea peor en tarjeta, precio y ping. Mientras la máquina elegida arranca con normalidad, no se sustituye por otra.
+VastGame sirve para jugar en una máquina alquilada de [Vast.ai](https://vast.ai) sin montarla de nuevo cada vez.
 
 ![Pantalla principal de VastGame](docs/home-es.jpg)
 
