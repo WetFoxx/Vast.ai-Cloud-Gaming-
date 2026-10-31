@@ -4,9 +4,7 @@
 
 > **Beta.** People are already using it, and it is still changing. If something breaks, write in [Issues](https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/issues).
 
-VastGame is for playing on a rented [Vast.ai](https://vast.ai) machine without setting that machine up again every time. You press a game in your Steam library, and the machine list opens. You pick the machine yourself and confirm the price. After the rental, Steam on the machine downloads the game and starts it, and Moonlight opens on its own. Saves, the Steam session, mods and programs stay in your Google Drive and come back on the next machine. Finish uploads all of that first and deletes the machine only after the upload is confirmed. Nothing is billed while no machine is running.
-
-The app picks a different machine on its own only when the one you chose fails to start. It deletes that one and takes the next from your list that is no worse in GPU, price and ping. While your machine is starting normally, nothing is substituted for it.
+VastGame is for playing on a rented [Vast.ai](https://vast.ai) machine without setting that machine up again every time.
 
 ![VastGame home screen](docs/home-en.jpg)
 
