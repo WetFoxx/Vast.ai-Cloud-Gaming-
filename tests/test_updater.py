@@ -785,6 +785,7 @@ class TestPublish(unittest.TestCase):
         create = next(c for c in self.tools.cmds if c[:3] == ["gh", "release", "create"])
         self.assertEqual(create[3:7], [f"vastgame-v{v}", str(self.dist / zip_name), str(self.dist / "vastgame-update.json"),
                                        str(self.dist / "vastgame-mac.dmg")])
+        self.assertIn(str(release.ROOT / "wolf-setup.sh"), create)
         self.assertIn("--latest", create)
         self.assertEqual(create[create.index("--repo") + 1], "WetFoxx/Vast.ai-Cloud-Gaming-")
         m = updater.verify(json.loads((self.dist / "vastgame-update.json").read_text()))

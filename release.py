@@ -306,6 +306,7 @@ def publish(notes):
                    f"ручной установки; описание {updater.WIN_MANIFEST}, подписано")
     else:
         windows = f"нет — выпуск только для Mac (нет dist.noindex/{updater.WIN_FILE.format(version=version)})"
+    files.append(ROOT / "wolf-setup.sh")  # setup.py ссылается на файл именно этого выпуска
 
     _step("Сводка")
     print(f"""  выпуск:   {tag} → github.com/{updater.REPO}/releases (станет «последним»)

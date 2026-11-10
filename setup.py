@@ -21,6 +21,7 @@ import drive
 import paths
 import settings
 from vastapi import KEY_FILE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
+from version import VERSION
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 
@@ -271,15 +272,14 @@ def step_tailscale():
     return False
 
 
-# Скрипт wolf-setup.sh — в публичном репозитории, ссылка закреплена на коммит.
+# Скрипт wolf-setup.sh — файл конкретного выпуска приложения на GitHub.
 # KVM берёт её из шаблона vastgame (onstart). Шаблон на Vast обновляет refresh_template:
 # правка здесь сама на машины не попадает.
-# [2026-10-30] v5.15: Steam Link — PIN отдельно для каждого компьютера.
-# v5.14 (823e0d4) остаётся по старому адресу: rclone качает помеченный архив.
-SCRIPT_VERSION = "v5.15"
-SCRIPT_URL = ("https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/"
-              "b987f65ab37f04420a4dfcec4f520c4520260fe5/wolf-setup.sh")
-# Docker качает тот же коммит переменной аренды WOLF_SCRIPT_URL, не из шаблона KVM.
+SCRIPT_VERSION = "v5.16"
+SCRIPT_RELEASE = f"vastgame-v{VERSION}"
+SCRIPT_URL = ("https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/releases/download/"
+              f"{SCRIPT_RELEASE}/wolf-setup.sh")
+# Docker получает адрес скрипта через переменную аренды WOLF_SCRIPT_URL.
 DOCKER_SCRIPT_VERSION = SCRIPT_VERSION
 DOCKER_SCRIPT_URL = SCRIPT_URL
 IMAGE, IMAGE_TAG = "docker.io/vastai/kvm", "ubuntu_desktop_22.04-2025-11-21"
@@ -346,7 +346,7 @@ def step_template():
     ok, msg = save_template(disk, lang, res, games)
     print(("  ✓ " if ok else "  ✗ ") + msg)
     if ok:
-        print(f"    Скрипт: wolf-setup.sh {SCRIPT_VERSION} ({SCRIPT_URL.split('/')[5][:7]})")
+        print(f"    Скрипт: wolf-setup.sh {SCRIPT_VERSION} ({SCRIPT_RELEASE})")
     return ok
 
 
