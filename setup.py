@@ -20,7 +20,7 @@ import keystore   # ключи и токены — в Связке ключей 
 import drive
 import paths
 import settings
-from vastapi import KEY_FILE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
+from vastapi import HOST, KEY_FILE, TEMPLATE_NAME, VastgameError, call, check_key, my_template
 from version import VERSION
 
 VAST_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
@@ -277,8 +277,8 @@ def step_tailscale():
 # правка здесь сама на машины не попадает.
 SCRIPT_VERSION = "v5.16"
 SCRIPT_RELEASE = f"vastgame-v{VERSION}"
-SCRIPT_URL = ("https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/releases/download/"
-              f"{SCRIPT_RELEASE}/wolf-setup.sh")
+SCRIPT_BASE = "https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-/releases/download/"
+SCRIPT_URL = f"{SCRIPT_BASE}{SCRIPT_RELEASE}/wolf-setup.sh"
 # Docker получает адрес скрипта через переменную аренды WOLF_SCRIPT_URL.
 DOCKER_SCRIPT_VERSION = SCRIPT_VERSION
 DOCKER_SCRIPT_URL = SCRIPT_URL
@@ -367,28 +367,69 @@ def save_template(disk, lang, res, games):
         "recommended_disk_space": int(disk),
         "private": True,
     }
-    if old:
-        body["hash_id"] = old["hash_id"]      # изменить существующий (как vastai update template)
-    r = call("PUT" if old else "POST", "template/", body)
-    if not r.get("success"):
-        return False, f"Vast не сохранил шаблон: {r.get('msg') or 'без объяснения'}"
-    # Проверка: шаблон читается обратно с нашими настройками
-    new = my_template()
-    if not new or new.get("onstart") != ONSTART or env_value(new.get("env"), "RES") != res:
-        return False, "Шаблон сохранён, но читается не так, как ожидалось — проверь на сайте Vast."
+    ok, msg = _write_template(body, old)
+    if not ok:
+        return False, msg
     return True, (f"Шаблон «{TEMPLATE_NAME}» {'обновлён' if old else 'создан'} (приватный): диск {disk} ГБ, "
                   f"разрешение {res}, язык Steam {lang or 'как в Steam'}, "
                   f"игры Steam {'в облаке' if games == '1' else 'из Steam'}.")
 
 
-def refresh_template():
-    """Пересохранить шаблон с текущими настройками — например, чтобы подхватить новый SCRIPT_URL."""
+def _write_template(body, old):
+    if old:
+        body = {**body, "id": old["id"], "hash_id": old["hash_id"]}
+        r = call("PUT", "template/", body, base=HOST + "api/v1/")
+    else:
+        r = call("POST", "template/", body)
+    if not r.get("success"):
+        return False, f"Vast не сохранил шаблон: {r.get('msg') or 'без объяснения'}"
+    new = my_template()
+    if (not new or new.get("onstart") != body["onstart"]
+            or env_value(new.get("env"), "RES") != env_value(body.get("env"), "RES")):
+        return False, "Шаблон сохранён, но читается не так, как ожидалось — проверь на сайте Vast."
+    return True, ""
+
+
+def _old_vastgame_launcher(onstart):
+    prefix, _, suffix = ONSTART.partition(SCRIPT_URL)
+    if not onstart.startswith(prefix) or not onstart.endswith(suffix):
+        return False
+    url = onstart[len(prefix):-len(suffix)]
+    if re.fullmatch(r"https://raw\.githubusercontent\.com/WetFoxx/Vast\.ai-Cloud-Gaming-/[0-9a-f]{40}/wolf-setup\.sh", url):
+        return True
+    match = re.fullmatch(re.escape(SCRIPT_BASE) + r"vastgame-v(\d+)\.(\d+)\.(\d+)/wolf-setup\.sh", url)
+    return bool(match and tuple(map(int, match.groups())) < tuple(map(int, VERSION.split("."))))
+
+
+def refresh_template(automatic=False):
+    """Заменить загрузчик в существующем шаблоне, сохранив его настройки."""
     old = my_template()
     if not old:
         return False, "Шаблона нет — пройди мастер: vastgame setup"
-    env = old.get("env") or ""
-    return save_template(int(old.get("recommended_disk_space") or 100), env_value(env, "STEAM_LANG") or "",
-                         env_value(env, "RES") or "1920x1200", env_value(env, "SYNC_STEAM_GAMES") or "0")
+    onstart = old.get("onstart") or ""
+    if onstart == ONSTART:
+        return True, ""
+    if automatic and (old.get("private") is not True or not _old_vastgame_launcher(onstart)):
+        return False, "Автоматически обновляется только штатный приватный шаблон vastgame."
+    if old.get("readme_hash") and "readme" not in old:
+        return False, "Vast не вернул описание шаблона. Обнови загрузчик на сайте Vast, чтобы сохранить описание."
+    # API v1 создаёт новую версию, поэтому передаём все доступные поля конфигурации.
+    fields = ("name", "desc", "readme", "readme_visible", "image", "tag", "repo", "href", "env", "args_str",
+              "runtype", "ssh_direct", "use_ssh", "jup_direct", "jupyter_dir", "use_jupyter_lab",
+              "docker_login_repo", "docker_login_user", "docker_login_pass", "extra_filters",
+              "recommended_disk_space", "private", "volume_info")
+    body = {key: old[key] for key in fields if key in old}
+    for key in ("extra_filters", "volume_info"):
+        if isinstance(body.get(key), str):
+            # GET может возвращать JSON строкой, а PUT ждёт объект.
+            try:
+                value = json.loads(body[key]) if body[key] else None
+            except ValueError:
+                return False, f"Vast вернул некорректное поле шаблона {key}."
+            if value is not None and not isinstance(value, dict):
+                return False, f"Vast вернул некорректное поле шаблона {key}."
+            body[key] = value
+    return _write_template({**body, "onstart": ONSTART}, old)
 
 
 TS_READY = ("NeedsLogin", "NeedsMachineAuth", "Running", "Stopped")   # Tailscale работает (вошёл или ждёт входа)

@@ -123,7 +123,7 @@ _templates = {}       # (отпечаток ключа, имя) → (когда,
 def my_template(name=TEMPLATE_NAME, max_age=0):
     """Мой шаблон с таким именем (dict) или None. Чужие шаблоны с тем же именем не берём.
     max_age — секунды: окну (список машин, «Настройка») годится запомненный не старше; аренде и мастеру — свежий (0).
-    Шаблон меняет только мастер (через API — тогда память сбрасывается) или человек на сайте Vast."""
+    При редактировании API v1 сохраняет прежние версии. Берём последнюю в каждой цепочке."""
     k = (hashlib.sha256(read_key().encode()).hexdigest()[:16], name)
     hit = _templates.get(k)
     if max_age and hit and time.time() - hit[0] < max_age:
@@ -133,6 +133,8 @@ def my_template(name=TEMPLATE_NAME, max_age=0):
         lambda: call("GET", "template/", params={"select_filters": json.dumps({"name": {"eq": name}})}))
     me, ts = who.get("id"), found.get("templates", [])
     mine = [t for t in ts if t.get("creator_id") == me]
+    superseded = {t["created_from_id"] for t in mine if t.get("created_from_id") is not None}
+    mine = [t for t in mine if t.get("id") not in superseded]
     if len(mine) > 1:
         raise VastgameError(f"Шаблонов «{name}» у тебя несколько ({len(mine)}) — удали лишние на сайте Vast.",
                             key="vast.templates_many", name=name, count=len(mine))

@@ -1147,6 +1147,18 @@ class TestSetupActions(unittest.TestCase):
         self.assertEqual(api.save_template("100", "Рус", "1920x1200")["error"]["key"], "setup.err.lang")
         self.assertEqual(api.save_template("100", "", "big")["error"]["key"], "setup.err.res")
 
+    def test_setup_status_refreshes_template_once(self):
+        api = gui.Api()
+        stale = {"id": "template", "state": "warn", "key": "setup.template.outdated"}
+        current = {"id": "template", "state": "ok", "key": "setup.template.ok"}
+        with mock.patch.object(gui.setupcheck, "status", side_effect=lambda fresh: {"steps": [stale], "ready": True}), \
+             mock.patch.object(gui.setupcheck, "template", side_effect=[stale, current]), \
+             mock.patch.object(gui.setup, "refresh_template", side_effect=gui.VastgameError("offline")) as refresh:
+            self.assertEqual(api.setup_status()["steps"], [stale])
+            self.assertEqual(api.setup_status()["steps"], [stale])
+            self.assertEqual(api.setup_status()["steps"], [current])
+        refresh.assert_called_once_with(automatic=True)
+
     def test_tailscale_key_format(self):
         self.assertEqual(gui.Api().save_tailscale_key("abc")["error"]["key"], "setup.err.ts_key")
 

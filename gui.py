@@ -110,6 +110,8 @@ class Api:
         self._front = None                  # приложение, которое было впереди до карточки (Moonlight) — вернуть
         self._answer_lock = threading.Lock()  # ответы машине — по одному (второй сразу мог бы потеряться)
         self._steam_lock = threading.Lock()   # окно входа Steam — одно
+        self._template_refresh_lock = threading.Lock()
+        self._template_refresh_attempted = False
 
     # ---- настройки
     def settings(self):
@@ -474,8 +476,25 @@ class Api:
             d = setupcheck.status(fresh=bool(fresh))
         except VastgameError as e:
             return {"error": error_data(e)}
+        for index, step in enumerate(d["steps"]):
+            if step["key"] == "setup.template.outdated":
+                self._refresh_template_status(d, index)
+                break
         snapshot.save("setup", d)
         return d
+
+    def _refresh_template_status(self, data, index):
+        # Проверка готовности запускается при открытии окна. При сбое оставляем кнопку для повтора.
+        with self._template_refresh_lock:
+            try:
+                if not self._template_refresh_attempted:
+                    self._template_refresh_attempted = True
+                    setup.refresh_template(automatic=True)
+                step = setupcheck.template()
+                if step["state"] == "ok":
+                    data["steps"][index] = step
+            except VastgameError:
+                pass
 
     # ---- Простая настройка: по одному шагу — программы → Vast → Google → Tailscale → остальное само
     def wizard_state(self):
@@ -747,7 +766,8 @@ class Api:
 
     def refresh_template(self):
         def refresh():
-            ok, msg = setup.refresh_template()
+            with self._template_refresh_lock:
+                ok, msg = setup.refresh_template()
             if not ok:
                 raise VastgameError(msg, key="setup.err.template")
         return self._simple(refresh)

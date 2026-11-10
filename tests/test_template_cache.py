@@ -9,6 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import setup  # noqa: E402
 import vastapi  # noqa: E402
 
 
@@ -24,6 +25,7 @@ class TestTemplateCache(unittest.TestCase):
     def setUp(self):
         self.key, self.calls, self.delay = "k1", [], 0
         self.tpl = {"id": 1, "creator_id": 7, "name": "vastgame", "onstart": "v1"}
+        self.versions = []
 
         def request(method, url, **kw):
             self.calls.append((method, url.rsplit("/api/v0/", 1)[-1]))
@@ -31,7 +33,7 @@ class TestTemplateCache(unittest.TestCase):
             if url.endswith("users/current/"):
                 return Resp({"id": 7})
             if url.endswith("template/") and method == "GET":
-                return Resp({"templates": [dict(self.tpl)]})
+                return Resp({"templates": [dict(self.tpl), *self.versions]})
             return Resp({"success": True})
         for name, value in (("read_key", lambda: self.key),):
             p = mock.patch.object(vastapi, name, value); p.start(); self.addCleanup(p.stop)
@@ -51,8 +53,40 @@ class TestTemplateCache(unittest.TestCase):
     def test_change_through_api_clears_memory(self):
         vastapi.my_template(max_age=600)
         self.tpl["onstart"] = "v2"
-        vastapi.call("PUT", "template/", {"hash_id": "x"})          # мастер обновил шаблон
+        vastapi.call("PUT", "template/", {"id": 1, "hash_id": "x"}, base=vastapi.HOST + "api/v1/")
         self.assertEqual(vastapi.my_template(max_age=600)["onstart"], "v2")
+
+    def test_automatic_refresh_uses_v1_and_preserves_settings(self):
+        url = "https://raw.githubusercontent.com/WetFoxx/Vast.ai-Cloud-Gaming-/" + "a" * 40 + "/wolf-setup.sh"
+        old = {**self.tpl, "hash_id": "old", "private": True, "image": "kvm", "recommended_disk_space": 140,
+               "env": "-e RES=1920x1200 -e EXTRA=keep", "desc": "My template", "extra_filters": '{"test": 1}',
+               "onstart": setup.ONSTART.replace(setup.SCRIPT_URL, url)}
+        new = {**old, "onstart": setup.ONSTART, "id": 2, "hash_id": "new"}
+        with mock.patch.object(setup, "my_template", side_effect=[old, new]), \
+             mock.patch.object(setup, "call", return_value={"success": True}) as write:
+            self.assertEqual(setup.refresh_template(automatic=True), (True, ""))
+        body = {key: value for key, value in old.items() if key != "creator_id"}
+        write.assert_called_once_with("PUT", "template/", {**body, "onstart": setup.ONSTART, "extra_filters": {"test": 1}},
+                                      base=vastapi.HOST + "api/v1/")
+
+    def test_latest_template_ignores_superseded_versions_but_rejects_duplicates(self):
+        v2 = {**self.tpl, "id": 2, "created_from_id": 1, "onstart": "v2"}
+        v3 = {**v2, "id": 3, "created_from_id": 2, "onstart": "v3"}
+        self.versions = [v3, v2]
+        self.assertEqual(vastapi.my_template(), v3)
+        self.versions.append({**self.tpl, "id": 4})
+        with self.assertRaises(vastapi.VastgameError) as error:
+            vastapi.my_template()
+        self.assertEqual(error.exception.key, "vast.templates_many")
+
+    def test_automatic_refresh_skips_custom_and_newer_launchers(self):
+        newer = setup.ONSTART.replace(setup.SCRIPT_URL, setup.SCRIPT_BASE + "vastgame-v100.0.0/wolf-setup.sh")
+        for onstart in ("echo custom", newer):
+            with self.subTest(onstart=onstart), \
+                 mock.patch.object(setup, "my_template", return_value={"private": True, "onstart": onstart}), \
+                 mock.patch.object(setup, "call") as write:
+                self.assertFalse(setup.refresh_template(automatic=True)[0])
+                write.assert_not_called()
 
     def test_other_key_other_memory_and_copy(self):
         t = vastapi.my_template(max_age=600)
