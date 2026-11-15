@@ -157,7 +157,10 @@
       <button id="tab-docker" role="tab" data-i18n="offers.mode.docker"></button>
       <button id="tab-kvm" role="tab" data-i18n="offers.mode.kvm"></button>
       <button class="tabs-refresh" id="offers-refresh" data-i18n="offers.refresh"></button>
-      <button id="offers-expand" data-i18n="offers.expand" hidden></button>
+      <button class="tabs-expand" id="offers-expand" type="button" hidden>
+        <span class="tabs-expand-icon" aria-hidden="true">+</span>
+        <span data-i18n="offers.expand"></span>
+      </button>
     </div>
     <!-- Каталог во время запуска: какая машина запускается (с ней сравниваются цена и пинг в списке) -->
     <section class="card attention replace-card" id="offers-current" hidden></section>
