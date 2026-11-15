@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# wolf-setup.sh v5.15 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
+# wolf-setup.sh v5.16 — Vast.ai KVM (docker.io/vastai/kvm:ubuntu_desktop_22.04)
 #                   и Docker-образ vastgame-desktop (WOLF_MODE=docker, экспериментально)
 # Steam + Sunshine + Tailscale/ZeroTier + инкрементальная синхронизация с Google Drive
 # ------------------------------------------------------------------------------
@@ -172,6 +172,9 @@ export SYNC_OTHER_GAMES="${SYNC_OTHER_GAMES:-1}"  # 1 = синхронизиро
 export SYNC_SAVES="${SYNC_SAVES:-1}"              # 1 = синхронизировать сохранения (префиксы Proton)
 export AUTO_RES="${AUTO_RES:-1}"                  # 1 = управлять разрешением (EDID/xorg + wolf-res)
 export WOLF_MODE="${WOLF_MODE:-kvm}"              # kvm | docker (v4.0; docker задаёт образ vastgame-desktop)
+export WOLF_STATE_AGENT="${WOLF_STATE_AGENT:-observe-only}"  # off | observe-only: пассивный наблюдатель ФС (этап 5)
+export WOLF_STATE_AGENT_OPTIN="${WOLF_STATE_AGENT_OPTIN:-0}"  # 1 = эксперимент фонового opt-in для game-- и pfx-- (выключен по умолчанию)
+export WOLF_OPTIN_INTERVAL_SEC="${WOLF_OPTIN_INTERVAL_SEC:-30}"
 
 set -uo pipefail
 umask 022
@@ -203,6 +206,9 @@ GMIN="${GAMES_SYNC_MIN:-15}"                   # период синхрониз
 NT="${NOTIFY_SAVES:-1}"                        # 1 = уведомлять о выгрузке сохранений
 NS="${NOTIFY_SEC:-8}"                          # сколько секунд показывать уведомление
 WP="${WOLF_PORT:-8099}"                        # порт страницы статуса (закрыт тем же firewall)
+SA="$WOLF_STATE_AGENT"                         # режим State Agent: off | observe-only (в /etc/wolf/env)
+OPTIN="$WOLF_STATE_AGENT_OPTIN"                # фоновый opt-in эксперимент для game-- и pfx-- (0 по умолчанию)
+OPTIN_SEC="$WOLF_OPTIN_INTERVAL_SEC"           # период фоновой проверки opt-in, с
 
 DU="${DESKTOP_USER:-$(getent passwd 1000 | cut -d: -f1)}"
 [ -n "$DU" ] || DU=$(getent passwd | awk -F: '$3>=1000 && $3<60000 {print $1; exit}')
@@ -271,11 +277,12 @@ umask 022
 # [v5.6] SMIN/GMIN — периоды синхронизации для wolf supervise (Docker): без них в /etc/wolf/env цикл получал пустые
 # значения и запускал state и games каждые 20 с вместо 5 и 15 мин (с v4.0; заметили 2026-10-08 — сохранения FF14
 # выгружались по кругу)
-declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD PD VI WM VGS VGP SMIN GMIN > /etc/wolf/env
+declare -p R ZT TSH TSX TSS SF SG SO SV AR SL RES PAR ZL ZG NT NS WP DU DH UI GD PD VI WM VGS VGP SMIN GMIN SA OPTIN OPTIN_SEC > /etc/wolf/env
 chmod 600 /etc/wolf/env
 
 # Общий лог пишет только root; у wolf-res (работает от пользователя) свой лог
 touch /var/log/wolf.log; chmod 644 /var/log/wolf.log
+touch /var/log/wolf-state-agent.log; chmod 644 /var/log/wolf-state-agent.log
 touch /var/log/wolf-res.log; chown "$DU:" /var/log/wolf-res.log; chmod 644 /var/log/wolf-res.log
 # [HARDENING #1] базовое разрешение для wolf-res (читается от пользователя)
 echo "$RES" > /etc/wolf-res.conf; chmod 644 /etc/wolf-res.conf
@@ -347,6 +354,7 @@ w /usr/local/bin/wolf <<'WOLF'
 #   wolf forget ИМЯ...     убрать архивы игр из облака (в корзину Drive) и больше
 #                          не выгружать их с этого инстанса
 #   wolf watch             следить за запуском и выходом игр (wolf-watch.service)
+#   wolf state-agent ...   пассивный наблюдатель ФС (Docker, observe-only | off)
 #   wolf firewall          [HARDENING #4] переприменить изоляцию портов
 #   wolf display           [HARDENING #1] привести EDID/xorg.conf к нужному виду и
 #                          вернуть базовый режим (может перезапустить X)
@@ -359,7 +367,7 @@ S=/var/lib/wolf     # h/ отпечаток  m/ манифест базы  v/ в
 T=/var/tmp/wolf     # временные файлы
 L=/run/wolf         # блокировки, найденный X-дисплей, boot-done
 D=:0 SR=
-mkdir -p "$S"/{h,m,v,p,st,nt,nm,x,pg} "$T" "$L"
+mkdir -p "$S"/{h,m,v,p,st,nt,nm,x,pg,shadow/prev,shadow/cursor} "$T" "$L"
 [ -f "$L/x" ] && . "$L/x"
 
 # ------------------------------------------------------------------ утилиты ---
@@ -404,6 +412,9 @@ sr() {
   for c in .steam/steam .local/share/Steam; do
     p=$(readlink -f "$DH/$c") && [ -d "$p/config" ] && { SR=${p#"$DH"/}; return 0; }
   done
+  for c in .steam/steam .local/share/Steam; do
+    p=$(readlink -f "$DH/$c") && [ -d "$p/steamapps" ] && { SR=${p#"$DH"/}; return 0; }
+  done
   return 1
 }
 
@@ -416,7 +427,7 @@ rver() {
         if(h!=""){d=b"."substr(h,1,8); dh=H[d".parts"]; if(dh=="") dh=H[d]; print h (dh!=""?"+"dh:"")}}' "${2:-$LS}"
 }
 names() { sed -n -E 's/\.tar\.zst(\.parts)?\t.*//p' "$LS" | awk '!s[$0]++' | grep -E "$1"; }
-# [v4.4] Большие архивы — частями, параллельно: parts put|get|rm ОБЪЕКТ [--no-trash] (ход — в wolf.log)
+# [v4.4] Большие архивы — частями: parts stage|publish|abort|get|rm ОБЪЕКТ (ход — в wolf.log)
 parts() { local c=$1; shift; WOLF_TMP="$T" WOLF_PG="${PG:-}" python3 /usr/local/bin/wolf-parts.py "$c" "$R" "$@" 2>>/var/log/wolf.log; }
 ld()    { find "$1" -mindepth 1 -maxdepth 1 -type d -printf "$2%f\n" 2>/dev/null; }
 # [v5.7] Игры из Games без тех, что сейчас добавляет помощник vg-open (метка ~/.local/share/vastgame/adding/ПАПКА с
@@ -608,7 +619,7 @@ delsz() { awk -F'\t' 'NR==FNR{d[$0]=1;next} ($1 in d){s+=$3} END{printf "%.0f", 
 gamearch() { case $1 in game--*|sgame--*|pfx--*|mod--*|prog--*|lgame--*|gsave--*) return 0 ;; esac; return 1; }
 # Перестать синхронизировать архив на этом инстансе: забыть версию, манифест и
 # отпечаток и поставить метку x/, чтобы таймеры и wolf-watch не выгрузили его снова
-drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1"; : > "$S/x/$1"; }
+drop() { rm -f "$S/h/$1" "$S/m/$1" "$S/v/$1" "$S/p/$1" "$S/id/$1" "$S/shadow/prev/$1.man" "$S/shadow/prev/$1.id" "$S/shadow/cursor/$1.json"; : > "$S/x/$1"; }
 # Каталоги установки из манифестов Steam: installdir из appmanifest_*.acf
 idirs() { sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$@" 2>/dev/null; }
 # [v4.2] Паспорта игр Steam хранятся в облаке всегда. Без синхронизации игр Steam паспорта игр, файлов которых
@@ -854,20 +865,62 @@ answer() {
     *)       log "answer: не понял '$k $a'"; return 1 ;;
   esac
   unask "$k" "$n"
+  case $k:$a in
+    new:yes|new:no|del:yes|mod:yes|mod:no)
+      if declare -F agent_reload >/dev/null 2>&1 \
+         && { [ "${WM:-kvm}" = docker ] || [ -s "$L/state-agent.pid" ] || [ -s "$L/state-agent-loop.pid" ]; }; then
+        agent_reload || true
+      fi ;;
+  esac
 }
-# Список игр для приложения — в облако файлом vastgame-games.json, когда меняется (wolf-games.py)
+# Список игр для приложения — файл vastgame-games.json. Блокировка только от двух вызовов на ЭТОЙ машине
+# (загрузка и таймер). Перед сборкой берётся свежий список облака: повторно загруженный архив снимается
+# с forgotten, если метки $S/x уже нет. Существующий каталог, который не прочитался, не перезаписывается.
+# Если между чтением и записью в облаке оказалась другая версия — её не затираем. Две игровые машины
+# сразу это не страхует: вторая может записать файл в щель после проверки.
 gindex() {
-  local j="$S/index.json" nj="$T/index.new"
-  [ -n "$SR" ] || sr
-  [ -n "$SR" ] || return 0
-  if [ ! -s "$j" ]; then
-    # прежний список из облака: в нём и игры, которых на этой машине нет; не скачался, хотя есть, — не трогаем
-    if grep -q $'^vastgame-games.json\t' "$LS" 2>/dev/null; then rc cat "$R/vastgame-games.json" > "$j" || { rm -f "$j"; return 0; }; fi
-  fi
-  u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --index 2>/dev/null \
-    | python3 /usr/local/bin/wolf-games.py index "$DH/$SR/steamapps" "$j" > "$nj" || return 0
-  cmp -s "$nj" "$j" 2>/dev/null && return 0
-  rc rcat "$R/vastgame-games.json" < "$nj" && mv -f "$nj" "$j" && log "список игр для приложения обновлён"
+  (
+    j="$S/index.json"; nj="$T/index.new"; base="$T/index.base"; nowf="$T/index.now"
+    ls="$T/ls.gindex"; ls2="$T/ls.gindex2"; old="$j"; have=""
+    flock 7 || exit 0
+    [ -n "$SR" ] || sr
+    [ -n "$SR" ] || exit 0
+    rl > "$ls" || { log "список игр: список облака не получен — каталог не перезаписываю"; exit 0; }
+    rm -f "$base" "$nowf"
+    if grep -q $'^vastgame-games.json\t' "$ls"; then
+      have=1
+      rc cat "$R/vastgame-games.json" > "$base" || {
+        log "список игр: каталог в облаке не прочитался — не перезаписываю"
+        rm -f "$base"
+        exit 0
+      }
+      old="$base"
+    fi
+    u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" --index 2>/dev/null \
+      | WOLF_STATE="$S" WOLF_LS="$ls" WOLF_HOME="$DH" WOLF_PROGRAMS="${PD:-}" \
+        python3 /usr/local/bin/wolf-games.py index "$DH/$SR/steamapps" "$old" > "$nj" || exit 0
+    if [ -n "$have" ] && cmp -s "$nj" "$base"; then exit 0; fi
+    if [ -n "$have" ]; then
+      rc cat "$R/vastgame-games.json" > "$nowf" || {
+        log "список игр: каталог в облаке перед записью не прочитался — не перезаписываю"
+        rm -f "$nj" "$nowf"
+        exit 0
+      }
+      if ! cmp -s "$base" "$nowf"; then
+        log "список игр: в облаке другая версия каталога — не затираю"
+        rm -f "$nj" "$nowf"
+        exit 0
+      fi
+    else
+      rl > "$ls2" || { log "список игр: список облака перед записью не получен — не перезаписываю"; rm -f "$nj"; exit 0; }
+      if grep -q $'^vastgame-games.json\t' "$ls2"; then
+        log "список игр: каталог в облаке появился — не затираю"
+        rm -f "$nj"
+        exit 0
+      fi
+    fi
+    rc rcat "$R/vastgame-games.json" < "$nj" && mv -f "$nj" "$j" && log "список игр для приложения обновлён"
+  ) 7>"$L/gindex.lock"
 }
 
 # ---------------------------------------------- игра из библиотеки (v4.8) ---
@@ -971,18 +1024,20 @@ mods_snap() {
 # [v5.6] Игра, которую докачивает её лаунчер, «в облаке» (sel.gdata): её файлы — архив lgame--НОМЕР--Название.
 # Восстановление — сразу после снимка чистой игры из Steam и до модов; восстановленное — слой игры (claim)
 lgame_restore() {
-  local a=$1 d=$2 n LS
+  local a=$1 d=$2 n LS c
   inlist "$a" sel.gdata || return 0
   LS=$T/ls.lgame-$a
   rl > "$LS" 2>/dev/null || { log "игра $a: не удалось получить список облака — лаунчер скачает её сам"; return 0; }
   n=$(sed -n -E "s/^(lgame--$a--[^\t]*)\.tar\.zst(\.parts)?\t.*/\1/p" "$LS" | head -1)
   [ -n "$n" ] || { log "игра $a: её файлов в облаке ещё нет — лаунчер скачает сам, при выключении уедут в облако"; return 0; }
   st play up "game"
-  if LS=$LS unpack "$n"; then
-    log "игра $a: файлы из облака на месте, лаунчеру осталось докачать новое ($(python3 /usr/local/bin/wolf-mods.py claim \
-      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv") файлов)"
-    spec "$n" && man "$n" > "$S/m/$n" && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+  if _IDIR=$d LS=$LS unpack "$n" && c=$(python3 /usr/local/bin/wolf-mods.py claim \
+      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv") \
+      && spec "$n" && { [ -s "$S/m/$n" ] || man "$n" > "$S/m/$n"; } && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"; then
+    log "игра $a: файлы из облака на месте, лаунчеру осталось докачать новое ($c файлов)"
   else
+    rm -f "$S/van/$a.game.tsv" "$S/m/$n" "$S/h/$n" "$S/v/$n" "$S/id/$n"
+    st "$n" err "ошибка восстановления"
     log "игра $a: из облака не восстановилась — лаунчер скачает её сам"
   fi
 }
@@ -990,17 +1045,19 @@ lgame_restore() {
 # всегда (с модами и без), восстановление — сразу после файлов игры и до модов; восстановленное — данные игры (claim data)
 gsave_name() { python3 /usr/local/bin/wolf-mods.py arch "$1" "$DH/$SR/steamapps/appmanifest_$1.acf" gsave; }
 gsave_restore() {
-  local a=$1 d=$2 n LS
+  local a=$1 d=$2 n LS c
   [ "$SV" = 1 ] || return 0
   LS=$T/ls.gsave-$a
   rl > "$LS" 2>/dev/null || { log "данные игры $a: не удалось получить список облака — игра начнёт с чистого листа"; return 0; }
   n=$(sed -n -E "s/^(gsave--$a--[^\t]*)\.tar\.zst(\.parts)?\t.*/\1/p" "$LS" | head -1)
   [ -n "$n" ] || return 0
-  if LS=$LS unpack "$n"; then
-    log "данные игры $a: из облака на месте ($(python3 /usr/local/bin/wolf-mods.py claim \
-      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" data) файлов)"
-    spec "$n" && man "$n" > "$S/m/$n" && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+  if _IDIR=$d LS=$LS unpack "$n" && c=$(python3 /usr/local/bin/wolf-mods.py claim \
+      "$DH/$SR/steamapps/common/$d" "$S/van/$a.tsv" data) \
+      && spec "$n" && { [ -s "$S/m/$n" ] || man "$n" > "$S/m/$n"; } && man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"; then
+    log "данные игры $a: из облака на месте ($c файлов)"
   else
+    rm -f "$S/van/$a.pend.tsv" "$S/m/$n" "$S/h/$n" "$S/v/$n" "$S/id/$n"
+    st "$n" err "ошибка восстановления"
     log "данные игры $a: из облака не восстановились"
   fi
 }
@@ -1129,7 +1186,37 @@ mods_apply() {
 }
 
 # ----------------------------------------------------------------- манифест ---
-F() { find "$@" \( -type d -printf '%p\td\0' -o -printf '%p\t%y\t%s\t%T@\t%l\0' \) 2>/dev/null; }
+# Ошибка обхода доходит до man и pack. Нет начального пути — необязательный путь Steam:
+# его не ищем и ошибкой не считаем. Путь есть, а find вернул ошибку — список неполный.
+F() {
+  local -a starts=() rest=()
+  local seen=0 arg err rc
+  for arg in "$@"; do
+    if [ "$seen" -eq 0 ]; then
+      case $arg in
+        \( | -*) seen=1; rest+=("$arg") ;;
+        *) [ -e "$arg" ] || [ -L "$arg" ] && starts+=("$arg") ;;
+      esac
+    else
+      rest+=("$arg")
+    fi
+  done
+  [ "${#starts[@]}" -gt 0 ] || return 0
+  err=$(mktemp "${T:-/tmp}/wolf-find.XXXXXX") || return 1
+  if [ "${#rest[@]}" -gt 0 ]; then
+    find "${starts[@]}" "${rest[@]}" \( -type d -printf '%p\td\0' -o -printf '%p\t%y\t%s\t%T@\t%l\0' \) 2>"$err"
+  else
+    find "${starts[@]}" \( -type d -printf '%p\td\0' -o -printf '%p\t%y\t%s\t%T@\t%l\0' \) 2>"$err"
+  fi
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "$err" >&2
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
+  return 0
+}
 
 spec() {
   B=$DH Z=$ZL K=1 DB=0 A=
@@ -1151,7 +1238,7 @@ spec() {
 
 # Что входит в архив (cwd = B)
 ls_() {
-  local s=$SR/steamapps
+  local s=$SR/steamapps walk=0
   case $1 in
     identity)      # machine-id; ключи ZeroTier; состояние Tailscale; Sunshine без логов
       F etc/machine-id var/lib/zerotier-one/identity.* var/lib/tailscale/tailscaled.state \
@@ -1163,14 +1250,15 @@ ls_() {
       F "$SR/appcache" -path "$SR/appcache/httpcache" -prune -o ;;
     steam-state)   # [HARDENING #5] вход и настройки: local.vdf, config/ (config.vdf/ConnectCache,
                    # loginusers.vdf), userdata/, registry.vdf, ssfn*, ссылки ~/.steam
-      F .steam -maxdepth 1 \( -type l -o -name registry.vdf \)
-      F "$SR/config" "$SR/userdata" -path "$SR/config/htmlcache" -prune -o
-      F "$SR" -maxdepth 1 \( -name local.vdf -o -name 'ssfn*' \)
+      F .steam -maxdepth 1 \( -type l -o -name registry.vdf \) || walk=1
+      F "$SR/config" "$SR/userdata" -path "$SR/config/htmlcache" -prune -o || walk=1
+      F "$SR" -maxdepth 1 \( -name local.vdf -o -name 'ssfn*' \) || walk=1
       # [v4.2] паспорта игр (appmanifest_*.acf) — всегда, в том числе спрятанные (acf_hide): раньше без
       # синхронизации игр Steam их здесь не было, и выгрузка удаляла их из облака — включённая потом
       # синхронизация уже не могла вернуть игры (Steam их «не знал»)
-      F "$s" -maxdepth 1 \( -name '*.acf' -o -name libraryfolders.vdf \)
-      F "$s/$HID" -maxdepth 1 -name '*.acf'; : ;;
+      F "$s" -maxdepth 1 \( -name '*.acf' -o -name libraryfolders.vdf \) || walk=1
+      F "$s/$HID" -maxdepth 1 -name '*.acf' || walk=1
+      return "$walk" ;;
     # [v5.6] без временных папок Windows в префиксе: лаунчер Square Enix качает туда патчи FF14 и всё время их
     # меняет — сохранения уходили в облако по кругу, по 2 ГБ каждые полминуты (живой случай 2026-10-08)
     compatdata) F "$s/compatdata" \( -ipath '*/drive_c/users/*/AppData/Local/Temp' -o -ipath '*/drive_c/windows/temp' \) -prune -o ;;
@@ -1182,7 +1270,16 @@ ls_() {
     gsave--*)   python3 /usr/local/bin/wolf-mods.py man "$s/common/$(idir "$A")" "$S/van/$A.tsv" data ;;
   esac
 }
-man() { [ -n "$SR" ] || sr; (cd "$B" && ls_ "$1") | LC_ALL=C sort -z; }
+man() {
+  # Обход сразу в sort: временный снимок не пишется. Байты те же, что у sort -z
+  # от полного вывода. Ошибка обхода или сортировки доходит до pack, даже если
+  # обход уже выдал часть списка — неполный поток тоже отсортирован, но код не ноль.
+  local -a man_pipe
+  [ -n "$SR" ] || sr
+  (cd "$B" && ls_ "$1") | LC_ALL=C sort -z
+  man_pipe=("${PIPESTATUS[@]}")
+  [ "${man_pipe[0]}" -eq 0 ] && [ "${man_pipe[1]}" -eq 0 ]
+}
 
 pool() {
   local f=$1 n; shift
@@ -1193,16 +1290,192 @@ pool() {
   wait
 }
 
+# Локальная подсказка, не часть архива. Номер файла и ctime_ns — что изменилось
+# с последней выгрузки: совпали, содержимое не читаем. Отдельное поле — хеш содержимого
+# в базе (для файлов базы, удалённых в дельте, оно тоже сохраняется). Накопительная дельта
+# собирается от базы, поэтому файл с тем же размером и временем, но другими байтами,
+# входит в неё снова, даже если с прошлой выгрузки он не менялся или был пересоздан после удаления.
+# Подсказки нет — один раз читаем всё и запоминаем, без лишней выгрузки.
+# После восстановления подсказка создаётся заново.
+idhint() {  # check КОРЕНЬ ТЕКУЩИЙ СТАРЫЙ НОВЫЙ ОТЛИЧИЯ СТАТ БАЗА | save/refresh/rebase
+  python3 - "$@" << 'PY'
+import hashlib, os, stat, sys
+mode, root = sys.argv[1], sys.argv[2]
+
+def records(path):
+    if not os.path.isfile(path):
+        return
+    for rec in open(path, "rb").read().split(b"\0"):
+        if rec:
+            yield rec.split(b"\t")
+
+def digest_of(path):
+    h, n = hashlib.sha256(), 0
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(1 << 20)
+            if not b:
+                break
+            h.update(b)
+            n += len(b)
+    return h.hexdigest().encode(), n
+
+def write_rows(dest, rows):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    open(dest, "wb").write(b"\0".join(rows) + (b"\0" if rows else b""))
+
+def write_stats(path, files, nbytes):
+    if path:
+        open(path, "w").write("%d\t%d\n" % (files, nbytes))
+
+def file_rows(manifest):
+    for rec in records(manifest):
+        if len(rec) > 1 and rec[1] in (b"d", b"l"):
+            continue
+        full = os.path.join(root, os.fsdecode(rec[0]))
+        st = os.lstat(full)
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        yield rec, full, st
+
+def prev_base(prev):
+    return prev[3] if len(prev) > 3 and prev[3] else prev[2]
+
+def load_old(path):
+    old = {}
+    for rec in records(path):
+        if len(rec) >= 4:
+            old[rec[0]] = rec[1:]
+    return old
+
+def load_base_keys(path):
+    base_keys = {}
+    for rec in records(path):
+        if len(rec) > 3 and rec[1] not in (b"d", b"l"):
+            base_keys[rec[0]] = (rec[2], rec[3])
+    return base_keys
+
+def carry_deleted(rows, old, seen, base_keys=None):
+    for rel in sorted(k for k in old if k not in seen):
+        if base_keys is not None and rel not in base_keys:
+            continue
+        base = prev_base(old[rel])
+        if base:
+            rows.append(b"\t".join((rel, b"", b"", b"", base)))
+
+def diff_manifest(manifest, old, base_keys=None, track_changed=False):
+    rows, changed, seen, files, nbytes, since = [], [], set(), 0, 0, False
+    for rec, full, st in file_rows(manifest):
+        rel = rec[0]
+        seen.add(rel)
+        ino, ctime = str(st.st_ino).encode(), str(st.st_ctime_ns).encode()
+        cur = (rec[2], rec[3]) if len(rec) > 3 else None
+        prev = old.get(rel)
+        if prev and prev[0] == ino and prev[1] == ctime:
+            sha = prev[2]
+            base = prev_base(prev)
+        else:
+            sha, n = digest_of(full)
+            files, nbytes = files + 1, nbytes + n
+            if prev:
+                base = prev_base(prev)
+                if prev[2] != sha:
+                    since = True
+            elif track_changed and old and base_keys.get(rel) == cur:
+                base = b"?"
+                since = True
+            else:
+                base = sha
+        if track_changed and sha != base and base_keys.get(rel) == cur:
+            changed.append(rel)
+        rows.append(b"\t".join((rel, ino, ctime, sha, base)))
+    carry_deleted(rows, old, seen, base_keys)
+    return rows, changed, files, nbytes, since
+
+if mode == "save":
+    manifest, dest = sys.argv[3], sys.argv[4]
+    stats = sys.argv[5] if len(sys.argv) > 5 else ""
+    rows, files, nbytes = [], 0, 0
+    for rec, full, st in file_rows(manifest):
+        digest, n = digest_of(full)
+        files, nbytes = files + 1, nbytes + n
+        rows.append(b"\t".join((rec[0], str(st.st_ino).encode(), str(st.st_ctime_ns).encode(), digest, digest)))
+    write_rows(dest, rows)
+    write_stats(stats, files, nbytes)
+    sys.exit(0)
+
+if mode == "rebase":
+    path = sys.argv[3]
+    rows = []
+    for rec in records(path):
+        if len(rec) >= 4 and rec[3]:
+            rows.append(b"\t".join((rec[0], rec[1], rec[2], rec[3], rec[3])))
+    write_rows(path, rows)
+    sys.exit(0)
+
+if mode == "refresh":
+    manifest, side = sys.argv[3], sys.argv[4]
+    stats = sys.argv[5] if len(sys.argv) > 5 else ""
+    basep = sys.argv[6] if len(sys.argv) > 6 else ""
+    old = load_old(side)
+    base_keys = load_base_keys(basep) if basep and os.path.isfile(basep) else None
+    rows, _, files, nbytes, _ = diff_manifest(manifest, old, base_keys, track_changed=False)
+    write_rows(side, rows)
+    write_stats(stats, files, nbytes)
+    sys.exit(0)
+
+manifest, oldp, newp, changedp, statsp = sys.argv[3:8]
+basep = sys.argv[8] if len(sys.argv) > 8 else ""
+old = load_old(oldp)
+base_keys = load_base_keys(basep)
+rows, changed, files, nbytes, since = diff_manifest(manifest, old, base_keys, track_changed=True)
+write_rows(newp, rows)
+write_rows(changedp, changed)
+write_stats(statsp, files, nbytes)
+sys.exit(2 if since else 0)
+PY
+}
+
+# Снимок из манифеста ещё совпадает с диском: размер и mtime каждого файла.
+# Каталоги не проверяются. Содержимое при тех же размере и mtime не перечитывается.
+stable() {  # $1 NUL-манифест  $2 корень
+  python3 - "$1" "$2" << 'PY'
+import os, sys
+man, root = sys.argv[1], sys.argv[2]
+for rec in open(man, "rb").read().split(b"\0"):
+    if not rec:
+        continue
+    f = rec.split(b"\t")
+    if len(f) > 1 and f[1] == b"d":
+        continue
+    if len(f) < 4:
+        sys.exit(1)
+    full = os.path.join(root, os.fsdecode(f[0]))
+    try:
+        st = os.lstat(full)
+    except OSError:
+        sys.exit(1)
+    if st.st_size != int(f[2]) or abs(st.st_mtime - float(f[3])) > 1e-4:
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
 # ----------------------------------------------------------------- выгрузка ---
-# [HARDENING #2] Всегда пишем в ИМЯ.part, боевой файл заменяем только успешным
-# moveto; при обрыве сети боевой архив не тронут. Перезапись боевого через
-# moveto (rc, trash=true) уводит старую версию в корзину — восстановимо.
+# [HARDENING #2] Подготовка и публикация разделены. Конвейер tar|zstd пишет только
+# во временное имя (ОБЪЕКТ.part или новое поколение частей и ОБЪЕКТ.parts.new).
+# Боевое имя меняется вызовом parts publish и только если tar, счётчик, zstd и
+# подготовка завершились успешно, а выгрузка повторно сошлась по MD5 и размеру.
+# Обрыв упаковщика оставляет прежний одиночный архив, .parts и дельту.
 pack() {
   local n=$1 w="$T/$1.w" fp rv lv o f=1 s x=() t=$SECONDS
+  local stage_log="$S/staging/$n"
   spec "$n" || return 0
   exec 8> "$L/$n.lock"
   # при немедленной выгрузке (NOW) ждём, пока архив освободит другой проход, а не пропускаем
   if [ -n "${NOW:-}" ]; then flock -w 900 8; else flock -n 8; fi || return 0
+  # Если Python погибнет первым, дочерний rclone удержит блокировку до своей остановки.
+  local -x WOLF_PART_LOCK_FD=8
   # Убран из облака (wolf forget или вручную на Drive) — больше не выгружаем.
   # Метка проверяется под блокировкой, чтобы не разминуться с идущим wolf forget.
   # FORCE=1 wolf push ИМЯ снимает метку и выгружает архив заново.
@@ -1210,11 +1483,63 @@ pack() {
     [ -n "${FORCE:-}" ] || return 0
     rm -f "$S/x/$n"
   fi
-  mkdir -p "$w"
+  # Прошлая публикация .parts не была проверена: не качать заново, пока не ясно, какое оглавление боевое.
+  if [ -s "$S/pending/$n" ]; then
+    o=$(sed -n 's/^object //p' "$S/pending/$n" | head -1)
+    [ -n "$o" ] || o=$n.tar.zst
+    sed '1{/^object /d;}' "$S/pending/$n" | parts resume "$o"
+    pr=$?
+    if [ "$pr" -eq 0 ]; then
+      # Сверка кончилась. Манифест прошлой подтверждённой версии больше не база для дельты:
+      # в этом же проходе выгружаем то, что лежит на диске сейчас, и только потом можно сказать ok.
+      rm -f "$stage_log" || return 1
+      rm -f "$S/pending/$n" "$S/m/$n" "$S/h/$n"
+      { rl > "$T/resume.ls" && rver "$n" "$T/resume.ls"; } > "$S/v/$n" || echo "?" > "$S/v/$n"
+    elif [ "$pr" -eq 2 ] || { [ "$pr" -eq 3 ] && [ -f "$stage_log" ]; }; then
+      st "$n" err "выгрузка не подтверждена: публикация не проверена"
+      return 1
+    else
+      rm -f "$S/pending/$n"
+    fi
+  fi
+  if [ -f "$stage_log" ] && ! WOLF_STAGE_LOG="$stage_log" parts recover-stage "$n.tar.zst"; then
+    st "$n" err "не удалось разобрать прерванную подготовку — выгрузка не подтверждена"
+    return 1
+  fi
+  mkdir -p "$w" || { st "$n" err "нет места для рабочей папки выгрузки"; return 1; }
   man "$n" > "$w/c"
-  if ! { [ -s "$w/c" ] && fp=$(sha1sum < "$w/c" | cut -c1-40) && [ "$fp" != "$(rd "$S/h/$n")" ]; }; then
+  mw=$?
+  if [ "$mw" -ne 0 ]; then
+    st "$n" err "обход файлов не удался — выгрузка не подтверждена"
+    rm -rf "$w"; return 1
+  fi
+  fp=; content=0
+  if [ -s "$w/c" ]; then
+    fp=$(sha1sum < "$w/c" | cut -c1-40)
+    idhint check "$B" "$w/c" "$S/id/$n" "$w/id" "$w/changed" "$T/content-read" "$S/m/$n" || content=$?
+    if [ "$content" -eq 1 ]; then
+      st "$n" err "не прочиталось содержимое — выгрузка не подтверждена"
+      rm -rf "$w"; return 1
+    fi
+  fi
+  # Отпечаток манифеста тот же и ни один файл не изменился при тех же размере и времени.
+  if [ "$content" -eq 0 ] && { [ -z "$fp" ] || [ "$fp" = "$(rd "$S/h/$n")" ]; }; then
+    if declare -F shadow_enabled >/dev/null 2>&1 && shadow_enabled; then
+      shadow_mark_boundary "$n" "$B" "$w/c" "$w/id" "$w/boundary.json"
+      # Штатная сверка после паузы/фиксации границы: конкурентная запись не должна давать ложный ok.
+      if ! man "$n" > "$w/now"; then
+        st "$n" err "обход файлов не удался — выгрузка не подтверждена"
+        rm -rf "$w"; return 1
+      elif ! cmp -s "$w/c" "$w/now"; then
+        st "$n" err "файлы изменились после чтения — выгрузка не подтверждена"
+        rm -rf "$w"; return 1
+      fi
+      shadow_compare_pack "$n" "$B" "$w/c" "$w/id" 0 "$w/boundary.json"
+    fi
+    if [ -f "$w/id" ]; then mkdir -p "$S/id"; mv -f "$w/id" "$S/id/$n"; fi
     rm -rf "$w"; return 0
   fi
+  [ "$content" -eq 2 ] && content=1 || content=0
   rv=$(rver "$n"); lv=$(rd "$S/v/$n")
   # Архив игры пропал из облака, хотя этот инстанс его знал, — его удалили с Drive
   # вручную. Это решение пользователя: не воюем с ним и заново не выгружаем.
@@ -1249,29 +1574,111 @@ pack() {
   else
     o=$n.tar.zst.${rv:0:8};  cut -zf1 "$w/d" > "$w/l"; x=(-C "$w" ".wolf-del.$n")
   fi
+  # Содержимое изменилось, а запись манифеста — нет. Файл всё равно входит в выгрузку,
+  # в том числе в дельту к прежней базе. Формат записи манифеста не меняется.
+  if [ -s "$w/changed" ]; then
+    python3 - "$w/l" "$w/changed" << 'PY'
+import sys
+seen = []
+for path in sys.argv[1:]:
+    for rec in open(path, "rb").read().split(b"\0"):
+        if rec and rec not in seen:
+            seen.append(rec)
+open(sys.argv[1], "wb").write(b"\0".join(seen) + (b"\0" if seen else b""))
+PY
+  fi
   st "$n" up "выгрузка $o"
   rcp deletefile "$R/$o.part" &>/dev/null       # хвост прерванной выгрузки — мимо корзины
-  # [v4.6] между tar и zstd — счётчик хода (проценты от объёма файлов, скорость) для приложения
-  tar -cf - -C "$B" --no-recursion --null -T "$w/l" "${x[@]}" --ignore-failed-read \
+  rcp deletefile "$R/$o.parts.new" &>/dev/null
+  : > "$w/stage"
+  # [v4.6] между tar и zstd — счётчик хода (проценты от объёма файлов, скорость) для приложения.
+  # parts stage только готовит выгрузку. Публикация — отдельным шагом, после кода всего конвейера.
+  # Файл из манифеста, исчезнувший до чтения tar, — ошибка: иначе новое оглавление
+  # публикуется без него. Удаление до манифеста в список не попадает и уходит в облако как раньше.
+  tar -cf - -C "$B" --no-recursion --null -T "$w/l" "${x[@]}" \
       --warning=no-file-changed --warning=no-file-removed 2>> "$T/tar.err" \
     | WOLF_PG="$S/pg/$n" WOLF_PG_TOTAL="$(sz "$([ $f = 1 ] && echo "$w/c" || echo "$w/d")")" \
       python3 /usr/local/bin/wolf-parts.py count \
     | zstd -q -T0 -"$Z" \
-    | parts put "$o"            # [v4.4] маленький — одним файлом (.part → переименование), большой — частями
+    | WOLF_STAGE_LOG="$stage_log" parts stage "$o" > "$w/stage"
   s=("${PIPESTATUS[@]}")
-  if [ "${s[0]}" -le 1 ] && [ "${s[1]}${s[2]}${s[3]}" = 000 ]; then
+  pub=1
+  drift=0
+  badwalk=0
+  if [ "${s[0]}" -eq 1 ]; then
+    st "$n" err "файл изменился во время чтения — выгрузка не подтверждена"
+    [ -s "$w/stage" ] && parts abort "$o" < "$w/stage" || true
+    rcp deletefile "$R/$o.part" &>/dev/null
+    rcp deletefile "$R/$o.parts.new" &>/dev/null
+    rm -rf "$w"; return 1
+  fi
+  if [ "${s[0]}" -eq 0 ] && [ "${s[1]}${s[2]}${s[3]}" = 000 ] && [ -s "$w/stage" ]; then
+    if declare -F shadow_enabled >/dev/null 2>&1 && shadow_enabled; then
+      shadow_mark_boundary "$n" "$B" "$w/c" "$w/id" "$w/boundary.json"
+    fi
+    # Тот же man, что собрал исходный манифест: новый файл, удаление и смена
+    # размера или времени видны как другой снимок. Ошибка обхода — не «список совпал»:
+    # неполный снимок публиковать нельзя. Содержимое при тех же размере и времени не читается.
+    if ! man "$n" > "$w/now"; then
+      badwalk=1
+    elif ! cmp -s "$w/c" "$w/now"; then
+      drift=1
+    else
+    # Квитанция до публикации: если процесс умрёт после неё, но до записи $S/v,
+    # повтор узнает свою выгрузку по MD5 и не примет её за чужую версию.
+    if mkdir -p "$S/pending" && { echo "object $o" && cat "$w/stage"; } > "$S/pending/$n.tmp" \
+        && mv -f "$S/pending/$n.tmp" "$S/pending/$n"; then
+      parts publish "$o" < "$w/stage"
+      pub=$?
+    fi
+    fi
+  fi
+  if [ "$badwalk" -eq 1 ]; then
+    st "$n" err "обход файлов не удался — выгрузка не подтверждена"
+    [ -s "$w/stage" ] && parts abort "$o" < "$w/stage" || true
+    rcp deletefile "$R/$o.part" &>/dev/null
+    rcp deletefile "$R/$o.parts.new" &>/dev/null
+    rm -rf "$w"; return 1
+  fi
+  if [ "$drift" -eq 1 ]; then
+    st "$n" err "файлы изменились после чтения — выгрузка не подтверждена"
+    [ -s "$w/stage" ] && parts abort "$o" < "$w/stage" || true
+    rcp deletefile "$R/$o.part" &>/dev/null
+    rcp deletefile "$R/$o.parts.new" &>/dev/null
+    rm -rf "$w"; return 1
+  fi
+  if [ "$pub" -eq 0 ]; then
+    if declare -F shadow_enabled >/dev/null 2>&1 && shadow_enabled; then
+      shadow_compare_pack "$n" "$B" "$w/c" "$w/id" 1 "$w/boundary.json"
+    fi
     if [ $f = 1 ]; then
       mv "$w/c" "$S/m/$n"
       [[ $rv = *+* ]] && parts rm "$n.tar.zst.${rv:0:8}" --no-trash &>/dev/null   # дельта к прежней базе
     fi
     echo "$fp" > "$S/h/$n"; rm -f "$S/p/$n"
+    if [ "$f" = 1 ] && [ -f "$w/id" ]; then idhint rebase "$B" "$w/id" || true; fi
+    if [ -f "$w/id" ]; then mkdir -p "$S/id"; mv -f "$w/id" "$S/id/$n"; fi
     { rl > "$w/r" && rver "$n" "$w/r"; } > "$S/v/$n" || echo "?" > "$S/v/$n"
+    rm -f "$stage_log" || return 1
+    rm -f "$S/pending/$n"          # только после записанной локальной версии
     st "$n" ok "выгружено $o за $((SECONDS - t)) с"
     case $n in pfx--*|game--*|sgame--*|lgame--*) : > "$S/nt/$n" ;; esac   # сохранения — к уведомлению
     rm -rf "$w"; return 0
   fi
+  if [ "$pub" -eq 2 ] || [ "$pub" -eq 3 ]; then
+    parts abort "$o" < "$w/stage" || true    # квитанция уже в $S/pending; части не стираем
+    if [ "$pub" -eq 3 ]; then
+      st "$n" err "выгрузка не подтверждена: оглавление .parts ещё не активно"
+    else
+      st "$n" err "выгрузка не подтверждена: публикация не проверена"
+    fi
+    rm -rf "$w"; return 1
+  fi
+  rm -f "$S/pending/$n"          # подтверждённый отказ: эта квитанция не описывает боевую версию
   st "$n" err "ошибка выгрузки (tar/счётчик/zstd/rclone: ${s[*]})"
+  [ -s "$w/stage" ] && parts abort "$o" < "$w/stage" || true
   rcp deletefile "$R/$o.part" &>/dev/null
+  rcp deletefile "$R/$o.parts.new" &>/dev/null
   rm -rf "$w"; return 1
 }
 
@@ -1297,6 +1704,7 @@ gname() {
   s=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
         "$DH/$SR/steamapps/appmanifest_$1.acf" 2>/dev/null | head -1)
   [ -n "$s" ] || s=$(rd "$S/nm/$1")
+  [ -n "$s" ] || s=$(python3 /usr/local/bin/wolf-games.py get "$S/index.json" "pfx--$1" name 2>/dev/null)
   echo "${s:-appid $1}"
 }
 # Одно уведомление на игру после выгрузки её сохранений (префикс Proton или папка игры).
@@ -1506,12 +1914,36 @@ unpack() {
   u mkdir -p "$B"
   # [v5.8] Сбой скачивания (живой случай 2026-10-15, Орегон: «не сходится MD5» — кусок пришёл испорченным, а файл в
   # облаке цел) — ещё раз, всего 3: распаковка повторно просто перепишет те же файлы, битый архив не распакуется
-  local try _pfx _u
+  local try _pfx _u _d
   for try in 1 2 3; do
     if get "$n.tar.zst" "$n" \
+       && case $n in
+            lgame--*) rm -f "$S/van/$A.game.tsv" && { [ ! -e "$S/van/$A.tsv" ] || { _d=${_IDIR:-$(idir "$A")} && [ -n "$_d" ] && python3 /usr/local/bin/wolf-mods.py claim "$DH/$SR/steamapps/common/$_d" "$S/van/$A.tsv" >/dev/null; }; } ;;
+            gsave--*) rm -f "$S/van/$A.pend.tsv" && { [ ! -e "$S/van/$A.tsv" ] || { _d=${_IDIR:-$(idir "$A")} && [ -n "$_d" ] && python3 /usr/local/bin/wolf-mods.py claim "$DH/$SR/steamapps/common/$_d" "$S/van/$A.tsv" data >/dev/null; }; } ;;
+          esac \
        && { [ "$K" = 0 ] || man "$n" > "$S/m/$n"; } \
-       && { [[ $rv != *+* ]] || { get "$n.tar.zst.${rv:0:8}" "$n" && del "$n"; }; }; then
-      man "$n" | sha1sum | cut -c1-40 > "$S/h/$n"
+       && { [[ $rv != *+* ]] || { idhint save "$B" "$S/m/$n" "$S/id/$n" "$T/content-restore" || true
+            get "$n.tar.zst.${rv:0:8}" "$n" && del "$n" \
+            && case $n in
+                 lgame--*) rm -f "$S/van/$A.game.tsv" && { [ ! -e "$S/van/$A.tsv" ] || { _d=${_IDIR:-$(idir "$A")} && [ -n "$_d" ] && python3 /usr/local/bin/wolf-mods.py claim "$DH/$SR/steamapps/common/$_d" "$S/van/$A.tsv" >/dev/null; }; } ;;
+                 gsave--*) rm -f "$S/van/$A.pend.tsv" && { [ ! -e "$S/van/$A.tsv" ] || { _d=${_IDIR:-$(idir "$A")} && [ -n "$_d" ] && python3 /usr/local/bin/wolf-mods.py claim "$DH/$SR/steamapps/common/$_d" "$S/van/$A.tsv" data >/dev/null; }; } ;;
+               esac; }; }; then
+      # K=1 без дельты: дерево совпадает с только что записанным манифестом базы.
+      # С дельтой снимок базы ($S/m) остаётся до неё, а отпечаток — уже итогового дерева.
+      # K=0 манифест базы здесь не пишется, отпечаток по-прежнему после восстановления.
+      if [ "$K" = 1 ] && [[ $rv != *+* ]]; then
+        sha1sum < "$S/m/$n" | cut -c1-40 > "$S/h/$n"
+        idhint save "$B" "$S/m/$n" "$S/id/$n" "$T/content-restore" || true
+      else
+        man "$n" > "$T/$n.final"
+        sha1sum < "$T/$n.final" | cut -c1-40 > "$S/h/$n"
+        if [[ $rv == *+* ]]; then
+          idhint refresh "$B" "$T/$n.final" "$S/id/$n" "$T/content-restore-delta" "$S/m/$n" || true
+        else
+          idhint save "$B" "$T/$n.final" "$S/id/$n" "$T/content-restore" || true
+        fi
+        rm -f "$T/$n.final"
+      fi
       echo "$rv" > "$S/v/$n"; rm -f "$S/p/$n"
       case $n in
         pfx--*)
@@ -1540,8 +1972,12 @@ unpack() {
           done
           ;;
       esac
+      if declare -F shadow_enabled >/dev/null 2>&1 && shadow_enabled; then
+        shadow_baseline_one "$n"
+      fi
       st "$n" ok "восстановлено"; return 0
     fi
+    rm -f "$S/m/$n" "$S/id/$n"
     [ "$try" = 3 ] || { log "$n: восстановление не удалось — пробую ещё раз ($((try + 1)) из 3)"; sleep $((try * 5)); }
   done
   st "$n" err "ошибка восстановления"; return 1
@@ -1758,11 +2194,279 @@ steam_go() {
   log "Steam запущен${SL:+ (язык: $SL)}$([ -e "$S/nvapi.off" ] && echo ", NVAPI выключен")"
 }
 
+_pid_alive() {
+  local p="$1" s
+  [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null || return 1
+  if [ -d "/proc" ]; then
+    [ ! -e "/proc/$p" ] && return 1
+    s=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null || true)
+    [ -z "$s" ] || [ "$s" = "Z" ] && return 1
+    return 0
+  fi
+  kill -0 "$p" 2>/dev/null || return 1
+  s=$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ' || true)
+  [ -n "$s" ] && case $s in Z*|*Z*) return 1 ;; esac
+  return 0
+}
+
+_pg_alive() {
+  local g="$1" p s
+  [ -n "$g" ] && [ "$g" -gt 1 ] 2>/dev/null || return 1
+  if command -v pgrep >/dev/null 2>&1; then
+    for p in $(pgrep -g "$g" 2>/dev/null); do
+      if [ -f "/proc/$p/stat" ]; then
+        s=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null) || continue
+      else
+        s=$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ') || continue
+      fi
+      [ -n "$s" ] && case $s in Z*|*Z*) continue ;; esac
+      return 0
+    done
+    return 1
+  fi
+  kill -0 -"$g" 2>/dev/null && return 0
+  return 1
+}
+
+_pg_kill() {
+  local sig="$1" g="$2"
+  [ -n "$g" ] && [ "$g" -gt 1 ] 2>/dev/null || return 1
+  local own_pgid
+  if [ -f /proc/self/stat ]; then
+    own_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null)
+  else
+    own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  fi
+  if [ -n "$own_pgid" ] && [ "$g" -eq "$own_pgid" ] 2>/dev/null; then
+    return 1
+  fi
+  kill -"$sig" -"$g" 2>/dev/null || true
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -"$sig" -g "$g" 2>/dev/null || true
+  fi
+}
+
+_stop_cmd_group() {
+  local p="$1" g="$2" dl="${3:-0}"
+  local own_pgid=""
+  if [ -f /proc/self/stat ]; then
+    own_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null || true)
+  else
+    own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)
+  fi
+  [ -n "$own_pgid" ] && [ "$g" = "$own_pgid" ] && g=""
+
+  # Если группа ещё не была подтверждена, даём короткое время (до 0.5 с или остатка dl) на setsid
+  if [ -z "$g" ] && [ -n "$p" ] && _pid_alive "$p"; then
+    local wait_iso=0 max_iso=5
+    [ "$dl" -gt 0 ] && [ $(( dl - $(date +%s) )) -le 1 ] && max_iso=2
+    while [ "$wait_iso" -lt "$max_iso" ]; do
+      local cur_pg=""
+      if [ -f "/proc/$p/stat" ]; then
+        cur_pg=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null || true)
+      else
+        cur_pg=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ' || true)
+      fi
+      if [ -n "$cur_pg" ] && [ "$cur_pg" -gt 1 ] 2>/dev/null; then
+        if [ -z "$own_pgid" ] || [ "$cur_pg" -ne "$own_pgid" ]; then
+          g="$cur_pg"
+          break
+        fi
+      fi
+      sleep 0.1
+      wait_iso=$(( wait_iso + 1 ))
+    done
+  fi
+
+  local now rem grace=10 i=0
+  now=$(date +%s)
+  if [ "$dl" -gt 0 ]; then
+    rem=$(( dl - now ))
+    [ "$rem" -le 0 ] && grace=1
+    [ "$rem" -eq 1 ] && grace=5
+  fi
+
+  if [ -n "$g" ] && [ "$g" -gt 1 ] 2>/dev/null; then
+    _pg_kill TERM "$g"
+  elif [ -n "$p" ] && _pid_alive "$p"; then
+    for c in $(pgrep -P "$p" 2>/dev/null || true); do
+      [ -n "$c" ] && [ "$c" -gt 1 ] 2>/dev/null && kill -TERM "$c" 2>/dev/null || true
+    done
+    kill -TERM "$p" 2>/dev/null || true
+  fi
+
+  while [ "$i" -lt "$grace" ]; do
+    local still_alive=0
+    [ -n "$g" ] && _pg_alive "$g" && still_alive=1
+    [ -n "$p" ] && _pid_alive "$p" && still_alive=1
+    [ "$still_alive" -eq 0 ] && break
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+
+  local alive_after_term=0
+  [ -n "$g" ] && _pg_alive "$g" && alive_after_term=1
+  [ -n "$p" ] && _pid_alive "$p" && alive_after_term=1
+
+  if [ "$alive_after_term" -eq 1 ]; then
+    if [ -n "$g" ] && [ "$g" -gt 1 ] 2>/dev/null; then
+      _pg_kill KILL "$g"
+    fi
+    if [ -n "$p" ] && _pid_alive "$p"; then
+      for c in $(pgrep -P "$p" 2>/dev/null || true); do
+        [ -n "$c" ] && [ "$c" -gt 1 ] 2>/dev/null && kill -KILL "$c" 2>/dev/null || true
+      done
+      kill -KILL "$p" 2>/dev/null || true
+    fi
+    local k=0
+    while [ "$k" -lt 10 ]; do
+      local any_alive=0
+      [ -n "$g" ] && _pg_alive "$g" && any_alive=1
+      [ -n "$p" ] && _pid_alive "$p" && any_alive=1
+      [ "$any_alive" -eq 0 ] && break
+      sleep 0.1
+      k=$(( k + 1 ))
+    done
+  fi
+
+  if [ -n "$g" ] && _pg_alive "$g"; then
+    log "steam_off: ошибка — группа команды остановки (PGID $g) не завершилась"
+    return 1
+  fi
+  if [ -n "$p" ] && _pid_alive "$p"; then
+    log "steam_off: ошибка — процесс команды остановки (PID $p) не завершился"
+    return 1
+  fi
+
+  # Вызываем wait только после подтверждения завершения процесса p
+  if [ -n "$p" ]; then
+    wait "$p" 2>/dev/null || true
+  fi
+
+  # При невозможности подтвердить изоляцию возвращаем ошибку
+  if [ -z "$g" ]; then
+    log "steam_off: ошибка — изоляция группы команды остановки не была подтверждена"
+    return 1
+  fi
+
+  return 0
+}
+
+_cmd_kill() {
+  local sig="$1" p="$2"
+  [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null || return 1
+  _pg_kill "$sig" "$p"
+  kill -"$sig" "$p" 2>/dev/null || true
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -"$sig" -P "$p" 2>/dev/null || true
+  fi
+}
+
+_steam_running() {
+  local exclude_pgid="${1:-0}"
+  local p s pg
+  for p in $(pgrep -x steam 2>/dev/null); do
+    if [ "$exclude_pgid" -gt 1 ] 2>/dev/null; then
+      if [ -f "/proc/$p/stat" ]; then
+        pg=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null) || continue
+      else
+        pg=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ') || continue
+      fi
+      [ "$pg" -eq "$exclude_pgid" ] 2>/dev/null && continue
+    fi
+    if [ -f "/proc/$p/stat" ]; then
+      s=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null) || continue
+    else
+      s=$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ') || continue
+    fi
+    [ -n "$s" ] && case $s in Z*|*Z*) continue ;; esac
+    return 0
+  done
+  return 1
+}
+
 # [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за минуту
 steam_off() {
-  pgrep -x steam >/dev/null || return 0
-  u /usr/games/steam -shutdown &>/dev/null
-  for _ in {1..60}; do pgrep -x steam >/dev/null || return 0; sleep 1; done
+  _steam_running || return 0
+
+  local to="${WOLF_STEAM_OFF_TIMEOUT:-60}"
+  local steam_cmd="${WOLF_STEAM_BIN:-/usr/games/steam}"
+  local runuser_cmd
+  runuser_cmd=$(command -v runuser 2>/dev/null || echo "/usr/sbin/runuser")
+
+  if ! command -v setsid >/dev/null 2>&1; then
+    log "steam_off: ошибка — утилита setsid недоступна; запуск команды остановки без изоляции группы запрещён"
+    return 1
+  fi
+
+  local own_pgid
+  if [ -f /proc/self/stat ]; then
+    own_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null)
+  else
+    own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  fi
+
+  local t0 dl now
+  t0=$(date +%s)
+  dl=$(( t0 + to ))
+
+  local cmd_pid="" cmd_pgid=""
+  ( exec setsid "$runuser_cmd" -u "$DU" -- env -i HOME="$DH" USER="$DU" LOGNAME="$DU" \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      LANG=C.UTF-8 DISPLAY="$D" XAUTHORITY="$DH/.Xauthority" \
+      XDG_RUNTIME_DIR="/run/user/$UI" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UI/bus" \
+      "$steam_cmd" -shutdown ) &>/dev/null &
+  cmd_pid=$!
+
+  if [ -z "$cmd_pid" ] || [ "$cmd_pid" -le 1 ] 2>/dev/null; then
+    log "steam_off: ошибка — не удалось запустить команду остановки Steam"
+    return 1
+  fi
+
+  while true; do
+    # Обновляем подтверждённый PGID команды, если он ещё не установлен
+    if [ -z "$cmd_pgid" ] && [ -n "$cmd_pid" ] && _pid_alive "$cmd_pid"; then
+      local cur_pg=""
+      if [ -f "/proc/$cmd_pid/stat" ]; then
+        cur_pg=$(awk '{print $5}' "/proc/$cmd_pid/stat" 2>/dev/null || true)
+      else
+        cur_pg=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d ' ' || true)
+      fi
+      if [ -n "$cur_pg" ] && [ "$cur_pg" -gt 1 ] 2>/dev/null; then
+        if [ -z "$own_pgid" ] || [ "$cur_pg" -ne "$own_pgid" ]; then
+          cmd_pgid="$cur_pg"
+        fi
+      fi
+    fi
+
+    if ! _steam_running "$cmd_pgid"; then
+      _stop_cmd_group "$cmd_pid" "$cmd_pgid" "$dl" || return 1
+      return 0
+    fi
+
+    now=$(date +%s)
+    if [ "$now" -ge "$dl" ]; then
+      break
+    fi
+
+    # Проверка завершения лидера команды остановки
+    if [ -n "$cmd_pid" ] && ! _pid_alive "$cmd_pid"; then
+      local cmd_rc=0
+      wait "$cmd_pid" 2>/dev/null || cmd_rc=$?
+      cmd_pid=""
+      if [ "$cmd_rc" -ne 0 ] && [ "$cmd_rc" -ne 127 ]; then
+        log "steam_off: команда остановки Steam завершилась с ошибкой (код $cmd_rc)"
+        _stop_cmd_group "" "$cmd_pgid" "$dl" || true
+        return 1
+      fi
+    fi
+
+    sleep 0.5
+  done
+
+  # Превышен общий бюджет времени: завершаем команду остановки, Steam остался
+  _stop_cmd_group "$cmd_pid" "$cmd_pgid" "$dl" || true
+  log "steam_off: Steam не закрылся за отведённое время ($to с)"
   return 1
 }
 # [v5.3] Из аккаунта Steam вышли (Steam сам убрал его вход и пропуск) — убрать и его данные userdata/НОМЕР,
@@ -1770,7 +2474,7 @@ steam_off() {
 steam_gone() {
   local out
   [ -n "$SR" ] && [ -s "$S/steam.seen" ] || return 0
-  pgrep -x steam >/dev/null && return 0
+  _steam_running && return 0
   out=$(python3 /usr/local/bin/wolf-steam.py gone "$DH/$SR" "$S/steam.seen" 2>&1)
   [ -n "$out" ] && log "$out"
   return 0
@@ -1780,7 +2484,7 @@ steam_gone() {
 shortcuts() {
   local out rc
   [ -n "$SR" ] || sr || return 0
-  pgrep -x steam >/dev/null && return 0
+  _steam_running && return 0
   out=$(u python3 /usr/local/bin/wolf-shortcuts.py "$GD" "$DH/$SR" 2>&1); rc=$?
   [ -n "$out" ] && log "$out"
   return $rc
@@ -1945,6 +2649,7 @@ boot() {
   [ -e "$S/play.app" ] && ( play_watch & )      # [v4.8] вход, скачивание и запуск игры — в фоне
   selon && askable > "$S/present"              # [v4.6] что есть после загрузки — с этим сравнивает scan_games
   ( gindex ) &
+  [ "${WM:-kvm}" = docker ] && agent_reload || true
 
   touch "$L/boot-done"   # [HARDENING #5] снять гейт с таймеров и wolf-watch только теперь
   [ -n "$offnote" ] && ntf "Steam запущен онлайн" \
@@ -1964,7 +2669,7 @@ boot() {
 # всё время пишет в свою папку, выгружалась бы по кругу — живой случай 2026-09-28, Dawnwalker раз в минуту).
 gsync() {
   local n run="" sz
-  [ -n "$SR" ] || sr
+  sr || true
   [ -n "${NOW:-}" ] || run=$(running_archives)
   { ldg; [ -n "$SR" ] && ld "$DH/$SR/steamapps/common" sgame--; ld "$PD" prog--; } | while IFS= read -r n; do
     case $n in prog--*) echo "$n"; continue ;; esac      # [v5.4] программы для игр — всегда, без вопросов
@@ -1995,15 +2700,28 @@ bk() {
   if [ "$m" = shutdown ]; then
     export NOW=1
     [ -e "$S/play.app" ] && [ ! -e "$S/play.done" ] && echo stop > "$S/play.done"   # [v4.8] не запускать игру при выключении
-    steam_off && steam_gone                      # [v5.3] данные аккаунтов, из которых вышли, — до выгрузки
-    shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
-    prog_scan      # [v5.7] программу удалили за последние 30 с — убрать из облака, а не выгружать снова
-    "$0" state; "$0" games
-    "$0" mods                                    # [v5.0] моды игр Steam
-    "$0" lgame                                   # [v5.6] файлы игр, которые качает их лаунчер («в облаке»); [v5.7] данные игр
-    return 0
+    local shut=0
+    if steam_off && steam_gone; then                      # [v5.3] данные аккаунтов, из которых вышли, — до выгрузки
+      shortcuts      # [v4.1] игры, появившиеся в папке за сессию, — в библиотеку; уедет в облако со steam-state
+      prog_scan      # [v5.7] программу удалили за последние 30 с — убрать из облака, а не выгружать снова
+      "$0" state || shut=1
+      "$0" games || shut=1
+      "$0" mods || shut=1                          # [v5.0] моды игр Steam
+      "$0" lgame || shut=1                         # [v5.6] файлы игр, которые качает их лаунчер («в облаке»); [v5.7] данные игр
+      gindex || shut=1                             # после всех выгрузок: каталог в конце state их ещё не видел
+    else
+      log "shutdown: ошибка — Steam не закрылся вовремя"
+      st shutdown err "Steam не закрылся вовремя"
+      shut=1
+    fi
+    return "$shut"
   fi
-  rl > "$LS" || { log "$m: не удалось получить список облака"; return 1; }
+  # При выключении недоступный список — не «изменений не было»: finish не должен сказать ok.
+  rl > "$LS" || {
+    log "$m: не удалось получить список облака"
+    [ -n "${NOW:-}" ] && st "$m" err "список облака не получен"
+    return 1
+  }
   case $m in
     state)
       n=(identity)
@@ -2034,7 +2752,9 @@ bk() {
       shift; lgame_push; gsave_push; return 0 ;;
   esac
   [ ${#n[@]} -gt 0 ] && pool pack "${n[@]}"
-  [ "$m" = state ] && gindex
+  # Обычные таймеры state (5 мин) и games (15 мин) — каталог после выгрузки этого прохода.
+  # При выключении NOW=1: один раз в конце shutdown, когда games, mods и lgame уже записаны.
+  if [ -z "${NOW:-}" ] && { [ "$m" = state ] || [ "$m" = games ]; }; then gindex; fi
   saves_notify
   return 0
 }
@@ -2150,30 +2870,299 @@ finish_start() {
     && echo "finish: запущено" || { echo "finish: не удалось запустить"; return 1; }
 }
 
+cmd_clean() {
+  local archives=("$@")
+  local r_val="${R:-gdrive:vastai-cloud-games}"
+  local lib_dir="${WOLF_LIB_DIR:-/usr/local/lib}"
+
+  # 1. Проверка явного включения (opt-in)
+  local enabled=0
+  if [ "${VG_STORAGE_CLEANUP_ENABLED:-0}" = "1" ] || [ "${VG_STORAGE_CLEANUP_ENABLED:-0}" = "true" ] || [ -f "$L/cleanup_enabled" ]; then
+    enabled=1
+  fi
+  if [ "$enabled" -eq 0 ]; then
+    log "clean: выключено (opt-in не активирован)"
+    echo "clean: выключено (opt-in не активирован)"
+    return 0
+  fi
+
+  # 2. Проверка сессионного допуска
+  local cur_run_id="$(cat "$L/run_id" 2>/dev/null || true)"
+  local cur_iid="${VI:-$(cat "$L/iid" 2>/dev/null || true)}"
+  local cur_fid="$(storage_id 2>/dev/null || true)"
+  local py_check="import sys; sys.path.insert(0, '$lib_dir'); from wolf_session import is_cleanup_authorized; sys.exit(0 if is_cleanup_authorized(grant_file='$L/cleanup_grant.json', run_id_val='$cur_run_id', iid_val='$cur_iid', folder_id_val='$cur_fid') else 1)"
+  if ! python3 -c "$py_check" 2>/dev/null; then
+    log "clean: отказ — сессионный допуск отсутствует или не валиден"
+    echo "clean: отказ — сессионный допуск отсутствует" >&2
+    return 1
+  fi
+
+  # 3. Определение списка архивов для очистки
+  if [ ${#archives[@]} -eq 0 ]; then
+    for f in "$S"/st/*; do
+      local n=${f##*/}
+      case $n in boot|finish|play|sunshine|progs|cleanup) continue ;; esac
+      archives+=("$n")
+    done
+  fi
+
+  if [ ${#archives[@]} -eq 0 ]; then
+    log "clean: нет архивов для очистки"
+    return 0
+  fi
+
+  local cur_pass_id="${WOLF_CLEANUP_PASS_ID:-$(cat "$L/cleanup_pass_id" 2>/dev/null || echo "$(date +%s)_$$")}"
+  log "clean: обработка архивов ${archives[*]} (проход $cur_pass_id)..."
+  python3 "$lib_dir/wolf_cleaner.py" "$r_val" "${archives[@]}" --report-file "$L/cleanup_report.json" --lock-dir "$L" --grant-file "$L/cleanup_grant.json" --enabled --run-id "$cur_run_id" --iid "$cur_iid" --folder-id "$cur_fid" --clean-pass-id "$cur_pass_id" --require-isolation
+}
+
+run_finish_cleanup() {
+  local clean_timeout="${WOLF_CLEANUP_TIMEOUT:-120}"
+  local clean_grace="${WOLF_CLEANUP_GRACE:-5}"
+  local lib_dir="${WOLF_LIB_DIR:-/usr/local/lib}"
+
+  # 1. Проверка явного включения (opt-in)
+  local enabled=0
+  if [ "${VG_STORAGE_CLEANUP_ENABLED:-0}" = "1" ] || [ "${VG_STORAGE_CLEANUP_ENABLED:-0}" = "true" ] || [ -f "$L/cleanup_enabled" ]; then
+    enabled=1
+  fi
+  if [ "$enabled" -eq 0 ]; then
+    log "cleanup: выключено по умолчанию (opt-in не активирован)"
+    st cleanup ok "выключено (по умолчанию)"
+    return 0
+  fi
+
+  # 2. Проверка сессионного допуска
+  local cur_run_id="$(cat "$L/run_id" 2>/dev/null || true)"
+  local cur_iid="${VI:-$(cat "$L/iid" 2>/dev/null || true)}"
+  local cur_fid="$(storage_id 2>/dev/null || true)"
+  local py_check="import sys; sys.path.insert(0, '$lib_dir'); from wolf_session import is_cleanup_authorized; sys.exit(0 if is_cleanup_authorized(grant_file='$L/cleanup_grant.json', run_id_val='$cur_run_id', iid_val='$cur_iid', folder_id_val='$cur_fid') else 1)"
+  if ! python3 -c "$py_check" 2>/dev/null; then
+    log "cleanup: пропуск — сессионный допуск отсутствует или не валиден"
+    st cleanup ok "пропуск (нет допуска)"
+    return 0
+  fi
+
+  # 3. Определение PGID текущего процесса Wolf для исключения самосигнализации
+  local my_pgid
+  my_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)
+  [ -z "$my_pgid" ] && my_pgid=0
+  export WOLF_PARENT_PGID="$my_pgid"
+
+  # Генерация уникального идентификатора конкретного прохода очистки
+  local clean_pass_id="$(date +%s)_$((RANDOM % 100000))"
+  echo "$clean_pass_id" > "$L/cleanup_pass_id"
+  export WOLF_CLEANUP_PASS_ID="$clean_pass_id"
+
+  # Очищаем следы предыдущих запусков
+  rm -f "$L/cleanup_isolated" "$L/cleanup_report.json" "$L/cleanup.rc" "$L/cleanup_pgid.probe"
+
+  # 4. Запуск wolf clean в новой изолированной группе процессов
+  log "cleanup: запуск безопасной очистки (общий лимит ${clean_timeout} с)..."
+  st cleanup up "очистка хранилища"
+
+  local launcher_pid=""
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import subprocess, sys, os
+cmd = [sys.argv[1], "clean"]
+log_file = sys.argv[2]
+probe_file = sys.argv[3]
+rc_file = sys.argv[4]
+with open(log_file, "a") as out_f:
+    p = subprocess.Popen(cmd, start_new_session=True, stdout=out_f, stderr=subprocess.STDOUT)
+    with open(probe_file, "w") as pf:
+        pf.write(f"{p.pid}\n{os.getpgid(p.pid)}\n")
+    rc = p.wait()
+    rc_code = (128 + (-rc)) if rc < 0 else rc
+    with open(rc_file, "w") as rf:
+        rf.write(f"{rc_code}\n")
+' "$0" "$L/cleanup.log" "$L/cleanup_pgid.probe" "$L/cleanup.rc" &
+    launcher_pid=$!
+  else
+    (
+      if command -v setsid >/dev/null 2>&1; then
+        setsid "$0" clean >"$L/cleanup.log" 2>&1
+      else
+        "$0" clean >"$L/cleanup.log" 2>&1
+      fi
+      echo $? > "$L/cleanup.rc"
+    ) &
+    launcher_pid=$!
+    echo -e "$launcher_pid\n$launcher_pid" > "$L/cleanup_pgid.probe"
+  fi
+
+  # Ожидание появления probe-файла с PID и PGID исполнителя
+  local probe_wait=0
+  while [ "$probe_wait" -lt 30 ] && [ ! -f "$L/cleanup_pgid.probe" ]; do
+    sleep 0.1
+    probe_wait=$((probe_wait + 1))
+  done
+
+  local clean_pid="" clean_pgid=""
+  if [ -f "$L/cleanup_pgid.probe" ]; then
+    clean_pid=$(head -n 1 "$L/cleanup_pgid.probe" 2>/dev/null || true)
+    clean_pgid=$(sed -n '2p' "$L/cleanup_pgid.probe" 2>/dev/null || true)
+  fi
+
+  # 5. Проверка надёжности изоляции группы процессов
+  if [ -z "$clean_pgid" ] || [ "$clean_pgid" -le 1 ] 2>/dev/null || [ "$clean_pgid" = "$my_pgid" ]; then
+    log "cleanup: ошибка изоляции группы процессов (pgid=$clean_pgid, my_pgid=$my_pgid) — безопасный пропуск"
+    st cleanup warn "ошибка изоляции процессов"
+    # Завершаем вспомогательные процессы строго по PID (никогда по группе)
+    if [ -n "$launcher_pid" ] && [ "$launcher_pid" -gt 1 ] 2>/dev/null && [ "$launcher_pid" != "$$" ]; then
+      kill -KILL "$launcher_pid" 2>/dev/null || true
+    fi
+    if [ -n "$clean_pid" ] && [ "$clean_pid" -gt 1 ] 2>/dev/null && [ "$clean_pid" != "$$" ]; then
+      for cpid in $(pgrep -P "$clean_pid" 2>/dev/null || true); do
+        [ "$cpid" != "$$" ] && kill -KILL "$cpid" 2>/dev/null || true
+      done
+      kill -KILL "$clean_pid" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  # Квитирование подтверждённой изоляции для исполнителя очистки
+  echo "$clean_pgid" > "$L/cleanup_isolated"
+
+  # 6. Контроль времени работы ВСЕЙ группы процессов
+  local elapsed=0 step=1 finished=0
+  while [ "$elapsed" -lt "$clean_timeout" ]; do
+    if ! _pg_alive "$clean_pgid"; then
+      finished=1
+      break
+    fi
+    sleep "$step"
+    elapsed=$((elapsed + step))
+  done
+
+  if [ "$finished" -eq 1 ]; then
+    [ -n "$launcher_pid" ] && wait "$launcher_pid" 2>/dev/null || true
+    log "cleanup: процесс очистки завершился за ${elapsed} с"
+  else
+    log "cleanup: превышен общий таймаут ${clean_timeout} с — завершаю группу процессов $clean_pgid..."
+    _pg_kill TERM "$clean_pgid"
+    local grace_elapsed=0
+    while [ "$grace_elapsed" -lt "$clean_grace" ]; do
+      if ! _pg_alive "$clean_pgid"; then
+        finished=1
+        break
+      fi
+      sleep 1
+      grace_elapsed=$((grace_elapsed + 1))
+    done
+    if [ "$finished" -ne 1 ]; then
+      log "cleanup: группа процессов $clean_pgid не ответила на TERM за ${clean_grace} с — принудительный KILL"
+      _pg_kill KILL "$clean_pgid"
+      local kill_wait=0
+      while [ "$kill_wait" -lt 5 ]; do
+        ! _pg_alive "$clean_pgid" && break
+        sleep 1
+        kill_wait=$((kill_wait + 1))
+      done
+    fi
+    [ -n "$launcher_pid" ] && wait "$launcher_pid" 2>/dev/null || true
+    st cleanup warn "превышен лимит времени (${clean_timeout} с)"
+    return 0
+  fi
+
+  # 7. Подведение достоверного итога текущего запуска
+  local clean_rc
+  clean_rc=$(cat "$L/cleanup.rc" 2>/dev/null || echo 1)
+  if [ "$clean_rc" -ne 0 ]; then
+    log "cleanup: ошибка исполнителя (код $clean_rc)"
+    st cleanup warn "ошибка исполнителя (код $clean_rc)"
+    return 0
+  fi
+
+  if [ ! -f "$L/cleanup_report.json" ]; then
+    log "cleanup: отчёт очистки отсутствует"
+    st cleanup warn "отчёт отсутствует"
+    return 0
+  fi
+
+  local check_res
+  check_res=$(python3 -c "
+import json, sys
+try:
+    with open('$L/cleanup_report.json', 'r', encoding='utf-8') as f:
+        r = json.load(f)
+    if not isinstance(r, dict):
+        sys.exit(2)
+    rep_run = str(r.get('run_id') or '').strip()
+    cur_run = str('$cur_run_id').strip()
+    if cur_run and rep_run != cur_run:
+        sys.exit(3)
+    rep_pass = str(r.get('clean_pass_id') or '').strip()
+    cur_pass = str('$clean_pass_id').strip()
+    if cur_pass and rep_pass != cur_pass:
+        sys.exit(4)
+    status = str(r.get('status') or '').strip()
+    if not status:
+        status = 'unknown'
+    del_count = r.get('deleted_count', len(r.get('deleted', [])))
+    print(f'{status}:{del_count}')
+except Exception:
+    sys.exit(2)
+" 2>/dev/null || echo "err:$?")
+
+  case "$check_res" in
+    err:2)
+      log "cleanup: повреждённый отчёт"
+      st cleanup warn "повреждённый отчёт"
+      ;;
+    err:3)
+      log "cleanup: отчёт принадлежит чужому запуску"
+      st cleanup warn "чужой отчёт сессии"
+      ;;
+    err:4)
+      log "cleanup: отчёт принадлежит чужому проходу очистки"
+      st cleanup warn "чужой отчёт прохода"
+      ;;
+    completed:*|noop:*)
+      local rep_status="${check_res%%:*}"
+      local del_count="${check_res##*:}"
+      log "cleanup: успешно (статус $rep_status, удалено $del_count)"
+      st cleanup ok "удалено кандидатов: $del_count"
+      ;;
+    *)
+      local rep_status="${check_res%%:*}"
+      log "cleanup: статус очистки: $rep_status"
+      st cleanup warn "статус очистки: $rep_status"
+      ;;
+  esac
+  return 0
+}
+
 finish_run() {
-  local t0 f n ts s rest r i bad=()
+  local t0 f n ts s rest r i bad=() shut=0
   t0=$(date +%s)
   st finish up "выгрузка"
   "$0" shutdown
+  shut=$?
   for f in "$S"/st/*; do
     n=${f##*/}
-    case $n in boot|finish|play|sunshine|progs) continue ;; esac   # [v4.8] play и sunshine — не архивы; [v5.4] progs
+    case $n in boot|finish|play|sunshine|progs|cleanup) continue ;; esac   # [v4.8] play и sunshine — не архивы; [v5.4] progs; [v5.8] cleanup
     IFS='|' read -r ts s rest < "$f"
     [ "${ts:-0}" -ge "$t0" ] && case $s in up|down|err) bad+=("$n") ;; esac
   done
+  [ "$shut" -ne 0 ] && bad+=("shutdown")
   if [ ${#bad[@]} -gt 0 ]; then
     st finish err "выгрузка не подтверждена: ${bad[*]} — инстанс НЕ удаляю"
     return 1
   fi
-  if [ ! -s /etc/wolf/vastkey ] || [ -z "$VI" ]; then
+  # [v5.8] Очистка вытесненных поколений (только после подтверждённого сохранения)
+  run_finish_cleanup
+  local vastkey_file="${WOLF_VASTKEY_FILE:-/etc/wolf/vastkey}"
+  if [ ! -s "$vastkey_file" ] || [ -z "$VI" ]; then
     st finish ok "app: всё выгружено; ключа инстанса нет — удалит приложение"
     return 0
   fi
   st finish ok "self: всё выгружено; инстанс удалит себя через 30 с"
-  sleep 30
+  sleep "${WOLF_SELF_DELETE_SLEEP:-30}"
   for i in 1 2 3; do
     # Ключ — через stdin (curl -K -), а не аргументом: не виден в списке процессов
-    r=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat /etc/wolf/vastkey)" \
+    r=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$vastkey_file")" \
         | curl -sS -m 60 -K - -X DELETE -H 'Content-Type: application/json' -d '{}' \
           "https://console.vast.ai/api/v0/instances/$VI/" 2>&1)
     log "finish: удаление, ответ Vast: $(printf '%s' "$r" | tr -d '\n' | head -c 200)"
@@ -2188,7 +3177,7 @@ finish_run() {
 # играми (перезапускаются, если упали), загрузка — один раз, синхронизация по расписанию как у
 # таймеров KVM (state через 5 мин, дальше каждые SMIN; games через 12 мин, дальше каждые GMIN) и,
 # как там, только после boot-done. Низкий приоритет — чтобы не мешать игре.
-low() { if ionice -c3 true 2>/dev/null; then ionice -c3 nice -n 19 "$@"; else nice -n 19 "$@"; fi; }
+low() { if ionice -c3 true 2>/dev/null; then exec ionice -c3 nice -n 19 "$@"; else exec nice -n 19 "$@"; fi; }
 # [v5.4] wolf prog run НОМЕР ID — запустить программу рядом с игрой; wolf prog auto НОМЕР ID on|off — «вместе с игрой»
 # [v5.6] wolf prog launch НОМЕР ID|- ПАРАМЕТРЫ — запускать игру через программу («-» — как обычно);
 #        wolf prog install НОМЕР ID — один раз запустить установщик в префиксе игры (игра закрыта)
@@ -2360,22 +3349,806 @@ launch_opts() {
   fi
   echo "prog: ok"
 }
-supervise() {
-  local ns ng now
-  ( while :; do WOLF_PORT=$WP python3 /usr/local/bin/wolf-web.py; sleep 5; done ) &
-  ( while :; do low "$0" watch; sleep 10; done ) &
-  [ -e "$L/boot-started" ] || { : > "$L/boot-started"; "$0" boot & }
-  now=$(date +%s); ns=$(( now + 300 )); ng=$(( now + 720 ))
+agent_mode() {
+  local m=${WOLF_STATE_AGENT:-${SA:-observe-only}}
+  case $m in
+    off|OFF|0|false|FALSE|no|NO|disabled|DISABLED|"") echo off ;;
+    observe-only|OBSERVE-ONLY|observe|OBSERVE|1|true|TRUE|yes|YES) echo observe-only ;;
+    *) echo off ;;
+  esac
+}
+agent_config() {
+  sr >/dev/null 2>&1 || true
+  WOLF_S="$S" WOLF_T="$T" WOLF_L="$L" WOLF_DH="$DH" WOLF_SR="${SR:-}" \
+  WOLF_GD="${GD:-}" WOLF_PD="${PD:-}" WOLF_SG="${SG:-1}" WOLF_SO="${SO:-1}" WOLF_SV="${SV:-1}" \
+  WOLF_STATE_AGENT="$(agent_mode)" \
+  python3 /usr/local/bin/wolf-state-agent.py write-config --out "$L/state-agent.json"
+}
+agent_stop() {
+  local lpid apid i
+  lpid=$(cat "$L/state-agent-loop.pid" 2>/dev/null) || lpid=""
+  apid=$(cat "$L/state-agent.pid" 2>/dev/null) || apid=""
+  [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null && kill -TERM "$lpid" 2>/dev/null || true
+  if [ -n "$apid" ] && kill -0 "$apid" 2>/dev/null; then
+    kill -TERM "$apid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+      kill -0 "$apid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$apid" 2>/dev/null && kill -KILL "$apid" 2>/dev/null || true
+  fi
+  rm -f "$L/state-agent-loop.pid" "$L/state-agent.pid"
+}
+agent_reload() {
+  [ "$(agent_mode)" = observe-only ] || { agent_stop; return 0; }
+  agent_config >/dev/null 2>&1 || return 0
+  local apid
+  apid=$(cat "$L/state-agent.pid" 2>/dev/null) || apid=""
+  [ -n "$apid" ] && kill -0 "$apid" 2>/dev/null && kill -HUP "$apid" 2>/dev/null || true
+}
+agent_run_loop() {
+  local delay=${WOLF_STATE_AGENT_RESTART_SEC:-2} logf=${WOLF_STATE_AGENT_LOG:-/var/log/wolf-state-agent.log} ap="" rc=0
+  mkdir -p "$(dirname "$logf")" 2>/dev/null || true
+  trap 'ap=$(cat "$L/state-agent.pid" 2>/dev/null) || ap=""; [ -n "$ap" ] && kill -TERM "$ap" 2>/dev/null && wait "$ap" 2>/dev/null || true; exit 0' TERM INT
   while :; do
-    sleep 20
+    agent_config >/dev/null 2>&1 || true
+    if [ "$(agent_mode)" != observe-only ]; then
+      sleep 5 & wait $! || break
+      continue
+    fi
+    low python3 /usr/local/bin/wolf-state-agent.py run --config "$L/state-agent.json" >> "$logf" 2>&1 &
+    ap=$!
+    wait "$ap"
+    rc=$?
+    log "state-agent: завершился с кодом $rc — перезапуск через ${delay} с"
+    sleep "$delay" & wait $! || break
+  done
+}
+shadow_enabled() {
+  local v=${WOLF_SHADOW_COMPARE:-}
+  if [ -z "$v" ]; then
+    if [ "${WM:-kvm}" = docker ] && [ "$(agent_mode)" = observe-only ]; then
+      v=1
+    else
+      v=0
+    fi
+  fi
+  case $v in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+  esac
+  return 1
+}
+shadow_baseline_one() {
+  local n=${1:-} tmp_m tmp_id rc=0
+  shadow_enabled || return 0
+  case $n in game--*|pfx--*) ;; *) return 0 ;; esac
+  spec "$n" >/dev/null 2>&1 || return 0
+  mkdir -p "$S/shadow/prev" "$S/shadow/cursor" 2>/dev/null || true
+  tmp_m="$T/shbase.$n.$$.m"
+  tmp_id="$T/shbase.$n.$$.id"
+  if man "$n" > "$tmp_m" 2>/dev/null; then
+    if [ -s "$tmp_m" ]; then
+      idhint check "$B" "$tmp_m" "$S/id/$n" "$tmp_id" "$T/shchg.$$" "$T/shst.$$" "$S/m/$n" >/dev/null 2>&1 || rc=$?
+      if [ "$rc" -eq 1 ]; then
+        : > "$tmp_id"
+      fi
+    else
+      : > "$tmp_id"
+    fi
+  else
+    : > "$tmp_m"
+    : > "$tmp_id"
+  fi
+  WOLF_S="$S" WOLF_T="$T" WOLF_L="$L" WOLF_DH="$DH" WOLF_SR="${SR:-}" WOLF_GD="${GD:-}" \
+    python3 /usr/local/bin/wolf-state-agent.py shadow-baseline \
+      --shadow-dir "$S/shadow" --state "$S/agent/state.json" --pid "$L/state-agent.pid" \
+      --journal "$S/agent/events.jsonl" --archive "$n" --base-dir "$B" --sr "${SR:-}" \
+      --manifest "$tmp_m" --idhint "$tmp_id" >/dev/null 2>&1 || true
+  rm -f "$tmp_m" "$tmp_id" "$T/shchg.$$" "$T/shst.$$"
+}
+shadow_baseline_all() {
+  shadow_enabled || return 0
+  [ -n "$SR" ] || sr >/dev/null 2>&1 || true
+  local -A seen=()
+  local n
+  if [ "$#" -gt 0 ]; then
+    for n in "$@"; do
+      [ -n "${seen[$n]:-}" ] || { seen[$n]=1; shadow_baseline_one "$n"; }
+    done
+    return 0
+  fi
+  while IFS= read -r n; do
+    case $n in game--*)
+      if [ -z "${seen[$n]:-}" ]; then
+        seen[$n]=1
+        shadow_baseline_one "$n"
+      fi ;;
+    esac
+  done < <(gsync 2>/dev/null || true)
+  if [ -f "$S/sel.games" ]; then
+    while IFS= read -r n; do
+      case $n in game--*)
+        if wants "$n" && [ -z "${seen[$n]:-}" ]; then
+          seen[$n]=1
+          shadow_baseline_one "$n"
+        fi ;;
+      esac
+    done < "$S/sel.games"
+  fi
+  if [ -n "$SR" ] && [ "$SV" = 1 ]; then
+    while IFS= read -r n; do
+      if wants "$n" && [ -z "${seen[$n]:-}" ]; then
+        seen[$n]=1
+        shadow_baseline_one "$n"
+      fi
+    done < <(ld "$DH/$SR/steamapps/compatdata" pfx-- 2>/dev/null || true)
+  fi
+  return 0
+}
+shadow_mark_boundary() {
+  local n=${1:-} base=${2:-} cur_m=${3:-} cur_id=${4:-} out=${5:-}
+  shadow_enabled || return 0
+  case $n in game--*|pfx--*) ;; *) return 0 ;; esac
+  [ -n "$out" ] || return 0
+  WOLF_S="$S" WOLF_T="$T" WOLF_L="$L" WOLF_DH="$DH" WOLF_SR="${SR:-}" WOLF_GD="${GD:-}" \
+    python3 /usr/local/bin/wolf-state-agent.py shadow-mark \
+      --state "$S/agent/state.json" --pid "$L/state-agent.pid" \
+      --journal "$S/agent/events.jsonl" --archive "$n" --base-dir "$base" --sr "${SR:-}" \
+      --manifest "$cur_m" --idhint "$cur_id" --out "$out" >/dev/null 2>&1 || true
+}
+shadow_compare_pack() {
+  local n=${1:-} base=${2:-} cur_m=${3:-} cur_id=${4:-} pub=${5:-0} boundary=${6:-}
+  shadow_enabled || return 0
+  case $n in game--*|pfx--*) ;; *) return 0 ;; esac
+  local -a extra=()
+  [ -n "$boundary" ] && extra+=(--boundary "$boundary")
+  WOLF_S="$S" WOLF_T="$T" WOLF_L="$L" WOLF_DH="$DH" WOLF_SR="${SR:-}" WOLF_GD="${GD:-}" \
+    python3 /usr/local/bin/wolf-state-agent.py shadow-compare \
+      --shadow-dir "$S/shadow" --state "$S/agent/state.json" --pid "$L/state-agent.pid" \
+      --journal "$S/agent/events.jsonl" --archive "$n" --base-dir "$base" --sr "${SR:-}" \
+      --manifest "$cur_m" --idhint "$cur_id" --prev-id-fallback "$S/id/$n" \
+      --published "$pub" "${extra[@]}" >/dev/null 2>&1 || true
+}
+optin_enabled() {
+  [ "$(agent_mode)" = observe-only ] || return 1
+  local v=${WOLF_STATE_AGENT_OPTIN:-${OPTIN:-0}}
+  case $v in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+optin_candidates() {
+  local run="" a
+  [ -n "$SR" ] || sr
+  if [ "${SV:-1}" = 1 ] && [ -n "$SR" ]; then
+    ld "$DH/$SR/steamapps/compatdata" pfx-- | while IFS= read -r a; do
+      [ -e "$S/x/$a" ] && continue
+      wants "$a" && printf '%s\n' "$a"
+    done
+  fi
+  mkgd >/dev/null 2>&1 || true
+  run=$(running_archives)
+  ldg | while IFS= read -r a; do
+    [ -e "$S/x/$a" ] && continue
+    grep -qxF -- "$a" <<< "$run" && continue
+    if selon && [ -e "$S/sel.own_all" ]; then
+      inlist "$a" sel.skip || printf '%s\n' "$a"
+    else
+      want "$a" && printf '%s\n' "$a"
+    fi
+  done
+}
+optin_tick() {
+  optin_enabled || return 0
+  exec 9> "$L/bk-optin.lock"
+  flock -n 9 || return 0
+  local -a candidates=() selected=() clean_list=() packed=() failed=() deferred=() busy=()
+  local a plan_f rc run="" drive_listed=0 fb=0 mark_seq="" can_commit=0 t0
+  mapfile -t candidates < <(optin_candidates)
+  [ ${#candidates[@]} -gt 0 ] || return 0
+  mkdir -p "$S/optin" "$T"
+  plan_f=$(mktemp "$T/optin-plan.XXXXXX") || return 1
+  t0=$(python3 -c 'import time; print(time.monotonic())')
+  WOLF_S="$S" WOLF_T="$T" WOLF_L="$L" WOLF_DH="$DH" WOLF_SR="${SR:-}" WOLF_GD="${GD:-}" \
+    python3 /usr/local/bin/wolf-state-agent.py optin-plan \
+      --optin-dir "$S/optin" --state "$S/agent/state.json" --pid "$L/state-agent.pid" \
+      --journal "$S/agent/events.jsonl" --dh "$DH" --gd "$GD" --sr "${SR:-}" \
+      --archives "${candidates[@]}" --json > "$plan_f" 2>/dev/null
+  if [ $? -ne 0 ] || [ ! -s "$plan_f" ]; then
+    # Ошибка планировщика не отменяет штатную проверку допустимых game--/pfx--
+    printf '{"fallback_to_standard":true,"fallback_reasons":["plan_error"],"mark_seq":null,"io_unreadable":true,"selected":[]}\n' > "$plan_f"
+    selected=("${candidates[@]}")
+    fb=1
+  else
+    mapfile -t selected < <(python3 - "$plan_f" << 'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for a in d.get("selected") or []:
+    print(a)
+PY
+)
+    mapfile -t clean_list < <(python3 - "$plan_f" << 'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for a in d.get("clean") or []:
+    print(a)
+PY
+)
+    read -r fb mark_seq can_commit < <(python3 - "$plan_f" << 'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+fb = 1 if d.get("fallback_to_standard") else 0
+ms = d.get("mark_seq")
+cc = 1 if (ms is not None and not d.get("io_unreadable")) else 0
+print(fb, "" if ms is None else int(ms), cc)
+PY
+)
+  fi
+  if [ ${#selected[@]} -gt 0 ]; then
+    LS="$T/ls.optin"
+    FL="$T/fail.optin"
+    : > "$FL"
+    if ! rl > "$LS"; then
+      log "optin: не удалось получить список облака"
+      rm -f "$plan_f"
+      return 1
+    fi
+    drive_listed=1
+    run=$(running_archives)
+    for a in "${selected[@]}"; do
+      [ -e "$S/x/$a" ] && continue
+      case $a in
+        pfx--*) wants "$a" || continue ;;
+        game--*) grep -qxF -- "$a" <<< "$run" && continue; want "$a" || continue ;;
+        *) continue ;;
+      esac
+      if ! flock -n "$L/$a.lock" true 2>/dev/null; then
+        busy+=("$a")
+        continue
+      fi
+      pack "$a"
+      rc=$?
+      if [ "$rc" -eq 0 ] && [ ! -e "$S/p/$a" ] && [ ! -s "$S/pending/$a" ]; then
+        packed+=("$a")
+        if [ "$can_commit" = 1 ] && [ -n "$mark_seq" ]; then
+          python3 /usr/local/bin/wolf-state-agent.py optin-commit \
+            --optin-dir "$S/optin" --state "$S/agent/state.json" \
+            --archive "$a" --up-to-seq "$mark_seq" >/dev/null 2>&1 || true
+        fi
+      elif [ "$rc" -eq 0 ] && [ -e "$S/p/$a" ]; then
+        deferred+=("$a")
+      else
+        failed+=("$a")
+      fi
+    done
+  fi
+  if [ "$fb" = 0 ] && [ "$can_commit" = 1 ] && [ -n "$mark_seq" ] && [ ${#clean_list[@]} -gt 0 ]; then
+    python3 /usr/local/bin/wolf-state-agent.py optin-commit \
+      --optin-dir "$S/optin" --state "$S/agent/state.json" \
+      --up-to-seq "$mark_seq" --archives "${clean_list[@]}" >/dev/null 2>&1 || true
+  fi
+  python3 - "$plan_f" "$S/optin/report.jsonl" "$drive_listed" "$t0" \
+    "$(printf '%s\n' "${packed[@]}")" "$(printf '%s\n' "${failed[@]}")" \
+    "$(printf '%s\n' "${deferred[@]}")" "$(printf '%s\n' "${busy[@]}")" << 'PY' 2>/dev/null || true
+import json, sys, time
+plan_p, rep_p, dl, t0_s, pk_s, fl_s, df_s, bs_s = sys.argv[1:9]
+plan = json.load(open(plan_p, encoding="utf-8"))
+lines = lambda s: [x for x in s.splitlines() if x]
+rec = {
+    "version": 1,
+    "ts": round(time.time(), 6),
+    "elapsed_ms": round((time.monotonic() - float(t0_s)) * 1000.0, 3),
+    "fallback_to_standard": bool(plan.get("fallback_to_standard")),
+    "fallback_reasons": plan.get("fallback_reasons") or [],
+    "mark_seq": plan.get("mark_seq"),
+    "drive_listed": bool(int(dl)),
+    "selected": plan.get("selected") or [],
+    "clean": plan.get("clean") or [],
+    "packed": lines(pk_s),
+    "failed": lines(fl_s),
+    "deferred": lines(df_s),
+    "busy": lines(bs_s),
+}
+with open(rep_p, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+PY
+  rm -f "$plan_f"
+  [ ${#failed[@]} -eq 0 ]
+}
+state_agent_cmd() {
+  local cmd=${1:-status}
+  shift || true
+  case $cmd in
+    mode)    agent_mode ;;
+    config)  agent_config ;;
+    roots)   agent_config && cat "$L/state-agent.json" ;;
+    reload)  agent_reload && echo "state-agent: reloaded ($(agent_mode))" ;;
+    status)  python3 /usr/local/bin/wolf-state-agent.py status --state "$S/agent/state.json" --pid "$L/state-agent.pid" "$@" ;;
+    journal) python3 /usr/local/bin/wolf-state-agent.py journal --journal "$S/agent/events.jsonl" "$@" ;;
+    clean)   python3 /usr/local/bin/wolf-state-agent.py clean --state-dir "$S/agent" --pid "$L/state-agent.pid" "$@" ;;
+    shadow-baseline) shadow_baseline_all "$@" && echo "state-agent: shadow baseline captured" ;;
+    shadow-report)   python3 /usr/local/bin/wolf-state-agent.py shadow-report --shadow-dir "$S/shadow" "$@" ;;
+    optin-tick)      optin_tick ;;
+    stop)    agent_stop; echo "state-agent: stopped" ;;
+    start)
+      [ "$(agent_mode)" = observe-only ] || { echo "state-agent: disabled (off)"; return 0; }
+      local apid
+      apid=$(cat "$L/state-agent.pid" 2>/dev/null) || apid=""
+      if [ -n "$apid" ] && kill -0 "$apid" 2>/dev/null; then
+        echo "state-agent: already running ($apid)"
+        return 0
+      fi
+      agent_config >/dev/null 2>&1
+      local logf=${WOLF_STATE_AGENT_LOG:-/var/log/wolf-state-agent.log}
+      low python3 /usr/local/bin/wolf-state-agent.py run --config "$L/state-agent.json" >> "$logf" 2>&1 &
+      echo "state-agent: started ($!)" ;;
+    *) echo "использование: wolf state-agent mode|roots|status|journal [N]|shadow-baseline|shadow-report|optin-tick|reload|start|stop|clean"; return 2 ;;
+  esac
+}
+_rc_stat_call() {
+  local to_cmd=()
+  if command -v timeout >/dev/null 2>&1; then
+    to_cmd=(timeout 10)
+  fi
+  if [ -n "${WOLF_RCLONE_CMD:-}" ]; then
+    "${to_cmd[@]}" "$WOLF_RCLONE_CMD" "$@"
+  else
+    "${to_cmd[@]}" rclone "$@" --timeout=8s --contimeout=4s --retries=1 --low-level-retries=2 \
+      --drive-pacer-min-sleep=10ms --drive-acknowledge-abuse
+  fi
+}
+
+storage_id() {
+  local r_val="${R:-}"
+  if [ -z "$r_val" ] && [ -f /etc/wolf/env ]; then
+    r_val=$(grep -E '^\s*declare -p R\b|^\s*R=' /etc/wolf/env 2>/dev/null | sed -E 's/.*R="?([^" ]*)"?.*/\1/' || true)
+  fi
+  if [ -z "$r_val" ] || [[ "$r_val" != *:* ]]; then
+    rm -f "$L/storage_folder_id" 2>/dev/null || true
+    return 1
+  fi
+  local rem="${r_val%%:*}" fol="${r_val#*:}"
+  fol="${fol#/}"
+  fol="${fol%/}"
+  if [ -z "$rem" ] || [ -z "$fol" ]; then
+    rm -f "$L/storage_folder_id" 2>/dev/null || true
+    return 1
+  fi
+  local fid rc_out rc_code=0
+  rc_out=$(_rc_stat_call lsjson -M --stat "$r_val" 2>/dev/null) || rc_code=$?
+  if [ "$rc_code" -ne 0 ]; then
+    rm -f "$L/storage_folder_id" 2>/dev/null || true
+    return 1
+  fi
+  fid=$(echo "$rc_out" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    i = str(d.get("ID") or d.get("id") or "").strip()
+    if i: print(i)
+except Exception:
+    pass
+' 2>/dev/null || true)
+  if [ -z "$fid" ]; then
+    local dir_out dir_code=0
+    dir_out=$(_rc_stat_call lsjson -M --dirs-only --max-depth 1 "${rem}:" 2>/dev/null) || dir_code=$?
+    if [ "$dir_code" -ne 0 ]; then
+      rm -f "$L/storage_folder_id" 2>/dev/null || true
+      return 1
+    fi
+    fid=$(echo "$dir_out" | python3 -c '
+import sys, json
+try:
+    for item in json.load(sys.stdin):
+        if str(item.get("Name") or "").strip() == "'"$fol"'":
+            i = str(item.get("ID") or item.get("id") or "").strip()
+            if i:
+                print(i)
+                break
+except Exception:
+    pass
+' 2>/dev/null || true)
+  fi
+  if [ -n "$fid" ]; then
+    mkdir -p "$L"
+    echo "$fid" > "$L/storage_folder_id.tmp.$$"
+    mv -f "$L/storage_folder_id.tmp.$$" "$L/storage_folder_id"
+    echo "$fid"
+    return 0
+  fi
+  rm -f "$L/storage_folder_id" 2>/dev/null || true
+  return 1
+}
+
+session_start() {
+  mkdir -p "$L"
+  if ! command -v flock >/dev/null 2>&1; then
+    log "session: ошибка — утилита flock отсутствует"
+    return 1
+  fi
+  (
+    flock -w "${WOLF_LOCK_WAIT:-10}" 8 || {
+      log "session: отказ — session.lock занят"
+      exit 1
+    }
+    rm -f "$L/cleanup_grant.json" "$L/cleanup_grant.json.tmp"*
+    local rid
+    rid=$(python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null || od -vN 16 -An -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+    [ -n "$rid" ] || rid=$(date +%s%N | md5sum | cut -c1-32)
+    echo "$rid" > "$L/run_id.tmp.$$"
+    mv -f "$L/run_id.tmp.$$" "$L/run_id"
+    log "session: начат новый запуск run_id=$rid, прежние разрешения очистки отменены"
+    exit 0
+  ) 8>"$L/session.lock"
+}
+
+grant_cleanup() {
+  local req_iid="${1:-}" req_run_id="${2:-}" req_folder_id="${3:-}" req_enabled="${4:-0}"
+
+  if ! command -v flock >/dev/null 2>&1; then
+    log "grant-cleanup: отказ — утилита flock отсутствует"
+    echo "отказ: flock отсутствует" >&2
+    return 1
+  fi
+
+  (
+    flock -w "${WOLF_LOCK_WAIT:-10}" 8 || {
+      log "grant-cleanup: отказ — session.lock занят"
+      echo "отказ: занято" >&2
+      exit 1
+    }
+
+    # 1. Проверка входных аргументов от клиента: ни один не может быть пустым
+    if [ -z "$req_run_id" ] || [ -z "$req_iid" ] || [ -z "$req_folder_id" ]; then
+      log "grant-cleanup: отказ — пустые параметры запроса (iid='$req_iid', run_id='$req_run_id', folder_id='$req_folder_id')"
+      echo "отказ: пустые параметры" >&2
+      exit 1
+    fi
+
+    # 2. Серверный run_id: обязан быть непустым и строго совпадать
+    local cur_run_id
+    cur_run_id=$(cat "$L/run_id" 2>/dev/null || true)
+    if [ -z "$cur_run_id" ]; then
+      log "grant-cleanup: отказ — серверный run_id отсутствует"
+      echo "отказ: сервер не инициализирован" >&2
+      exit 1
+    fi
+    if [ "$req_run_id" != "$cur_run_id" ]; then
+      log "grant-cleanup: отказ — run_id не совпадает ($req_run_id != $cur_run_id)"
+      echo "отказ: неверный run_id" >&2
+      exit 1
+    fi
+
+    # 3. Серверный iid: обязан быть непустым и строго совпадать
+    local cur_vi="${VI:-}"
+    if [ -z "$cur_vi" ] && [ -f "$L/iid" ]; then
+      cur_vi=$(cat "$L/iid" 2>/dev/null || true)
+    fi
+    if [ -z "$cur_vi" ]; then
+      log "grant-cleanup: отказ — сервер не знает свой iid"
+      echo "отказ: серверный iid не определён" >&2
+      exit 1
+    fi
+    if [ "$req_iid" != "$cur_vi" ]; then
+      log "grant-cleanup: отказ — iid не совпадает ($req_iid != $cur_vi)"
+      echo "отказ: неверный iid" >&2
+      exit 1
+    fi
+
+    # 4. Серверный folder_id: обязан быть получен из фактически используемого хранилища и строго совпадать
+    local cur_storage_id
+    cur_storage_id=$(storage_id 2>/dev/null || true)
+    if [ -z "$cur_storage_id" ]; then
+      log "grant-cleanup: отказ — серверное хранилище не определено"
+      echo "отказ: серверный folder_id не определён" >&2
+      exit 1
+    fi
+    if [ "$req_folder_id" != "$cur_storage_id" ]; then
+      log "grant-cleanup: отказ — folder_id не совпадает ($req_folder_id != $cur_storage_id)"
+      echo "отказ: неверный folder_id" >&2
+      exit 1
+    fi
+
+    # 5. Атомарная запись разрешения
+    local now tmp_file is_enabled="false"
+    now=$(date +%s)
+    if [ "$req_enabled" = "1" ] || [ "$req_enabled" = "true" ]; then
+      is_enabled="true"
+      echo 1 > "$L/cleanup_enabled"
+    else
+      rm -f "$L/cleanup_enabled"
+    fi
+    tmp_file="$L/cleanup_grant.json.tmp.$$"
+    cat > "$tmp_file" <<EOF
+{"status":"granted","iid":"$req_iid","run_id":"$req_run_id","folder_id":"$req_folder_id","granted_at":$now,"enabled":$is_enabled}
+EOF
+    chmod 600 "$tmp_file" 2>/dev/null || true
+    mv -f "$tmp_file" "$L/cleanup_grant.json"
+
+    # Повторная сверка под блокировкой: не сменился ли run_id в процессе
+    local verify_run_id
+    verify_run_id=$(cat "$L/run_id" 2>/dev/null || true)
+    if [ "$verify_run_id" != "$req_run_id" ]; then
+      rm -f "$L/cleanup_grant.json" "$L/cleanup_enabled"
+      log "grant-cleanup: отказ — сессия сменилась во время записи"
+      echo "отказ: сессия сменилась" >&2
+      exit 1
+    fi
+
+    log "grant-cleanup: принято разрешение очистки (run_id=$req_run_id, iid=$req_iid, folder_id=$req_folder_id, enabled=$is_enabled)"
+    echo "ok"
+    exit 0
+  ) 8>"$L/session.lock"
+}
+
+supervise() {
+  if [ -f "$L/supervise.failed" ]; then
+    log "supervise: отказ — обнаружено состояние аварийной остановки ($L/supervise.failed); запуск запрещён"
+    return 1
+  fi
+  if [ -n "${WOLF_TEST_RACE_PAUSE:-}" ]; then
+    : > "$L/race_precheck_done"
+    while [ ! -f "$L/race_resume" ]; do
+      sleep 0.02
+    done
+  fi
+  set -m 2>/dev/null || true
+  local ns ng now web_pid="" watch_pid="" agent_pid="" boot_pid="" state_pid="" games_pid="" optin_pid=""
+  local web_pgid="" watch_pgid="" agent_pgid="" boot_pgid="" state_pgid="" games_pgid="" optin_pgid=""
+  local opt_int=${WOLF_OPTIN_INTERVAL_SEC:-${OPTIN_SEC:-30}} step=20 nopt=0 sleep_pid=""
+  [ "$opt_int" -lt 1 ] 2>/dev/null && opt_int=1
+  if ! command -v flock >/dev/null 2>&1; then
+    log "supervise: ошибка — утилита flock отсутствует"
+    return 1
+  fi
+  exec 9>"$L/supervise.lock"
+  if ! flock -n 9; then
+    log "supervise: координатор уже запущен"
+    return 1
+  fi
+  if [ -f "$L/supervise.failed" ]; then
+    log "supervise: отказ — состояние аварийной остановки подтверждено под блокировкой ($L/supervise.failed); запуск запрещён"
+    exec 9>&- 2>/dev/null || true
+    return 1
+  fi
+  if declare -f session_start >/dev/null 2>&1; then
+    if ! session_start; then
+      log "supervise: сбой инициализации сессии — запуск координатора остановлен"
+      exec 9>&- 2>/dev/null || true
+      return 1
+    fi
+  fi
+
+  _supervise_spawn() {
+    local name="$1"; shift
+    ( exec 9>&- 8>&- 2>/dev/null || true
+      local cp=""
+      trap "trap - TERM INT; [ -n \"\$cp\" ] && kill -TERM \"\$cp\" 2>/dev/null; [ -n \"\$cp\" ] && wait \"\$cp\" 2>/dev/null || true; rm -f \"\$L/$name.pid\"; exit 0" TERM INT
+      "$@" & cp=$!
+      echo "$cp" > "$L/$name.pid"
+      wait "$cp" 2>/dev/null || true
+      rm -f "$L/$name.pid"
+    ) &
+    local jpid=$!
+    echo "$jpid" > "$L/$name.pgid"
+  }
+
+  _supervise_loop() {
+    local name="$1" delay="$2"; shift 2
+    ( exec 9>&- 8>&- 2>/dev/null || true
+      local cp=""
+      trap "trap - TERM INT; [ -n \"\$cp\" ] && kill -TERM \"\$cp\" 2>/dev/null; [ -n \"\$cp\" ] && wait \"\$cp\" 2>/dev/null || true; rm -f \"\$L/$name.pid\"; exit 0" TERM INT
+      while :; do
+        "$@" & cp=$!
+        echo "$cp" > "$L/$name.pid"
+        wait "$cp" 2>/dev/null || true
+        rm -f "$L/$name.pid"
+        sleep "$delay" & cp=$!
+        wait "$cp" 2>/dev/null || break
+      done ) &
+    local jpid=$!
+    echo "$jpid" > "$L/$name.pgid"
+  }
+
+  supervise_teardown() {
+    trap '' TERM INT EXIT
+    [ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null || true
+
+    local all_pgids=() pg
+    for pg in "$boot_pgid" "$state_pgid" "$games_pgid" "$optin_pgid" "$watch_pgid" "$web_pgid" "$agent_pgid"; do
+      [ -n "$pg" ] && all_pgids+=("$pg")
+    done
+    for f in "$L"/*.pgid; do
+      if [ -f "$f" ]; then
+        pg=$(cat "$f" 2>/dev/null || true)
+        [ -n "$pg" ] && all_pgids+=("$pg")
+      fi
+    done
+
+    local all_pids=() p
+    for p in "$boot_pid" "$state_pid" "$games_pid" "$optin_pid" "$watch_pid" "$web_pid" "$agent_pid"; do
+      [ -n "$p" ] && all_pids+=("$p")
+    done
+    for name in boot state games optin watch web state-agent state-agent-loop; do
+      p=$(cat "$L/$name.pid" 2>/dev/null || true)
+      [ -n "$p" ] && all_pids+=("$p")
+    done
+
+    agent_stop 2>/dev/null || true
+    for pg in "${all_pgids[@]}"; do
+      [ -n "$pg" ] && kill -0 -- "-$pg" 2>/dev/null && kill -TERM -- "-$pg" 2>/dev/null || true
+    done
+    for p in "${all_pids[@]}"; do
+      [ -n "$p" ] && kill -0 "$p" 2>/dev/null && kill -TERM "$p" 2>/dev/null || true
+    done
+
+    _any_worker_alive() {
+      if [ -f "$L/supervise_alive_override" ]; then
+        return 0
+      fi
+      if [ -d /proc ]; then
+        local statf content state pgrp p
+        for statf in /proc/[0-9]*/stat; do
+          [ -f "$statf" ] || continue
+          read -r _ content < "$statf" 2>/dev/null || continue
+          content="${content##*) }"
+          read -r state _ pgrp _ <<< "$content"
+          [ "$state" = "Z" ] && continue
+          for pg in "${all_pgids[@]}"; do
+            [ "$pgrp" = "$pg" ] && return 0
+          done
+          p="${statf#/proc/}"
+          p="${p%/stat}"
+          for tp in "${all_pids[@]}"; do
+            [ "$p" = "$tp" ] && return 0
+          done
+        done
+        return 1
+      fi
+      for pg in "${all_pgids[@]}"; do
+        if [ -n "$pg" ] && kill -0 -- "-$pg" 2>/dev/null; then
+          return 0
+        fi
+      done
+      for p in "${all_pids[@]}"; do
+        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    local timeout=${WOLF_STOP_TIMEOUT_SEC:-10}
+    local t0 deadline now_t
+    t0=$(date +%s)
+    deadline=$(( t0 + timeout ))
+
+    while _any_worker_alive; do
+      now_t=$(date +%s)
+      if [ "$now_t" -ge "$deadline" ]; then
+        log "supervise: таймаут остановки (${timeout} с) — принудительное завершение групп и процессов (KILL)"
+        for pg in "${all_pgids[@]}"; do
+          if [ -n "$pg" ] && kill -0 -- "-$pg" 2>/dev/null; then
+            kill -KILL -- "-$pg" 2>/dev/null || true
+          fi
+        done
+        for p in "${all_pids[@]}"; do
+          if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+            kill -KILL "$p" 2>/dev/null || true
+          fi
+        done
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          _any_worker_alive || break
+          sleep 0.1
+        done
+        break
+      fi
+      sleep 0.1
+    done
+
+    if _any_worker_alive; then
+      log "supervise: критический сбой — не удалось подтвердить завершение всех работников; запуск нового координатора заблокирован"
+      local failed_saved=0
+      if [ -z "${WOLF_TEST_FAIL_MARKER_ERROR:-}" ]; then
+        if printf 'unconfirmed_workers %s\n' "$(date +%s)" > "$L/supervise.failed.tmp.$$" 2>/dev/null && \
+           mv -f "$L/supervise.failed.tmp.$$" "$L/supervise.failed" 2>/dev/null && \
+           [ -s "$L/supervise.failed" ]; then
+          failed_saved=1
+        elif printf 'unconfirmed_workers %s\n' "$(date +%s)" > "$L/supervise.failed" 2>/dev/null && \
+             [ -s "$L/supervise.failed" ]; then
+          failed_saved=1
+        fi
+      fi
+      if [ "$failed_saved" != "1" ]; then
+        log "supervise: критический сбой — работники не остановлены и не удалось сохранить маркер аварийного состояния ($L/supervise.failed); принудительное удержание блокировки для защиты от нового запуска"
+        while :; do
+          sleep 3600 & sleep_pid=$!
+          wait "$sleep_pid" 2>/dev/null || true
+        done
+      fi
+      exit 1
+    fi
+
+    rm -f "$L/boot.pid" "$L/state.pid" "$L/games.pid" "$L/optin.pid" "$L/watch.pid" "$L/web.pid" "$L/"*.pgid 2>/dev/null || true
+    rm -f "$L/supervise.failed" 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    exit 0
+  }
+
+  trap 'supervise_teardown' TERM INT EXIT
+
+  _supervise_loop "web" 5 env WOLF_PORT="$WP" python3 "${WOLF_WEB_PY:-/usr/local/bin/wolf-web.py}"
+  web_pid=$!
+  web_pgid=$!
+
+  _supervise_loop "watch" 10 low "$0" watch
+  watch_pid=$!
+  watch_pgid=$!
+
+  if [ "$(agent_mode)" = observe-only ]; then
+    ( exec 9>&- 8>&- 2>/dev/null || true; agent_run_loop ) &
+    agent_pid=$!
+    agent_pgid=$!
+    echo "$agent_pid" > "$L/state-agent-loop.pid"
+    echo "$agent_pgid" > "$L/state-agent-loop.pgid"
+    log "state-agent: запущен в режиме observe-only"
+  else
+    agent_stop
+    log "state-agent: выключен (WOLF_STATE_AGENT=off)"
+  fi
+
+  if [ ! -e "$L/boot-started" ]; then
+    : > "$L/boot-started"
+    _supervise_spawn "boot" "$0" boot
+    boot_pid=$!
+    boot_pgid=$!
+  fi
+
+  now=$(date +%s); ns=$(( now + 300 )); ng=$(( now + 720 ))
+  if optin_enabled; then
+    nopt=$(( now + opt_int ))
+    [ "$opt_int" -lt "$step" ] && step=$opt_int
+    log "state-agent: включён фоновый opt-in эксперимент (период ${opt_int} с)"
+  fi
+
+  while :; do
+    sleep "$step" & sleep_pid=$!
+    wait "$sleep_pid" 2>/dev/null || break
+    sleep_pid=""
     [ -e "$L/boot-done" ] || continue
     now=$(date +%s)
-    if [ "$now" -ge "$ns" ]; then ns=$(( now + SMIN * 60 )); ( low "$0" state >/dev/null 2>&1 & ); fi
-    if [ "$now" -ge "$ng" ]; then ng=$(( now + GMIN * 60 )); ( low "$0" games >/dev/null 2>&1 & ); fi
+    if [ "$now" -ge "$ns" ]; then
+      ns=$(( now + SMIN * 60 ))
+      if [ -z "$state_pid" ] || ! kill -0 "$state_pid" 2>/dev/null; then
+        _supervise_spawn "state" low "$0" state
+        state_pid=$!
+        state_pgid=$!
+      fi
+    fi
+    if [ "$now" -ge "$ng" ]; then
+      ng=$(( now + GMIN * 60 ))
+      if [ -z "$games_pid" ] || ! kill -0 "$games_pid" 2>/dev/null; then
+        _supervise_spawn "games" low "$0" games
+        games_pid=$!
+        games_pgid=$!
+      fi
+    fi
+    if optin_enabled && [ "$now" -ge "$nopt" ]; then
+      nopt=$(( now + opt_int ))
+      if [ -z "$optin_pid" ] || ! kill -0 "$optin_pid" 2>/dev/null; then
+        _supervise_spawn "optin" low "$0" state-agent optin-tick
+        optin_pid=$!
+        optin_pgid=$!
+      fi
+    fi
   done
+
+  supervise_teardown
 }
 
 case ${1:-} in
+  session-start)                             session_start ;;
+  grant-cleanup)                             shift; grant_cleanup "$@" ;;
   boot)                                      boot ;;
   finish)                                    finish_start ;;
   sunshine-creds)                            shift; sunshine_creds "$@" ;;
@@ -2383,12 +4156,16 @@ case ${1:-} in
   steamlink-pin)                             shift; steamlink_pin "$@" ;;
   prog)                                      shift; prog_cmd "$@" ;;
   finish-run)                                finish_run ;;
+  clean)                                     shift; cmd_clean "$@" ;;
+  gsync)                                     ( NOW=1; log() { :; }; gsync ) ;;
   state|games|shutdown|restore|push|forget|answer|mods|lgame)  bk "$@" ;;
   watch)                                     watch_games ;;
+  state-agent)                               shift; state_agent_cmd "$@" ;;
   supervise)                                 supervise ;;
+  classify)                                  shift; python3 /usr/local/bin/wolf-parts.py classify "$R" "$@" ;;
   firewall)                                  setup_sunshine_firewall ;;
   display)                                   xenv && setup_display ;;
-  *) echo "использование: wolf boot|state|games|shutdown|finish|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|watch|supervise|firewall|display"; exit 2 ;;
+  *) echo "использование: wolf boot|state|games|shutdown|finish|restore ИМЯ..|push ИМЯ..|forget ИМЯ..|clean ИМЯ..|watch|state-agent|supervise|classify ИМЯ|firewall|display|gsync"; exit 2 ;;
 esac
 WOLF
 
@@ -2463,6 +4240,2728 @@ exit 0
 RES
 fi
 
+# =============================== wolf_session.py ===============================
+mkdir -p /usr/local/lib
+w /usr/local/lib/wolf_session.py 644 <<'SESSION'
+#!/usr/bin/env python3
+"""wolf_session.py — единые функции сессионного допуска к очистке и метаданных Wolf."""
+import json
+import os
+import re
+import subprocess
+
+def get_run_id(run_id_file='/run/wolf/run_id'):
+    try:
+        with open(run_id_file, 'r', encoding='utf-8') as f:
+            v = f.read().strip()
+            return v if v else None
+    except Exception:
+        return None
+
+def get_env_iid(iid_file='/run/wolf/iid'):
+    v = os.environ.get('VI')
+    if v and str(v).strip():
+        return str(v).strip()
+    try:
+        with open(iid_file, 'r', encoding='utf-8') as f:
+            c = f.read().strip()
+            return c if c else None
+    except Exception:
+        return None
+
+def get_env_r(env_file='/etc/wolf/env'):
+    if os.environ.get('R'):
+        v = str(os.environ['R']).strip()
+        if v:
+            return v
+    if os.path.isfile(env_file):
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if 'R=' in line:
+                        m = re.search(r'\bR=["\']?([^"\'\s]+)["\']?', line)
+                        if m and m.group(1).strip():
+                            return m.group(1).strip()
+        except Exception:
+            pass
+    return ''
+
+def get_storage_folder_id(r_val=None, rc_cmd=None, fid_path='/run/wolf/storage_folder_id'):
+    if r_val is None:
+        r_val = get_env_r()
+    if not r_val or ':' not in r_val:
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+    rem, _, fol = r_val.partition(':')
+    fol = fol.strip('/')
+    if not rem or not fol:
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+    if rc_cmd is None:
+        rc_cmd = os.environ.get('WOLF_RCLONE_CMD', 'rclone')
+    try:
+        res = subprocess.run([rc_cmd, 'lsjson', '-M', '--stat', r_val],
+                             capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            d = json.loads(res.stdout or '{}')
+            fid = str(d.get('ID') or d.get('id') or '').strip()
+            if fid:
+                try:
+                    os.makedirs(os.path.dirname(fid_path), exist_ok=True)
+                    tmp = f'{fid_path}.tmp.{os.getpid()}'
+                    with open(tmp, 'w', encoding='utf-8') as f:
+                        f.write(fid)
+                    os.replace(tmp, fid_path)
+                except Exception:
+                    pass
+                return fid
+        else:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+    try:
+        res = subprocess.run([rc_cmd, 'lsjson', '-M', '--dirs-only', '--max-depth', '1', f'{rem}:'],
+                             capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            for item in json.loads(res.stdout or '[]'):
+                if str(item.get('Name') or '').strip() == fol:
+                    fid = str(item.get('ID') or item.get('id') or '').strip()
+                    if fid:
+                        try:
+                            os.makedirs(os.path.dirname(fid_path), exist_ok=True)
+                            tmp = f'{fid_path}.tmp.{os.getpid()}'
+                            with open(tmp, 'w', encoding='utf-8') as f:
+                                f.write(fid)
+                            os.replace(tmp, fid_path)
+                        except Exception:
+                            pass
+                        return fid
+        else:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        pass
+    try:
+        os.unlink(fid_path)
+    except Exception:
+        pass
+    return None
+
+def is_cleanup_authorized(grant_file='/run/wolf/cleanup_grant.json', run_id_val=None, iid_val=None, folder_id_val=None):
+    """Единая проверка допуска к очистке во всех слоях Wolf."""
+    cur_run_id = (run_id_val if run_id_val is not None else get_run_id()) or ''
+    cur_iid = (iid_val if iid_val is not None else get_env_iid()) or ''
+    cur_fid = (folder_id_val if folder_id_val is not None else get_storage_folder_id()) or ''
+    if not cur_run_id or not cur_iid or not cur_fid:
+        return False
+    if not os.path.isfile(grant_file):
+        return False
+    try:
+        with open(grant_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        if data.get('status') != 'granted':
+            return False
+        g_run = str(data.get('run_id') or '').strip()
+        g_iid = str(data.get('iid') or '').strip()
+        g_fid = str(data.get('folder_id') or '').strip()
+        if not g_run or not g_iid or not g_fid:
+            return False
+        if g_run != cur_run_id or g_iid != cur_iid or g_fid != cur_fid:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def is_cleanup_enabled(enabled_val=None, grant_file='/run/wolf/cleanup_grant.json', enabled_file='/run/wolf/cleanup_enabled'):
+    """Проверка явного включения очистки (по умолчанию ВСЕГДА False)."""
+    if enabled_val is not None:
+        return bool(enabled_val)
+    env_v = os.environ.get("VG_STORAGE_CLEANUP_ENABLED", "").lower().strip()
+    if env_v in ("1", "true", "yes"):
+        return True
+    if os.path.isfile(enabled_file):
+        try:
+            with open(enabled_file, "r", encoding="utf-8") as f:
+                val = f.read().strip().lower()
+                if val in ("1", "true", "yes", ""):
+                    return True
+        except Exception:
+            pass
+    if os.path.isfile(grant_file):
+        try:
+            with open(grant_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data.get("enabled") is True:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+SESSION
+
+# ============================= wolf_classifier.py =============================
+w /usr/local/lib/wolf_classifier.py 644 <<'CLASSIFIER'
+"""wolf_classifier.py — классификатор объектов облачного хранилища VastGame.
+
+Реализует безопасный аудит и предварительный просмотр (preview/view-only):
+- Категория 1 (ACTIVE): подтверждённые активные данные — безусловно сохранить;
+- Группа Б (PROTECTED): незавершённые, staged, pending и неподтверждённые попытки — защитить;
+- Группа А (CANDIDATE): доказанно вытесненные объекты, недостижимые в коде unpack — кандидаты;
+- Группа В (AMBIGUOUS): повреждённые оглавления, ошибки формата и неизвестные файлы — запретить очистку.
+
+Категории взаимоисключающие; приоритет защиты всегда превалирует.
+Никакого удаления или перемещения файлов этот модуль не производит.
+Модуль работает строго в режиме чтения (read-only).
+"""
+
+import json
+import os
+import re
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+PARTS_HEAD = "vastgame-parts 1"
+STAGE_HEAD = "vastgame-stage 1"
+
+
+def part_re(obj):
+    return re.compile(re.escape(obj) + r"\.g([0-9a-f]{8})-\d{4}")
+
+
+def delta_pattern(base_tar):
+    return re.compile(r"^(" + re.escape(base_tar) + r"\.([0-9a-f]{8}))(.*)$")
+
+
+def parse_parts_index_text(text, obj):
+    """Парсинг и строгая валидация содержимого .parts оглавления.
+    Возвращает (gen, total_size, parts_list). При ошибке синтаксиса выбрасывает ValueError."""
+    lines = text.splitlines()
+    if len(lines) < 3 or lines[0].strip() != PARTS_HEAD:
+        raise ValueError(f"{obj}: неверный заголовок оглавления: {lines[0] if lines else 'пусто'}")
+    try:
+        total = int(lines[1].strip())
+    except Exception as e:
+        raise ValueError(f"{obj}: неверный размер в оглавлении: {lines[1] if len(lines) > 1 else ''}") from e
+
+    pr = part_re(obj)
+    parts = []
+    gen = None
+    for i, line in enumerate(lines[2:], 3):
+        if not line.strip():
+            continue
+        if "\t" in line:
+            row = [x.strip() for x in line.split("\t")]
+        else:
+            row = line.split()
+        if len(row) != 3:
+            raise ValueError(f"{obj}: строка {i} оглавления повреждена: {line!r}")
+        name, md5_val, size_str = row
+        m = pr.fullmatch(name)
+        if not m:
+            raise ValueError(f"{obj}: строка {i}: имя части {name!r} не соответствует шаблону")
+        p_gen = m.group(1)
+        if gen is None:
+            gen = p_gen
+        elif gen != p_gen:
+            raise ValueError(f"{obj}: в оглавлении смешаны поколения {gen} и {p_gen}")
+        try:
+            sz = int(size_str)
+        except Exception as e:
+            raise ValueError(f"{obj}: строка {i}: неверный размер {size_str}") from e
+        parts.append((name, md5_val, sz))
+
+    if not parts:
+        raise ValueError(f"{obj}: оглавление не содержит частей")
+    sum_sz = sum(p[2] for p in parts)
+    if sum_sz != total:
+        raise ValueError(f"{obj}: сумма размеров частей ({sum_sz}) не совпадает с итогом ({total})")
+    return gen, total, parts
+
+
+def parse_receipt(text, obj=None):
+    """Строгий разбор квитанции подготовки vastgame-stage 1 (совместим с wolf-parts.py)."""
+    lines = text.splitlines()
+    if len(lines) < 4 or lines[0].strip() != STAGE_HEAD:
+        raise ValueError("нет квитанции подготовки: неверный заголовок")
+    kind = lines[1].strip()
+    if kind == "single":
+        return ("single", lines[2].strip(), int(lines[3].strip()))
+    if kind != "parts" or len(lines) < 6:
+        raise ValueError("нет квитанции подготовки: неверный формат parts")
+    parts = []
+    for i, ln in enumerate(lines[6:], 7):
+        if not ln.strip():
+            continue
+        row = ln.split("\t")
+        if len(row) != 3:
+            raise ValueError(f"повреждённая строка части в квитанции (строка {i}): {ln!r}")
+        n, m, s = row
+        if obj and not n.startswith(obj + ".g"):
+            raise ValueError(f"чужое имя в квитанции: {n} (ожидался префикс {obj}.g)")
+        parts.append((n, m, int(s)))
+    return ("parts", lines[2].strip(), lines[3].strip(), int(lines[4].strip()), parts, float(lines[5].strip()))
+
+
+def read_attempt_file(path, expected_obj=None):
+    """Чтение и валидация файла маркера попытки attempt-* из $T."""
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ValueError(f"{path}: пустой файл attempt")
+    kind = lines[0].strip()
+    if not kind:
+        raise ValueError(f"{path}: пустой заголовок kind в attempt")
+    stage_text = "\n".join(lines[1:])
+    receipt = parse_receipt(stage_text, obj=expected_obj)
+    return kind, receipt
+
+
+def read_pending_file(path):
+    """Чтение и валидация постоянного файла квитанции $S/pending/<архив>."""
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ValueError(f"{path}: пустой файл pending")
+    first_line = lines[0].strip()
+    if not first_line.startswith("object "):
+        raise ValueError(f"{path}: первая строка должна начинаться с 'object ': {first_line!r}")
+    target_obj = first_line[7:].strip()
+    if not target_obj:
+        raise ValueError(f"{path}: пустое значение object в pending")
+    stage_text = "\n".join(lines[1:])
+    receipt = parse_receipt(stage_text, obj=target_obj)
+    return target_obj, receipt
+
+
+def _read_remote_file(remote, rel_name, rclone_cmd="rclone"):
+    """Чтение содержимого файла из remote (локального каталога или через rclone)."""
+    if os.path.isdir(remote):
+        p = Path(remote) / rel_name
+        if not p.is_file():
+            return None
+        try:
+            return p.read_bytes()
+        except OSError:
+            return None
+    try:
+        res = subprocess.run(
+            [rclone_cmd, "cat", f"{remote.rstrip('/')}/{rel_name}"],
+            capture_output=True,
+            timeout=15,
+        )
+        if res.returncode == 0:
+            return res.stdout
+        return None
+    except Exception:
+        return None
+
+
+def _get_remote_listing(remote, rclone_cmd="rclone"):
+    """Получение описи файлов в remote со свойствами (Name, Size, ModTime, MD5)."""
+    if os.path.isdir(remote):
+        items = []
+        import hashlib
+        root = Path(remote)
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(root).as_posix()
+            try:
+                st = p.stat()
+                mtime_iso = datetime.fromtimestamp(st.st_mtime).isoformat()
+                h = hashlib.md5()
+                with open(p, "rb") as f:
+                    while b := f.read(65536):
+                        h.update(b)
+                md5_val = h.hexdigest()
+                items.append({
+                    "Name": rel,
+                    "Size": st.st_size,
+                    "ModTime": mtime_iso,
+                    "ModTime_epoch": st.st_mtime,
+                    "MD5": md5_val,
+                })
+            except OSError:
+                continue
+        return items
+
+    # Через rclone lsjson
+    try:
+        res = subprocess.run(
+            [rclone_cmd, "lsjson", "-M", "--hash", remote],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if res.returncode == 0:
+            data = json.loads(res.stdout or "[]")
+            items = []
+            for d in data:
+                if d.get("IsDir"):
+                    continue
+                name = d.get("Name") or ""
+                sz = d.get("Size") or 0
+                mtime = d.get("ModTime") or ""
+                epoch = 0.0
+                if mtime:
+                    try:
+                        ts_str = re.sub(r"(\.\d{6})\d+", r"\1", mtime).replace("Z", "+00:00")
+                        epoch = datetime.fromisoformat(ts_str).timestamp()
+                    except Exception:
+                        pass
+                hashes = d.get("Hashes") or {}
+                md5_val = hashes.get("md5") or hashes.get("MD5") or ""
+                items.append({
+                    "Name": name,
+                    "Size": sz,
+                    "ModTime": mtime,
+                    "ModTime_epoch": epoch,
+                    "MD5": md5_val,
+                    "ID": d.get("ID") or "",
+                })
+            return items
+        return None
+    except Exception:
+        return None
+
+
+def _check_session_authorization(
+    grant_file="/run/wolf/cleanup_grant.json",
+    run_id_val=None,
+    iid_val=None,
+    folder_id_val=None,
+):
+    """Проверка допуска сессии строго через единую библиотеку wolf_session.
+    Отсутствие модуля wolf_session или любая ошибка проверки означает отказ (False).
+    Никаких упрощённых fallback-проверок без сверки run_id, iid и folder_id."""
+    try:
+        from wolf_session import is_cleanup_authorized
+        return is_cleanup_authorized(
+            grant_file=grant_file,
+            run_id_val=run_id_val,
+            iid_val=iid_val,
+            folder_id_val=folder_id_val,
+        )
+    except Exception:
+        return False
+
+
+def classify_archive(
+    remote,
+    obj_name,
+    listing=None,
+    grant_file="/run/wolf/cleanup_grant.json",
+    tmp_dir="/var/tmp/wolf",
+    state_dir="/var/lib/wolf",
+    rclone_cmd="rclone",
+    run_id_val=None,
+    iid_val=None,
+    folder_id_val=None,
+):
+    """Классифицирует все облачные файлы, относящиеся к указанному архиву.
+
+    Возвращает словарь отчёта с гарантией non-overlapping категорий:
+    - ACTIVE: подтверждённые активные данные (оглавления и части, активный одиночный архив);
+    - PROTECTED: незавершённые выгрузки, неподтверждённые поколения, объекты попыток/staged;
+    - CANDIDATE: доказанно вытесненные объекты (независимо от возраста/mtime);
+    - AMBIGUOUS: ошибки синтаксиса, посторонние файлы или повреждённые квитанции.
+    """
+    # Нормализация имени объекта
+    obj_str = str(obj_name).strip()
+    if obj_str.endswith(".tar.zst"):
+        base_tar = obj_str
+        base_name = obj_str[:-8]
+    else:
+        base_name = obj_str
+        base_tar = f"{obj_str}.tar.zst"
+
+    report = {
+        "object": base_tar,
+        "base_name": base_name,
+        "active_base_kind": None,
+        "active_base_version": None,
+        "active_delta_kind": None,
+        "active_delta_version": None,
+        "cleanup_allowed": False,
+        "cleanup_block_reason": None,
+        "summary": {
+            "total_files": 0,
+            "active_count": 0,
+            "protected_count": 0,
+            "candidate_count": 0,
+            "ambiguous_count": 0,
+        },
+        "files": [],
+    }
+
+    # 1. Получение описи хранилища
+    if listing is None:
+        listing = _get_remote_listing(remote, rclone_cmd=rclone_cmd)
+
+    if listing is None:
+        report["cleanup_allowed"] = False
+        report["cleanup_block_reason"] = "storage_listing_failed"
+        return report
+
+    # 2. Фильтрация файлов, относящихся к данному архиву
+    by_name = {}
+    d_pat = delta_pattern(base_tar)
+    pr_base = part_re(base_tar)
+
+    for item in listing:
+        fname = item["Name"]
+        if fname in (base_tar, f"{base_tar}.parts", f"{base_tar}.parts.new", f"{base_tar}.part") or pr_base.fullmatch(fname):
+            by_name[fname] = item
+            continue
+        m = d_pat.match(fname)
+        if m:
+            by_name[fname] = item
+            continue
+        if fname.startswith(f"{base_name}.") or fname.startswith(f"{base_tar}."):
+            by_name[fname] = item
+
+    if not by_name:
+        report["cleanup_allowed"] = False
+        report["cleanup_block_reason"] = "archive_not_found_in_storage"
+        return report
+
+    report["summary"]["total_files"] = len(by_name)
+
+    # 3. Чтение квитанций попыток (attempt-* и $S/pending/<архив>)
+    # Отслеживаем повреждения квитанций: любая ошибка чтения/парсинга блокирует очистку!
+    receipt_errors = []
+    protected_targets = set()       # target_obj (base_tar или delta), описанные квитанциями
+    protected_part_names = set()    # конкретные имена файлов частей из квитанций
+    protected_generations = {}      # target_obj -> set(gen_strings)
+
+    # 3.1. Сканирование tmp_dir (attempt-*)
+    # ВНИМАНИЕ: движок сохраняет файл как os.path.join(TMP, "attempt-" + obj.replace("/", "_")).
+    # Для сопоставления используем прямое преобразование известного имени base_tar и его дельт,
+    # исключая неоднозначное обратное replace("_", "/").
+    if tmp_dir and os.path.isdir(tmp_dir):
+        base_att_name = "attempt-" + base_tar.replace("/", "_")
+        try:
+            for entry in os.listdir(tmp_dir):
+                if entry == base_att_name:
+                    target_obj = base_tar
+                elif entry.startswith(base_att_name + "."):
+                    delta_suffix = entry[len(base_att_name) + 1:]
+                    target_obj = f"{base_tar}.{delta_suffix}"
+                else:
+                    continue
+
+                att_path = os.path.join(tmp_dir, entry)
+                if not os.path.isfile(att_path):
+                    continue
+                try:
+                    _, receipt = read_attempt_file(att_path, expected_obj=target_obj)
+                    protected_targets.add(target_obj)
+                    if receipt[0] == "parts":
+                        gen = receipt[1]
+                        protected_generations.setdefault(target_obj, set()).add(gen)
+                        for pn, _, _ in receipt[4]:
+                            protected_part_names.add(pn)
+                except Exception as e:
+                    receipt_errors.append((att_path, str(e)))
+        except OSError as e:
+            receipt_errors.append((tmp_dir, str(e)))
+
+    # 3.2. Сканирование state_dir/pending/<архив>
+    if state_dir and os.path.isdir(state_dir):
+        p_dir = os.path.join(state_dir, "pending")
+        if os.path.isdir(p_dir):
+            checked_paths = set()
+            for cand_name in (base_name, base_tar):
+                cand_path = os.path.join(p_dir, cand_name)
+                if os.path.isfile(cand_path) and cand_path not in checked_paths:
+                    checked_paths.add(cand_path)
+                    try:
+                        target_obj, receipt = read_pending_file(cand_path)
+                        protected_targets.add(target_obj)
+                        if receipt[0] == "parts":
+                            gen = receipt[1]
+                            protected_generations.setdefault(target_obj, set()).add(gen)
+                            for pn, _, _ in receipt[4]:
+                                protected_part_names.add(pn)
+                    except Exception as e:
+                        receipt_errors.append((cand_path, str(e)))
+
+    # 3.3. Сканирование staged файлов хранилища (.parts.new и .part)
+    for fname in by_name:
+        if fname.endswith(".parts.new"):
+            t_obj = fname[:-10]
+            protected_targets.add(t_obj)
+            s_bytes = _read_remote_file(remote, fname, rclone_cmd=rclone_cmd)
+            if s_bytes:
+                try:
+                    s_gen, _, s_parts = parse_parts_index_text(s_bytes.decode("utf-8", "replace"), t_obj)
+                    protected_generations.setdefault(t_obj, set()).add(s_gen)
+                    for pn, _, _ in s_parts:
+                        protected_part_names.add(pn)
+                except Exception:
+                    pass
+        elif fname.endswith(".part"):
+            t_obj = fname[:-5]
+            protected_targets.add(t_obj)
+
+    # 4. Анализ базового архива (parts vs single)
+    active_base_parts_item = by_name.get(f"{base_tar}.parts")
+    active_base_single_item = by_name.get(base_tar)
+    active_base_parts_list = []
+    active_base_gen = None
+    active_base_md5 = None
+    base_is_corrupted = False
+
+    if active_base_parts_item:
+        idx_bytes = _read_remote_file(remote, f"{base_tar}.parts", rclone_cmd=rclone_cmd)
+        if idx_bytes is None:
+            base_is_corrupted = True
+        else:
+            try:
+                gen, _, p_list = parse_parts_index_text(idx_bytes.decode("utf-8", "replace"), base_tar)
+                active_base_gen = gen
+                active_base_parts_list = p_list
+                import hashlib
+                active_base_md5 = hashlib.md5(idx_bytes).hexdigest()
+                report["active_base_kind"] = "parts"
+                report["active_base_version"] = active_base_md5
+            except Exception:
+                base_is_corrupted = True
+                report["active_base_kind"] = "corrupted_parts"
+    elif active_base_single_item:
+        active_base_md5 = active_base_single_item.get("MD5") or ""
+        report["active_base_kind"] = "single"
+        report["active_base_version"] = active_base_md5
+
+    # 5. Анализ активной накопительной дельты
+    active_delta_base = None
+    active_delta_parts_item = None
+    active_delta_single_item = None
+    active_delta_parts_list = []
+    active_delta_gen = None
+    active_delta_md5 = None
+
+    if active_base_md5:
+        delta_prefix = f"{base_tar}.{active_base_md5[:8]}"
+        active_delta_base = delta_prefix
+        active_delta_parts_item = by_name.get(f"{delta_prefix}.parts")
+        active_delta_single_item = by_name.get(delta_prefix)
+
+        if active_delta_parts_item:
+            d_idx_bytes = _read_remote_file(remote, f"{delta_prefix}.parts", rclone_cmd=rclone_cmd)
+            if d_idx_bytes:
+                try:
+                    d_gen, _, d_p_list = parse_parts_index_text(d_idx_bytes.decode("utf-8", "replace"), delta_prefix)
+                    active_delta_gen = d_gen
+                    active_delta_parts_list = d_p_list
+                    import hashlib
+                    active_delta_md5 = hashlib.md5(d_idx_bytes).hexdigest()
+                    report["active_delta_kind"] = "parts"
+                    report["active_delta_version"] = active_delta_md5
+                except Exception:
+                    pass
+        elif active_delta_single_item:
+            active_delta_md5 = active_delta_single_item.get("MD5") or ""
+            report["active_delta_kind"] = "single"
+            report["active_delta_version"] = active_delta_md5
+
+    # 6. Классификация каждого файла
+    classified_files = []
+    active_base_part_names = set(p[0] for p in active_base_parts_list)
+    active_delta_part_names = set(p[0] for p in active_delta_parts_list)
+
+    for fname, item in sorted(by_name.items()):
+        f_size = item.get("Size") or 0
+        f_mtime = item.get("ModTime") or ""
+        f_md5 = item.get("MD5") or ""
+        f_id = str(item.get("ID") or item.get("id") or "")
+
+        # Проверка соответствия форматам VastGame
+        is_known_format = (
+            fname in (base_tar, f"{base_tar}.parts", f"{base_tar}.parts.new", f"{base_tar}.part")
+            or bool(pr_base.fullmatch(fname))
+            or bool(d_pat.match(fname))
+        )
+        if not is_known_format:
+            classified_files.append({
+                "name": fname,
+                "category": "AMBIGUOUS",
+                "reason": "unrecognized_archive_file_pattern_or_grammar_violation",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        # Случай А: повреждённое оглавление активной базы
+        if base_is_corrupted:
+            if fname == f"{base_tar}.parts":
+                category = "AMBIGUOUS"
+                reason = "corrupted_parts_index_syntax_or_checksum_error"
+            else:
+                category = "PROTECTED"
+                reason = "active_base_corrupted_cleanup_aborted_for_safety"
+            classified_files.append({
+                "name": fname,
+                "category": category,
+                "reason": reason,
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        # Случай Б: Активная база
+        if active_base_parts_item:
+            if fname == f"{base_tar}.parts":
+                classified_files.append({
+                    "name": fname,
+                    "category": "ACTIVE",
+                    "reason": "active_base_parts_index",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+            if fname in active_base_part_names:
+                classified_files.append({
+                    "name": fname,
+                    "category": "ACTIVE",
+                    "reason": "part_of_active_base_index",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+        elif active_base_single_item and fname == base_tar:
+            classified_files.append({
+                "name": fname,
+                "category": "ACTIVE",
+                "reason": "active_base_single_archive",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        # Случай В: Активная дельта
+        if active_delta_base:
+            if active_delta_parts_item and fname == f"{active_delta_base}.parts":
+                classified_files.append({
+                    "name": fname,
+                    "category": "ACTIVE",
+                    "reason": "active_delta_parts_index",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+            if fname in active_delta_part_names:
+                classified_files.append({
+                    "name": fname,
+                    "category": "ACTIVE",
+                    "reason": "part_of_active_delta_index",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+            if active_delta_single_item and fname == active_delta_base:
+                classified_files.append({
+                    "name": fname,
+                    "category": "ACTIVE",
+                    "reason": "active_delta_single_archive",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+
+        # Случай Г: Файлы незавершённой подготовки (staged / partial / in-flight)
+        if fname.endswith(".part"):
+            classified_files.append({
+                "name": fname,
+                "category": "PROTECTED",
+                "reason": "partial_upload_in_progress",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        if fname.endswith(".parts.new"):
+            classified_files.append({
+                "name": fname,
+                "category": "PROTECTED",
+                "reason": "staged_index_upload_in_progress",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        # Случай Д: Файлы, прямо защищённые квитанциями попыток (attempt-* или pending)
+        if fname in protected_part_names:
+            classified_files.append({
+                "name": fname,
+                "category": "PROTECTED",
+                "reason": "pending_attempt_part_matching_receipt",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        # Случай Е: Части базового архива (не входящие в активное оглавление)
+        m_part = pr_base.fullmatch(fname)
+        if m_part:
+            p_gen = m_part.group(1)
+            # Проверяем принадлежность к поколению попытки или staged
+            if p_gen in protected_generations.get(base_tar, set()):
+                classified_files.append({
+                    "name": fname,
+                    "category": "PROTECTED",
+                    "reason": "pending_attempt_generation_matching_receipt",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+
+            # Неподтверждённое поколение (gen != active_base_gen):
+            # Внимание: mtime (старое, равное или новое) НЕ доказывает возможность удаления!
+            # Без строгого подтверждения вытеснения любая такая часть остаётся PROTECTED.
+            classified_files.append({
+                "name": fname,
+                "category": "PROTECTED",
+                "reason": "unconfirmed_generation_without_proven_displacement",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+            })
+            continue
+
+        # Случай Ж: Одиночный архив базы рядом с активным .parts оглавлением
+        if fname == base_tar and active_base_parts_item:
+            if base_tar in protected_targets:
+                classified_files.append({
+                    "name": fname,
+                    "category": "PROTECTED",
+                    "reason": "pending_attempt_single_archive_matching_receipt",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+            if receipt_errors:
+                classified_files.append({
+                    "name": fname,
+                    "category": "PROTECTED",
+                    "reason": "corrupted_receipt_blocks_cleanup_candidate_protection",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                })
+                continue
+            # Структурно вытесненная одиночная база (в unpack/rver используется активное .parts оглавление)
+            classified_files.append({
+                "name": fname,
+                "category": "CANDIDATE",
+                "reason": "displaced_single_archive_superseded_by_active_parts_index",
+                "size": f_size,
+                "md5": f_md5,
+                "mtime": f_mtime,
+                "id": f_id,
+            })
+            continue
+
+        # Случай З: Дельты (накопительные дельты к старым базам)
+        m_delta = d_pat.match(fname)
+        if m_delta:
+            d_prefix = m_delta.group(1)
+            d_hash = m_delta.group(2)
+            d_suffix = m_delta.group(3)
+
+            # Проверяем защиту по квитанциям и staged маркерам:
+            # Неподтверждённую попытку дельты нельзя объявлять мусором только из-за несовпадения её базы!
+            delta_is_protected = False
+            if d_prefix in protected_targets or fname in protected_part_names:
+                delta_is_protected = True
+            else:
+                m_dpart = part_re(d_prefix).fullmatch(fname)
+                if m_dpart and m_dpart.group(1) in protected_generations.get(d_prefix, set()):
+                    delta_is_protected = True
+
+            if delta_is_protected:
+                classified_files.append({
+                    "name": fname,
+                    "category": "PROTECTED",
+                    "reason": "pending_attempt_or_staged_delta_protected",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                    "id": f_id,
+                })
+                continue
+
+            if receipt_errors:
+                classified_files.append({
+                    "name": fname,
+                    "category": "PROTECTED",
+                    "reason": "corrupted_receipt_blocks_cleanup_candidate_protection",
+                    "size": f_size,
+                    "md5": f_md5,
+                    "mtime": f_mtime,
+                    "id": f_id,
+                })
+                continue
+
+            # Если дельта относится к чужой (старой) базе (hash != h_base[:8]):
+            if not active_base_md5 or d_hash != active_base_md5[:8]:
+                if d_suffix == "":
+                    classified_files.append({
+                        "name": fname,
+                        "category": "CANDIDATE",
+                        "reason": "displaced_delta_superseded_by_newer_base",
+                        "size": f_size,
+                        "md5": f_md5,
+                        "mtime": f_mtime,
+                        "id": f_id,
+                    })
+                    continue
+                if d_suffix == ".parts":
+                    classified_files.append({
+                        "name": fname,
+                        "category": "CANDIDATE",
+                        "reason": "displaced_delta_parts_index_superseded_by_newer_base",
+                        "size": f_size,
+                        "md5": f_md5,
+                        "mtime": f_mtime,
+                        "id": f_id,
+                    })
+                    continue
+                pr_d = part_re(d_prefix)
+                if pr_d.fullmatch(fname):
+                    classified_files.append({
+                        "name": fname,
+                        "category": "CANDIDATE",
+                        "reason": "displaced_delta_part_superseded_by_newer_base",
+                        "size": f_size,
+                        "md5": f_md5,
+                        "mtime": f_mtime,
+                        "id": f_id,
+                    })
+                    continue
+
+        # Случай И: Любой иной нераспознанный файл
+        classified_files.append({
+            "name": fname,
+            "category": "AMBIGUOUS",
+            "reason": "unrecognized_archive_file_pattern_or_grammar_violation",
+            "size": f_size,
+            "md5": f_md5,
+            "mtime": f_mtime,
+        })
+
+    report["files"] = classified_files
+
+    # 7. Подсчёт итогов
+    n_act = sum(1 for f in classified_files if f["category"] == "ACTIVE")
+    n_prot = sum(1 for f in classified_files if f["category"] == "PROTECTED")
+    n_cand = sum(1 for f in classified_files if f["category"] == "CANDIDATE")
+    n_amb = sum(1 for f in classified_files if f["category"] == "AMBIGUOUS")
+
+    report["summary"]["active_count"] = n_act
+    report["summary"]["protected_count"] = n_prot
+    report["summary"]["candidate_count"] = n_cand
+    report["summary"]["ambiguous_count"] = n_amb
+
+    # 8. Проверка допуска к очистке
+    has_auth = _check_session_authorization(
+        grant_file=grant_file,
+        run_id_val=run_id_val,
+        iid_val=iid_val,
+        folder_id_val=folder_id_val,
+    )
+
+    if receipt_errors:
+        report["cleanup_allowed"] = False
+        report["cleanup_block_reason"] = f"corrupted_receipt_or_pending_attempt: {receipt_errors[0][0]}"
+    elif n_amb > 0:
+        report["cleanup_allowed"] = False
+        report["cleanup_block_reason"] = "has_ambiguous_or_corrupted_objects"
+    elif n_cand == 0:
+        report["cleanup_allowed"] = False
+        report["cleanup_block_reason"] = "no_candidates_to_clean"
+    elif not has_auth:
+        report["cleanup_allowed"] = False
+        report["cleanup_block_reason"] = "view_only_no_session_grant"
+    else:
+        report["cleanup_allowed"] = True
+        report["cleanup_block_reason"] = None
+
+    return report
+
+
+def format_classification_report(report):
+    """Форматирование отчёта в человекочитаемый текстовый вид без секретов."""
+    lines = []
+    lines.append("=" * 70)
+    lines.append(f"ОТЧЁТ КЛАССИФИКАЦИИ ОБЛАЧНОГО ОБЪЕКТА: {report['object']}")
+    act_ver = report.get("active_base_version") or "нет"
+    if report.get("active_delta_version"):
+        act_ver += f" + {report['active_delta_version'][:8]} (дельта)"
+    lines.append(f"Активная версия: {act_ver}")
+
+    if report["cleanup_allowed"]:
+        clean_status = "РАЗРЕШЕНО (сессионное разрешение активно, есть доказанные кандидаты)"
+    else:
+        reason_map = {
+            "view_only_no_session_grant": "ЗАПРЕЩЕНО (режим VIEW-ONLY: отсутствует сессионное разрешение)",
+            "no_candidates_to_clean": "ЗАПРЕЩЕНО (нет кандидатов на очистку)",
+            "has_ambiguous_or_corrupted_objects": "ЗАПРЕЩЕНО (обнаружены повреждённые или сомнительные объекты)",
+            "storage_listing_failed": "ЗАПРЕЩЕНО (сбой получения списка файлов хранилища)",
+            "archive_not_found_in_storage": "ЗАПРЕЩЕНО (архив не найден в хранилище)",
+        }
+        raw_reason = str(report.get("cleanup_block_reason") or "")
+        if raw_reason.startswith("corrupted_receipt_or_pending_attempt"):
+            clean_status = f"ЗАПРЕЩЕНО (обнаружена повреждённая квитанция: {raw_reason.split(': ', 1)[-1]})"
+        else:
+            clean_status = reason_map.get(raw_reason, f"ЗАПРЕЩЕНО ({raw_reason})")
+    lines.append(f"Статус очистки: {clean_status}")
+    lines.append("-" * 70)
+
+    # Группировка
+    groups = {"ACTIVE": [], "PROTECTED": [], "CANDIDATE": [], "AMBIGUOUS": []}
+    for f in report.get("files", []):
+        groups[f["category"]].append(f)
+
+    # Вывод по категориям
+    lines.append(f"[АКТИВНЫЕ] ({len(groups['ACTIVE'])} файлов) — абсолютная неприкосновенность:")
+    if groups["ACTIVE"]:
+        for f in groups["ACTIVE"]:
+            lines.append(f"  • {f['name']} ({f['reason']}, {f['size'] >> 10} КБ)")
+    else:
+        lines.append("  (нет)")
+
+    lines.append(f"[ЗАЩИЩЁННЫЕ] ({len(groups['PROTECTED'])} файлов) — незавершённые или требующие подтверждения:")
+    if groups["PROTECTED"]:
+        for f in groups["PROTECTED"]:
+            lines.append(f"  • {f['name']} ({f['reason']}, {f['size'] >> 10} КБ)")
+    else:
+        lines.append("  (нет)")
+
+    lines.append(f"[КАНДИДАТЫ] ({len(groups['CANDIDATE'])} файлов) — доказанно вытесненные объекты:")
+    if groups["CANDIDATE"]:
+        for f in groups["CANDIDATE"]:
+            lines.append(f"  • {f['name']} ({f['reason']}, {f['size'] >> 10} КБ)")
+    else:
+        lines.append("  (нет)")
+
+    lines.append(f"[СОМНИТЕЛЬНЫЕ / ОШИБКИ] ({len(groups['AMBIGUOUS'])} файлов) — очистка прерывается:")
+    if groups["AMBIGUOUS"]:
+        for f in groups["AMBIGUOUS"]:
+            lines.append(f"  • {f['name']} ({f['reason']}, {f['size'] >> 10} КБ)")
+    else:
+        lines.append("  (нет)")
+
+    lines.append("-" * 70)
+    lines.append("ИТОГ: удаление или перемещение файлов НЕ производится (только аудит).")
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+def main(args):
+    import sys
+    if len(args) < 3:
+        print("использование: wolf_classifier.py REMOTE OBJECT [--json] [--tmp-dir DIR] [--state-dir DIR]", file=sys.stderr)
+        return 2
+    remote = args[1]
+    obj = args[2]
+    flags = args[3:]
+    json_mode = "--json" in flags
+    tmp_dir = "/var/tmp/wolf"
+    state_dir = "/var/lib/wolf"
+    for i, flag in enumerate(flags):
+        if flag == "--tmp-dir" and i + 1 < len(flags):
+            tmp_dir = flags[i + 1]
+        elif flag == "--state-dir" and i + 1 < len(flags):
+            state_dir = flags[i + 1]
+    rep = classify_archive(remote, obj, tmp_dir=tmp_dir, state_dir=state_dir)
+    if json_mode:
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+    else:
+        print(format_classification_report(rep))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv))
+
+CLASSIFIER
+
+# ============================== wolf_cleaner.py ==============================
+w /usr/local/lib/wolf_cleaner.py 644 <<'CLEANER'
+"""wolf_cleaner.py — стендовый исполнитель безопасной очистки облачных архивов VastGame.
+
+Работает ИСКЛЮЧИТЕЛЬНО на изолированном локальном стендовом каталоге.
+Удаляет только доказанных кандидатов (CANDIDATE) при соблюдении всех условий:
+1. Под общей блокировкой архива (flock на {base_name}.lock);
+2. При наличии активного сессионного допуска (cleanup_grant.json);
+3. При свежей классификации без неоднозначностей и повреждений;
+4. При неизменности снимка метаданных активных/защищённых данных и квитанций;
+5. Со строгой проверкой границ стендового каталога (запрет directory traversal и симлинков);
+6. С пошаговым протоколированием оснований удаления и фиксацией остатка при прерывании.
+"""
+
+import fcntl
+import json
+import os
+import re
+import signal
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+from wolf_classifier import (
+    _check_session_authorization,
+    _get_remote_listing,
+    classify_archive,
+    delta_pattern,
+    part_re,
+)
+
+
+def is_cleanup_enabled(
+    enabled_arg: bool | None = None,
+    grant_data: dict | None = None,
+    lock_dir: str | Path = "/run/wolf",
+) -> bool:
+    """Проверка явного включения очистки (по умолчанию ВСЕГДА False)."""
+    if enabled_arg is True:
+        return True
+    if enabled_arg is False:
+        return False
+    env_val = os.environ.get("VG_STORAGE_CLEANUP_ENABLED", "").lower().strip()
+    if env_val in ("1", "true", "yes"):
+        return True
+    trigger_file = Path(lock_dir) / "cleanup_enabled"
+    if trigger_file.is_file():
+        try:
+            val = trigger_file.read_text(encoding="utf-8").strip().lower()
+            if val in ("1", "true", "yes", ""):
+                return True
+        except OSError:
+            pass
+    if isinstance(grant_data, dict) and grant_data.get("enabled") is True:
+        return True
+    return False
+
+
+class DriveProductionAdapter:
+    """Рабочий адаптер для Google Drive с проверкой целевой папки и удалением по file ID."""
+
+    def __init__(self, folder_id: str, access_token: str | None = None, rclone_cmd: str = "rclone"):
+        self.folder_id = str(folder_id).strip()
+        self.access_token = access_token
+        self.rclone_cmd = rclone_cmd
+
+    def _get_token(self) -> str | None:
+        if self.access_token:
+            return self.access_token
+        tok = os.environ.get("GOOGLE_ACCESS_TOKEN")
+        if tok:
+            self.access_token = tok
+            return tok
+        rc_conf = os.environ.get("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf")
+        if os.path.isfile(rc_conf):
+            try:
+                with open(rc_conf, "r", encoding="utf-8") as f:
+                    content = f.read()
+                cid_m = re.search(r"client_id\s*=\s*(.+)", content)
+                sec_m = re.search(r"client_secret\s*=\s*(.+)", content)
+                tok_m = re.search(r"token\s*=\s*(\{.*?\})", content)
+                if tok_m:
+                    tok_data = json.loads(tok_m.group(1))
+                    ref_tok = tok_data.get("refresh_token")
+                    cid = cid_m.group(1).strip() if cid_m else ""
+                    csec = sec_m.group(1).strip() if sec_m else ""
+                    if ref_tok and cid:
+                        req_data = urllib.parse.urlencode({
+                            "client_id": cid,
+                            "client_secret": csec,
+                            "refresh_token": ref_tok,
+                            "grant_type": "refresh_token",
+                        }).encode("utf-8")
+                        req = urllib.request.Request(
+                            "https://oauth2.googleapis.com/token",
+                            data=req_data,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        )
+                        with urllib.request.urlopen(req, timeout=15) as resp:
+                            res = json.loads(resp.read().decode("utf-8"))
+                            self.access_token = res.get("access_token")
+                            return self.access_token
+            except Exception:
+                pass
+        return None
+
+    def delete_candidate(self, fname: str, cand_info: dict) -> tuple[bool, str | None]:
+        cand_fid = cand_info.get("id") or cand_info.get("ID")
+        if not cand_fid or not str(cand_fid).strip():
+            return False, f"refusing delete: candidate {fname} has no registered file ID (name fallback forbidden)"
+        tok = self._get_token()
+        if not tok:
+            return False, "missing_access_token_for_drive_api"
+        try:
+            # 1. Проверка целевой папки и имени файла в Drive
+            check_url = f"https://www.googleapis.com/drive/v3/files/{cand_fid}?fields=id,name,parents,trashed"
+            req = urllib.request.Request(check_url, headers={"Authorization": f"Bearer {tok}"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                meta = json.loads(resp.read().decode("utf-8"))
+            if meta.get("name") != fname:
+                return False, f"file_name_mismatch: expected {fname}, got {meta.get('name')}"
+            parents = meta.get("parents") or []
+            if self.folder_id and self.folder_id not in parents:
+                return False, f"folder_id_mismatch: expected parent {self.folder_id}, got {parents}"
+            if meta.get("trashed"):
+                return True, None
+
+            # 2. Удаление строго по ID
+            del_req = urllib.request.Request(
+                f"https://www.googleapis.com/drive/v3/files/{cand_fid}",
+                headers={"Authorization": f"Bearer {tok}"},
+                method="DELETE",
+            )
+            with urllib.request.urlopen(del_req, timeout=20) as resp:
+                if resp.status in (200, 204):
+                    return True, None
+                return False, f"unexpected delete status: {resp.status}"
+        except urllib.error.HTTPError as e:
+            if e.code in (404,):
+                return True, None
+            return False, f"Drive API HTTPError: {e.code} ({e.reason})"
+        except Exception as e:
+            return False, f"Drive API delete exception: {e}"
+
+    def verify_deleted(self, fname: str, cand_info: dict) -> bool:
+        cand_fid = cand_info.get("id") or cand_info.get("ID")
+        if not cand_fid:
+            return False
+        tok = self._get_token()
+        if not tok:
+            return False
+        try:
+            check_url = f"https://www.googleapis.com/drive/v3/files/{cand_fid}?fields=id,trashed"
+            req = urllib.request.Request(check_url, headers={"Authorization": f"Bearer {tok}"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                meta = json.loads(resp.read().decode("utf-8"))
+                return bool(meta.get("trashed"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return True
+            return False
+        except Exception:
+            return False
+
+
+def capture_storage_state(
+    stand_root: Path | str,
+    tmp_dir: str | Path = "",
+    state_dir: str | Path = "",
+    rclone_cmd: str = "rclone",
+    listing: list | None = None,
+) -> dict:
+    """Фиксирует базовое состояние хранилища и квитанций ДО классификации."""
+    state = {
+        "files": {},
+        "receipts": {},
+    }
+    stand_str = str(stand_root).strip()
+    is_remote = ":" in stand_str and not (len(stand_str) >= 2 and stand_str[1] == ":" and stand_str[0].isalpha())
+
+    if is_remote:
+        if listing is None:
+            listing = _get_remote_listing(stand_str, rclone_cmd=rclone_cmd)
+        if listing:
+            for item in listing:
+                state["files"][item["Name"]] = (item["Size"], item.get("ModTime_epoch", 0.0), item.get("MD5", ""))
+    else:
+        p_root = Path(stand_root)
+        if p_root.is_dir():
+            try:
+                for f in p_root.iterdir():
+                    if f.is_file():
+                        st = f.stat()
+                        state["files"][f.name] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+
+    if tmp_dir and os.path.isdir(tmp_dir):
+        try:
+            for entry in os.listdir(tmp_dir):
+                if entry.startswith("attempt-"):
+                    p = Path(tmp_dir) / entry
+                    if p.is_file():
+                        st = p.stat()
+                        state["receipts"][str(p)] = (st.st_size, st.st_mtime)
+        except OSError:
+            pass
+
+    if state_dir and os.path.isdir(state_dir):
+        p_dir = Path(state_dir) / "pending"
+        if p_dir.is_dir():
+            try:
+                for entry in os.listdir(p_dir):
+                    p = p_dir / entry
+                    if p.is_file():
+                        st = p.stat()
+                        state["receipts"][str(p)] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+
+    return state
+
+
+def verify_storage_state(
+    stand_root: Path | str,
+    expected_state: dict,
+    tmp_dir: str | Path = "",
+    state_dir: str | Path = "",
+    rclone_cmd: str = "rclone",
+    listing: list | None = None,
+) -> tuple[bool, str | None]:
+    """Проверяет неизменность состояния хранилища и квитанций относительно expected_state."""
+    stand_str = str(stand_root).strip()
+    is_remote = ":" in stand_str and not (len(stand_str) >= 2 and stand_str[1] == ":" and stand_str[0].isalpha())
+
+    current_files = {}
+    if is_remote:
+        if listing is None:
+            listing = _get_remote_listing(stand_str, rclone_cmd=rclone_cmd)
+        if listing is None:
+            return False, "storage directory listing failed"
+        for item in listing:
+            current_files[item["Name"]] = (item["Size"], item.get("ModTime_epoch", 0.0), item.get("MD5", ""))
+    else:
+        p_root = Path(stand_root)
+        if not p_root.is_dir():
+            return False, "stand root directory disappeared"
+        try:
+            for f in p_root.iterdir():
+                if f.is_file():
+                    st = f.stat()
+                    current_files[f.name] = (st.st_size, st.st_mtime)
+        except OSError as e:
+            return False, f"storage directory stat error: {e}"
+
+    if set(current_files.keys()) != set(expected_state.get("files", {}).keys()):
+        return False, "storage directory file list changed"
+
+    for fname, exp_val in expected_state.get("files", {}).items():
+        if fname not in current_files:
+            return False, f"file disappeared: {fname}"
+        exp_sz = exp_val[0]
+        cur_sz = current_files[fname][0]
+        if cur_sz != exp_sz:
+            return False, f"file size changed: {fname}"
+        if not is_remote:
+            exp_mt = exp_val[1]
+            cur_mt = current_files[fname][1]
+            if abs(cur_mt - exp_mt) > 1e-4:
+                return False, f"file mtime changed: {fname}"
+        else:
+            if len(exp_val) > 2 and exp_val[2] and current_files[fname][2]:
+                if current_files[fname][2] != exp_val[2]:
+                    return False, f"file hash changed: {fname}"
+
+    for rpath_str, (exp_sz, exp_mt) in expected_state.get("receipts", {}).items():
+        rp = Path(rpath_str)
+        if not rp.is_file():
+            return False, f"receipt file disappeared: {rpath_str}"
+        try:
+            st = rp.stat()
+            if st.st_size != exp_sz or abs(st.st_mtime - exp_mt) > 1e-4:
+                return False, f"receipt file modified: {rpath_str}"
+        except OSError as e:
+            return False, f"receipt file error: {rpath_str} ({e})"
+
+    return True, None
+
+
+def compute_storage_snapshot(
+    stand_root: Path | str,
+    report: dict,
+    tmp_dir: str | Path,
+    state_dir: str | Path,
+    rclone_cmd: str = "rclone",
+    listing: list | None = None,
+) -> dict:
+    """Фиксирует снимок метаданных, на котором основано решение об очистке:
+    - состояние активной базы и дельты;
+    - размеры и отпечатки активных и защищённых файлов;
+    - состав кандидатов;
+    - состояние файлов квитанций (attempt-* и pending).
+    """
+    snapshot = {
+        "active_base_kind": report.get("active_base_kind"),
+        "active_base_version": report.get("active_base_version"),
+        "active_delta_kind": report.get("active_delta_kind"),
+        "active_delta_version": report.get("active_delta_version"),
+        "active_protected_files": {},
+        "candidate_files": {},
+        "all_storage_files": {},
+        "receipt_files": {},
+    }
+
+    stand_str = str(stand_root).strip()
+    is_remote = ":" in stand_str and not (len(stand_str) >= 2 and stand_str[1] == ":" and stand_str[0].isalpha())
+
+    remote_items_by_name = {}
+    if is_remote:
+        if listing is None:
+            listing = _get_remote_listing(stand_str, rclone_cmd=rclone_cmd)
+        if listing:
+            snapshot["all_storage_files"] = {item["Name"]: item["Size"] for item in listing}
+            remote_items_by_name = {item["Name"]: item for item in listing}
+    else:
+        p_root = Path(stand_root)
+        try:
+            snapshot["all_storage_files"] = {f.name: f.stat().st_size for f in p_root.iterdir() if f.is_file()}
+        except OSError:
+            pass
+
+    # Снимок активных и защищённых файлов в хранилище
+    for f in report.get("files", []):
+        cat = f.get("category")
+        fname = f.get("name")
+        if is_remote:
+            it = remote_items_by_name.get(fname)
+            val = {
+                "size": it["Size"],
+                "mtime": it.get("ModTime_epoch", 0.0),
+                "md5": it.get("MD5", ""),
+            } if it else None
+            if cat in ("ACTIVE", "PROTECTED"):
+                snapshot["active_protected_files"][fname] = val
+            elif cat == "CANDIDATE":
+                snapshot["candidate_files"][fname] = val
+        else:
+            p_root = Path(stand_root)
+            fpath = p_root / fname
+            if cat in ("ACTIVE", "PROTECTED"):
+                if fpath.is_file():
+                    try:
+                        st = fpath.stat()
+                        snapshot["active_protected_files"][fname] = {
+                            "size": st.st_size,
+                            "mtime": st.st_mtime,
+                            "md5": f.get("md5"),
+                        }
+                    except OSError:
+                        snapshot["active_protected_files"][fname] = None
+            elif cat == "CANDIDATE":
+                if fpath.is_file():
+                    try:
+                        st = fpath.stat()
+                        snapshot["candidate_files"][fname] = {
+                            "size": st.st_size,
+                            "mtime": st.st_mtime,
+                            "md5": f.get("md5"),
+                        }
+                    except OSError:
+                        snapshot["candidate_files"][fname] = None
+
+    # Снимок файлов квитанций (attempt-*)
+    base_tar = report.get("object", "")
+    if tmp_dir and os.path.isdir(tmp_dir):
+        base_att_prefix = "attempt-" + base_tar.replace("/", "_")
+        try:
+            for entry in os.listdir(tmp_dir):
+                if entry == base_att_prefix or entry.startswith(base_att_prefix + "."):
+                    p = Path(tmp_dir) / entry
+                    if p.is_file():
+                        st = p.stat()
+                        snapshot["receipt_files"][str(p)] = (st.st_size, st.st_mtime)
+        except OSError:
+            pass
+
+    # Снимок постоянных квитанций (pending)
+    base_name = report.get("base_name", "")
+    if state_dir and os.path.isdir(state_dir):
+        p_dir = Path(state_dir) / "pending"
+        if p_dir.is_dir():
+            for cname in (base_name, base_tar):
+                p = p_dir / cname
+                if p.is_file():
+                    st = p.stat()
+                    snapshot["receipt_files"][str(p)] = (st.st_size, st.st_mtime)
+
+    return snapshot
+
+
+def verify_storage_snapshot(
+    stand_root: Path | str,
+    snapshot: dict,
+    tmp_dir: str | Path,
+    state_dir: str | Path,
+    rclone_cmd: str = "rclone",
+    listing: list | None = None,
+) -> tuple[bool, str | None]:
+    """Проверяет, не изменилось ли состояние активных данных, защиты и квитанций перед удалением."""
+    stand_str = str(stand_root).strip()
+    is_remote = ":" in stand_str and not (len(stand_str) >= 2 and stand_str[1] == ":" and stand_str[0].isalpha())
+
+    remote_items = {}
+    if is_remote:
+        if listing is None:
+            listing = _get_remote_listing(stand_str, rclone_cmd=rclone_cmd)
+        if listing is None:
+            return False, "storage listing failed"
+        current_files = {item["Name"]: item["Size"] for item in listing}
+        remote_items = {item["Name"]: item for item in listing}
+    else:
+        p_root = Path(stand_root)
+        try:
+            current_files = {f.name: f.stat().st_size for f in p_root.iterdir() if f.is_file()}
+        except OSError as e:
+            return False, f"storage directory stat error: {e}"
+
+    # 0. Проверка неизменности состава файлов в стенде
+    if snapshot.get("all_storage_files"):
+        if set(current_files.keys()) != set(snapshot["all_storage_files"].keys()):
+            return False, "storage directory file list changed between classification and execution"
+        for fn, exp_sz in snapshot["all_storage_files"].items():
+            if current_files.get(fn) != exp_sz:
+                return False, f"file size changed between classification and execution: {fn}"
+
+    # 1. Проверка активных и защищённых файлов
+    for fname, expected in snapshot.get("active_protected_files", {}).items():
+        if is_remote:
+            it = remote_items.get(fname)
+            if expected is None:
+                if it is not None:
+                    return False, f"active/protected file appeared unexpectedly: {fname}"
+                continue
+            if it is None:
+                return False, f"active/protected file missing: {fname}"
+            if it["Size"] != expected["size"]:
+                return False, f"active/protected file size changed: {fname}"
+            if expected.get("md5") and it.get("MD5") and it["MD5"] != expected["md5"]:
+                return False, f"active/protected file hash changed: {fname}"
+        else:
+            p_root = Path(stand_root)
+            fpath = p_root / fname
+            if expected is None:
+                if fpath.is_file():
+                    return False, f"active/protected file appeared unexpectedly: {fname}"
+                continue
+            if not fpath.is_file():
+                return False, f"active/protected file missing: {fname}"
+            try:
+                st = fpath.stat()
+                if st.st_size != expected["size"]:
+                    return False, f"active/protected file size changed: {fname}"
+                if abs(st.st_mtime - expected["mtime"]) > 1e-4:
+                    return False, f"active/protected file mtime changed: {fname}"
+            except OSError as e:
+                return False, f"active/protected file stat error: {fname} ({e})"
+
+    # 2. Проверка файлов-кандидатов
+    for fname, expected in snapshot.get("candidate_files", {}).items():
+        if is_remote:
+            it = remote_items.get(fname)
+            if expected is None:
+                continue
+            if it is None:
+                return False, f"candidate file missing before deletion: {fname}"
+            if it["Size"] != expected["size"]:
+                return False, f"candidate file size changed: {fname}"
+            if expected.get("md5") and it.get("MD5") and it["MD5"] != expected["md5"]:
+                return False, f"candidate file hash changed: {fname}"
+        else:
+            p_root = Path(stand_root)
+            fpath = p_root / fname
+            if expected is None:
+                continue
+            if not fpath.is_file():
+                return False, f"candidate file missing before deletion: {fname}"
+            try:
+                st = fpath.stat()
+                if st.st_size != expected["size"]:
+                    return False, f"candidate file size changed: {fname}"
+                if abs(st.st_mtime - expected["mtime"]) > 1e-4:
+                    return False, f"candidate file mtime changed: {fname}"
+            except OSError as e:
+                return False, f"candidate file stat error: {fname} ({e})"
+
+    # 3. Проверка файлов квитанций
+    for rpath_str, expected in snapshot.get("receipt_files", {}).items():
+        rp = Path(rpath_str)
+        if not rp.is_file():
+            return False, f"receipt file disappeared: {rpath_str}"
+        try:
+            st = rp.stat()
+            if (st.st_size, st.st_mtime) != expected:
+                return False, f"receipt file modified: {rpath_str}"
+        except OSError as e:
+            return False, f"receipt file error: {rpath_str} ({e})"
+
+    return True, None
+
+
+def load_or_init_run_report(
+    report_path: Path | str,
+    run_id: str | None,
+    iid: str | None,
+    folder_id: str | None,
+    all_objects: list[str] | None = None,
+    clean_pass_id: str | None = None,
+) -> dict:
+    """Загружает существующий отчёт текущего прогона или инициализирует новый."""
+    p = Path(report_path)
+    if p.is_file():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            matches_run = False
+            if run_id and data.get("run_id") == run_id:
+                matches_run = True
+            elif run_id is None and data.get("run_id"):
+                matches_run = True
+                run_id = data.get("run_id")
+            elif run_id is None and not data.get("run_id"):
+                matches_run = True
+
+            # Если задан идентификатор отдельного прохода очистки, он обязан совпадать
+            if clean_pass_id and data.get("clean_pass_id") != clean_pass_id:
+                matches_run = False
+
+            if matches_run and "archives" in data and isinstance(data["archives"], dict):
+                if not data.get("clean_pass_id") and clean_pass_id:
+                    data["clean_pass_id"] = clean_pass_id
+                if not data.get("iid") and iid:
+                    data["iid"] = iid
+                if not data.get("folder_id") and folder_id:
+                    data["folder_id"] = folder_id
+                if all_objects:
+                    for obj in all_objects:
+                        bname = obj[:-8] if obj.endswith(".tar.zst") else obj
+                        if bname not in data["archives"]:
+                            data["archives"][bname] = {
+                                "object": bname,
+                                "status": "pending",
+                                "reason": None,
+                                "candidates": [],
+                                "deleted": [],
+                                "unconfirmed": [],
+                                "skipped": [],
+                                "deleted_count": 0,
+                                "unconfirmed_count": 0,
+                                "skipped_count": 0,
+                                "deleted_bytes": 0,
+                            }
+                sync_run_report_totals(data)
+                return data
+        except Exception:
+            pass
+
+    data = {
+        "run_id": run_id,
+        "session_id": run_id,
+        "clean_pass_id": clean_pass_id,
+        "iid": iid,
+        "folder_id": folder_id,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "status": "in_progress",
+        "reason": None,
+        "total_candidates": 0,
+        "deleted_count": 0,
+        "unconfirmed_count": 0,
+        "skipped_count": 0,
+        "deleted_bytes": 0,
+        "archives": {},
+        "candidates": [],
+        "deleted": [],
+        "unconfirmed": [],
+        "skipped": [],
+    }
+    if all_objects:
+        for obj in all_objects:
+            bname = obj[:-8] if obj.endswith(".tar.zst") else obj
+            data["archives"][bname] = {
+                "object": bname,
+                "status": "pending",
+                "reason": None,
+                "candidates": [],
+                "deleted": [],
+                "unconfirmed": [],
+                "skipped": [],
+                "deleted_count": 0,
+                "unconfirmed_count": 0,
+                "skipped_count": 0,
+                "deleted_bytes": 0,
+            }
+    return data
+
+
+def sync_run_report_totals(report: dict) -> None:
+    """Агрегирует счётчики и определяет статус всего прогона очистки."""
+    all_candidates = []
+    all_deleted = []
+    all_unconfirmed = []
+    all_skipped = []
+    total_deleted_bytes = 0
+
+    has_error = False
+    has_stopped = False
+    has_in_progress = False
+    all_clean = True
+
+    for arch_name, arch_data in report.get("archives", {}).items():
+        st = arch_data.get("status")
+        if st in ("failed", "aborted", "forbidden", "rejected"):
+            has_error = True
+            all_clean = False
+        elif st == "stopped":
+            has_stopped = True
+            all_clean = False
+        elif st in ("in_progress", "pending"):
+            has_in_progress = True
+            all_clean = False
+        elif st not in ("completed", "noop", "disabled"):
+            all_clean = False
+
+        cands = arch_data.get("candidates", [])
+        all_candidates.extend(cands)
+        total_deleted_bytes += arch_data.get("deleted_bytes", 0)
+
+        for c in cands:
+            c_state = c.get("state")
+            if c_state == "CONFIRMED_DELETED":
+                all_deleted.append(c)
+            elif c_state in ("UNCONFIRMED_UNKNOWN", "UNCONFIRMED_ERROR"):
+                all_unconfirmed.append(c)
+            elif c_state == "SKIPPED_UNEXECUTED":
+                all_skipped.append(c)
+
+        arch_data["deleted"] = [c for c in cands if c.get("state") == "CONFIRMED_DELETED"]
+        arch_data["unconfirmed"] = [c for c in cands if c.get("state") in ("UNCONFIRMED_UNKNOWN", "UNCONFIRMED_ERROR")]
+        arch_data["skipped"] = [c for c in cands if c.get("state") == "SKIPPED_UNEXECUTED"]
+        arch_data["deleted_count"] = len(arch_data["deleted"])
+        arch_data["unconfirmed_count"] = len(arch_data["unconfirmed"])
+        arch_data["skipped_count"] = len(arch_data["skipped"])
+
+    report["candidates"] = all_candidates
+    report["deleted"] = all_deleted
+    report["unconfirmed"] = all_unconfirmed
+    report["skipped"] = all_skipped
+    report["total_candidates"] = len(all_candidates)
+    report["deleted_count"] = len(all_deleted)
+    report["unconfirmed_count"] = len(all_unconfirmed)
+    report["skipped_count"] = len(all_skipped)
+    report["deleted_bytes"] = total_deleted_bytes
+    report["updated_at"] = time.time()
+
+    if has_stopped:
+        report["status"] = "stopped"
+    elif has_error:
+        report["status"] = "warn"
+    elif has_in_progress:
+        report["status"] = "in_progress"
+    elif all_clean:
+        report["status"] = "completed"
+
+
+def flush_atomic_report(report_path: Path | str, report: dict) -> None:
+    """Атомарно сбрасывает JSON отчёта через временный файл."""
+    p = Path(report_path)
+    tmp_p = p.with_name(f"{p.name}.tmp.{os.getpid()}")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp_p.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_p, p)
+    except Exception:
+        pass
+
+
+def execute_stand_cleanup(
+    stand_dir: str | Path,
+    obj_name: str | list[str],
+    grant_file: str | Path = "/run/wolf/cleanup_grant.json",
+    lock_dir: str | Path = "/run/wolf",
+    tmp_dir: str | Path = "/var/tmp/wolf",
+    state_dir: str | Path = "/var/lib/wolf",
+    run_id_val: str | None = None,
+    iid_val: str | None = None,
+    folder_id_val: str | None = None,
+    dry_run: bool = False,
+    log_fn=None,
+    allow_interruption_hook: bool = True,
+    drive_test_mode: bool = False,
+    drive_test_folder_id: str | None = None,
+    drive_test_registry: dict | None = None,
+    rclone_cmd: str = "rclone",
+    drive_adapter=None,
+    drive_production_mode: bool = False,
+    enabled: bool | None = None,
+    report_file: str | Path | None = None,
+    access_token: str | None = None,
+    require_isolation: bool = False,
+    clean_pass_id: str | None = None,
+) -> dict:
+    """Исполняет безопасную очистку одного или нескольких архивов.
+
+    Возвращает словарь с точным результатом выполнения:
+    - status: 'completed' | 'stopped' | 'aborted' | 'forbidden' | 'noop' | 'rejected' | 'disabled' | 'warn'
+    - reason: текстовое пояснение статуса
+    - deleted: список словарей удалённых объектов [{'name': ..., 'reason': ..., 'size': ...}]
+    - deleted_bytes: суммарный локальный размер удалённых файлов
+    - remaining: список кандидатов, оставшихся неудалёнными (при остановке/ошибке)
+    - report: свежий отчёт классификатора (для одиночного архива)
+    - log_messages: список журнальных сообщений
+    - candidate_states: детальный статус каждого кандидата
+    - archives: словарь с деталями по каждому архиву
+    """
+    log_messages = []
+
+    def _log(msg: str):
+        log_messages.append(msg)
+        if log_fn:
+            log_fn(msg)
+
+    if isinstance(obj_name, (list, tuple)):
+        target_objects = [str(o).strip() for o in obj_name if str(o).strip()]
+    else:
+        target_objects = [str(obj_name).strip()] if str(obj_name).strip() else []
+
+    if not target_objects:
+        return {
+            "status": "noop",
+            "reason": "no_objects_specified",
+            "deleted": [],
+            "deleted_bytes": 0,
+            "remaining": [],
+            "report": {},
+            "log_messages": ["нет объектов для очистки"],
+            "archives": {},
+            "total_candidates": 0,
+            "deleted_count": 0,
+            "unconfirmed_count": 0,
+            "skipped_count": 0,
+        }
+
+    # 0. Проверка выключателя: по умолчанию ВСЕГДА выключено
+    grant_data = None
+    if os.path.isfile(str(grant_file)):
+        try:
+            with open(str(grant_file), "r", encoding="utf-8") as gf:
+                grant_data = json.load(gf)
+        except Exception:
+            pass
+
+
+    stand_str = str(stand_dir).strip()
+    is_remote = ":" in stand_str and not (len(stand_str) >= 2 and stand_str[1] == ":" and stand_str[0].isalpha())
+
+    # Независимое определение метаданных текущей сессии строго по доверенному состоянию сервера.
+    # Подстановка из grant_data строго запрещена: допуск должен сверяться против доверенных данных.
+    if run_id_val is None:
+        p_rid = Path(lock_dir) / "run_id"
+        if p_rid.is_file():
+            try:
+                run_id_val = p_rid.read_text("utf-8").strip() or None
+            except Exception:
+                pass
+        if run_id_val is None and os.environ.get("WOLF_RUN_ID"):
+            run_id_val = os.environ.get("WOLF_RUN_ID").strip() or None
+        if run_id_val is None:
+            try:
+                from wolf_session import get_run_id
+                run_id_val = get_run_id(str(p_rid)) or get_run_id()
+            except Exception:
+                pass
+
+    if iid_val is None:
+        if os.environ.get("VI"):
+            iid_val = os.environ.get("VI").strip() or None
+        elif (Path(lock_dir) / "iid").is_file():
+            try:
+                iid_val = (Path(lock_dir) / "iid").read_text("utf-8").strip() or None
+            except Exception:
+                pass
+        if iid_val is None:
+            try:
+                from wolf_session import get_env_iid
+                iid_val = get_env_iid(str(Path(lock_dir) / "iid")) or get_env_iid()
+            except Exception:
+                pass
+
+    if folder_id_val is None:
+        p_fid = Path(lock_dir) / "storage_folder_id"
+        if p_fid.is_file():
+            try:
+                folder_id_val = p_fid.read_text("utf-8").strip() or None
+            except Exception:
+                pass
+        elif os.environ.get("WOLF_STORAGE_FOLDER_ID"):
+            folder_id_val = os.environ.get("WOLF_STORAGE_FOLDER_ID").strip() or None
+        elif drive_test_mode and drive_test_folder_id:
+            folder_id_val = drive_test_folder_id
+        elif is_remote and (drive_production_mode or drive_adapter is not None):
+            try:
+                from wolf_session import get_storage_folder_id
+                folder_id_val = get_storage_folder_id(r_val=stand_str, rc_cmd=rclone_cmd)
+            except Exception:
+                pass
+
+
+    if enabled is False:
+        clean_enabled = False
+    elif enabled is True:
+        clean_enabled = True
+    elif drive_production_mode:
+        clean_enabled = is_cleanup_enabled(None, grant_data=grant_data, lock_dir=str(lock_dir))
+    else:
+        clean_enabled = True if enabled is None else is_cleanup_enabled(enabled, grant_data=grant_data, lock_dir=str(lock_dir))
+
+    if clean_pass_id is None:
+        if os.environ.get("WOLF_CLEANUP_PASS_ID"):
+            clean_pass_id = os.environ.get("WOLF_CLEANUP_PASS_ID").strip() or None
+        elif (Path(lock_dir) / "cleanup_pass_id").is_file():
+            try:
+                clean_pass_id = (Path(lock_dir) / "cleanup_pass_id").read_text("utf-8").strip() or None
+            except Exception:
+                pass
+        if clean_pass_id is None:
+            clean_pass_id = f"pass_{int(time.time())}_{os.getpid()}"
+
+    report_path = Path(report_file) if report_file else (Path(lock_dir) / "cleanup_report.json")
+    run_report = load_or_init_run_report(report_path, run_id_val, iid_val, folder_id_val, target_objects, clean_pass_id=clean_pass_id)
+
+    if not clean_enabled:
+        _log("очистка выключена по умолчанию (требуется явное включение opt-in)")
+        for obj in target_objects:
+            bname = obj[:-8] if obj.endswith(".tar.zst") else obj
+            run_report["archives"][bname]["status"] = "disabled"
+            run_report["archives"][bname]["reason"] = "cleanup_disabled_by_default"
+        run_report["status"] = "disabled"
+        run_report["reason"] = "cleanup_disabled_by_default"
+        sync_run_report_totals(run_report)
+        flush_atomic_report(report_path, run_report)
+        return {
+            "status": "disabled",
+            "reason": "cleanup_disabled_by_default",
+            "deleted": [],
+            "deleted_bytes": 0,
+            "remaining": [],
+            "report": {},
+            "log_messages": log_messages,
+            "archives": run_report["archives"],
+            "total_candidates": 0,
+            "deleted_count": 0,
+            "unconfirmed_count": 0,
+            "skipped_count": 0,
+        }
+
+    # 1. Валидация стендового каталога или удалённого режима Drive
+    if is_remote:
+        if drive_test_mode:
+            if not drive_test_folder_id:
+                return {
+                    "status": "rejected",
+                    "reason": "drive_test_folder_id_required",
+                    "deleted": [],
+                    "deleted_bytes": 0,
+                    "remaining": [],
+                    "log_messages": ["отказ: не указан folder ID тестовой папки Drive"],
+                    "archives": run_report["archives"],
+                }
+            prod_folder_id = "1vXf2vBiywk0SVf0bFPJTWfcg1Er9pemy"
+            if drive_test_folder_id == prod_folder_id or "vastai-cloud-games" in stand_str:
+                return {
+                    "status": "rejected",
+                    "reason": "production_folder_forbidden",
+                    "deleted": [],
+                    "deleted_bytes": 0,
+                    "remaining": [],
+                    "log_messages": ["отказ: использование рабочей папки vastai-cloud-games строго запрещено"],
+                    "archives": run_report["archives"],
+                }
+            if drive_test_registry is None:
+                return {
+                    "status": "rejected",
+                    "reason": "drive_test_registry_required",
+                    "deleted": [],
+                    "deleted_bytes": 0,
+                    "remaining": [],
+                    "log_messages": ["отказ: реестр тестового запуска обязателен для drive_test_mode"],
+                    "archives": run_report["archives"],
+                }
+            if folder_id_val and folder_id_val != drive_test_folder_id:
+                return {
+                    "status": "rejected",
+                    "reason": "folder_id_mismatch",
+                    "deleted": [],
+                    "deleted_bytes": 0,
+                    "remaining": [],
+                    "log_messages": [f"отказ: folder_id сессии ({folder_id_val}) не совпадает со стендовым ({drive_test_folder_id})"],
+                    "archives": run_report["archives"],
+                }
+            stand_root = stand_str
+        elif drive_production_mode or drive_adapter is not None:
+            effective_fid = folder_id_val
+            if not effective_fid:
+                try:
+                    from wolf_session import get_storage_folder_id
+                    effective_fid = get_storage_folder_id(r_val=stand_str, rc_cmd=rclone_cmd)
+                except Exception:
+                    pass
+            if not effective_fid:
+                return {
+                    "status": "rejected",
+                    "reason": "drive_folder_id_required",
+                    "deleted": [],
+                    "deleted_bytes": 0,
+                    "remaining": [],
+                    "log_messages": ["отказ: не определена целевая папка Drive для сессии"],
+                    "archives": run_report["archives"],
+                }
+            if drive_adapter is None:
+                drive_adapter = DriveProductionAdapter(
+                    folder_id=effective_fid,
+                    access_token=access_token,
+                    rclone_cmd=rclone_cmd,
+                )
+            stand_root = stand_str
+        else:
+            return {
+                "status": "rejected",
+                "reason": "remote_storage_forbidden_local_stand_only",
+                "deleted": [],
+                "deleted_bytes": 0,
+                "remaining": [],
+                "log_messages": ["отказ: удаление разрешено только на локальном стендовом каталоге"],
+                "archives": run_report["archives"],
+            }
+    else:
+        stand_path = Path(stand_str)
+        if not stand_path.is_dir():
+            return {
+                "status": "rejected",
+                "reason": "stand_directory_not_found",
+                "deleted": [],
+                "deleted_bytes": 0,
+                "remaining": [],
+                "log_messages": [f"отказ: каталог стенда не найден: {stand_str}"],
+                "archives": run_report["archives"],
+            }
+        stand_root = stand_path.resolve()
+
+    # Установка обработчиков сигналов прерывания
+    active_archive = None
+
+    def _sig_handler(signum, frame):
+        if active_archive and active_archive in run_report.get("archives", {}):
+            arch_entry = run_report["archives"][active_archive]
+            arch_entry["status"] = "stopped"
+            arch_entry["reason"] = f"received signal {signum}"
+        run_report["status"] = "stopped"
+        run_report["reason"] = f"received signal {signum}"
+        sync_run_report_totals(run_report)
+        flush_atomic_report(report_path, run_report)
+        sys.exit(128 + signum)
+
+    old_term = None
+    old_int = None
+    try:
+        old_term = signal.signal(signal.SIGTERM, _sig_handler)
+        old_int = signal.signal(signal.SIGINT, _sig_handler)
+    except (ValueError, AttributeError):
+        pass
+
+    # Проверка изоляции группы процессов ДО разрешения удаления объектов
+    parent_pgid = os.environ.get("WOLF_PARENT_PGID")
+    must_isolate = require_isolation or bool(parent_pgid) or bool(os.environ.get("VG_REQUIRE_ISOLATION"))
+    if must_isolate:
+        my_pgrp = os.getpgrp()
+        iso_ok = True
+        iso_err = None
+        if my_pgrp <= 1:
+            iso_ok = False
+            iso_err = f"process group {my_pgrp} is invalid"
+        elif parent_pgid and str(my_pgrp) == str(parent_pgid):
+            iso_ok = False
+            iso_err = f"process group {my_pgrp} is identical to Wolf parent PGID {parent_pgid}"
+        else:
+            iso_file = Path(lock_dir) / "cleanup_isolated"
+            t_iso_start = time.time()
+            while time.time() - t_iso_start < 2.0:
+                if iso_file.is_file():
+                    break
+                time.sleep(0.05)
+            if not iso_file.is_file():
+                iso_ok = False
+                iso_err = "cleanup_isolated confirmation handshake file missing"
+            else:
+                try:
+                    conf_pgid = iso_file.read_text("utf-8").strip()
+                    if conf_pgid and conf_pgid != str(my_pgrp):
+                        iso_ok = False
+                        iso_err = f"cleanup_isolated PGID {conf_pgid} != my PGID {my_pgrp}"
+                except Exception as e:
+                    iso_ok = False
+                    iso_err = f"cannot read cleanup_isolated: {e}"
+
+        if not iso_ok:
+            _log(f"ошибка безопасности: изоляция группы процессов не подтверждена: {iso_err}")
+            for obj in target_objects:
+                bname = obj[:-8] if str(obj).endswith(".tar.zst") else str(obj)
+                arch_e = run_report["archives"].setdefault(bname, {
+                    "object": bname, "status": "aborted", "reason": f"process_isolation_failed: {iso_err}",
+                    "candidates": [], "deleted": [], "unconfirmed": [], "skipped": [],
+                    "deleted_count": 0, "unconfirmed_count": 0, "skipped_count": 0, "deleted_bytes": 0,
+                })
+                arch_e["status"] = "aborted"
+                arch_e["reason"] = f"process_isolation_failed: {iso_err}"
+            run_report["status"] = "aborted"
+            run_report["reason"] = f"process_isolation_failed: {iso_err}"
+            sync_run_report_totals(run_report)
+            flush_atomic_report(report_path, run_report)
+            return {
+                "status": "aborted",
+                "reason": f"process_isolation_failed: {iso_err}",
+                "deleted": [],
+                "deleted_bytes": 0,
+                "remaining": [],
+                "report": {},
+                "log_messages": log_messages,
+                "archives": run_report["archives"],
+                "total_candidates": 0,
+                "deleted_count": 0,
+                "unconfirmed_count": 0,
+                "skipped_count": 0,
+            }
+
+    stop_all = False
+    try:
+        for target_obj in target_objects:
+            if stop_all:
+                break
+
+            obj_str = str(target_obj).strip()
+            if obj_str.endswith(".tar.zst"):
+                base_tar = obj_str
+                base_name = obj_str[:-8]
+            else:
+                base_name = obj_str
+                base_tar = f"{obj_str}.tar.zst"
+
+            active_archive = base_name
+            arch_entry = run_report["archives"].setdefault(base_name, {
+                "object": base_name,
+                "status": "pending",
+                "reason": None,
+                "candidates": [],
+                "deleted": [],
+                "unconfirmed": [],
+                "skipped": [],
+                "deleted_count": 0,
+                "unconfirmed_count": 0,
+                "skipped_count": 0,
+                "deleted_bytes": 0,
+            })
+            arch_entry["status"] = "in_progress"
+            sync_run_report_totals(run_report)
+            flush_atomic_report(report_path, run_report)
+
+            # 2. Захват общей блокировки архива ({base_name}.lock)
+            lock_file = Path(lock_dir) / f"{base_name}.lock"
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                lock_fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o644)
+            except OSError as e:
+                arch_entry["status"] = "aborted"
+                arch_entry["reason"] = f"lock_file_open_failed: {e}"
+                _log(f"ошибка дескриптора блокировки {lock_file.name}: {e}")
+                sync_run_report_totals(run_report)
+                flush_atomic_report(report_path, run_report)
+                continue
+
+            try:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    _log(f"блокировка {lock_file.name} занята другой операцией (запись/восстановление/очистка) — отказ")
+                    arch_entry["status"] = "aborted"
+                    arch_entry["reason"] = "archive_lock_busy"
+                    arch_entry["lock_file"] = str(lock_file)
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                _log(f"захвачена блокировка архива: {lock_file.name}")
+
+                # 3. Проверка разрешения текущей сессии под блокировкой
+                effective_fid = drive_test_folder_id if (drive_test_mode and folder_id_val is None) else folder_id_val
+                has_auth = _check_session_authorization(
+                    grant_file=str(grant_file),
+                    run_id_val=run_id_val,
+                    iid_val=iid_val,
+                    folder_id_val=effective_fid,
+                )
+                if not has_auth:
+                    _log("сессионное разрешение отсутствует или устарело — выполнение очистки запрещено (VIEW-ONLY)")
+                    arch_entry["status"] = "forbidden"
+                    arch_entry["reason"] = "view_only_no_session_grant"
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                # 4. Фиксация базового состояния хранилища ДО классификации
+                pre_snapshot = capture_storage_state(stand_root, tmp_dir=tmp_dir, state_dir=state_dir, rclone_cmd=rclone_cmd)
+
+                # 5. Построение свежей классификации под блокировкой
+                report = classify_archive(
+                    remote=str(stand_root),
+                    obj_name=base_tar,
+                    grant_file=str(grant_file),
+                    tmp_dir=str(tmp_dir),
+                    state_dir=str(state_dir),
+                    run_id_val=run_id_val,
+                    iid_val=iid_val,
+                    folder_id_val=effective_fid,
+                    rclone_cmd=rclone_cmd,
+                )
+                arch_entry["classification_report"] = report
+
+                # Управляемое изменение между классификацией и подтверждением неизменности
+                if allow_interruption_hook and hasattr(execute_stand_cleanup, "_post_classify_hook"):
+                    try:
+                        execute_stand_cleanup._post_classify_hook()
+                    except Exception as e:
+                        _log(f"post_classify_hook вызвал исключение: {e}")
+
+                # 6. Проверка неизменности состояния ПОСЛЕ классификации
+                post_ok, post_err = verify_storage_state(stand_root, pre_snapshot, tmp_dir=tmp_dir, state_dir=state_dir, rclone_cmd=rclone_cmd)
+                if not post_ok:
+                    _log(f"отмена плана: обнаружено параллельное изменение состояния хранилища во время классификации ({post_err})")
+                    arch_entry["status"] = "aborted"
+                    arch_entry["reason"] = f"metadata_snapshot_mismatch: {post_err}"
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                if not report.get("cleanup_allowed"):
+                    block_reason = report.get("cleanup_block_reason") or "cleanup_not_allowed"
+                    if block_reason == "no_candidates_to_clean":
+                        _log("доказанных кандидатов на очистку нет (0 файлов)")
+                        arch_entry["status"] = "noop"
+                        arch_entry["reason"] = "no_candidates_to_clean"
+                    else:
+                        _log(f"очистка запрещена классификатором: {block_reason}")
+                        arch_entry["status"] = "forbidden"
+                        arch_entry["reason"] = block_reason
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                candidates = [f for f in report.get("files", []) if f.get("category") == "CANDIDATE"]
+                if not candidates:
+                    _log("доказанных кандидатов на очистку нет (0 файлов)")
+                    arch_entry["status"] = "noop"
+                    arch_entry["reason"] = "no_candidates_to_clean"
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                # 7. Проверка грамматики и путей кандидатов
+                pr_b = part_re(base_tar)
+                d_pat = delta_pattern(base_tar)
+                grammar_violated = False
+                for cand in candidates:
+                    fname = cand["name"]
+                    is_valid_grammar = (
+                        fname == base_tar
+                        or fname == f"{base_tar}.parts"
+                        or bool(pr_b.fullmatch(fname))
+                        or bool(d_pat.match(fname))
+                    )
+                    if not is_valid_grammar:
+                        _log(f"ошибка безопасности: кандидат {fname} не соответствует грамматике архива")
+                        arch_entry["status"] = "rejected"
+                        arch_entry["reason"] = f"candidate_grammar_violation: {fname}"
+                        grammar_violated = True
+                        break
+
+                    if is_remote:
+                        if drive_test_mode:
+                            if fname not in drive_test_registry:
+                                _log(f"ошибка безопасности: кандидат {fname} отсутствует в реестре тестового запуска")
+                                arch_entry["status"] = "rejected"
+                                arch_entry["reason"] = f"candidate_not_in_test_registry: {fname}"
+                                grammar_violated = True
+                                break
+                            reg_info = drive_test_registry[fname]
+                            cand_fid = reg_info.get("id") if isinstance(reg_info, dict) else None
+                        else:
+                            cand_fid = cand.get("id") or cand.get("ID")
+
+                        if not cand_fid or not str(cand_fid).strip():
+                            _log(f"ошибка безопасности: кандидат {fname} не имеет зарегистрированного file ID (удаление по имени запрещено)")
+                            arch_entry["status"] = "rejected"
+                            arch_entry["reason"] = f"candidate_missing_registered_file_id: {fname}"
+                            grammar_violated = True
+                            break
+                    else:
+                        cand_file = stand_root / fname
+                        if cand_file.is_symlink():
+                            resolved_target = cand_file.resolve()
+                            if not resolved_target.is_relative_to(stand_root):
+                                _log(f"ошибка безопасности: обнаружен симлинк за пределы стенда: {fname}")
+                                arch_entry["status"] = "rejected"
+                                arch_entry["reason"] = f"symlink_traversal_detected: {fname}"
+                                grammar_violated = True
+                                break
+
+                        try:
+                            resolved_cand = cand_file.resolve()
+                            if not resolved_cand.is_relative_to(stand_root):
+                                _log(f"ошибка безопасности: путь выходит за пределы каталога стенда: {fname}")
+                                arch_entry["status"] = "rejected"
+                                arch_entry["reason"] = f"directory_traversal_detected: {fname}"
+                                grammar_violated = True
+                                break
+                        except OSError as e:
+                            arch_entry["status"] = "aborted"
+                            arch_entry["reason"] = f"path_resolve_error: {fname} ({e})"
+                            grammar_violated = True
+                            break
+
+                if grammar_violated:
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                # 8. Фиксация снимка плана и проверка перед удалением
+                snapshot = compute_storage_snapshot(stand_root, report, tmp_dir=tmp_dir, state_dir=state_dir, rclone_cmd=rclone_cmd)
+                if allow_interruption_hook and hasattr(execute_stand_cleanup, "_pre_verify_hook"):
+                    try:
+                        execute_stand_cleanup._pre_verify_hook()
+                    except Exception as e:
+                        _log(f"pre_verify_hook вызвал исключение: {e}")
+
+                snap_ok, snap_err = verify_storage_snapshot(stand_root, snapshot, tmp_dir=tmp_dir, state_dir=state_dir, rclone_cmd=rclone_cmd)
+                if not snap_ok:
+                    _log(f"отмена плана: обнаружено параллельное изменение метаданных ({snap_err})")
+                    arch_entry["status"] = "aborted"
+                    arch_entry["reason"] = f"metadata_snapshot_mismatch: {snap_err}"
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                if dry_run:
+                    _log(f"[DRY-RUN] запланировано к удалению кандидатов: {len(candidates)}")
+                    arch_entry["status"] = "completed"
+                    arch_entry["reason"] = "dry_run_success"
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+                    continue
+
+                # 9. Исполнение удаления кандидатов для текущего архива
+                cand_status_list = [
+                    {
+                        "name": c["name"],
+                        "id": str(c.get("id") or (drive_test_registry.get(c["name"], {}).get("id") if drive_test_mode and drive_test_registry else "") or ""),
+                        "size": c.get("size", 0),
+                        "reason": c.get("reason", "proven_candidate"),
+                        "state": "SKIPPED_UNEXECUTED",
+                    }
+                    for c in candidates
+                ]
+                arch_entry["candidates"] = cand_status_list
+                sync_run_report_totals(run_report)
+                flush_atomic_report(report_path, run_report)
+
+                stop_reason = None
+                deleted_arch = []
+
+                for idx, cand in enumerate(candidates):
+                    fname = cand["name"]
+
+                    # Перед отправкой запроса фиксируем состояние UNCONFIRMED_UNKNOWN
+                    cand_status_list[idx]["state"] = "UNCONFIRMED_UNKNOWN"
+                    cand_status_list[idx]["requested_at"] = time.time()
+                    sync_run_report_totals(run_report)
+                    flush_atomic_report(report_path, run_report)
+
+                    # Тестовый хук прерывания/ошибки
+                    if allow_interruption_hook and hasattr(execute_stand_cleanup, "_test_hook"):
+                        try:
+                            execute_stand_cleanup._test_hook(fname, idx)
+                        except Exception as e:
+                            stop_reason = f"interrupted: {e}"
+                            _log(f"прерывание прохода очистки на объекте {fname}: {e}")
+                            cand_status_list[idx]["state"] = "UNCONFIRMED_UNKNOWN"
+                            cand_status_list[idx]["error"] = stop_reason
+                            arch_entry["status"] = "stopped"
+                            arch_entry["reason"] = stop_reason
+                            run_report["status"] = "stopped"
+                            run_report["reason"] = stop_reason
+                            sync_run_report_totals(run_report)
+                            flush_atomic_report(report_path, run_report)
+                            stop_all = True
+                            break
+
+                    if is_remote:
+                        if drive_test_mode:
+                            reg_info = drive_test_registry.get(fname, {})
+                            cand_fid = reg_info.get("id") if isinstance(reg_info, dict) else None
+                        else:
+                            cand_fid = cand.get("id") or cand.get("ID")
+                            reg_info = {"id": cand_fid, "name": fname, "size": cand.get("size", 0)}
+
+                        f_size = cand.get("size") or (reg_info.get("size") if isinstance(reg_info, dict) else 0)
+                        del_ok = False
+                        del_err = None
+                        if drive_adapter:
+                            del_ok, del_err = drive_adapter.delete_candidate(fname, reg_info)
+                        else:
+                            stop_reason = f"drive_adapter is required for Drive deletion without name fallback: {fname}"
+                            _log(f"ошибка: {stop_reason}")
+                            cand_status_list[idx]["state"] = "UNCONFIRMED_ERROR"
+                            cand_status_list[idx]["error"] = stop_reason
+                            arch_entry["status"] = "stopped"
+                            arch_entry["reason"] = stop_reason
+                            run_report["status"] = "stopped"
+                            run_report["reason"] = stop_reason
+                            sync_run_report_totals(run_report)
+                            flush_atomic_report(report_path, run_report)
+                            stop_all = True
+                            break
+
+                        fate_ok = False
+                        if del_ok:
+                            fate_ok = drive_adapter.verify_deleted(fname, reg_info)
+
+                        if not del_ok or not fate_ok:
+                            stop_reason = f"error deleting or verifying candidate {fname} by file ID {cand_fid}: {del_err or 'candidate_fate_unverified'}"
+                            _log(f"ошибка при удалении или проверке судьбы {fname}: {stop_reason}")
+                            cand_status_list[idx]["state"] = "UNCONFIRMED_ERROR"
+                            cand_status_list[idx]["error"] = stop_reason
+                            arch_entry["status"] = "stopped"
+                            arch_entry["reason"] = stop_reason
+                            run_report["status"] = "stopped"
+                            run_report["reason"] = stop_reason
+                            sync_run_report_totals(run_report)
+                            flush_atomic_report(report_path, run_report)
+                            stop_all = True
+                            break
+
+                        cand_status_list[idx]["state"] = "CONFIRMED_DELETED"
+                        cand_status_list[idx]["deleted_at"] = time.time()
+                        sync_run_report_totals(run_report)
+                        flush_atomic_report(report_path, run_report)
+
+                        deleted_arch.append({
+                            "name": fname,
+                            "reason": cand.get("reason", "proven_candidate"),
+                            "size": f_size,
+                            "id": str(cand_fid),
+                            "state": "CONFIRMED_DELETED",
+                        })
+                        storage_label = "Google Drive (тестовая папка)" if drive_test_mode else "Google Drive"
+                        _log(f"удаление в {storage_label} {fname} (file ID {cand_fid}): {cand.get('reason')} ({f_size} байт)")
+                    else:
+                        target_file = stand_root / fname
+                        try:
+                            f_size = 0
+                            if target_file.exists():
+                                f_size = target_file.stat().st_size
+                            else:
+                                f_size = cand.get("size", 0)
+
+                            if drive_adapter is not None:
+                                cand_info = {"name": fname, "size": f_size, "id": str(target_file)}
+                                del_ok, del_err = drive_adapter.delete_candidate(fname, cand_info)
+                                if not del_ok:
+                                    raise OSError(del_err or "adapter_deletion_failed")
+                                if hasattr(drive_adapter, "verify_deleted"):
+                                    if not drive_adapter.verify_deleted(fname, cand_info):
+                                        raise OSError("adapter_verify_deleted_failed")
+                            else:
+                                if target_file.exists():
+                                    target_file.unlink()
+
+                            cand_status_list[idx]["state"] = "CONFIRMED_DELETED"
+                            cand_status_list[idx]["deleted_at"] = time.time()
+                            sync_run_report_totals(run_report)
+                            flush_atomic_report(report_path, run_report)
+
+                            deleted_arch.append({
+                                "name": fname,
+                                "reason": cand.get("reason", "proven_candidate"),
+                                "size": f_size,
+                                "state": "CONFIRMED_DELETED",
+                            })
+                            _log(f"удаление {fname}: {cand.get('reason')} ({f_size} байт)")
+                        except OSError as e:
+                            stop_reason = f"error deleting {fname}: {e}"
+                            _log(f"ошибка при удалении файла {fname}: {e}")
+                            cand_status_list[idx]["state"] = "UNCONFIRMED_ERROR"
+                            cand_status_list[idx]["error"] = stop_reason
+                            arch_entry["status"] = "stopped"
+                            arch_entry["reason"] = stop_reason
+                            run_report["status"] = "stopped"
+                            run_report["reason"] = stop_reason
+                            sync_run_report_totals(run_report)
+                            flush_atomic_report(report_path, run_report)
+                            stop_all = True
+                            break
+
+                arch_deleted_bytes = sum(f["size"] for f in deleted_arch)
+                arch_entry["deleted_bytes"] = arch_deleted_bytes
+                if not stop_reason:
+                    arch_entry["status"] = "completed"
+                sync_run_report_totals(run_report)
+                flush_atomic_report(report_path, run_report)
+
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+
+    finally:
+        try:
+            if old_term is not None:
+                signal.signal(signal.SIGTERM, old_term)
+            if old_int is not None:
+                signal.signal(signal.SIGINT, old_int)
+        except (ValueError, AttributeError):
+            pass
+
+    sync_run_report_totals(run_report)
+    flush_atomic_report(report_path, run_report)
+
+    if len(target_objects) == 1:
+        single_bname = target_objects[0][:-8] if target_objects[0].endswith(".tar.zst") else target_objects[0]
+        arch_res = run_report["archives"].get(single_bname, {})
+        return {
+            "status": arch_res.get("status", run_report["status"]),
+            "reason": arch_res.get("reason", run_report.get("reason")),
+            "deleted": arch_res.get("deleted", []),
+            "deleted_bytes": arch_res.get("deleted_bytes", 0),
+            "remaining": [c for c in arch_res.get("candidates", []) if c.get("state") != "CONFIRMED_DELETED"],
+            "report": arch_res.get("classification_report", {}),
+            "log_messages": log_messages,
+            "candidate_states": arch_res.get("candidates", []),
+            "deleted_count": arch_res.get("deleted_count", 0),
+            "unconfirmed_count": arch_res.get("unconfirmed_count", 0),
+            "skipped_count": arch_res.get("skipped_count", 0),
+            "archives": run_report["archives"],
+            "run_id": run_report.get("run_id"),
+            "object": target_objects[0],
+            "total_candidates": run_report.get("total_candidates", 0),
+        }
+
+    res = dict(run_report)
+    res["log_messages"] = log_messages
+    res["candidate_states"] = run_report.get("candidates", [])
+    res["remaining"] = [c for c in run_report.get("candidates", []) if c.get("state") != "CONFIRMED_DELETED"]
+    return res
+
+
+def format_cleanup_result(result: dict) -> str:
+    """Форматирует результат выполнения очистки в текстовый журнал."""
+    lines = []
+    lines.append("=" * 70)
+    lines.append(f"РЕЗУЛЬТАТ СТЕНДОВОЙ ОЧИСТКИ: статус {result.get('status', 'unknown').upper()}")
+    if result.get("reason"):
+        lines.append(f"Причина / пояснение: {result.get('reason')}")
+    lines.append("-" * 70)
+
+    archives = result.get("archives", {})
+    if archives:
+        lines.append(f"Обработано архивов: {len(archives)}")
+        for aname, adata in archives.items():
+            lines.append(f"  • {aname}: статус {adata.get('status')} (удалено: {adata.get('deleted_count', 0)}, не подтверждено: {adata.get('unconfirmed_count', 0)}, пропущено: {adata.get('skipped_count', 0)})")
+        lines.append("-" * 70)
+
+    deleted = result.get("deleted", [])
+    lines.append(f"Всего удалено кандидатов ({len(deleted)} файлов):")
+    if deleted:
+        for f in deleted:
+            lines.append(f"  • {f['name']} — основание: {f.get('reason', 'proven_candidate')} ({f.get('size', 0) >> 10} КБ)")
+    else:
+        lines.append("  (нет)")
+
+    lines.append(f"Локальный объём удалённых файлов: {result.get('deleted_bytes', 0)} байт")
+    lines.append("  (Внимание: значение получено на локальном стенде и не является измеренным освобождением квоты Google Drive)")
+
+    remaining = result.get("remaining", [])
+    if remaining:
+        lines.append("-" * 70)
+        lines.append(f"Оставшиеся неудалённые кандидаты ({len(remaining)} файлов):")
+        for f in remaining:
+            lines.append(f"  • {f.get('name')} — {f.get('reason')}")
+
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+def main(args):
+    if len(args) < 3:
+        print("использование: wolf_cleaner.py STAND_DIR OBJECT... [--grant-file FILE] [--lock-dir DIR] [--dry-run] [--json] [--drive-test] [--drive-folder-id ID] [--registry-file FILE] [--enabled] [--report-file FILE] [--access-token TOKEN]", file=sys.stderr)
+        return 2
+
+    stand_dir = args[1]
+    objects = []
+    flags = []
+    i = 2
+    flag_keys_with_arg = {
+        "--grant-file", "--lock-dir", "--tmp-dir", "--state-dir",
+        "--run-id", "--iid", "--folder-id", "--drive-folder-id",
+        "--report-file", "--access-token", "--registry-file", "--clean-pass-id",
+    }
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--"):
+            flags.append(arg)
+            if arg in flag_keys_with_arg and i + 1 < len(args):
+                flags.append(args[i + 1])
+                i += 1
+        else:
+            objects.append(arg)
+        i += 1
+
+    if not objects:
+        print("ошибка: не указаны объекты для очистки", file=sys.stderr)
+        return 2
+
+    json_mode = "--json" in flags
+    dry_run = "--dry-run" in flags
+    drive_test_mode = "--drive-test" in flags
+
+    grant_file = "/run/wolf/cleanup_grant.json"
+    lock_dir = "/run/wolf"
+    tmp_dir = "/var/tmp/wolf"
+    state_dir = "/var/lib/wolf"
+    run_id_val = None
+    iid_val = None
+    folder_id_val = None
+    drive_test_folder_id = None
+    drive_test_registry = None
+    report_file = None
+    access_token = None
+    clean_pass_id = None
+
+    for i, flag in enumerate(flags):
+        if flag == "--grant-file" and i + 1 < len(flags):
+            grant_file = flags[i + 1]
+        elif flag == "--lock-dir" and i + 1 < len(flags):
+            lock_dir = flags[i + 1]
+        elif flag == "--tmp-dir" and i + 1 < len(flags):
+            tmp_dir = flags[i + 1]
+        elif flag == "--state-dir" and i + 1 < len(flags):
+            state_dir = flags[i + 1]
+        elif flag == "--run-id" and i + 1 < len(flags):
+            run_id_val = flags[i + 1]
+        elif flag == "--iid" and i + 1 < len(flags):
+            iid_val = flags[i + 1]
+        elif flag == "--folder-id" and i + 1 < len(flags):
+            folder_id_val = flags[i + 1]
+        elif flag == "--drive-folder-id" and i + 1 < len(flags):
+            drive_test_folder_id = flags[i + 1]
+        elif flag == "--report-file" and i + 1 < len(flags):
+            report_file = flags[i + 1]
+        elif flag == "--access-token" and i + 1 < len(flags):
+            access_token = flags[i + 1]
+        elif flag == "--clean-pass-id" and i + 1 < len(flags):
+            clean_pass_id = flags[i + 1]
+        elif flag == "--registry-file" and i + 1 < len(flags):
+            reg_path = Path(flags[i + 1])
+            if reg_path.is_file():
+                try:
+                    drive_test_registry = json.loads(reg_path.read_text("utf-8"))
+                except Exception:
+                    pass
+
+    grant_data = None
+    if os.path.isfile(grant_file):
+        try:
+            with open(grant_file, "r", encoding="utf-8") as gf:
+                grant_data = json.load(gf)
+        except Exception:
+            pass
+
+    enabled_val = True if "--enabled" in flags else (False if "--disabled" in flags else None)
+    if enabled_val is None:
+        enabled_val = is_cleanup_enabled(grant_data=grant_data, lock_dir=lock_dir)
+
+    res = execute_stand_cleanup(
+        stand_dir=stand_dir,
+        obj_name=objects if len(objects) > 1 else objects[0],
+        grant_file=grant_file,
+        lock_dir=lock_dir,
+        tmp_dir=tmp_dir,
+        state_dir=state_dir,
+        run_id_val=run_id_val,
+        iid_val=iid_val,
+        folder_id_val=folder_id_val,
+        dry_run=dry_run,
+        drive_test_mode=drive_test_mode,
+        drive_test_folder_id=drive_test_folder_id,
+        drive_test_registry=drive_test_registry,
+        drive_production_mode=(not drive_test_mode and ":" in str(stand_dir)),
+        enabled=enabled_val,
+        report_file=report_file,
+        access_token=access_token,
+        require_isolation=("--require-isolation" in flags),
+        clean_pass_id=clean_pass_id,
+    )
+
+    if json_mode:
+        print(json.dumps(res, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(format_cleanup_result(res))
+
+    return 0 if res.get("status") in ("completed", "noop", "disabled") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+CLEANER
+
 # ================================= wolf-web.py =================================
 w /usr/local/bin/wolf-web.py <<'WEB'
 #!/usr/bin/env python3
@@ -2520,6 +7019,168 @@ def page():
             'pre{background:#010409;padding:10px;overflow:auto;font-size:12px}</style>'
             f'<h2>{banner}</h2><table>{rows}</table><h3>Лог</h3><pre>{html.escape(log_tail())}</pre>')
 WOLF = '/usr/local/bin/wolf'
+def get_run_id():
+    for p in ('/run/wolf/run_id', os.environ.get('WOLF_RUN_ID_FILE', '')):
+        if p and os.path.isfile(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    v = f.read().strip()
+                    if v:
+                        return v
+            except Exception:
+                pass
+    return None
+def get_env_iid():
+    if os.environ.get('CONTAINER_ID'):
+        v = str(os.environ['CONTAINER_ID']).strip()
+        if v:
+            return v
+    for p in ('/run/wolf/iid', '/etc/wolf/env'):
+        if os.path.isfile(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if p.endswith('/iid'):
+                            v = line.strip()
+                            if v: return v
+                        elif 'VI=' in line:
+                            m = re.search(r'\bVI=["\']?([^"\'\s]+)["\']?', line)
+                            if m and m.group(1).strip():
+                                return m.group(1).strip()
+            except Exception:
+                pass
+    return None
+def get_env_r():
+    if os.environ.get('R'):
+        v = str(os.environ['R']).strip()
+        if v: return v
+    if os.path.isfile('/etc/wolf/env'):
+        try:
+            with open('/etc/wolf/env', 'r', encoding='utf-8') as f:
+                for line in f:
+                    if 'R=' in line:
+                        m = re.search(r'\bR=["\']?([^"\'\s]+)["\']?', line)
+                        if m and m.group(1).strip():
+                            return m.group(1).strip()
+        except Exception:
+            pass
+    return ''
+def get_storage_folder_id(r_val=None, rc_cmd=None, fid_path='/run/wolf/storage_folder_id'):
+    if r_val is None:
+        r_val = get_env_r()
+    if not r_val or ':' not in r_val:
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+    rem, _, fol = r_val.partition(':')
+    fol = fol.strip('/')
+    if not rem or not fol:
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+    if rc_cmd is None:
+        rc_cmd = os.environ.get('WOLF_RCLONE_CMD', 'rclone')
+    try:
+        res = subprocess.run([rc_cmd, 'lsjson', '-M', '--stat', r_val],
+                             capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            d = json.loads(res.stdout or '{}')
+            fid = str(d.get('ID') or d.get('id') or '').strip()
+            if fid:
+                try:
+                    os.makedirs(os.path.dirname(fid_path), exist_ok=True)
+                    tmp = f'{fid_path}.tmp.{os.getpid()}'
+                    with open(tmp, 'w', encoding='utf-8') as f:
+                        f.write(fid)
+                    os.replace(tmp, fid_path)
+                except Exception:
+                    pass
+                return fid
+        else:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+    try:
+        res = subprocess.run([rc_cmd, 'lsjson', '-M', '--dirs-only', '--max-depth', '1', f'{rem}:'],
+                             capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            for item in json.loads(res.stdout or '[]'):
+                if str(item.get('Name') or '').strip() == fol:
+                    fid = str(item.get('ID') or item.get('id') or '').strip()
+                    if fid:
+                        try:
+                            os.makedirs(os.path.dirname(fid_path), exist_ok=True)
+                            tmp = f'{fid_path}.tmp.{os.getpid()}'
+                            with open(tmp, 'w', encoding='utf-8') as f:
+                                f.write(fid)
+                            os.replace(tmp, fid_path)
+                        except Exception:
+                            pass
+                        return fid
+        else:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        pass
+    try:
+        os.unlink(fid_path)
+    except Exception:
+        pass
+    return None
+def is_cleanup_authorized(grant_file='/run/wolf/cleanup_grant.json', run_id_val=None, iid_val=None, folder_id_val=None):
+    """Единая проверка допуска к очистке во всех слоях Wolf."""
+    cur_run_id = (run_id_val if run_id_val is not None else get_run_id()) or ''
+    cur_iid = (iid_val if iid_val is not None else get_env_iid()) or ''
+    cur_fid = (folder_id_val if folder_id_val is not None else get_storage_folder_id()) or ''
+    if not cur_run_id or not cur_iid or not cur_fid:
+        return False
+    if not os.path.isfile(grant_file):
+        return False
+    try:
+        with open(grant_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        if data.get('status') != 'granted':
+            return False
+        g_run = str(data.get('run_id') or '').strip()
+        g_iid = str(data.get('iid') or '').strip()
+        g_fid = str(data.get('folder_id') or '').strip()
+        if not g_run or not g_iid or not g_fid:
+            return False
+        if g_run != cur_run_id or g_iid != cur_iid or g_fid != cur_fid:
+            return False
+        return True
+    except Exception:
+        return False
+def session_data():
+    r_val = get_env_r()
+    rem, _, fol = r_val.partition(':')
+    return {
+        'iid': get_env_iid(),
+        'run_id': get_run_id(),
+        'storage': {
+            'remote': r_val,
+            'folder_name': fol,
+            'folder_id': get_storage_folder_id(),
+        },
+        'cleanup_allowed': is_cleanup_authorized(),
+    }
 # Имя архива игры: папки бывают с пробелами («sgame--The Blood of Dawnwalker»); без «/» и управляющих
 # символов. Аргументы уходят программе списком, без оболочки, — подставить в них команду нельзя
 ARCHIVE = re.compile(r'^(game|sgame|pfx|mod|prog|lgame|gsave)--[^/\x00-\x1f]{1,200}$')
@@ -2533,6 +7194,7 @@ MOD = re.compile(r'^mod--\d{1,10}$')            # [v5.0] вопрос «сохр
 RESTORABLE = ('steam-state', 'steam-client', 'steam-cache')   # [v5.10] служебные — тоже можно повторить (не identity)
 PROG = re.compile(r'^(game|prog|pfx):[^\x00-\x1f]{1,400}$')   # [v5.4] программа игры (путь проверяет wolf-steam.py)
 ARGS = re.compile(r'^[^\x00-\x1f]{0,300}$')                     # [v5.6] параметры программы-загрузчика
+GRANT_ARG = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
 def command(c, a):
     """Закрытый список: (команда, в фоне?) или None — такой команды нет."""
     arg = a[0] if len(a) == 1 and isinstance(a[0], str) else ''
@@ -2561,7 +7223,10 @@ def command(c, a):
                            and len(str(a[0])) <= 10 and isinstance(a[1], str) and (a[1] == '-' or PROG.match(a[1]))
                            and isinstance(a[2], str) and ARGS.match(a[2]) else None,
             'prog-install': ([WOLF, 'prog', 'install', *a], False) if len(a) == 2 and str(a[0]).isdigit()
-                            and len(str(a[0])) <= 10 and isinstance(a[1], str) and PROG.match(a[1]) else None}.get(c)
+                            and len(str(a[0])) <= 10 and isinstance(a[1], str) and PROG.match(a[1]) else None,
+            'grant-cleanup': ([WOLF, 'grant-cleanup', *[str(x) for x in a]], False) if (
+                len(a) >= 2 and all(isinstance(x, (str, int)) and GRANT_ARG.match(str(x)) for x in a[:4])
+            ) else None}.get(c)
 def tsjson(sub, *args):
     # --json — сразу после подкоманды: после адреса tailscale отвечает «too many arguments»
     return json.loads(subprocess.run(['tailscale', sub, '--json', *args], capture_output=True, text=True,
@@ -2618,6 +7283,9 @@ class H(BaseHTTPRequestHandler):
                                     **({'progress': pg} if s in ('up', 'down') and (pg := progress(n)) else {}))
                                for n, t, s, x in items()], ensure_ascii=False).encode()
             ctype = 'application/json; charset=utf-8'
+        elif self.path.startswith('/session'):
+            body = json.dumps(session_data(), ensure_ascii=False).encode()
+            ctype = 'application/json; charset=utf-8'
         else:
             body = page().encode(); ctype = 'text/html; charset=utf-8'
         self.send_response(200); self.send_header('Content-Type', ctype)
@@ -2626,6 +7294,3173 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 ThreadingHTTPServer(('', int(os.environ.get('WOLF_PORT', '8099'))), H).serve_forever()
 WEB
+
+# ============================ wolf-state-agent.py =============================
+w /usr/local/bin/wolf-state-agent.py <<'AGENT'
+#!/usr/bin/env python3
+"""Wolf State Agent (Stage 5 MVP): passive observe-only inotify watcher.
+
+Observes allowed Wolf storage directories via Linux inotify without extra
+container privileges, coalesces repeated events, records changed paths in a
+size-bounded local JSONL journal, and flags needs_full_scan on overflow,
+inaccessible directories, moved/deleted roots, or agent start/restart.
+"""
+
+import argparse
+import ctypes
+import ctypes.util
+import errno
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import selectors
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import struct
+import sys
+import time
+
+# Linux <linux/inotify.h> bitmasks (architecture-independent across x86_64/arm64)
+IN_MODIFY = 0x00000002
+IN_CLOSE_WRITE = 0x00000008
+IN_MOVED_FROM = 0x00000040
+IN_MOVED_TO = 0x00000080
+IN_CREATE = 0x00000100
+IN_DELETE = 0x00000200
+IN_DELETE_SELF = 0x00000400
+IN_MOVE_SELF = 0x00000800
+IN_UNMOUNT = 0x00002000
+IN_Q_OVERFLOW = 0x00004000
+IN_IGNORED = 0x00008000
+IN_ONLYDIR = 0x01000000
+IN_DONT_FOLLOW = 0x02000000
+IN_ISDIR = 0x40000000
+
+WATCH_MASK = (
+    IN_CREATE
+    | IN_MODIFY
+    | IN_CLOSE_WRITE
+    | IN_DELETE
+    | IN_MOVED_FROM
+    | IN_MOVED_TO
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF
+    | IN_ONLYDIR
+    | IN_DONT_FOLLOW
+)
+
+PARENT_WATCH_MASK = (
+    IN_CREATE
+    | IN_MOVED_TO
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF
+    | IN_ONLYDIR
+    | IN_DONT_FOLLOW
+)
+
+INOTIFY_EVENT_HEADER = struct.Struct("=iIII")
+STEAM_TOOL_NAMES = {
+    "Steamworks Shared",
+    "Steam Controller Configs",
+}
+STEAM_TOOL_PREFIXES = ("Proton", "SteamLinuxRuntime", "Steam Linux Runtime")
+SENSITIVE_NAMES = {".ssh", ".gnupg", ".aws", "rclone.conf", "vastkey", "tskey"}
+ENV_KEYS = {
+    "S", "T", "L", "DH", "SR", "GD", "PD", "SG", "SO", "SV", "SA",
+    "WOLF_S", "WOLF_T", "WOLF_L", "WOLF_DH", "WOLF_SR", "WOLF_GD", "WOLF_PD",
+    "WOLF_SG", "WOLF_SO", "WOLF_SV", "WOLF_STATE_AGENT",
+    "WOLF_STATE_AGENT_DEBOUNCE_MS", "WOLF_STATE_AGENT_MOVE_WAIT_MS",
+    "WOLF_STATE_AGENT_HEALTH_SEC", "WOLF_STATE_AGENT_MAX_BYTES",
+    "WOLF_STATE_AGENT_MAX_PENDING", "WOLF_SHADOW_COMPARE",
+}
+
+
+def _env_int(env, key, default, minimum=1):
+    raw = str(env.get(key, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def _env_float(env, key, default, minimum=0.05):
+    raw = str(env.get(key, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        return default
+
+
+def normalize_mode(raw):
+    val = str(raw or "").strip().lower()
+    if val in ("observe-only", "observe", "1", "true", "yes"):
+        return "observe-only"
+    return "off"
+
+
+def load_env_file(path):
+    """Safely parse selected non-secret assignments from /etc/wolf/env."""
+    out = {}
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return out
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("declare "):
+            parts = line.split(None, 2)
+            line = parts[2] if len(parts) == 3 and parts[1].startswith("-") else line[8:].strip()
+        elif line.startswith("export "):
+            line = line[7:].strip()
+        key, sep, val = line.partition("=")
+        if not sep or key not in ENV_KEYS:
+            continue
+        val = val.strip()
+        if not val:
+            out[key] = ""
+            continue
+        try:
+            tokens = shlex.split(val, posix=True)
+            out[key] = tokens[0] if tokens else ""
+        except ValueError:
+            out[key] = val.strip("'\"")
+    return out
+
+
+def _resolve_under(base, path):
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    if not base:
+        return os.path.normpath(os.path.abspath(path))
+    return os.path.normpath(os.path.join(base, path))
+
+
+def _discover_steam_root(dh, sr_val):
+    if sr_val:
+        cand = _resolve_under(dh, sr_val)
+        return cand
+    if not dh:
+        return None
+    dh_real = os.path.realpath(dh)
+    for rel in (".steam/steam", ".local/share/Steam"):
+        probe = os.path.join(dh, rel)
+        try:
+            resolved = os.path.realpath(probe)
+        except OSError:
+            continue
+        if os.path.isdir(os.path.join(resolved, "config")):
+            if resolved == dh_real or resolved.startswith(dh_real + os.sep):
+                return os.path.normpath(os.path.join(dh, os.path.relpath(resolved, dh_real)))
+            return os.path.normpath(resolved)
+    return None
+
+
+def _read_lines(path):
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return [ln.strip() for ln in fh if ln.strip()]
+
+
+def _acf_installdir(steamapps_dir, appid):
+    for parent in (steamapps_dir, os.path.join(steamapps_dir, ".vastgame-hidden")):
+        acf = os.path.join(parent, f"appmanifest_{appid}.acf")
+        if not os.path.isfile(acf):
+            continue
+        try:
+            with open(acf, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(65536)
+        except OSError:
+            continue
+        match = re.search(r'"installdir"\s+"([^"\r\n]+)"', text)
+        if match:
+            idir = match.group(1).strip()
+            if idir and "/" not in idir and ".." not in idir:
+                return idir
+    return None
+
+
+def _is_steam_tool_dir(name):
+    return name in STEAM_TOOL_NAMES or name.startswith(STEAM_TOOL_PREFIXES)
+
+
+def _atomic_write_json(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+def _read_json_if_exists(path):
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _make_root(root_id, path, recursive=True, required=True, allow_names=None,
+               exclude_globs=None, exclude_subdirs=None, skip_win_temp=False):
+    return {
+        "id": root_id,
+        "path": os.path.normpath(os.path.abspath(path)),
+        "recursive": bool(recursive),
+        "required": bool(required),
+        "allow_names": list(allow_names or []),
+        "exclude_globs": list(exclude_globs or []),
+        "exclude_subdirs": list(exclude_subdirs or []),
+        "skip_win_temp": bool(skip_win_temp),
+    }
+
+
+def resolve_config(environ=None, env_file=None):
+    """Build sanitized Stage 5 watcher config from Wolf env and state dir."""
+    environ = os.environ if environ is None else environ
+    ef = env_file if env_file is not None else environ.get("WOLF_ENV_FILE", "/etc/wolf/env")
+    merged = load_env_file(ef)
+    merged.update({k: v for k, v in environ.items() if v is not None})
+
+    def pick(*keys, default=""):
+        for k in keys:
+            val = merged.get(k)
+            if val is not None and str(val) != "":
+                return str(val)
+        return default
+
+    state_dir_wolf = os.path.normpath(os.path.abspath(pick("WOLF_S", "S", default="/var/lib/wolf")))
+    tmp_dir = os.path.normpath(os.path.abspath(pick("WOLF_T", "T", default="/tmp/wolf")))
+    run_dir = os.path.normpath(os.path.abspath(pick("WOLF_L", "L", default="/run/wolf")))
+    dh = pick("WOLF_DH", "DH", default="")
+    if dh:
+        dh = os.path.normpath(os.path.abspath(dh))
+
+    gd = _resolve_under(dh, pick("WOLF_GD", "GD", default=os.path.join(dh, "Downloads/Games") if dh else ""))
+    pd = _resolve_under(dh, pick("WOLF_PD", "PD", default=os.path.join(dh, "Downloads/Programs") if dh else ""))
+    sr_abs = _discover_steam_root(dh, pick("WOLF_SR", "SR", default=""))
+    sg = pick("WOLF_SG", "SG", default="1")
+    so = pick("WOLF_SO", "SO", default="1")
+    sv = pick("WOLF_SV", "SV", default="1")
+    mode = normalize_mode(pick("WOLF_STATE_AGENT", "SA", default="observe-only"))
+
+    sel_on = os.path.exists(os.path.join(state_dir_wolf, "sel.on"))
+    sel_store = os.path.exists(os.path.join(state_dir_wolf, "sel.store"))
+    sel_own_all = os.path.exists(os.path.join(state_dir_wolf, "sel.own_all"))
+    sel_games = _read_lines(os.path.join(state_dir_wolf, "sel.games"))
+    sel_skip = set(_read_lines(os.path.join(state_dir_wolf, "sel.skip")))
+    saves_off = _read_lines(os.path.join(state_dir_wolf, "sel.saves_off"))
+    gdata_ids = set(_read_lines(os.path.join(state_dir_wolf, "sel.gdata")))
+    mods_yes = set(_read_lines(os.path.join(state_dir_wolf, "sel.mods_yes")))
+    mods_no = set(_read_lines(os.path.join(state_dir_wolf, "sel.mods_no")))
+    mods_all = os.path.exists(os.path.join(state_dir_wolf, "sel.mods_all"))
+
+    def _strip_prefix(entry, prefix):
+        if not entry.startswith(prefix):
+            return None
+        folder = entry[len(prefix):]
+        if not folder or "/" in folder or folder in (".", ".."):
+            return None
+        return folder
+
+    selected_game_folders = []
+    selected_sgame_folders = []
+    for entry in sel_games:
+        if entry in sel_skip:
+            continue
+        gf = _strip_prefix(entry, "game--")
+        if gf and gf not in selected_game_folders:
+            selected_game_folders.append(gf)
+            continue
+        sf = _strip_prefix(entry, "sgame--")
+        if sf and sf not in selected_sgame_folders:
+            selected_sgame_folders.append(sf)
+
+    skip_game_folders = sorted({f for f in (_strip_prefix(x, "game--") for x in sel_skip) if f})
+    disabled_compat_ids = []
+    for entry in saves_off:
+        pid = _strip_prefix(entry, "pfx--")
+        if pid is None and entry.isdigit():
+            pid = entry
+        if pid and pid not in disabled_compat_ids:
+            disabled_compat_ids.append(pid)
+
+    agent_state_dir = os.path.join(state_dir_wolf, "agent")
+    excluded_paths = sorted({state_dir_wolf, tmp_dir, run_dir, agent_state_dir})
+
+    roots = []
+    if gd:
+        if not sel_on:
+            if so == "1":
+                roots.append(_make_root(
+                    "games", gd, recursive=True, required=True,
+                    exclude_globs=["*.vgtmp"], skip_win_temp=True,
+                ))
+        elif sel_own_all:
+            roots.append(_make_root(
+                "games", gd, recursive=True, required=True,
+                exclude_globs=["*.vgtmp"], exclude_subdirs=skip_game_folders, skip_win_temp=True,
+            ))
+        else:
+            watched_games = list(selected_game_folders)
+            if os.path.isdir(gd):
+                try:
+                    for ent in sorted(os.scandir(gd), key=lambda e: e.name):
+                        if (
+                            ent.name not in skip_game_folders
+                            and ent.name not in watched_games
+                            and ent.is_dir(follow_symlinks=False)
+                            and os.path.isfile(os.path.join(ent.path, ".vastgame.json"))
+                        ):
+                            watched_games.append(ent.name)
+                except OSError:
+                    pass
+            for folder in watched_games:
+                target = os.path.join(gd, folder)
+                roots.append(_make_root(
+                    f"game:{folder}", target, recursive=True, required=os.path.isdir(target),
+                    exclude_globs=["*.vgtmp"], skip_win_temp=True,
+                ))
+
+    pd_explicit = bool(str(merged.get("WOLF_PD", "") or "").strip())
+    if pd and (pd_explicit or os.path.isdir(pd)):
+        roots.append(_make_root("programs", pd, recursive=True, required=True))
+
+    if dh:
+        sunshine_dir = os.path.join(dh, ".config", "sunshine")
+        if os.path.isdir(sunshine_dir):
+            roots.append(_make_root(
+                "sunshine", sunshine_dir, recursive=True, required=True,
+                exclude_globs=["*.log", "*.log.*"],
+            ))
+        dot_steam = os.path.join(dh, ".steam")
+        if os.path.isdir(dot_steam):
+            roots.append(_make_root(
+                "dot_steam", dot_steam, recursive=False, required=False,
+                allow_names=["registry.vdf", "steam", "root", "bin", "sdk32", "sdk64"],
+            ))
+
+    if sr_abs and os.path.isdir(sr_abs):
+        steamapps = os.path.join(sr_abs, "steamapps")
+        compat = os.path.join(steamapps, "compatdata")
+        if sv == "1" and os.path.isdir(compat):
+            roots.append(_make_root(
+                "compatdata", compat, recursive=True, required=True,
+                exclude_globs=["*.vgtmp"], exclude_subdirs=disabled_compat_ids, skip_win_temp=True,
+            ))
+        cfg_dir = os.path.join(sr_abs, "config")
+        if os.path.isdir(cfg_dir):
+            roots.append(_make_root(
+                "steam_config", cfg_dir, recursive=True, required=True,
+                exclude_subdirs=["htmlcache"],
+            ))
+        ud_dir = os.path.join(sr_abs, "userdata")
+        if os.path.isdir(ud_dir):
+            roots.append(_make_root("steam_userdata", ud_dir, recursive=True, required=True))
+        if os.path.isdir(steamapps):
+            roots.append(_make_root(
+                "steamapps", steamapps, recursive=False, required=True,
+                allow_names=["*.acf", "libraryfolders.vdf"],
+            ))
+            hidden = os.path.join(steamapps, ".vastgame-hidden")
+            if os.path.isdir(hidden):
+                roots.append(_make_root(
+                    "steamapps_hidden", hidden, recursive=False, required=False,
+                    allow_names=["*.acf"],
+                ))
+        roots.append(_make_root(
+            "steam_root", sr_abs, recursive=False, required=False,
+            allow_names=["local.vdf", "ssfn*"],
+        ))
+
+        common = os.path.join(steamapps, "common")
+        if not sel_on:
+            if os.path.isdir(common):
+                if sg == "1":
+                    roots.append(_make_root("steam_common", common, recursive=True, required=True))
+                else:
+                    try:
+                        for ent in sorted(os.scandir(common), key=lambda e: e.name):
+                            if ent.is_dir(follow_symlinks=False) and _is_steam_tool_dir(ent.name):
+                                roots.append(_make_root(
+                                    f"steam_common:{ent.name}", ent.path, recursive=True, required=True,
+                                ))
+                    except OSError:
+                        pass
+        else:
+            watched_common = set()
+            if os.path.isdir(common):
+                try:
+                    for ent in os.scandir(common):
+                        if (
+                            ent.is_dir(follow_symlinks=False)
+                            and _is_steam_tool_dir(ent.name)
+                            and f"sgame--{ent.name}" not in sel_skip
+                        ):
+                            watched_common.add(ent.name)
+                except OSError:
+                    pass
+            if not sel_store:
+                for sf in selected_sgame_folders:
+                    watched_common.add(sf)
+            van_ids = set()
+            van_dir = os.path.join(state_dir_wolf, "van")
+            if os.path.isdir(van_dir):
+                for fn in os.listdir(van_dir):
+                    if fn.endswith(".tsv"):
+                        van_ids.add(fn[:-4])
+            selected_appids = set(gdata_ids) | mods_yes
+            if mods_all:
+                selected_appids |= (van_ids - mods_no)
+            for appid in sorted(selected_appids):
+                idir = _acf_installdir(steamapps, appid)
+                if idir:
+                    watched_common.add(idir)
+            for dname in sorted(watched_common):
+                target = os.path.join(common, dname)
+                roots.append(_make_root(
+                    f"steam_common:{dname}", target,
+                    recursive=True, required=os.path.isdir(target),
+                ))
+
+    return {
+        "version": 1,
+        "mode": mode,
+        "debounce_ms": _env_int(merged, "WOLF_STATE_AGENT_DEBOUNCE_MS", 250, minimum=10),
+        "move_cookie_wait_ms": _env_int(merged, "WOLF_STATE_AGENT_MOVE_WAIT_MS", 50, minimum=10),
+        "health_check_sec": _env_float(merged, "WOLF_STATE_AGENT_HEALTH_SEC", 2.0, minimum=0.05),
+        "max_journal_bytes": _env_int(merged, "WOLF_STATE_AGENT_MAX_BYTES", 512 * 1024, minimum=512),
+        "max_pending_events": _env_int(merged, "WOLF_STATE_AGENT_MAX_PENDING", 10000, minimum=16),
+        "state_dir": agent_state_dir,
+        "state_path": os.path.join(agent_state_dir, "state.json"),
+        "journal_path": os.path.join(agent_state_dir, "events.jsonl"),
+        "pid_path": os.path.join(run_dir, "state-agent.pid"),
+        "excluded_paths": excluded_paths,
+        "roots": roots,
+    }
+
+
+def parse_inotify_events(buf):
+    """Decode raw bytes from an inotify fd into (wd, mask, cookie, name) tuples."""
+    events = []
+    offset = 0
+    total = len(buf)
+    hsize = INOTIFY_EVENT_HEADER.size
+    while offset + hsize <= total:
+        wd, mask, cookie, length = INOTIFY_EVENT_HEADER.unpack_from(buf, offset)
+        end = offset + hsize + length
+        if end > total:
+            break
+        raw_name = buf[offset + hsize : end]
+        name = raw_name.split(b"\x00", 1)[0].decode("utf-8", errors="replace") if length else ""
+        events.append((wd, mask, cookie, name))
+        offset = end
+    return events
+
+
+class InotifyBackend:
+    """Thin ctypes wrapper around Linux glibc inotify syscalls."""
+
+    def __init__(self):
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        self._libc = ctypes.CDLL(libc_name, use_errno=True)
+        self._libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self._libc.inotify_add_watch.restype = ctypes.c_int
+        self._libc.inotify_rm_watch.argtypes = [ctypes.c_int, ctypes.c_int]
+        self._libc.inotify_rm_watch.restype = ctypes.c_int
+
+        if hasattr(self._libc, "inotify_init1"):
+            self._libc.inotify_init1.argtypes = [ctypes.c_int]
+            self._libc.inotify_init1.restype = ctypes.c_int
+            fd = self._libc.inotify_init1(0)
+        else:
+            self._libc.inotify_init.argtypes = []
+            self._libc.inotify_init.restype = ctypes.c_int
+            fd = self._libc.inotify_init()
+
+        if fd < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+        try:
+            os.set_blocking(fd, False)
+            os.set_inheritable(fd, False)
+        except Exception:
+            os.close(fd)
+            raise
+        self._fd = fd
+        self._tail = b""
+
+    def fileno(self):
+        return self._fd
+
+    def add_watch(self, path, mask=WATCH_MASK):
+        bpath = os.fsencode(path)
+        wd = self._libc.inotify_add_watch(self._fd, bpath, mask)
+        if wd < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err), path)
+        return wd
+
+    def rm_watch(self, wd):
+        if self._fd < 0 or wd < 0:
+            return
+        res = self._libc.inotify_rm_watch(self._fd, wd)
+        if res < 0:
+            err = ctypes.get_errno()
+            if err not in (errno.EINVAL, errno.EBADF):
+                raise OSError(err, os.strerror(err))
+
+    def read_events(self):
+        if self._fd < 0:
+            return []
+        chunks = [self._tail] if self._tail else []
+        while True:
+            try:
+                data = os.read(self._fd, 65536)
+            except BlockingIOError:
+                break
+            except InterruptedError:
+                continue
+            if not data:
+                break
+            chunks.append(data)
+            if len(data) < 65536:
+                break
+        buf = b"".join(chunks)
+        events = []
+        offset = 0
+        total = len(buf)
+        hsize = INOTIFY_EVENT_HEADER.size
+        while offset + hsize <= total:
+            wd, mask, cookie, length = INOTIFY_EVENT_HEADER.unpack_from(buf, offset)
+            end = offset + hsize + length
+            if end > total:
+                break
+            raw_name = buf[offset + hsize : end]
+            name = raw_name.split(b"\x00", 1)[0].decode("utf-8", errors="replace") if length else ""
+            events.append((wd, mask, cookie, name))
+            offset = end
+        self._tail = buf[offset:]
+        return events
+
+    def close(self):
+        if self._fd >= 0:
+            try:
+                os.close(self._fd)
+            finally:
+                self._fd = -1
+
+
+class BoundedJournal:
+    """Append-only JSONL journal strictly bounded across active + .1 files."""
+
+    def __init__(self, path, max_bytes):
+        self.path = path
+        self.rotated_path = f"{path}.1"
+        self.max_bytes = max(512, int(max_bytes))
+        self.rotations = 0
+        self.seq = self._load_last_seq()
+
+    def _file_size(self, p):
+        try:
+            return os.path.getsize(p)
+        except OSError:
+            return 0
+
+    def total_bytes(self):
+        return self._file_size(self.path) + self._file_size(self.rotated_path)
+
+    def _load_last_seq(self):
+        max_seq = 0
+        for p in (self.rotated_path, self.path):
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        try:
+                            rec = json.loads(line)
+                            seq = int(rec.get("seq", 0))
+                            if seq > max_seq:
+                                max_seq = seq
+                        except (ValueError, TypeError, AttributeError):
+                            continue
+            except OSError:
+                continue
+        return max_seq
+
+    def append(self, record):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.seq += 1
+        payload = {"seq": self.seq}
+        payload.update(record)
+        line = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(line) > self.max_bytes:
+            trimmed = {k: v for k, v in payload.items() if k != "detail"}
+            trimmed["truncated"] = True
+            line = (json.dumps(trimmed, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+            if len(line) > self.max_bytes:
+                minimal = {"seq": self.seq, "ts": payload.get("ts"), "kind": payload.get("kind"), "op": payload.get("op")}
+                line = (json.dumps(minimal, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+        half_cap = self.max_bytes // 2
+        cur_size = self._file_size(self.path)
+        if cur_size > 0 and (cur_size + len(line) > half_cap or cur_size + len(line) + self._file_size(self.rotated_path) > self.max_bytes):
+            if os.path.isfile(self.path):
+                os.replace(self.path, self.rotated_path)
+                self.rotations += 1
+        if len(line) + self._file_size(self.rotated_path) > self.max_bytes:
+            try:
+                os.remove(self.rotated_path)
+            except FileNotFoundError:
+                pass
+        with open(self.path, "ab") as fh:
+            fh.write(line)
+        return payload
+
+    @staticmethod
+    def read_tail(path, limit=50):
+        records = []
+        for candidate in (f"{path}.1", path):
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            records.append(json.loads(line))
+                        except ValueError:
+                            continue
+            except OSError:
+                continue
+        if limit is not None and limit >= 0:
+            return records[-limit:] if limit > 0 else []
+        return records
+
+    @staticmethod
+    def read_since(path, after_seq=0, up_to_seq=None):
+        upper = None if up_to_seq is None else int(up_to_seq)
+        records = []
+        system_events = []
+        seen_seqs = set()
+        min_seq = None
+        max_seq = None
+        decode_errors = 0
+        io_errors = []
+        files_seen = 0
+        for candidate in (f"{path}.1", path):
+            if not os.path.exists(candidate):
+                continue
+            files_seen += 1
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                    for raw_line in fh:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except ValueError:
+                            decode_errors += 1
+                            continue
+                        if not isinstance(rec, dict):
+                            decode_errors += 1
+                            continue
+                        try:
+                            seq = int(rec.get("seq"))
+                        except (TypeError, ValueError):
+                            decode_errors += 1
+                            continue
+                        if min_seq is None or seq < min_seq:
+                            min_seq = seq
+                        if max_seq is None or seq > max_seq:
+                            max_seq = seq
+                        if seq <= after_seq or (upper is not None and seq > upper) or seq in seen_seqs:
+                            continue
+                        seen_seqs.add(seq)
+                        records.append(rec)
+                        if rec.get("kind") == "system":
+                            system_events.append(rec)
+            except OSError as exc:
+                io_errors.append(f"{candidate}: {type(exc).__name__}: {exc}")
+        empty_window = (upper is not None and upper <= after_seq)
+        rotation_gap = bool(after_seq > 0 and not empty_window and min_seq is not None and min_seq > after_seq + 1)
+        expected_tail = upper if (upper is not None and upper > after_seq) else after_seq
+        missing_after = bool(expected_tail > 0 and not io_errors and (files_seen == 0 or max_seq is None or max_seq < expected_tail))
+        return {
+            "records": records,
+            "system_events": system_events,
+            "min_seq": min_seq,
+            "max_seq": max_seq,
+            "up_to_seq": upper,
+            "decode_errors": decode_errors,
+            "io_errors": io_errors,
+            "files_seen": files_seen,
+            "rotation_gap": rotation_gap,
+            "missing_after": missing_after,
+        }
+
+
+class StateAgent:
+    """Passive observe-only filesystem observer backed by InotifyBackend."""
+
+    def __init__(self, config, backend=None, config_path=None, time_fn=None):
+        self.config = config
+        self.config_path = config_path
+        self.backend = backend if backend is not None else InotifyBackend()
+        self.time_fn = time_fn or time.monotonic
+        self.wall_fn = time.time
+
+        self.journal = BoundedJournal(config["journal_path"], config["max_journal_bytes"])
+        self.roots = list(config.get("roots", []))
+        self.roots_by_id = {r["id"]: r for r in self.roots}
+        self._refresh_exclusions()
+
+        self.wd_to_dir = {}        # wd -> (root_id, dir_path)
+        self.dir_to_wd = {}        # dir_path -> (root_id, wd)
+        self.root_wd = {}          # root_id -> wd
+        self.root_stats = {}       # root_id -> (st_dev, st_ino)
+        self.active_root_errors = {}
+        self.seen_roots = set()    # root_ids seen on disk at least once
+        self.parent_watches = {}   # wd -> (parent_dir, set(root_id))
+        self.parent_path_to_wd = {}  # parent_dir -> wd
+
+        self.pending = {}          # (kind, path) -> dict
+        self.move_cookies = {}     # cookie -> dict
+        self.needs_full_scan = False
+        self.needs_full_scan_reasons = []
+        self.overflow_count = 0
+        self.events_logged = 0
+        self.events_coalesced = 0
+        self.boot_seq = 1
+        self.restart_count = 0
+        self.flush_ack = 0
+        self.started_at = self.wall_fn()
+        self.last_event_at = None
+        self.last_health_check = self.time_fn()
+        self.running = True
+        self._stop_requested = False
+        self._reload_requested = False
+        self._flush_requested = False
+
+    def _refresh_exclusions(self):
+        raw_ex = self.config.get("excluded_paths", [])
+        self._excluded = set()
+        for p in raw_ex:
+            if not p:
+                continue
+            self._excluded.add(os.path.normpath(os.path.abspath(p)))
+            try:
+                self._excluded.add(os.path.normpath(os.path.realpath(p)))
+            except OSError:
+                pass
+
+    def _is_win_temp_path(self, rel_path):
+        low = "/" + rel_path.replace("\\", "/").lower().strip("/") + "/"
+        if "/drive_c/windows/temp/" in low:
+            return True
+        return "/drive_c/users/" in low and "/appdata/local/temp/" in low
+
+    def is_excluded(self, root, full_path, is_dir=False):
+        norm = os.path.normpath(full_path)
+        if norm in self._excluded:
+            return True
+        for ex in self._excluded:
+            if norm.startswith(ex + os.sep):
+                return True
+        try:
+            real = os.path.normpath(os.path.realpath(norm))
+            for ex in self._excluded:
+                if real == ex or real.startswith(ex + os.sep):
+                    return True
+        except OSError:
+            pass
+
+        base = os.path.basename(norm)
+        if base in SENSITIVE_NAMES:
+            return True
+
+        root_path = root["path"]
+        rel = os.path.relpath(norm, root_path) if norm != root_path else ""
+        if rel.startswith(".."):
+            try:
+                real_norm = os.path.normpath(os.path.realpath(norm))
+                real_root = os.path.normpath(os.path.realpath(root_path))
+                rel = os.path.relpath(real_norm, real_root) if real_norm != real_root else ""
+            except OSError:
+                return True
+        if rel.startswith(".."):
+            return True
+
+        parts = [p for p in rel.split(os.sep) if p and p != "."]
+        if parts and parts[0] in root.get("exclude_subdirs", []):
+            return True
+        for pat in root.get("exclude_globs", []):
+            if fnmatch.fnmatch(base, pat) or (rel and fnmatch.fnmatch(rel, pat)):
+                return True
+        if root.get("skip_win_temp") and rel and self._is_win_temp_path(rel):
+            return True
+
+        allow_names = root.get("allow_names") or []
+        if allow_names and rel:
+            if is_dir:
+                return True
+            if os.sep in rel:
+                return True
+            if not any(fnmatch.fnmatch(base, pat) for pat in allow_names):
+                return True
+        return False
+
+    def _trigger_full_scan(self, reason, root_id=None, path=None, detail=None, log_event=True):
+        self.needs_full_scan = True
+        if reason not in self.needs_full_scan_reasons:
+            self.needs_full_scan_reasons.append(reason)
+        if log_event:
+            rec = {
+                "ts": round(self.wall_fn(), 6),
+                "kind": "system",
+                "op": "needs_full_scan",
+                "reason": reason,
+                "boot_seq": self.boot_seq,
+                "restart_count": self.restart_count,
+            }
+            if root_id:
+                rec["root_id"] = root_id
+            if path:
+                rec["path"] = path
+            if detail:
+                rec["detail"] = str(detail)[:200]
+            self.journal.append(rec)
+            self.events_logged += 1
+
+    def _load_prior_state_and_mark_boot(self):
+        prev = _read_json_if_exists(self.config.get("state_path"))
+        if prev:
+            self.boot_seq = int(prev.get("boot_seq", 1)) + 1
+            self.restart_count = int(prev.get("restart_count", 0)) + 1
+            self.overflow_count = int(prev.get("overflow_count", 0))
+            self.events_logged = int(prev.get("events_logged", 0))
+            self.events_coalesced = int(prev.get("events_coalesced", 0))
+            reason = "agent_restart"
+        else:
+            self.boot_seq = 1
+            self.restart_count = 0
+            reason = "agent_start"
+        self._trigger_full_scan(reason, log_event=True)
+
+    def _is_awaiting_root(self, root):
+        return not root.get("required", True) and root["id"] not in self.seen_roots
+
+    def _find_awaiting_watch_target(self, root_path):
+        cur = os.path.dirname(root_path)
+        for _ in range(4):
+            if not cur or cur == os.path.dirname(cur):
+                return None
+            if os.path.isdir(cur):
+                return cur
+            cur = os.path.dirname(cur)
+        return None
+
+    def _activate_awaiting_root(self, root, emit_existing=True, now=None):
+        rid = root["id"]
+        rpath = root["path"]
+        if not os.path.isdir(rpath) or os.path.islink(rpath):
+            return False
+        self.seen_roots.add(rid)
+        now = self.time_fn() if now is None else now
+        if emit_existing:
+            self._record_pending(rid, "dir", rpath, "create", now)
+        self._sync_root(root, emit_existing=emit_existing)
+        return rid in self.root_wd
+
+    def _sync_parent_watches(self):
+        desired = {}
+        activated = False
+        for root in self.roots:
+            rid = root["id"]
+            if rid in self.root_wd or not self._is_awaiting_root(root):
+                continue
+            rpath = root["path"]
+            if os.path.isdir(rpath) and not os.path.islink(rpath):
+                if self._activate_awaiting_root(root, emit_existing=True):
+                    activated = True
+                continue
+            pdir = self._find_awaiting_watch_target(rpath)
+            if not pdir or pdir in self.dir_to_wd:
+                continue
+            desired.setdefault(pdir, set()).add(rid)
+
+        for pdir in list(self.parent_path_to_wd):
+            if pdir not in desired:
+                wd = self.parent_path_to_wd.pop(pdir)
+                self.parent_watches.pop(wd, None)
+                if wd not in self.wd_to_dir:
+                    try:
+                        self.backend.rm_watch(wd)
+                    except OSError:
+                        pass
+
+        for pdir, rids in desired.items():
+            wd = self.parent_path_to_wd.get(pdir)
+            if wd is not None:
+                self.parent_watches[wd] = (pdir, set(rids))
+                continue
+            try:
+                wd = self.backend.add_watch(pdir, PARENT_WATCH_MASK)
+            except OSError:
+                continue
+            self.parent_path_to_wd[pdir] = wd
+            self.parent_watches[wd] = (pdir, set(rids))
+        return activated
+
+    def _add_single_watch(self, root, dir_path, is_root=False):
+        if dir_path in self.dir_to_wd:
+            return True
+        try:
+            st = os.lstat(dir_path)
+            if not stat.S_ISDIR(st.st_mode):
+                raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), dir_path)
+            with os.scandir(dir_path) as it:
+                next(it, None)
+            wd = self.backend.add_watch(dir_path, WATCH_MASK)
+        except OSError as exc:
+            if exc.errno in (errno.ENOSPC, errno.EMFILE, errno.ENOMEM):
+                self._mark_root_error(root["id"], "watch_limit", dir_path, str(exc))
+            elif is_root:
+                if exc.errno == errno.ENOENT and self._is_awaiting_root(root):
+                    return False
+                self._mark_root_error(root["id"], "root_unavailable", dir_path, str(exc))
+            elif exc.errno in (errno.EACCES, errno.EPERM, errno.ENOTDIR):
+                self._mark_root_error(root["id"], "dir_unavailable", dir_path, str(exc))
+            elif exc.errno == errno.ENOENT and os.path.exists(dir_path):
+                self._mark_root_error(root["id"], "dir_unavailable", dir_path, str(exc))
+            return False
+
+        self.wd_to_dir[wd] = (root["id"], dir_path)
+        self.dir_to_wd[dir_path] = (root["id"], wd)
+        if is_root:
+            self.root_wd[root["id"]] = wd
+            self.root_stats[root["id"]] = (st.st_dev, st.st_ino)
+            self.seen_roots.add(root["id"])
+            self._clear_root_error(root["id"], dir_path)
+        return True
+
+    def _mark_root_error(self, root_id, reason, path, detail):
+        prev = self.active_root_errors.get(root_id)
+        changed = prev != reason
+        self.active_root_errors[root_id] = reason
+        self._trigger_full_scan(
+            reason, root_id=root_id, path=path, detail=detail, log_event=changed,
+        )
+
+    def _clear_root_error(self, root_id, path):
+        if root_id in self.active_root_errors:
+            prev = self.active_root_errors.pop(root_id)
+            rec = {
+                "ts": round(self.wall_fn(), 6),
+                "kind": "system",
+                "op": "root_recovered",
+                "root_id": root_id,
+                "path": path,
+                "prev_reason": prev,
+            }
+            self.journal.append(rec)
+            self.events_logged += 1
+
+    def _sync_root(self, root, emit_existing=False):
+        root_path = root["path"]
+        if self._is_awaiting_root(root) and not os.path.isdir(root_path):
+            return
+        if not self._add_single_watch(root, root_path, is_root=True):
+            return
+        if not root.get("recursive", True):
+            return
+        stack = [root_path]
+        now = self.time_fn()
+        while stack:
+            cur = stack.pop()
+            try:
+                entries = list(os.scandir(cur))
+            except OSError as exc:
+                reason = "root_unavailable" if cur == root_path else "dir_unavailable"
+                self._mark_root_error(root["id"], reason, cur, str(exc))
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_symlink():
+                        continue
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if self.is_excluded(root, entry.path, is_dir=is_dir):
+                    continue
+                if is_dir:
+                    if emit_existing:
+                        self._record_pending(root["id"], "dir", entry.path, "create", now)
+                    if self._add_single_watch(root, entry.path, is_root=False):
+                        stack.append(entry.path)
+                elif emit_existing:
+                    self._record_pending(root["id"], "file", entry.path, "create", now)
+
+    def _remove_watch_subtree(self, prefix_dir):
+        to_drop = [
+            (d, wd) for d, (_, wd) in self.dir_to_wd.items()
+            if d == prefix_dir or d.startswith(prefix_dir + os.sep)
+        ]
+        for d, wd in to_drop:
+            self.dir_to_wd.pop(d, None)
+            self.wd_to_dir.pop(wd, None)
+            for rid, rwd in list(self.root_wd.items()):
+                if rwd == wd:
+                    del self.root_wd[rid]
+            try:
+                self.backend.rm_watch(wd)
+            except OSError:
+                pass
+
+    def _sync_all_roots(self):
+        for root in self.roots:
+            self._sync_root(root, emit_existing=False)
+        self._sync_parent_watches()
+
+    def start(self):
+        self._load_prior_state_and_mark_boot()
+        self._sync_all_roots()
+        self.write_state()
+
+    def _record_pending(self, root_id, kind, path, op, now, src_path=None, dst_path=None, atomic_replace=False):
+        if len(self.pending) >= self.config["max_pending_events"] and (kind, path) not in self.pending:
+            self._trigger_full_scan("pending_overflow", root_id=root_id, path=path)
+            return
+        key = (kind, path)
+        entry = self.pending.get(key)
+        if entry is None:
+            self.pending[key] = {
+                "first_ts": now,
+                "last_ts": now,
+                "wall_ts": self.wall_fn(),
+                "root_id": root_id,
+                "kind": kind,
+                "path": path,
+                "ops": [op],
+                "merged": 1,
+                "src_path": src_path,
+                "dst_path": dst_path,
+                "atomic_replace": bool(atomic_replace),
+            }
+        else:
+            entry["last_ts"] = now
+            entry["wall_ts"] = self.wall_fn()
+            entry["merged"] += 1
+            self.events_coalesced += 1
+            if op not in entry["ops"]:
+                entry["ops"].append(op)
+            if src_path:
+                entry["src_path"] = src_path
+            if dst_path:
+                entry["dst_path"] = dst_path
+            if atomic_replace:
+                entry["atomic_replace"] = True
+
+    def _summary_op(self, ops):
+        if not ops:
+            return "write"
+        if ops[-1] == "delete":
+            return "delete"
+        if "rename" in ops or "moved_to" in ops:
+            return "rename"
+        if ops[0] == "create":
+            return "create"
+        if "write" in ops:
+            return "write"
+        return ops[-1]
+
+    def _emit_entry(self, entry):
+        root = self.roots_by_id.get(entry["root_id"])
+        root_path = root["path"] if root else ""
+        rel = os.path.relpath(entry["path"], root_path) if root_path and entry["path"] != root_path else "."
+        rec = {
+            "ts": round(entry["wall_ts"], 6),
+            "root_id": entry["root_id"],
+            "kind": entry["kind"],
+            "op": self._summary_op(entry["ops"]),
+            "ops": list(entry["ops"]),
+            "path": entry["path"],
+            "rel_path": rel,
+            "merged": entry["merged"],
+        }
+        if entry.get("src_path"):
+            rec["src_path"] = entry["src_path"]
+        if entry.get("dst_path"):
+            rec["dst_path"] = entry["dst_path"]
+        if entry.get("atomic_replace"):
+            rec["atomic_replace"] = True
+        self.journal.append(rec)
+        self.events_logged += 1
+        self.last_event_at = entry["wall_ts"]
+
+    def _remap_moved_dir(self, src_path, dst_path, dst_root_id):
+        updates = []
+        prefix = src_path + os.sep
+        for d, (rid, wd) in list(self.dir_to_wd.items()):
+            if d == src_path or d.startswith(prefix):
+                suffix = d[len(src_path):]
+                new_d = dst_path + suffix
+                updates.append((d, new_d, wd, dst_root_id))
+        for old_d, new_d, wd, new_rid in updates:
+            self.dir_to_wd.pop(old_d, None)
+            self.dir_to_wd[new_d] = (new_rid, wd)
+            self.wd_to_dir[wd] = (new_rid, new_d)
+
+    def _pair_move(self, prev, dst_root_id, dst_path, is_dir, now):
+        src_path = prev["src_path"]
+        src_root_id = prev["root_id"]
+        if is_dir:
+            dst_root = self.roots_by_id.get(dst_root_id)
+            if dst_root and self.is_excluded(dst_root, dst_path, is_dir=True):
+                self._remove_watch_subtree(src_path)
+                self._record_pending(src_root_id, "dir", src_path, "delete", now)
+                return
+            self._remap_moved_dir(src_path, dst_path, dst_root_id)
+            self._record_pending(src_root_id, "dir", src_path, "delete", now, dst_path=dst_path)
+            self._record_pending(dst_root_id, "dir", dst_path, "rename", now, src_path=src_path)
+            return
+
+        src_key = ("file", src_path)
+        src_pending = self.pending.get(src_key)
+        if src_pending and "create" in src_pending["ops"]:
+            self.pending.pop(src_key, None)
+            self._record_pending(
+                dst_root_id, "file", dst_path, "rename", now,
+                src_path=src_path, atomic_replace=True,
+            )
+            dst_entry = self.pending[("file", dst_path)]
+            if "write" in src_pending["ops"] and "write" not in dst_entry["ops"]:
+                dst_entry["ops"].append("write")
+            dst_entry["merged"] += src_pending["merged"]
+            self.events_coalesced += src_pending["merged"]
+            return
+
+        src_base = os.path.basename(src_path)
+        is_atomic = src_base.endswith((".tmp", ".part", ".new", ".swp", "~")) or ".tmp." in src_base
+        self._record_pending(src_root_id, "file", src_path, "delete", now, dst_path=dst_path)
+        self._record_pending(
+            dst_root_id, "file", dst_path, "rename", now,
+            src_path=src_path, atomic_replace=is_atomic,
+        )
+
+    def _expire_moves(self, now, force=False):
+        wait_sec = self.config["move_cookie_wait_ms"] / 1000.0
+        for cookie in list(self.move_cookies):
+            pm = self.move_cookies[cookie]
+            if not force and (now - pm["ts"]) < wait_sec:
+                continue
+            self.move_cookies.pop(cookie)
+            if pm["is_dir"]:
+                self._remove_watch_subtree(pm["src_path"])
+            self._record_pending(
+                pm["root_id"], "dir" if pm["is_dir"] else "file",
+                pm["src_path"], "delete", now,
+            )
+
+    def _handle_self_root_event(self, wd, mask):
+        root_ids = [rid for rid, rwd in self.root_wd.items() if rwd == wd]
+        if not root_ids:
+            return False
+        rid = root_ids[0]
+        root = self.roots_by_id.get(rid)
+        rpath = root["path"] if root else None
+        if mask & IN_UNMOUNT:
+            self._remove_watch_subtree(rpath) if rpath else None
+            self._mark_root_error(rid, "root_unmounted", rpath, "filesystem unmounted")
+        elif mask & IN_MOVE_SELF:
+            self._remove_watch_subtree(rpath) if rpath else None
+            self._mark_root_error(rid, "root_moved", rpath, "watched root moved")
+        elif mask & IN_DELETE_SELF:
+            self._remove_watch_subtree(rpath) if rpath else None
+            self._mark_root_error(rid, "root_deleted", rpath, "watched root deleted")
+        elif mask & IN_IGNORED:
+            self.root_wd.pop(rid, None)
+            self.wd_to_dir.pop(wd, None)
+            if rpath:
+                self.dir_to_wd.pop(rpath, None)
+        return True
+
+    def handle_raw_events(self, events):
+        now = self.time_fn()
+        resync_parents = False
+        for wd, mask, cookie, name in events:
+            if wd == -1 and (mask & IN_Q_OVERFLOW):
+                self.overflow_count += 1
+                self._trigger_full_scan("queue_overflow", detail="IN_Q_OVERFLOW")
+                continue
+
+            if wd in self.parent_watches:
+                pdir, waiting_rids = self.parent_watches[wd]
+                if not name and (mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT | IN_IGNORED)):
+                    self.parent_watches.pop(wd, None)
+                    self.parent_path_to_wd.pop(pdir, None)
+                    resync_parents = True
+                    continue
+                if name and (mask & (IN_CREATE | IN_MOVED_TO)) and (mask & IN_ISDIR):
+                    cand_path = os.path.normpath(os.path.join(pdir, name))
+                    matched = False
+                    for wrid in list(waiting_rids):
+                        child_root = self.roots_by_id.get(wrid)
+                        if not child_root:
+                            continue
+                        cpath = child_root["path"]
+                        if cpath == cand_path or cpath.startswith(cand_path + os.sep):
+                            matched = True
+                            if os.path.isdir(cpath):
+                                self._activate_awaiting_root(child_root, emit_existing=True, now=now)
+                    if matched:
+                        resync_parents = True
+                if wd not in self.wd_to_dir:
+                    continue
+
+            if not name and (mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_UNMOUNT | IN_IGNORED)):
+                if self._handle_self_root_event(wd, mask):
+                    continue
+                if mask & IN_IGNORED:
+                    info = self.wd_to_dir.pop(wd, None)
+                    if info:
+                        self.dir_to_wd.pop(info[1], None)
+                continue
+
+            info = self.wd_to_dir.get(wd)
+            if info is None:
+                continue
+            root_id, dir_path = info
+            root = self.roots_by_id.get(root_id)
+            if root is None:
+                continue
+            full_path = os.path.normpath(os.path.join(dir_path, name)) if name else dir_path
+            is_dir = bool(mask & IN_ISDIR)
+
+            # Nested root/special subdirs created after watch setup
+            if not root.get("recursive", True) and is_dir and full_path in {r["path"] for r in self.roots}:
+                for child_root in self.roots:
+                    if child_root["path"] == full_path:
+                        self._activate_awaiting_root(child_root, emit_existing=True, now=now)
+                        resync_parents = True
+
+            if self.is_excluded(root, full_path, is_dir=is_dir):
+                continue
+
+            kind = "dir" if is_dir else "file"
+            if mask & IN_CREATE:
+                self._record_pending(root_id, kind, full_path, "create", now)
+                if is_dir and root.get("recursive", True):
+                    self._sync_root_subdir(root, full_path, now)
+            if mask & (IN_MODIFY | IN_CLOSE_WRITE):
+                if not is_dir:
+                    self._record_pending(root_id, "file", full_path, "write", now)
+            if mask & IN_DELETE:
+                if is_dir:
+                    self._remove_watch_subtree(full_path)
+                self._record_pending(root_id, kind, full_path, "delete", now)
+            if mask & IN_MOVED_FROM:
+                if cookie:
+                    self.move_cookies[cookie] = {
+                        "ts": now,
+                        "root_id": root_id,
+                        "src_path": full_path,
+                        "is_dir": is_dir,
+                    }
+                else:
+                    if is_dir:
+                        self._remove_watch_subtree(full_path)
+                    self._record_pending(root_id, kind, full_path, "delete", now)
+            if mask & IN_MOVED_TO:
+                prev = self.move_cookies.pop(cookie, None) if cookie else None
+                if prev is not None:
+                    self._pair_move(prev, root_id, full_path, is_dir, now)
+                else:
+                    self._record_pending(root_id, kind, full_path, "rename", now)
+                    if is_dir and root.get("recursive", True):
+                        self._sync_root_subdir(root, full_path, now)
+        if resync_parents:
+            self._sync_parent_watches()
+
+    def _sync_root_subdir(self, root, subdir_path, now):
+        if os.path.islink(subdir_path):
+            return
+        stack = [subdir_path]
+        while stack:
+            cur = stack.pop()
+            if not self._add_single_watch(root, cur, is_root=False):
+                continue
+            try:
+                entries = list(os.scandir(cur))
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    self._mark_root_error(root["id"], "dir_unavailable", cur, str(exc))
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_symlink():
+                        continue
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if self.is_excluded(root, entry.path, is_dir=is_dir):
+                    continue
+                self._record_pending(root["id"], "dir" if is_dir else "file", entry.path, "create", now)
+                if is_dir:
+                    stack.append(entry.path)
+
+    def flush_pending(self, force=False):
+        now = self.time_fn()
+        self._expire_moves(now, force=force)
+        debounce_sec = self.config["debounce_ms"] / 1000.0
+        emitted = 0
+        due = [
+            (key, entry) for key, entry in self.pending.items()
+            if force or (now - entry["last_ts"]) >= debounce_sec
+        ]
+        due.sort(key=lambda kv: (kv[1]["first_ts"], kv[0][1]))
+        for key, entry in due:
+            self.pending.pop(key, None)
+            self._emit_entry(entry)
+            emitted += 1
+        return emitted
+
+    def check_health(self):
+        self.last_health_check = self.time_fn()
+        need_parent_sync = False
+        for root in self.roots:
+            rid = root["id"]
+            rpath = root["path"]
+            if self._is_awaiting_root(root):
+                if os.path.isdir(rpath) and not os.path.islink(rpath):
+                    self._activate_awaiting_root(root, emit_existing=True)
+                    need_parent_sync = True
+                else:
+                    target_p = self._find_awaiting_watch_target(rpath)
+                    if target_p and target_p not in self.dir_to_wd and target_p not in self.parent_path_to_wd:
+                        need_parent_sync = True
+                continue
+            try:
+                st = os.lstat(rpath)
+                if not stat.S_ISDIR(st.st_mode):
+                    raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), rpath)
+                with os.scandir(rpath) as it:
+                    next(it, None)
+            except OSError as exc:
+                self._remove_watch_subtree(rpath)
+                self._mark_root_error(rid, "root_unavailable", rpath, str(exc))
+                continue
+
+            old_stat = self.root_stats.get(rid)
+            cur_stat = (st.st_dev, st.st_ino)
+            if old_stat is not None and old_stat != cur_stat:
+                self._remove_watch_subtree(rpath)
+                self._mark_root_error(rid, "root_moved", rpath, "root device/inode changed")
+                self._sync_root(root, emit_existing=False)
+            elif rid not in self.root_wd:
+                self._sync_root(root, emit_existing=False)
+            elif rid in self.active_root_errors:
+                self._clear_root_error(rid, rpath)
+        if need_parent_sync:
+            self._sync_parent_watches()
+
+    def reload_from_disk(self):
+        self._reload_requested = False
+        if not self.config_path or not os.path.isfile(self.config_path):
+            return
+        new_cfg = _read_json_if_exists(self.config_path)
+        if not new_cfg:
+            return
+        if normalize_mode(new_cfg.get("mode")) != "observe-only":
+            self._stop_requested = True
+            return
+
+        old_roots = list(self.roots)
+        old_root_paths = {r["id"]: r["path"] for r in old_roots}
+        old_sig = [
+            (r["id"], r["path"], list(r.get("exclude_subdirs", [])), list(r.get("exclude_globs", [])))
+            for r in old_roots
+        ]
+        self.config = new_cfg
+        self.roots = list(new_cfg.get("roots", []))
+        self.roots_by_id = {r["id"]: r for r in self.roots}
+        self._refresh_exclusions()
+        new_root_paths = {r["id"]: r["path"] for r in self.roots}
+        new_sig = [
+            (r["id"], r["path"], list(r.get("exclude_subdirs", [])), list(r.get("exclude_globs", [])))
+            for r in self.roots
+        ]
+
+        for rid, old_path in old_root_paths.items():
+            if new_root_paths.get(rid) != old_path:
+                self._remove_watch_subtree(old_path)
+                self.root_wd.pop(rid, None)
+                self.root_stats.pop(rid, None)
+                self.seen_roots.discard(rid)
+                self.active_root_errors.pop(rid, None)
+
+        for d, (rid, _wd) in list(self.dir_to_wd.items()):
+            root = self.roots_by_id.get(rid)
+            if root is None or self.is_excluded(root, d, is_dir=True):
+                self._remove_watch_subtree(d)
+
+        if old_sig != new_sig:
+            self._trigger_full_scan("config_reload", log_event=True)
+        self._sync_all_roots()
+        self.write_state()
+
+    def write_state(self):
+        state = {
+            "version": 1,
+            "mode": self.config.get("mode", "observe-only"),
+            "running": self.running,
+            "pid": os.getpid(),
+            "boot_seq": self.boot_seq,
+            "restart_count": self.restart_count,
+            "started_at": round(self.started_at, 6),
+            "updated_at": round(self.wall_fn(), 6),
+            "last_event_at": round(self.last_event_at, 6) if self.last_event_at else None,
+            "needs_full_scan": self.needs_full_scan,
+            "needs_full_scan_reasons": list(self.needs_full_scan_reasons),
+            "watched_dirs": len(self.wd_to_dir),
+            "parent_watches": len(self.parent_watches),
+            "roots_configured": len(self.roots),
+            "roots": [
+                {
+                    "id": r["id"],
+                    "path": r["path"],
+                    "recursive": r.get("recursive", True),
+                    "watched": r["id"] in self.root_wd,
+                    "awaiting": self._is_awaiting_root(r),
+                    "error": self.active_root_errors.get(r["id"]),
+                }
+                for r in self.roots
+            ],
+            "root_errors": dict(self.active_root_errors),
+            "overflow_count": self.overflow_count,
+            "events_logged": self.events_logged,
+            "journal_seq": self.journal.seq,
+            "events_coalesced": self.events_coalesced,
+            "pending_events": len(self.pending),
+            "flush_ack": self.flush_ack,
+            "journal_path": self.journal.path,
+            "journal_bytes": self.journal.total_bytes(),
+            "journal_max_bytes": self.journal.max_bytes,
+            "journal_rotations": self.journal.rotations,
+        }
+        _atomic_write_json(self.config["state_path"], state)
+        return state
+
+    def _next_timeout(self):
+        now = self.time_fn()
+        waits = [max(0.02, self.config["health_check_sec"] - (now - self.last_health_check))]
+        if self.pending:
+            dsec = self.config["debounce_ms"] / 1000.0
+            oldest_due = min((e["last_ts"] + dsec) - now for e in self.pending.values())
+            waits.append(max(0.01, oldest_due))
+        if self.move_cookies:
+            msec = self.config["move_cookie_wait_ms"] / 1000.0
+            oldest_mv = min((pm["ts"] + msec) - now for pm in self.move_cookies.values())
+            waits.append(max(0.01, oldest_mv))
+        return max(0.01, min(waits))
+
+    def step(self):
+        prev_watched = set(self.root_wd)
+        flush_req = self._flush_requested
+        if flush_req:
+            self._flush_requested = False
+        raw = self.backend.read_events()
+        if raw:
+            self.handle_raw_events(raw)
+        emitted = self.flush_pending(force=flush_req)
+        if flush_req:
+            self.flush_ack += 1
+        now = self.time_fn()
+        prev_errors = dict(self.active_root_errors)
+        prev_reasons = list(self.needs_full_scan_reasons)
+        health_due = (now - self.last_health_check) >= self.config["health_check_sec"]
+        if health_due:
+            self.check_health()
+        if self._reload_requested:
+            self.reload_from_disk()
+        if (
+            emitted
+            or flush_req
+            or prev_errors != self.active_root_errors
+            or prev_reasons != self.needs_full_scan_reasons
+            or prev_watched != set(self.root_wd)
+            or health_due
+        ):
+            self.write_state()
+
+    def run(self):
+        pid_path = self.config.get("pid_path")
+        if pid_path:
+            os.makedirs(os.path.dirname(pid_path), exist_ok=True)
+            with open(pid_path, "w", encoding="utf-8") as fh:
+                fh.write(f"{os.getpid()}\n")
+
+        sig_r, sig_w = socket.socketpair()
+        sig_r.setblocking(False)
+        sig_w.setblocking(False)
+        prev_wakeup = signal.set_wakeup_fd(sig_w.fileno(), warn_on_full_buffer=False)
+
+        def on_term(_signum, _frame):
+            self._stop_requested = True
+
+        def on_hup(_signum, _frame):
+            self._reload_requested = True
+
+        def on_usr1(_signum, _frame):
+            self._flush_requested = True
+
+        prev_term = signal.signal(signal.SIGTERM, on_term)
+        prev_int = signal.signal(signal.SIGINT, on_term)
+        prev_hup = signal.signal(signal.SIGHUP, on_hup)
+        prev_usr1 = signal.signal(signal.SIGUSR1, on_usr1)
+
+        sel = selectors.DefaultSelector()
+        sel.register(self.backend.fileno(), selectors.EVENT_READ, data="inotify")
+        sel.register(sig_r, selectors.EVENT_READ, data="sig")
+
+        try:
+            self.start()
+            while not self._stop_requested:
+                timeout = self._next_timeout()
+                for key, _ in sel.select(timeout):
+                    if key.data == "sig":
+                        try:
+                            sig_r.recv(1024)
+                        except BlockingIOError:
+                            pass
+                if self._stop_requested:
+                    break
+                self.step()
+        finally:
+            self.flush_pending(force=True)
+            self.running = False
+            self.write_state()
+            sel.close()
+            signal.set_wakeup_fd(prev_wakeup)
+            signal.signal(signal.SIGTERM, prev_term)
+            signal.signal(signal.SIGINT, prev_int)
+            signal.signal(signal.SIGHUP, prev_hup)
+            signal.signal(signal.SIGUSR1, prev_usr1)
+            sig_r.close()
+            sig_w.close()
+            self.backend.close()
+            if pid_path and os.path.isfile(pid_path):
+                try:
+                    with open(pid_path, "r", encoding="utf-8") as fh:
+                        cur_pid = fh.read().strip()
+                    if cur_pid == str(os.getpid()):
+                        os.remove(pid_path)
+                except OSError:
+                    pass
+
+
+def _pid_alive(pid_path):
+    if not pid_path or not os.path.isfile(pid_path):
+        return False, None
+    try:
+        with open(pid_path, "r", encoding="utf-8") as fh:
+            pid = int(fh.read().strip())
+        os.kill(pid, 0)
+        return True, pid
+    except (OSError, ValueError):
+        return False, None
+
+
+def cmd_write_config(args):
+    cfg = resolve_config()
+    if args.out:
+        _atomic_write_json(args.out, cfg)
+    else:
+        print(json.dumps(cfg, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_run(args):
+    if args.config and os.path.isfile(args.config):
+        cfg = _read_json_if_exists(args.config) or resolve_config()
+    else:
+        cfg = resolve_config()
+    if normalize_mode(cfg.get("mode")) != "observe-only":
+        print("wolf-state-agent: mode=off, exiting", file=sys.stderr)
+        return 0
+    agent = StateAgent(cfg, config_path=args.config)
+    agent.run()
+    return 0
+
+
+def cmd_status(args):
+    state = _read_json_if_exists(args.state) or {}
+    alive, pid = _pid_alive(args.pid)
+    state["pid_alive"] = alive
+    if pid is not None:
+        state["pid_file"] = pid
+    if args.json:
+        print(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if not state.get("mode"):
+        print(f"state-agent: no state ({args.state}); alive={alive}")
+        return 0
+    reasons = ",".join(state.get("needs_full_scan_reasons") or []) or "none"
+    print(
+        f"mode={state.get('mode')} alive={alive} pid={state.get('pid')} "
+        f"boot_seq={state.get('boot_seq')} restarts={state.get('restart_count')} "
+        f"watched_dirs={state.get('watched_dirs')} needs_full_scan={state.get('needs_full_scan')} "
+        f"reasons={reasons} events={state.get('events_logged')} "
+        f"coalesced={state.get('events_coalesced')} journal_bytes={state.get('journal_bytes')}/{state.get('journal_max_bytes')}"
+    )
+    return 0
+
+
+def cmd_journal(args):
+    limit = args.limit
+    if args.count is not None:
+        limit = args.count
+    recs = BoundedJournal.read_tail(args.journal, limit=limit)
+    for rec in recs:
+        print(json.dumps(rec, ensure_ascii=False))
+    return 0
+
+
+def cmd_clean(args):
+    removed = []
+    for fn in ("events.jsonl", "events.jsonl.1", "state.json"):
+        p = os.path.join(args.state_dir, fn)
+        if os.path.isfile(p):
+            os.remove(p)
+            removed.append(p)
+    if args.pid:
+        alive, _ = _pid_alive(args.pid)
+        if not alive and os.path.isfile(args.pid):
+            os.remove(args.pid)
+            removed.append(args.pid)
+    print(f"cleaned: {len(removed)} file(s)")
+    return 0
+
+
+SHADOW_GLOBAL_INCOMPLETE_REASONS = {
+    "agent_start",
+    "agent_restart",
+    "queue_overflow",
+    "pending_overflow",
+    "config_reload",
+}
+SHADOW_ROOT_INCOMPLETE_REASONS = {
+    "watch_limit",
+    "root_unavailable",
+    "dir_unavailable",
+    "root_moved",
+    "root_deleted",
+    "root_unmounted",
+}
+
+
+def _safe_archive_name(name):
+    if not name or "/" in name or "\x00" in name or name in (".", ".."):
+        raise ValueError(f"invalid archive name: {name!r}")
+    return name
+
+
+def _read_json_strict(path):
+    if not path or not os.path.exists(path):
+        return None, f"missing:{path}"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None, f"invalid_json_type:{path}"
+        return data, None
+    except OSError as exc:
+        return None, f"io_error:{type(exc).__name__}:{exc}"
+    except ValueError as exc:
+        return None, f"decode_error:{exc}"
+
+
+def _atomic_copy_file(src, dst):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = f"{dst}.tmp.{os.getpid()}"
+    if src and os.path.isfile(src):
+        with open(src, "rb") as inp, open(tmp, "wb") as out:
+            shutil.copyfileobj(inp, out)
+    else:
+        with open(tmp, "wb"):
+            pass
+    os.replace(tmp, dst)
+
+
+def flush_running_agent(state_path, pid_path, timeout_sec=0.35):
+    t0 = time.monotonic()
+    alive, pid = _pid_alive(pid_path)
+    state, state_err = _read_json_strict(state_path)
+    if not alive or pid is None:
+        return {
+            "alive": False,
+            "flushed": False,
+            "reason": "agent_not_running",
+            "state": state,
+            "state_error": state_err,
+            "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 3),
+        }
+
+    prev_ack = int((state or {}).get("flush_ack") or 0)
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except OSError as exc:
+        state2, state_err2 = _read_json_strict(state_path)
+        return {
+            "alive": False,
+            "flushed": False,
+            "reason": f"signal_error:{type(exc).__name__}",
+            "state": state2,
+            "state_error": state_err2,
+            "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 3),
+        }
+
+    deadline = time.monotonic() + max(0.02, float(timeout_sec))
+    while time.monotonic() < deadline:
+        cur_state, cur_err = _read_json_strict(state_path)
+        if cur_state and int(cur_state.get("flush_ack") or 0) > prev_ack:
+            return {
+                "alive": True,
+                "flushed": True,
+                "reason": None,
+                "state": cur_state,
+                "state_error": None,
+                "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 3),
+            }
+        still_alive, _ = _pid_alive(pid_path)
+        if not still_alive:
+            cur_state, cur_err = _read_json_strict(state_path)
+            return {
+                "alive": False,
+                "flushed": False,
+                "reason": "agent_exited_during_flush",
+                "state": cur_state,
+                "state_error": cur_err,
+                "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 3),
+            }
+        time.sleep(0.005)
+
+    final_state, final_err = _read_json_strict(state_path)
+    return {
+        "alive": True,
+        "flushed": False,
+        "reason": "flush_timeout",
+        "state": final_state,
+        "state_error": final_err,
+        "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 3),
+    }
+
+
+def _norm_rel(rel):
+    rel = rel.replace("\\", "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    return rel.strip("/")
+
+
+def _is_shadow_excluded_rel(rel):
+    low = "/" + _norm_rel(rel).lower() + "/"
+    if "/drive_c/windows/temp/" in low:
+        return True
+    if "/drive_c/users/" in low and "/appdata/local/temp/" in low:
+        return True
+    base = os.path.basename(_norm_rel(rel))
+    return fnmatch.fnmatch(base, "*.vgtmp")
+
+
+def parse_wolf_manifest(path):
+    entries = {}
+    if not path or not os.path.exists(path):
+        return entries
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    for rec in raw.split(b"\0"):
+        if not rec:
+            continue
+        parts = rec.split(b"\t")
+        rel = _norm_rel(os.fsdecode(parts[0]))
+        if not rel:
+            continue
+        ftype = os.fsdecode(parts[1]) if len(parts) > 1 else ""
+        if ftype == "d":
+            entries[rel] = ("d", "", "", "")
+        else:
+            size = os.fsdecode(parts[2]) if len(parts) > 2 else ""
+            mtime = os.fsdecode(parts[3]) if len(parts) > 3 else ""
+            link = os.fsdecode(parts[4]) if len(parts) > 4 else ""
+            entries[rel] = (ftype, size, mtime, link)
+    return entries
+
+
+def parse_idhint(path):
+    shas = {}
+    for rel, (_ino, _ctime, sha) in parse_idhint_meta(path).items():
+        if sha:
+            shas[rel] = sha
+    return shas
+
+
+def parse_idhint_meta(path):
+    meta = {}
+    if not path or not os.path.exists(path):
+        return meta
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    for rec in raw.split(b"\0"):
+        if not rec:
+            continue
+        parts = rec.split(b"\t")
+        if len(parts) < 4:
+            continue
+        rel = _norm_rel(os.fsdecode(parts[0]))
+        if not rel:
+            continue
+        ino = None
+        ctime_ns = None
+        if parts[1]:
+            try:
+                ino = int(parts[1])
+            except ValueError:
+                ino = None
+        if parts[2]:
+            try:
+                ctime_ns = int(parts[2])
+            except ValueError:
+                ctime_ns = None
+        sha = os.fsdecode(parts[3]) if parts[3] else ""
+        meta[rel] = (ino, ctime_ns, sha)
+    return meta
+
+
+def _parse_mtime_ns(mtime_str):
+    s = (mtime_str or "").strip()
+    if not s:
+        return None
+    sign = -1 if s.startswith("-") else 1
+    if s[0] in ("+", "-"):
+        s = s[1:]
+    sec_s, _, frac_s = s.partition(".")
+    try:
+        sec = int(sec_s or "0")
+        frac = int((frac_s + "000000000")[:9])
+    except ValueError:
+        return None
+    return sign * (sec * 1_000_000_000 + frac)
+
+
+def _is_wolf_temp_pruned(rel):
+    low = "/" + _norm_rel(rel).lower()
+    return (
+        fnmatch.fnmatch(low, "*/drive_c/users/*/appdata/local/temp")
+        or fnmatch.fnmatch(low, "*/drive_c/windows/temp")
+    )
+
+
+def _stat_type_char(mode):
+    if stat.S_ISDIR(mode):
+        return "d"
+    if stat.S_ISREG(mode):
+        return "f"
+    if stat.S_ISLNK(mode):
+        return "l"
+    if stat.S_ISFIFO(mode):
+        return "p"
+    if stat.S_ISSOCK(mode):
+        return "s"
+    if stat.S_ISBLK(mode):
+        return "b"
+    if stat.S_ISCHR(mode):
+        return "c"
+    return "?"
+
+
+def _snapshot_matches_disk(scope, man_path, id_path):
+    cur_man = parse_wolf_manifest(man_path)
+    cur_id_meta = parse_idhint_meta(id_path)
+    target_abs = scope.get("target_abs") or ""
+    prefix_rel = _norm_rel(scope.get("prefix_rel") or "")
+    if not target_abs:
+        return False, "boundary_missing_base_dir"
+
+    try:
+        st_root = os.lstat(target_abs)
+    except FileNotFoundError:
+        if not cur_man:
+            return True, None
+        return False, "boundary_snapshot_drift"
+    except OSError as exc:
+        return False, f"boundary_walk_error:{type(exc).__name__}"
+
+    if _is_wolf_temp_pruned(prefix_rel):
+        return (len(cur_man) == 0), ("boundary_snapshot_drift" if cur_man else None)
+
+    seen = set()
+
+    def check_entry(abs_path, rel, st):
+        rel = _norm_rel(rel)
+        if _is_wolf_temp_pruned(rel):
+            return False, None
+        expected = cur_man.get(rel)
+        if expected is None:
+            return False, "boundary_snapshot_drift"
+        ftype = _stat_type_char(st.st_mode)
+        if expected[0] != ftype:
+            return False, "boundary_snapshot_drift"
+        seen.add(rel)
+        if ftype == "d":
+            return True, None
+        if ftype == "f":
+            if str(st.st_size) != expected[1]:
+                return False, "boundary_snapshot_drift"
+            exp_ns = _parse_mtime_ns(expected[2])
+            if exp_ns is not None and abs(st.st_mtime_ns - exp_ns) > 2_000_000:
+                return False, "boundary_snapshot_drift"
+            id_row = cur_id_meta.get(rel)
+            if id_row is None or id_row[0] is None or id_row[1] is None:
+                return False, "boundary_missing_idhint"
+            if st.st_ino != id_row[0] or st.st_ctime_ns != id_row[1]:
+                return False, "boundary_snapshot_drift"
+            return False, None
+        if ftype == "l":
+            try:
+                link_val = os.readlink(abs_path)
+            except OSError as exc:
+                return False, f"boundary_walk_error:{type(exc).__name__}"
+            if link_val != expected[3]:
+                return False, "boundary_snapshot_drift"
+            exp_ns = _parse_mtime_ns(expected[2])
+            if exp_ns is not None and abs(st.st_mtime_ns - exp_ns) > 2_000_000:
+                return False, "boundary_snapshot_drift"
+            return False, None
+        if str(st.st_size) != expected[1]:
+            return False, "boundary_snapshot_drift"
+        return False, None
+
+    is_dir, err = check_entry(target_abs, prefix_rel, st_root)
+    if err:
+        return False, err
+
+    stack = [(target_abs, prefix_rel)] if is_dir else []
+    while stack:
+        cur_dir, cur_rel = stack.pop()
+        try:
+            with os.scandir(cur_dir) as it:
+                entries = list(it)
+        except OSError as exc:
+            return False, f"boundary_walk_error:{type(exc).__name__}"
+        for ent in entries:
+            child_rel = f"{cur_rel}/{ent.name}" if cur_rel else ent.name
+            if _is_wolf_temp_pruned(child_rel):
+                continue
+            try:
+                cst = os.lstat(ent.path)
+            except FileNotFoundError:
+                return False, "boundary_snapshot_drift"
+            except OSError as exc:
+                return False, f"boundary_walk_error:{type(exc).__name__}"
+            child_is_dir, cerr = check_entry(ent.path, child_rel, cst)
+            if cerr:
+                return False, cerr
+            if child_is_dir:
+                stack.append((ent.path, child_rel))
+
+    if len(seen) != len(cur_man):
+        return False, "boundary_snapshot_drift"
+    return True, None
+
+
+def compute_wolf_interval_diff(prev_man, prev_id, cur_man, cur_id):
+    changes = {}
+    creates = 0
+    modifies = 0
+    deletes = 0
+    for rel in sorted(set(prev_man) | set(cur_man)):
+        p = prev_man.get(rel)
+        c = cur_man.get(rel)
+        if p is None and c is not None:
+            changes[rel] = {
+                "op": "create",
+                "reason": "new_entry",
+                "kind": "dir" if c[0] == "d" else "file",
+            }
+            creates += 1
+        elif p is not None and c is None:
+            changes[rel] = {
+                "op": "delete",
+                "reason": "removed_entry",
+                "kind": "dir" if p[0] == "d" else "file",
+            }
+            deletes += 1
+        elif p != c:
+            changes[rel] = {
+                "op": "modify",
+                "reason": "stat_changed",
+                "kind": "dir" if c[0] == "d" else "file",
+            }
+            modifies += 1
+        elif c is not None and c[0] == "f":
+            psha = prev_id.get(rel)
+            csha = cur_id.get(rel)
+            if psha and csha and psha != csha:
+                changes[rel] = {
+                    "op": "modify",
+                    "reason": "content_same_stat",
+                    "kind": "file",
+                }
+                modifies += 1
+    return changes, {
+        "creates": creates,
+        "modifies": modifies,
+        "deletes": deletes,
+        "total": creates + modifies + deletes,
+    }
+
+
+def resolve_archive_scope(archive, base_dir="", sr="", dh="", gd=""):
+    base_norm = os.path.normpath(os.path.abspath(base_dir)) if base_dir else ""
+    if archive.startswith("game--"):
+        folder = archive[len("game--"):]
+        if not base_norm and gd:
+            base_norm = os.path.normpath(os.path.abspath(gd))
+        prefix_rel = _norm_rel(folder)
+    elif archive.startswith("pfx--"):
+        appid = archive[len("pfx--"):]
+        if not base_norm and dh:
+            base_norm = os.path.normpath(os.path.abspath(dh))
+        sr_rel = _norm_rel(sr) if sr else ""
+        if not sr_rel and base_norm:
+            sr_abs = _discover_steam_root(base_norm, "")
+            if sr_abs and (sr_abs == base_norm or sr_abs.startswith(base_norm + os.sep)):
+                sr_rel = _norm_rel(os.path.relpath(sr_abs, base_norm))
+        prefix_rel = _norm_rel(os.path.join(sr_rel, "steamapps", "compatdata", appid))
+    else:
+        prefix_rel = _norm_rel(archive)
+    target_abs = os.path.normpath(os.path.join(base_norm, prefix_rel)) if base_norm else ""
+    target_real = ""
+    if target_abs:
+        try:
+            target_real = os.path.normpath(os.path.realpath(target_abs))
+        except OSError:
+            target_real = target_abs
+    return {
+        "archive": archive,
+        "base_dir": base_norm,
+        "prefix_rel": prefix_rel,
+        "target_abs": target_abs,
+        "target_real": target_real,
+    }
+
+
+def _path_under_or_equal(path, root):
+    if not path or not root:
+        return False
+    return path == root or path.startswith(root + os.sep)
+
+
+def _map_abs_to_rel(ev_path, scope):
+    if not ev_path:
+        return None
+    norm = os.path.normpath(ev_path)
+    target_abs = scope["target_abs"]
+    target_real = scope["target_real"]
+    prefix_rel = scope["prefix_rel"]
+    matched_root = None
+    if _path_under_or_equal(norm, target_abs):
+        matched_root = target_abs
+    elif target_real and _path_under_or_equal(norm, target_real):
+        matched_root = target_real
+    if matched_root is None:
+        return None
+    if norm == matched_root:
+        return prefix_rel
+    sub = os.path.relpath(norm, matched_root).replace(os.sep, "/")
+    rel = f"{prefix_rel}/{sub}" if prefix_rel else sub
+    return _norm_rel(rel)
+
+
+def _event_affects_archive(ev, archive, scope, cur_state):
+    ev_rid = ev.get("root_id")
+    ev_path = os.path.normpath(ev["path"]) if ev.get("path") else ""
+    reason = ev.get("reason") or ev.get("op") or ""
+    if not ev_rid and not ev_path:
+        return True
+    if reason in SHADOW_GLOBAL_INCOMPLETE_REASONS:
+        return True
+    if archive.startswith("game--"):
+        folder = archive[len("game--"):]
+        if ev_rid in ("games", f"game:{folder}"):
+            return True
+    elif archive.startswith("pfx--"):
+        if ev_rid == "compatdata":
+            return True
+    target_abs = scope["target_abs"]
+    if ev_path and (_path_under_or_equal(target_abs, ev_path) or _path_under_or_equal(ev_path, target_abs)):
+        return True
+    return False
+
+
+def analyze_agent_interval(
+    archive,
+    scope,
+    prev_man,
+    cur_man,
+    prev_id,
+    cur_id,
+    wolf_diff,
+    jres,
+    cursor,
+    flush_info,
+    boundary=None,
+):
+    cur_state = flush_info.get("state")
+    incomplete_reasons = []
+
+    def add_reason(r):
+        if r and r not in incomplete_reasons:
+            incomplete_reasons.append(r)
+
+    if not cursor.get("agent_alive", True) or not cursor.get("flush_ok", True):
+        add_reason("baseline_not_flushed")
+    if cursor.get("boundary_confirmed") is False:
+        add_reason("baseline_boundary_unconfirmed")
+        add_reason(cursor.get("confirm_reason"))
+    if boundary is not None and not boundary.get("confirmed"):
+        add_reason("boundary_unconfirmed")
+        add_reason(boundary.get("confirm_reason"))
+    if flush_info.get("state_error"):
+        add_reason("state_io_error")
+    if not flush_info.get("alive"):
+        add_reason("agent_not_running")
+    elif not flush_info.get("flushed"):
+        add_reason(flush_info.get("reason") or "flush_timeout")
+
+    if isinstance(cur_state, dict):
+        if normalize_mode(cur_state.get("mode")) != "observe-only":
+            add_reason("agent_disabled_or_wrong_mode")
+        if int(cur_state.get("boot_seq") or 0) != int(cursor.get("boot_seq") or 0):
+            add_reason("agent_restart")
+        if int(cur_state.get("restart_count") or 0) != int(cursor.get("restart_count") or 0):
+            add_reason("agent_restart")
+        if int(cur_state.get("overflow_count") or 0) > int(cursor.get("overflow_count") or 0):
+            add_reason("queue_overflow")
+
+        target_abs = scope["target_abs"]
+        expected_rid = f"game:{archive[len('game--'):]}" if archive.startswith("game--") else "compatdata"
+        for rid, rerr in (cur_state.get("root_errors") or {}).items():
+            if rid in (expected_rid, "games" if archive.startswith("game--") else "compatdata"):
+                add_reason(f"root_error:{rerr}")
+        for rinfo in cur_state.get("roots") or []:
+            rpath = os.path.normpath(rinfo.get("path") or "")
+            if _path_under_or_equal(target_abs, rpath) or _path_under_or_equal(rpath, target_abs):
+                if rinfo.get("error"):
+                    add_reason(f"root_error:{rinfo['error']}")
+                elif not rinfo.get("watched") and os.path.isdir(target_abs):
+                    add_reason("root_not_watched")
+
+    if jres.get("io_errors"):
+        add_reason("journal_io_error")
+    if int(jres.get("decode_errors") or 0) > 0:
+        add_reason("journal_decode_error")
+    if jres.get("rotation_gap"):
+        add_reason("rotation_gap")
+    elif (
+        int(cursor.get("seq") or 0) == 0
+        and int(cursor.get("events_logged") or 0) == 0
+        and (jres.get("up_to_seq") is None or int(jres.get("up_to_seq") or 0) > 0)
+        and jres.get("min_seq") is not None
+        and int(jres["min_seq"]) > 1
+    ):
+        add_reason("rotation_gap")
+    if jres.get("missing_after"):
+        add_reason("journal_missing_or_truncated")
+    elif (
+        isinstance(cur_state, dict)
+        and int(jres.get("files_seen") or 0) == 0
+        and int(cur_state.get("events_logged") or 0) > int(cursor.get("events_logged") or 0)
+    ):
+        add_reason("journal_missing_or_truncated")
+
+    for ev in jres.get("system_events") or []:
+        if _event_affects_archive(ev, archive, scope, cur_state):
+            reason = ev.get("reason") or ev.get("op") or "system_event"
+            add_reason(f"system:{reason}")
+
+    agent_ops = {
+        "creates": 0,
+        "modifies": 0,
+        "deletes": 0,
+        "rename_src": 0,
+        "rename_dst": 0,
+        "atomic_replaces": 0,
+    }
+    cand_ops = {}
+    cand_history = {}
+
+    def record_cand(rel_path, tag):
+        if not rel_path or _is_shadow_excluded_rel(rel_path):
+            return
+        cand_ops.setdefault(rel_path, set()).add(tag)
+        cand_history.setdefault(rel_path, []).append(tag)
+
+    for rec in jres.get("records") or []:
+        if rec.get("kind") == "system":
+            continue
+        rel = _map_abs_to_rel(rec.get("path"), scope)
+        if not rel or _is_shadow_excluded_rel(rel):
+            continue
+        op = rec.get("op")
+        kind = rec.get("kind")
+        if op == "create":
+            agent_ops["creates"] += 1
+            record_cand(rel, "create")
+        elif op == "write":
+            agent_ops["modifies"] += 1
+            record_cand(rel, "write")
+        elif op == "delete":
+            has_dst = bool(rec.get("dst_path"))
+            if has_dst:
+                agent_ops["rename_src"] += 1
+                tag = "rename_src"
+            else:
+                agent_ops["deletes"] += 1
+                tag = "delete"
+            record_cand(rel, tag)
+            if kind == "dir":
+                sub_prefix = rel + "/"
+                for p_rel in prev_man:
+                    if p_rel.startswith(sub_prefix):
+                        record_cand(p_rel, tag)
+        elif op == "rename":
+            if rec.get("atomic_replace"):
+                agent_ops["atomic_replaces"] += 1
+                record_cand(rel, "atomic_replace")
+            else:
+                agent_ops["rename_dst"] += 1
+                record_cand(rel, "rename_dst")
+                if kind == "dir" and rec.get("src_path"):
+                    src_rel = _map_abs_to_rel(rec.get("src_path"), scope)
+                    if src_rel:
+                        src_prefix = src_rel + "/"
+                        for p_rel in prev_man:
+                            if p_rel.startswith(src_prefix):
+                                moved_rel = f"{rel}/{p_rel[len(src_prefix):]}"
+                                record_cand(moved_rel, "rename_dst")
+
+    agent_ops["total"] = (
+        agent_ops["creates"]
+        + agent_ops["modifies"]
+        + agent_ops["deletes"]
+        + agent_ops["rename_src"]
+        + agent_ops["rename_dst"]
+        + agent_ops["atomic_replaces"]
+    )
+
+    COMPAT_OPS = {
+        "create": {"create", "write", "rename_dst", "atomic_replace"},
+        "modify": {"write", "create", "rename_dst", "atomic_replace"},
+        "delete": {"delete", "rename_src"},
+    }
+
+    missed = []
+    for rel, info in sorted(wolf_diff.items()):
+        seen_ops = cand_ops.get(rel, set())
+        if not (seen_ops & COMPAT_OPS[info["op"]]):
+            miss_reason = (
+                "mmap_or_same_stat_unobserved"
+                if info["reason"] == "content_same_stat"
+                else "missing_journal_event"
+            )
+            missed.append({
+                "path": rel,
+                "wolf_op": info["op"],
+                "wolf_reason": info["reason"],
+                "kind": info["kind"],
+                "reason": miss_reason,
+                "agent_ops_on_path": sorted(seen_ops),
+            })
+
+    extras = []
+    for rel, ops_set in sorted(cand_ops.items()):
+        if rel in wolf_diff:
+            continue
+        in_prev = rel in prev_man
+        in_cur = rel in cur_man
+        if not in_prev and not in_cur:
+            ex_reason = "transient_in_interval"
+        elif in_prev and in_cur:
+            ex_reason = "unchanged_in_snapshot"
+        elif in_prev and not in_cur:
+            ex_reason = "delete_not_in_wolf_diff"
+        else:
+            ex_reason = "absent_from_prev_unchanged"
+        extras.append({
+            "path": rel,
+            "ops": sorted(ops_set),
+            "history": cand_history.get(rel, []),
+            "reason": ex_reason,
+        })
+
+    return {
+        "incomplete": bool(incomplete_reasons),
+        "incomplete_reasons": incomplete_reasons,
+        "agent_ops": agent_ops,
+        "missed": missed,
+        "missed_count": len(missed),
+        "extras": extras,
+        "extra_count": len(extras),
+        "candidate_paths_count": len(cand_ops),
+    }
+
+
+def _journal_tail_seq(journal_path):
+    if not journal_path:
+        return 0, None
+    max_seq = 0
+    io_err = None
+    for candidate in (f"{journal_path}.1", journal_path):
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                sz = fh.tell()
+                tail_off = max(0, sz - 8192)
+                fh.seek(tail_off)
+                chunk = fh.read()
+                if tail_off > 0:
+                    nl = chunk.find(b"\n")
+                    chunk = chunk[nl + 1:] if nl >= 0 else b""
+                found = False
+                for raw_line in chunk.splitlines():
+                    sline = raw_line.strip()
+                    if not sline:
+                        continue
+                    try:
+                        rec = json.loads(sline.decode("utf-8", errors="replace"))
+                        if isinstance(rec, dict) and rec.get("seq") is not None:
+                            s = int(rec["seq"])
+                            if s > max_seq:
+                                max_seq = s
+                            found = True
+                    except (ValueError, TypeError):
+                        continue
+                if tail_off > 0 and not found:
+                    fh.seek(0)
+                    for raw_line in fh:
+                        sline = raw_line.strip()
+                        if not sline:
+                            continue
+                        try:
+                            rec = json.loads(sline.decode("utf-8", errors="replace"))
+                            if isinstance(rec, dict) and rec.get("seq") is not None:
+                                s = int(rec["seq"])
+                                if s > max_seq:
+                                    max_seq = s
+                        except (ValueError, TypeError):
+                            continue
+        except OSError as exc:
+            io_err = f"journal_io_error:{type(exc).__name__}"
+    return max_seq, io_err
+
+
+def _extract_flush_seq(flush_info, journal_path):
+    st = flush_info.get("state") or {}
+    if flush_info.get("flushed") and isinstance(st, dict) and st.get("journal_seq") is not None:
+        try:
+            return int(st["journal_seq"]), None
+        except (TypeError, ValueError):
+            pass
+    return _journal_tail_seq(journal_path)
+
+
+def _capture_snapshot_boundary(
+    scope,
+    archive,
+    man_path,
+    id_path,
+    state_path,
+    pid_path,
+    journal_path,
+    flush_timeout=0.35,
+):
+    pre_seq, pre_jerr = _journal_tail_seq(journal_path)
+    flush_info = flush_running_agent(state_path, pid_path, timeout_sec=flush_timeout)
+    post_seq, post_jerr = _extract_flush_seq(flush_info, journal_path)
+    disk_ok, disk_reason = _snapshot_matches_disk(scope, man_path, id_path)
+
+    flushed = bool(flush_info.get("flushed"))
+    flush_reason = flush_info.get("reason") or (
+        "agent_not_running" if not flush_info.get("alive") else "flush_timeout"
+    )
+    jerr = post_jerr or pre_jerr
+
+    if flushed and disk_ok and not jerr:
+        confirmed = True
+        confirm_reason = None
+        seq = post_seq
+    elif not disk_ok:
+        confirmed = False
+        reasons = []
+        if not flushed:
+            reasons.append(flush_reason)
+        if jerr:
+            reasons.append(jerr)
+        reasons.append(disk_reason or "boundary_snapshot_drift")
+        confirm_reason = reasons[-1] if len(reasons) == 1 else "|".join(reasons)
+        # Never swallow post-drift concurrent events into the previous snapshot cursor
+        seq = None
+    elif jerr:
+        confirmed = False
+        confirm_reason = jerr if flushed else f"{flush_reason}|{jerr}"
+        seq = None if post_jerr else post_seq
+    else:
+        confirmed = False
+        confirm_reason = flush_reason
+        seq = post_seq
+
+    return {
+        "version": 1,
+        "archive": archive,
+        "seq": seq,
+        "pre_flush_seq": pre_seq,
+        "confirmed": confirmed,
+        "confirm_reason": confirm_reason,
+        "flush_info": flush_info,
+        "captured_at": round(time.time(), 6),
+    }
+
+
+def _build_cursor(flush_info, journal_path, forced_seq=None, boundary_confirmed=True, confirm_reason=None):
+    st = flush_info.get("state") or {}
+    if forced_seq is not None:
+        max_seq = int(forced_seq)
+    else:
+        max_seq, _jerr = _extract_flush_seq(flush_info, journal_path)
+    return {
+        "seq": max_seq,
+        "boot_seq": int(st.get("boot_seq") or 0),
+        "restart_count": int(st.get("restart_count") or 0),
+        "overflow_count": int(st.get("overflow_count") or 0),
+        "events_logged": int(st.get("events_logged") or 0),
+        "journal_rotations": int(st.get("journal_rotations") or 0),
+        "agent_alive": bool(flush_info.get("alive")),
+        "flush_ok": bool(flush_info.get("flushed")),
+        "boundary_confirmed": bool(boundary_confirmed),
+        "confirm_reason": confirm_reason,
+        "captured_at": round(time.time(), 6),
+    }
+
+
+def rebuild_shadow_summary(shadow_dir):
+    report_path = os.path.join(shadow_dir, "report.jsonl")
+    records = []
+    if os.path.isfile(report_path):
+        with open(report_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if isinstance(rec, dict):
+                        records.append(rec)
+                except ValueError:
+                    continue
+
+    totals = {
+        "intervals": 0,
+        "complete_intervals": 0,
+        "incomplete_intervals": 0,
+        "incomplete_rate": 0.0,
+        "missed_total": 0,
+        "mmap_or_same_stat_missed_total": 0,
+        "extra_total": 0,
+        "shadow_overhead_ms_total": 0.0,
+        "wolf_ops": {"creates": 0, "modifies": 0, "deletes": 0, "total": 0},
+        "agent_ops": {
+            "creates": 0, "modifies": 0, "deletes": 0,
+            "rename_src": 0, "rename_dst": 0, "atomic_replaces": 0, "total": 0,
+        },
+        "incomplete_reasons_counts": {},
+    }
+    archives = {}
+
+    for rec in records:
+        arch = rec.get("archive") or "?"
+        a = archives.setdefault(arch, {
+            "intervals": 0,
+            "complete_intervals": 0,
+            "incomplete_intervals": 0,
+            "incomplete_rate": 0.0,
+            "missed_total": 0,
+            "mmap_or_same_stat_missed_total": 0,
+            "extra_total": 0,
+            "shadow_overhead_ms_total": 0.0,
+            "wolf_ops": {"creates": 0, "modifies": 0, "deletes": 0, "total": 0},
+            "agent_ops": {
+                "creates": 0, "modifies": 0, "deletes": 0,
+                "rename_src": 0, "rename_dst": 0, "atomic_replaces": 0, "total": 0,
+            },
+            "incomplete_reasons_counts": {},
+            "missed": [],
+            "extras": [],
+        })
+        for box in (totals, a):
+            box["intervals"] += 1
+            if rec.get("incomplete"):
+                box["incomplete_intervals"] += 1
+            else:
+                box["complete_intervals"] += 1
+            box["missed_total"] += int(rec.get("missed_count") or 0)
+            box["extra_total"] += int(rec.get("extra_count") or 0)
+            box["shadow_overhead_ms_total"] = round(
+                box["shadow_overhead_ms_total"] + float(rec.get("shadow_overhead_ms") or 0.0), 3,
+            )
+            wops = rec.get("wolf_ops") or {}
+            for k in box["wolf_ops"]:
+                box["wolf_ops"][k] += int(wops.get(k) or 0)
+            aops = rec.get("agent_ops") or {}
+            for k in box["agent_ops"]:
+                box["agent_ops"][k] += int(aops.get(k) or 0)
+            for reason in rec.get("incomplete_reasons") or []:
+                rc = box["incomplete_reasons_counts"]
+                rc[reason] = int(rc.get(reason, 0)) + 1
+            for m in rec.get("missed") or []:
+                if m.get("reason") == "mmap_or_same_stat_unobserved":
+                    box["mmap_or_same_stat_missed_total"] += 1
+        a["missed"].extend(rec.get("missed") or [])
+        a["extras"].extend(rec.get("extras") or [])
+
+    for box in [totals] + list(archives.values()):
+        n = box["intervals"]
+        box["incomplete_rate"] = round(box["incomplete_intervals"] / n, 6) if n else 0.0
+
+    summary = {
+        "version": 1,
+        "updated_at": round(time.time(), 6),
+        "totals": totals,
+        "archives": archives,
+    }
+    _atomic_write_json(os.path.join(shadow_dir, "summary.json"), summary)
+    return summary
+
+
+def _resolve_compare_boundary(scope, arch, args, start_seq=0):
+    b_path = getattr(args, "boundary", "") or ""
+    if b_path:
+        b_data, b_err = _read_json_strict(b_path)
+        if b_err or not isinstance(b_data, dict):
+            flush_info = {
+                "alive": False,
+                "flushed": False,
+                "reason": "boundary_missing_or_corrupt",
+                "state": None,
+                "state_error": b_err,
+            }
+            return {
+                "confirmed": False,
+                "confirm_reason": "boundary_missing_or_corrupt",
+                "seq": start_seq,
+                "diag_seq": start_seq,
+                "pre_flush_seq": start_seq,
+                "boundary_file_seq": None,
+                "flush_info": flush_info,
+            }
+        flush_info = b_data.get("flush_info") or {}
+        raw_seq = b_data.get("seq")
+        pre_seq = int(b_data.get("pre_flush_seq") or start_seq)
+        b_conf = bool(b_data.get("confirmed"))
+        b_reason = b_data.get("confirm_reason")
+        if raw_seq is None:
+            up_to_seq = start_seq
+            diag_seq = max(start_seq, pre_seq)
+        else:
+            raw_seq_i = int(raw_seq)
+            if raw_seq_i < start_seq:
+                b_conf = False
+                b_reason = f"{b_reason}|cursor_ahead_of_boundary" if b_reason else "cursor_ahead_of_boundary"
+                up_to_seq = start_seq
+                diag_seq = start_seq
+            else:
+                up_to_seq = raw_seq_i
+                diag_seq = raw_seq_i
+        return {
+            "confirmed": b_conf,
+            "confirm_reason": b_reason,
+            "seq": up_to_seq,
+            "diag_seq": diag_seq,
+            "pre_flush_seq": pre_seq,
+            "boundary_file_seq": raw_seq,
+            "flush_info": flush_info,
+        }
+
+    live = _capture_snapshot_boundary(
+        scope, arch, args.manifest, args.idhint, args.state, args.pid, args.journal,
+        flush_timeout=args.flush_timeout,
+    )
+    raw_seq = live.get("seq")
+    pre_seq = int(live.get("pre_flush_seq") or start_seq)
+    b_conf = bool(live.get("confirmed"))
+    b_reason = live.get("confirm_reason")
+    if raw_seq is None:
+        up_to_seq = start_seq
+        diag_seq = max(start_seq, pre_seq)
+    else:
+        raw_seq_i = int(raw_seq)
+        if raw_seq_i < start_seq:
+            b_conf = False
+            b_reason = f"{b_reason}|cursor_ahead_of_boundary" if b_reason else "cursor_ahead_of_boundary"
+            up_to_seq = start_seq
+            diag_seq = start_seq
+        else:
+            up_to_seq = raw_seq_i
+            diag_seq = raw_seq_i
+    return {
+        "confirmed": b_conf,
+        "confirm_reason": b_reason,
+        "seq": up_to_seq,
+        "diag_seq": diag_seq,
+        "pre_flush_seq": pre_seq,
+        "boundary_file_seq": raw_seq,
+        "flush_info": live.get("flush_info") or {},
+    }
+
+
+def cmd_shadow_mark(args):
+    arch = _safe_archive_name(args.archive)
+    scope = resolve_archive_scope(
+        arch,
+        base_dir=args.base_dir or "",
+        sr=args.sr or "",
+    )
+    b = _capture_snapshot_boundary(
+        scope, arch, args.manifest, args.idhint, args.state, args.pid, args.journal,
+        flush_timeout=args.flush_timeout,
+    )
+    if args.out:
+        _atomic_write_json(args.out, b)
+    if args.json:
+        print(json.dumps(b, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_shadow_baseline(args):
+    arch = _safe_archive_name(args.archive)
+    scope = resolve_archive_scope(
+        arch,
+        base_dir=args.base_dir or "",
+        sr=args.sr or "",
+    )
+    b_path = getattr(args, "boundary", "") or ""
+    if b_path:
+        b = _resolve_compare_boundary(scope, arch, args, start_seq=0)
+        seq = b.get("boundary_file_seq")
+        if seq is None:
+            seq = b.get("pre_flush_seq") or 0
+    else:
+        b = _capture_snapshot_boundary(
+            scope, arch, args.manifest, args.idhint, args.state, args.pid, args.journal,
+            flush_timeout=args.flush_timeout,
+        )
+        seq = b.get("seq")
+        if seq is None:
+            seq = b.get("pre_flush_seq") or 0
+    flush_info = b.get("flush_info") or {}
+    cursor = _build_cursor(
+        flush_info,
+        args.journal,
+        forced_seq=int(seq),
+        boundary_confirmed=bool(b.get("confirmed")),
+        confirm_reason=b.get("confirm_reason"),
+    )
+    cursor["archive"] = arch
+    cursor["base_dir"] = scope["base_dir"] or (args.base_dir or "")
+    cursor["sr"] = args.sr or ""
+
+    prev_dir = os.path.join(args.shadow_dir, "prev")
+    cursor_dir = os.path.join(args.shadow_dir, "cursor")
+    _atomic_copy_file(args.manifest, os.path.join(prev_dir, f"{arch}.man"))
+    _atomic_copy_file(args.idhint, os.path.join(prev_dir, f"{arch}.id"))
+    _atomic_write_json(os.path.join(cursor_dir, f"{arch}.json"), cursor)
+    if args.json:
+        print(json.dumps(cursor, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_shadow_compare(args):
+    t0 = time.monotonic()
+    arch = _safe_archive_name(args.archive)
+    prev_dir = os.path.join(args.shadow_dir, "prev")
+    cursor_dir = os.path.join(args.shadow_dir, "cursor")
+    prev_man_path = os.path.join(prev_dir, f"{arch}.man")
+    prev_id_path = os.path.join(prev_dir, f"{arch}.id")
+    cursor_path = os.path.join(cursor_dir, f"{arch}.json")
+
+    if not os.path.isfile(cursor_path) or not os.path.isfile(prev_man_path):
+        return cmd_shadow_baseline(args)
+
+    try:
+        cursor, cursor_err = _read_json_strict(cursor_path)
+        if not cursor:
+            cursor = {"seq": 0, "boot_seq": 0, "restart_count": 0, "overflow_count": 0, "events_logged": 0}
+        start_seq = int(cursor.get("seq") or 0)
+        prev_man = parse_wolf_manifest(prev_man_path)
+        cur_man = parse_wolf_manifest(args.manifest)
+        id_src = prev_id_path if os.path.isfile(prev_id_path) else (args.prev_id_fallback or "")
+        prev_id = parse_idhint(id_src)
+        cur_id = parse_idhint(args.idhint)
+
+        scope = resolve_archive_scope(
+            arch,
+            base_dir=args.base_dir or cursor.get("base_dir") or "",
+            sr=args.sr or cursor.get("sr") or "",
+        )
+        boundary = _resolve_compare_boundary(scope, arch, args, start_seq=start_seq)
+        flush_info = boundary["flush_info"]
+        up_to_seq = int(boundary["seq"])
+        diag_seq = int(boundary.get("diag_seq", up_to_seq))
+        jres = BoundedJournal.read_since(args.journal, after_seq=start_seq, up_to_seq=diag_seq)
+        wolf_diff, wolf_ops = compute_wolf_interval_diff(prev_man, prev_id, cur_man, cur_id)
+        analysis = analyze_agent_interval(
+            arch, scope, prev_man, cur_man, prev_id, cur_id, wolf_diff, jres, cursor, flush_info,
+            boundary=boundary,
+        )
+        if cursor_err and "cursor_io_error" not in analysis["incomplete_reasons"]:
+            analysis["incomplete"] = True
+            analysis["incomplete_reasons"].append("cursor_io_error")
+
+        end_cursor = _build_cursor(
+            flush_info,
+            args.journal,
+            forced_seq=up_to_seq,
+            boundary_confirmed=bool(boundary.get("confirmed")),
+            confirm_reason=boundary.get("confirm_reason"),
+        )
+        end_cursor["archive"] = arch
+        end_cursor["base_dir"] = scope["base_dir"]
+        end_cursor["sr"] = args.sr or cursor.get("sr") or ""
+
+        now = time.time()
+        elapsed_ms = round((time.monotonic() - t0) * 1000.0, 3)
+        report_rec = {
+            "version": 1,
+            "archive": arch,
+            "ts": round(now, 6),
+            "interval_sec": round(max(0.0, now - float(cursor.get("captured_at") or now)), 6),
+            "shadow_overhead_ms": elapsed_ms,
+            "cursor_start": start_seq,
+            "cursor_end": int(end_cursor.get("seq") or 0),
+            "boundary_confirmed": bool(boundary.get("confirmed")),
+            "boundary_confirm_reason": boundary.get("confirm_reason"),
+            "had_changes_wolf": bool(wolf_ops["total"] > 0),
+            "publish_committed": bool(int(args.published or 0) == 1),
+            "incomplete": analysis["incomplete"],
+            "complete": not analysis["incomplete"],
+            "incomplete_reasons": analysis["incomplete_reasons"],
+            "wolf_ops": wolf_ops,
+            "agent_ops": analysis["agent_ops"],
+            "missed_count": analysis["missed_count"],
+            "extra_count": analysis["extra_count"],
+            "missed": analysis["missed"],
+            "extras": analysis["extras"],
+            "journal_stats": {
+                "min_seq": jres["min_seq"],
+                "max_seq": jres["max_seq"],
+                "up_to_seq": jres["up_to_seq"],
+                "decode_errors": jres["decode_errors"],
+                "io_errors": jres["io_errors"],
+                "rotation_gap": jres["rotation_gap"],
+                "missing_after": jres["missing_after"],
+                "system_events": [
+                    {
+                        "seq": ev.get("seq"),
+                        "op": ev.get("op"),
+                        "reason": ev.get("reason"),
+                        "root_id": ev.get("root_id"),
+                    }
+                    for ev in jres["system_events"]
+                ],
+            },
+        }
+        os.makedirs(args.shadow_dir, exist_ok=True)
+        with open(os.path.join(args.shadow_dir, "report.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(report_rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+        rebuild_shadow_summary(args.shadow_dir)
+
+        # Advance common baseline to current snapshot + cursor for the next interval
+        _atomic_copy_file(args.manifest, prev_man_path)
+        _atomic_copy_file(args.idhint, prev_id_path)
+        _atomic_write_json(cursor_path, end_cursor)
+
+        if args.json:
+            print(json.dumps(report_rec, ensure_ascii=False, indent=2, sort_keys=True))
+    except Exception as exc:
+        err_rec = {
+            "version": 1,
+            "archive": arch,
+            "ts": round(time.time(), 6),
+            "shadow_overhead_ms": round((time.monotonic() - t0) * 1000.0, 3),
+            "incomplete": True,
+            "complete": False,
+            "incomplete_reasons": [f"compare_error:{type(exc).__name__}"],
+            "error_detail": str(exc)[:200],
+            "wolf_ops": {"creates": 0, "modifies": 0, "deletes": 0, "total": 0},
+            "agent_ops": {"creates": 0, "modifies": 0, "deletes": 0, "rename_src": 0, "rename_dst": 0, "atomic_replaces": 0, "total": 0},
+            "missed_count": 0,
+            "extra_count": 0,
+            "missed": [],
+            "extras": [],
+        }
+        try:
+            os.makedirs(args.shadow_dir, exist_ok=True)
+            with open(os.path.join(args.shadow_dir, "report.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(err_rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+            rebuild_shadow_summary(args.shadow_dir)
+        except OSError:
+            pass
+    return 0
+
+
+def cmd_shadow_report(args):
+    summary = _read_json_if_exists(os.path.join(args.shadow_dir, "summary.json"))
+    if summary is None:
+        summary = rebuild_shadow_summary(args.shadow_dir)
+    if args.archive:
+        summary = {
+            "version": 1,
+            "archive": args.archive,
+            "summary": (summary.get("archives") or {}).get(args.archive) or {},
+        }
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    t = summary.get("totals") or {}
+    if not t and "summary" in summary:
+        t = summary["summary"]
+    print(
+        f"intervals={t.get('intervals', 0)} incomplete={t.get('incomplete_intervals', 0)} "
+        f"incomplete_rate={t.get('incomplete_rate', 0.0):.3f} missed={t.get('missed_total', 0)} "
+        f"mmap_missed={t.get('mmap_or_same_stat_missed_total', 0)} extra={t.get('extra_total', 0)} "
+        f"overhead_ms={t.get('shadow_overhead_ms_total', 0.0)}"
+    )
+    return 0
+
+
+def _optin_cursor_path(optin_dir, arch):
+    return os.path.join(optin_dir, "cursor", f"{_safe_archive_name(arch)}.json")
+
+
+def _optin_record_dirty_for_scope(rec, scope):
+    for key in ("path", "src_path"):
+        raw = rec.get(key)
+        if not raw:
+            continue
+        rel = _map_abs_to_rel(raw, scope)
+        if not rel:
+            continue
+        if _is_shadow_excluded_rel(rel) or _is_wolf_temp_pruned(rel):
+            continue
+        return True
+    return False
+
+
+def cmd_optin_plan(args):
+    archives = [_safe_archive_name(a) for a in (args.archives or []) if a.startswith(("game--", "pfx--"))]
+    flush_info = flush_running_agent(args.state, args.pid, timeout_sec=args.flush_timeout)
+    cur_state = flush_info.get("state")
+    global_reasons = []
+
+    def add_global(reason):
+        if reason and reason not in global_reasons:
+            global_reasons.append(reason)
+
+    if flush_info.get("state_error"):
+        add_global("state_io_error")
+    if not flush_info.get("alive"):
+        add_global("agent_not_running")
+    elif not flush_info.get("flushed"):
+        add_global(flush_info.get("reason") or "flush_timeout")
+    if isinstance(cur_state, dict):
+        if normalize_mode(cur_state.get("mode")) != "observe-only":
+            add_global("agent_disabled_or_wrong_mode")
+    else:
+        add_global("state_missing")
+
+    healthy_flush = bool(
+        not global_reasons
+        and flush_info.get("alive")
+        and flush_info.get("flushed")
+        and isinstance(cur_state, dict)
+    )
+    mark_seq = int(cur_state.get("journal_seq") or 0) if healthy_flush else None
+
+    if not healthy_flush:
+        plan = {
+            "version": 1,
+            "mark_seq": mark_seq,
+            "io_unreadable": True,
+            "fallback_to_standard": True,
+            "fallback_reasons": global_reasons,
+            "selected": archives,
+            "clean": [],
+            "archives": {a: {"mode": "fallback", "reasons": list(global_reasons)} for a in archives},
+        }
+        if args.json:
+            print(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    jcache = {}
+    io_unreadable = False
+    fallback_to_standard = False
+    selected = []
+    clean = []
+    per_arch = {}
+
+    for arch in archives:
+        base_dir = args.gd if arch.startswith("game--") else args.dh
+        scope = resolve_archive_scope(arch, base_dir=base_dir, sr=args.sr or "", dh=args.dh or "", gd=args.gd or "")
+        cursor, cursor_err = _read_json_strict(_optin_cursor_path(args.optin_dir, arch))
+        reasons = []
+        if cursor_err:
+            reasons.append("cursor_io_error")
+        elif not isinstance(cursor, dict):
+            reasons.append("missing_cursor")
+        else:
+            start_seq = int(cursor.get("seq") or 0)
+            if int(cur_state.get("boot_seq") or 0) != int(cursor.get("boot_seq") or 0) or (
+                int(cur_state.get("restart_count") or 0) != int(cursor.get("restart_count") or 0)
+            ):
+                reasons.append("agent_restart")
+                fallback_to_standard = True
+            if int(cur_state.get("overflow_count") or 0) > int(cursor.get("overflow_count") or 0):
+                reasons.append("queue_overflow")
+                fallback_to_standard = True
+            expected_rid = f"game:{arch[len('game--'):]}" if arch.startswith("game--") else "compatdata"
+            for rid, rerr in (cur_state.get("root_errors") or {}).items():
+                if rid in (expected_rid, "games" if arch.startswith("game--") else "compatdata"):
+                    reasons.append(f"root_error:{rerr}")
+            if mark_seq < start_seq:
+                reasons.append("cursor_ahead_of_journal")
+                fallback_to_standard = True
+            else:
+                jres = jcache.get(start_seq)
+                if jres is None:
+                    jres = BoundedJournal.read_since(args.journal, after_seq=start_seq, up_to_seq=mark_seq)
+                    jcache[start_seq] = jres
+                if jres.get("io_errors"):
+                    io_unreadable = True
+                    fallback_to_standard = True
+                    reasons.append("journal_io_error")
+                if int(jres.get("decode_errors") or 0) > 0:
+                    fallback_to_standard = True
+                    reasons.append("journal_decode_error")
+                if jres.get("rotation_gap"):
+                    fallback_to_standard = True
+                    reasons.append("rotation_gap")
+                if jres.get("missing_after"):
+                    fallback_to_standard = True
+                    reasons.append("journal_missing_after_cursor")
+                for ev in jres.get("system_events") or []:
+                    if _event_affects_archive(ev, arch, scope, cur_state):
+                        fallback_to_standard = True
+                        reasons.append(f"system:{ev.get('reason') or ev.get('op') or 'needs_full_scan'}")
+                if not reasons:
+                    dirty_events = sum(1 for rec in (jres.get("records") or []) if _optin_record_dirty_for_scope(rec, scope))
+                    if dirty_events > 0:
+                        selected.append(arch)
+                        per_arch[arch] = {"mode": "dirty", "dirty_events": dirty_events, "cursor_start": start_seq}
+                    else:
+                        clean.append(arch)
+                        per_arch[arch] = {"mode": "clean", "dirty_events": 0, "cursor_start": start_seq}
+                    continue
+
+        for r in reasons:
+            add_global(r)
+        selected.append(arch)
+        per_arch[arch] = {"mode": "fallback", "reasons": reasons}
+
+    if fallback_to_standard:
+        selected = list(archives)
+        clean = []
+
+    plan = {
+        "version": 1,
+        "mark_seq": mark_seq,
+        "io_unreadable": io_unreadable,
+        "fallback_to_standard": fallback_to_standard,
+        "fallback_reasons": global_reasons,
+        "selected": selected,
+        "clean": clean,
+        "archives": per_arch,
+    }
+    if args.json:
+        print(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_optin_commit(args):
+    cur_state, _ = _read_json_strict(args.state)
+    targets = []
+    if args.archive:
+        targets.append(args.archive)
+    targets.extend(args.archives or [])
+    seq = int(args.up_to_seq)
+    for raw in targets:
+        arch = _safe_archive_name(raw)
+        if not arch.startswith(("game--", "pfx--")):
+            continue
+        cursor = {
+            "version": 1,
+            "archive": arch,
+            "seq": seq,
+            "boot_seq": int(cur_state.get("boot_seq") or 0) if isinstance(cur_state, dict) else 0,
+            "restart_count": int(cur_state.get("restart_count") or 0) if isinstance(cur_state, dict) else 0,
+            "overflow_count": int(cur_state.get("overflow_count") or 0) if isinstance(cur_state, dict) else 0,
+            "updated_at": round(time.time(), 6),
+        }
+        _atomic_write_json(_optin_cursor_path(args.optin_dir, arch), cursor)
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="wolf-state-agent.py")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_cfg = sub.add_parser("write-config")
+    p_cfg.add_argument("--out", default="")
+
+    p_run = sub.add_parser("run")
+    p_run.add_argument("--config", default="")
+
+    p_st = sub.add_parser("status")
+    p_st.add_argument("--state", required=True)
+    p_st.add_argument("--pid", default="")
+    p_st.add_argument("--json", action="store_true")
+
+    p_j = sub.add_parser("journal")
+    p_j.add_argument("--journal", required=True)
+    p_j.add_argument("--limit", type=int, default=50)
+    p_j.add_argument("count", nargs="?", type=int, default=None)
+
+    p_cl = sub.add_parser("clean")
+    p_cl.add_argument("--state-dir", required=True)
+    p_cl.add_argument("--pid", default="")
+
+    p_sm = sub.add_parser("shadow-mark")
+    p_sm.add_argument("--state", required=True)
+    p_sm.add_argument("--pid", default="")
+    p_sm.add_argument("--journal", required=True)
+    p_sm.add_argument("--archive", required=True)
+    p_sm.add_argument("--manifest", default="")
+    p_sm.add_argument("--idhint", default="")
+    p_sm.add_argument("--base-dir", default="")
+    p_sm.add_argument("--sr", default="")
+    p_sm.add_argument("--flush-timeout", type=float, default=0.35)
+    p_sm.add_argument("--out", default="")
+    p_sm.add_argument("--json", action="store_true")
+
+    p_sb = sub.add_parser("shadow-baseline")
+    p_sb.add_argument("--shadow-dir", required=True)
+    p_sb.add_argument("--state", required=True)
+    p_sb.add_argument("--pid", default="")
+    p_sb.add_argument("--journal", required=True)
+    p_sb.add_argument("--archive", required=True)
+    p_sb.add_argument("--manifest", default="")
+    p_sb.add_argument("--idhint", default="")
+    p_sb.add_argument("--base-dir", default="")
+    p_sb.add_argument("--sr", default="")
+    p_sb.add_argument("--boundary", default="")
+    p_sb.add_argument("--flush-timeout", type=float, default=0.35)
+    p_sb.add_argument("--json", action="store_true")
+
+    p_sc = sub.add_parser("shadow-compare")
+    p_sc.add_argument("--shadow-dir", required=True)
+    p_sc.add_argument("--state", required=True)
+    p_sc.add_argument("--pid", default="")
+    p_sc.add_argument("--journal", required=True)
+    p_sc.add_argument("--archive", required=True)
+    p_sc.add_argument("--manifest", default="")
+    p_sc.add_argument("--idhint", default="")
+    p_sc.add_argument("--prev-id-fallback", default="")
+    p_sc.add_argument("--base-dir", default="")
+    p_sc.add_argument("--sr", default="")
+    p_sc.add_argument("--published", type=int, default=0)
+    p_sc.add_argument("--boundary", default="")
+    p_sc.add_argument("--flush-timeout", type=float, default=0.35)
+    p_sc.add_argument("--json", action="store_true")
+
+    p_sr = sub.add_parser("shadow-report")
+    p_sr.add_argument("--shadow-dir", required=True)
+    p_sr.add_argument("--archive", default="")
+    p_sr.add_argument("--json", action="store_true")
+
+    p_op = sub.add_parser("optin-plan")
+    p_op.add_argument("--optin-dir", required=True)
+    p_op.add_argument("--state", required=True)
+    p_op.add_argument("--pid", default="")
+    p_op.add_argument("--journal", required=True)
+    p_op.add_argument("--dh", default="")
+    p_op.add_argument("--gd", default="")
+    p_op.add_argument("--sr", default="")
+    p_op.add_argument("--flush-timeout", type=float, default=0.35)
+    p_op.add_argument("--archives", nargs="*", default=[])
+    p_op.add_argument("--json", action="store_true")
+
+    p_oc = sub.add_parser("optin-commit")
+    p_oc.add_argument("--optin-dir", required=True)
+    p_oc.add_argument("--state", required=True)
+    p_oc.add_argument("--archive", default="")
+    p_oc.add_argument("--archives", nargs="*", default=[])
+    p_oc.add_argument("--up-to-seq", type=int, required=True)
+
+    args = parser.parse_args(argv)
+    handlers = {
+        "write-config": cmd_write_config,
+        "run": cmd_run,
+        "status": cmd_status,
+        "journal": cmd_journal,
+        "clean": cmd_clean,
+        "shadow-mark": cmd_shadow_mark,
+        "shadow-baseline": cmd_shadow_baseline,
+        "shadow-compare": cmd_shadow_compare,
+        "shadow-report": cmd_shadow_report,
+        "optin-plan": cmd_optin_plan,
+        "optin-commit": cmd_optin_commit,
+    }
+    return handlers[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+AGENT
 
 # ============================== wolf-shortcuts.py ==============================
 w /usr/local/bin/wolf-shortcuts.py <<'SHORTCUTS'
@@ -2878,26 +10713,144 @@ def sync_proton(config_vdf, ids):
 # установки (у пробной FF14 — папка полной игры «FINAL FANTASY XIV Online»: паспорт с папкой «по названию» вёл к
 # «Не найден исполняемый файл», живой случай 2026-10-08) и для каких систем игра (нет Linux — включить ей Proton:
 # иначе Steam качает только общие файлы, без Windows-версии). Форматы 28 и 29 (с 29 ключи — номера в таблице строк).
-def _appinfo_kv(data, i, keys):
+# Запись: appid u32, size u32 (байты после него), 60 байт заголовка, дерево KeyValues. Следующий AppID — строго
+# через size, даже если дерево оборвалось. Та же разборка, что в wolf-games.py.
+# Типы дерева, как их пишет Steam в appinfo: 0x00 блок, 0x01 строка UTF-8 до нуля, 0x02 int32, 0x03 float32
+# (IEEE-754, 4 байта), 0x04 указатель 4 байта, 0x05 WString — UTF-16LE до широкого нуля 00 00 (не до первого
+# нулевого байта: символ U+0100 начинается с 00), 0x06 цвет 4 байта, 0x07 uint64, 0x08 конец блока, 0x09 Binary —
+# uint32 длина и столько байт, 0x0A int64, 0x0B тот же конец блока. Неизвестный тип эту запись дальше не читает.
+def _appinfo_key(data, i, keys, end):
+    if keys is None:
+        j = data.find(b"\0", i, end)
+        if j < 0:
+            return None, end
+        return data[i:j].decode("utf-8", "replace"), j + 1
+    if i + 4 > end:
+        return None, end
+    idx = struct.unpack_from("<I", data, i)[0]
+    if idx >= len(keys):
+        return None, end
+    return keys[idx], i + 4
+
+
+def _appinfo_kv(data, i, keys, end):
+    """(словарь, индекс, целиком ли дочитан блок). Индекс при обрыве не использовать: хвост записи отбрасывается."""
+    end = min(end, len(data))
     out = {}
-    while True:
-        t = data[i]; i += 1
-        if t == 0x08:
-            return out, i
-        if keys is None:
-            j = data.index(b"\0", i); key = data[i:j].decode("utf-8", "replace"); i = j + 1
-        else:
-            key = keys[struct.unpack_from("<I", data, i)[0]]; i += 4
+    while i < end:
+        t = data[i]
+        i += 1
+        if t in (0x08, 0x0B):
+            return out, i, True
+        key, i = _appinfo_key(data, i, keys, end)
+        if key is None:
+            return out, end, False
         if t == 0x00:
-            out[key], i = _appinfo_kv(data, i, keys)
+            child, i, ok = _appinfo_kv(data, i, keys, end)
+            out[key] = child
+            if not ok:
+                return out, end, False
         elif t == 0x01:
-            j = data.index(b"\0", i); out[key] = data[i:j].decode("utf-8", "replace"); i = j + 1
-        elif t in (0x02, 0x03, 0x04, 0x06):
-            out[key] = struct.unpack_from("<i", data, i)[0]; i += 4
-        elif t in (0x07, 0x0A):
-            out[key] = struct.unpack_from("<q", data, i)[0]; i += 8
+            j = data.find(b"\0", i, end)
+            if j < 0:
+                return out, end, False
+            out[key] = data[i:j].decode("utf-8", "replace")
+            i = j + 1
+        elif t in (0x02, 0x04, 0x06):
+            if i + 4 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<i", data, i)[0]
+            i += 4
+        elif t == 0x03:
+            if i + 4 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<f", data, i)[0]
+            i += 4
+        elif t == 0x05:
+            start = i
+            found = False
+            while i + 2 <= end:
+                if data[i] == 0 and data[i + 1] == 0:
+                    out[key] = data[start:i].decode("utf-16-le", "replace")
+                    i += 2
+                    found = True
+                    break
+                i += 2
+            if not found:
+                return out, end, False
+        elif t == 0x09:
+            if i + 4 > end:
+                return out, end, False
+            n = struct.unpack_from("<I", data, i)[0]
+            i += 4
+            if n > end - i:
+                return out, end, False
+            out[key] = data[i:i + n]
+            i += n
+        elif t == 0x07:
+            if i + 8 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<Q", data, i)[0]
+            i += 8
+        elif t == 0x0A:
+            if i + 8 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<q", data, i)[0]
+            i += 8
         else:
-            raise ValueError(f"тип {t} в appinfo.vdf")
+            return out, end, False
+    return out, i, False
+
+
+def _appinfo_header(data):
+    """(таблица строк или None, смещение первой записи) либо None — это не appinfo 28/29."""
+    if len(data) < 8:
+        return None
+    magic = struct.unpack_from("<I", data, 0)[0]
+    if magic == 0x07564429:
+        if len(data) < 16:
+            return None
+        off = struct.unpack_from("<q", data, 8)[0]
+        if off < 0 or off > len(data) - 4:
+            return None
+        n = struct.unpack_from("<I", data, off)[0]
+        keys, j = [], off + 4
+        for _ in range(n):
+            if j >= len(data):
+                return None
+            k = data.find(b"\0", j)
+            if k < 0:
+                return None
+            keys.append(data[j:k].decode("utf-8", "replace"))
+            j = k + 1
+        return keys, 16
+    if magic == 0x07564428:
+        return None, 8
+    return None
+
+
+def _appinfo_apps(data):
+    """Пары (AppID, словарь appinfo). Размер записи, который не умещается в файл, обрывает хвост."""
+    opened = _appinfo_header(data)
+    if opened is None:
+        return
+    keys, i = opened
+    while i + 8 <= len(data):
+        aid, size = struct.unpack_from("<II", data, i)
+        if aid == 0 or size < 60 or i + 8 + size > len(data):
+            return
+        record_end = i + 8 + size
+        kv, _, _ = _appinfo_kv(data, i + 68, keys, record_end)
+        app = kv.get("appinfo")
+        yield aid, app if isinstance(app, dict) else {}
+        i = record_end
+
+
+def _appinfo_text(block, name):
+    if not isinstance(block, dict):
+        return ""
+    value = block.get(name)
+    return value if isinstance(value, str) else ""
 
 
 def appinfo(steam_root, appid):
@@ -2905,29 +10858,13 @@ def appinfo(steam_root, appid):
     try:
         with open(os.path.join(steam_root, "appcache", "appinfo.vdf"), "rb") as f:
             data = f.read()
-        magic = struct.unpack_from("<I", data, 0)[0]
-        if magic == 0x07564429:
-            off = struct.unpack_from("<q", data, 8)[0]
-            n = struct.unpack_from("<I", data, off)[0]
-            keys, j = [], off + 4
-            for _ in range(n):
-                k = data.index(b"\0", j); keys.append(data[j:k].decode("utf-8", "replace")); j = k + 1
-            i = 16
-        elif magic == 0x07564428:
-            keys, i = None, 8
-        else:
-            return None
-        while i + 8 <= len(data):
-            aid, size = struct.unpack_from("<II", data, i)
-            if aid == 0:
-                return None
-            if aid == int(appid):
-                kv = _appinfo_kv(data, i + 8 + 60, keys)[0].get("appinfo", {})
-                return {"installdir": str((kv.get("config") or {}).get("installdir") or ""),
-                        "oslist": str((kv.get("common") or {}).get("oslist") or "")}
-            i += 8 + size
-    except (OSError, ValueError, IndexError, struct.error, KeyError):
+        want = int(appid)
+    except (OSError, ValueError):
         return None
+    for aid, app in _appinfo_apps(data):
+        if aid == want:
+            return {"installdir": _appinfo_text(app.get("config"), "installdir"),
+                    "oslist": _appinfo_text(app.get("common"), "oslist")}
     return None
 
 
@@ -3118,16 +11055,19 @@ w /usr/local/bin/wolf-games.py <<'GAMES'
 #!/usr/bin/env python3
 # [v4.6] Список игр для приложения vastgame — какой архив какой игре принадлежит. Лежит в облаке файлом
 # vastgame-games.json: {"version": 1, "games": [{"archive": "sgame--ПАПКА", "appid": "123",
-# "name": "Название", "kind": "steam"|"folder", "tool": false}, ...]}. По нему приложение показывает одну строку
-# на игру (её файлы + сохранения pfx--<appid>) и прячет служебное (Proton, Steam Linux Runtime…).
-#   wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] < «game--ПАПКА\tномер\tназвание»   → новый JSON в stdout
-#       (игры Steam — из паспортов appmanifest_*.acf, в том числе спрятанных; прежние записи игр, которых
-#        на этой машине нет, сохраняются)
-#   wolf-games.py get ИНДЕКС.json АРХИВ appid|name                                  → поле или пусто
-import glob, json, os, re, sys
+# "name": "Название", "kind": "steam"|"folder", "tool": false, "archives": [...]}, ...]}. По нему приложение
+# связывает игру и все её архивы (sgame--/game--, сохранения pfx--/gsave--, моды mod--, файлы лаунчера lgame--,
+# программы prog--) и прячет служебное (Proton, Steam Linux Runtime…).
+#   wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] [STATE_DIR] [CLOUD_LS] [HOME] [PROGRAMS_DIR] < «game--ПАПКА\tномер\tназвание»
+#       (игры Steam — из паспортов appmanifest_*.acf, в том числе спрятанных, и кэша appcache/appinfo.vdf;
+#        сторонние игры — из потока wolf-shortcuts.py и $S/nm; программы — из $PD/$DH/Programs и настроек;
+#        прежние записи и их метаданные объединяются с новыми без потери поля archives)
+#   wolf-games.py get ИНДЕКС.json АРХИВ appid|name|archive|archives|appids          → поле или пусто
+import glob, json, os, re, struct, sys
 
 HID = ".vastgame-hidden"
 TOOL = re.compile(r"^sgame--(Proton|SteamLinuxRuntime|Steam Linux Runtime|Steamworks Shared$|Steam Controller Configs$)")
+APP_ARCH = re.compile(r"^(gsave|mod|lgame)--(\d+)--[^\x00-\x1f/]+$")
 
 
 def acf(path):
@@ -3138,44 +11078,528 @@ def acf(path):
     return {k: v for k, v in re.findall(r'^\s*"(appid|name|installdir)"\s+"(.*)"\s*$', text, re.M)}
 
 
+def _valid_member(arch, primary, appid):
+    if not isinstance(arch, str) or not arch or "/" in arch or "\0" in arch or "\n" in arch:
+        return False
+    if arch.startswith(("sgame--", "game--")):
+        return arch == primary
+    if arch.startswith("pfx--"):
+        return bool(appid) and arch == f"pfx--{appid}"
+    m = APP_ARCH.match(arch)
+    if m:
+        return bool(appid) and m.group(2) == str(appid)
+    if arch.startswith("prog--"):
+        top = arch[6:]
+        return bool(top) and top not in (".", "..")
+    return False
+
+
+def _norm_archives(val, primary="", appid="", include_primary=True):
+    raw = []
+    if isinstance(val, list):
+        raw = [x for x in val if isinstance(x, str)]
+    elif isinstance(val, dict):
+        for v in val.values():
+            if isinstance(v, str):
+                raw.append(v)
+            elif isinstance(v, list):
+                raw.extend(x for x in v if isinstance(x, str))
+    if include_primary and isinstance(primary, str) and primary:
+        raw.append(primary)
+    return sorted({x for x in raw if _valid_member(x, primary, appid)})
+
+
+def merge_game(old_g, new_g):
+    old_g = old_g if isinstance(old_g, dict) else {}
+    new_g = new_g if isinstance(new_g, dict) else {}
+    archive = new_g.get("archive") or old_g.get("archive") or ""
+    merged = dict(old_g)
+    for k, v in new_g.items():
+        if k in ("archives", "forgotten", "name", "appid", "kind", "tool") or k.startswith("_"):
+            continue
+        if v is not None and v != "":
+            merged[k] = v
+    merged["archive"] = archive
+    appid = str(new_g.get("appid") or old_g.get("appid") or "")
+    merged["appid"] = appid
+    merged["kind"] = new_g.get("kind") or old_g.get("kind") or ("steam" if archive.startswith("sgame--") else "folder")
+    old_name = old_g.get("name") if isinstance(old_g.get("name"), str) else ""
+    new_name = new_g.get("name") if isinstance(new_g.get("name"), str) else ""
+    folder = archive.split("--", 1)[1] if "--" in archive else archive
+    explicit = new_g.get("_explicit_name", True)
+    if new_name and (not old_name or new_name != folder or explicit):
+        merged["name"] = new_name
+    else:
+        merged["name"] = old_name or new_name or folder
+    merged.pop("_explicit_name", None)
+    merged["tool"] = bool(TOOL.match(archive)) or bool(new_g.get("tool")) or bool(old_g.get("tool"))
+    old_forg = _norm_archives(old_g.get("forgotten"), archive, appid, include_primary=False) if old_g else []
+    new_forg = _norm_archives(new_g.get("forgotten"), archive, appid, include_primary=False) if new_g else []
+    old_has = isinstance(old_g.get("archives"), (list, dict)) or isinstance(old_g.get("forgotten"), (list, dict))
+    new_has = isinstance(new_g.get("archives"), (list, dict)) or isinstance(new_g.get("forgotten"), (list, dict))
+    old_arch = _norm_archives(old_g.get("archives"), archive, appid, include_primary=bool(old_g) and not old_has) if old_g else []
+    new_arch = _norm_archives(new_g.get("archives"), archive, appid, include_primary=bool(new_g) and not new_has) if new_g else []
+    if isinstance(old_g.get("archives"), list) and not isinstance(old_g.get("forgotten"), list) and archive and archive not in old_arch:
+        old_forg = _norm_archives(old_forg + [archive], archive, appid, include_primary=False)
+    if isinstance(new_g.get("archives"), list) and not isinstance(new_g.get("forgotten"), list) and archive and archive not in new_arch:
+        new_forg = _norm_archives(new_forg + [archive], archive, appid, include_primary=False)
+    forg = sorted(set(old_forg) | set(new_forg))
+    merged["archives"] = sorted((set(old_arch) | set(new_arch)) - set(forg))
+    if forg:
+        merged["forgotten"] = forg
+    else:
+        merged.pop("forgotten", None)
+    return merged
+
+
 def load(path):
     try:
         games = json.load(open(path, encoding="utf-8")).get("games") or []
-        return [g for g in games if isinstance(g, dict) and isinstance(g.get("archive"), str)]
     except (OSError, ValueError, AttributeError):
         return []
+    by_arch = {}
+    for g in games:
+        if isinstance(g, dict) and isinstance(g.get("archive"), str) and g["archive"]:
+            a = g["archive"]
+            by_arch[a] = merge_game(by_arch.get(a), g)
+    return [by_arch[a] for a in sorted(by_arch)]
 
 
-def index(steamapps, old_path=None):
-    new = {}
+def _prog_archive(ident):
+    if not isinstance(ident, str) or not ident.startswith("prog:") or "\0" in ident:
+        return None
+    top = ident[5:].split("/", 1)[0].strip()
+    return f"prog--{top}" if top and top not in (".", "..") and "/" not in top else None
+
+
+def _jload(path):
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+# Разбор appinfo.vdf — тот же, что в wolf-shortcuts.py: граница записи (size) важнее дерева.
+# 0x03 float32, 0x05 WString (UTF-16LE до 00 00), 0x09 Binary (uint32 и байты). Неизвестный тип
+# не читает эту запись дальше; следующий AppID берётся по size.
+def _appinfo_key(data, i, keys, end):
+    if keys is None:
+        j = data.find(b"\0", i, end)
+        if j < 0:
+            return None, end
+        return data[i:j].decode("utf-8", "replace"), j + 1
+    if i + 4 > end:
+        return None, end
+    idx = struct.unpack_from("<I", data, i)[0]
+    if idx >= len(keys):
+        return None, end
+    return keys[idx], i + 4
+
+
+def _appinfo_kv(data, i, keys, end):
+    """(словарь, индекс, целиком ли дочитан блок). Индекс при обрыве не использовать: хвост записи отбрасывается."""
+    end = min(end, len(data))
+    out = {}
+    while i < end:
+        t = data[i]
+        i += 1
+        if t in (0x08, 0x0B):
+            return out, i, True
+        key, i = _appinfo_key(data, i, keys, end)
+        if key is None:
+            return out, end, False
+        if t == 0x00:
+            child, i, ok = _appinfo_kv(data, i, keys, end)
+            out[key] = child
+            if not ok:
+                return out, end, False
+        elif t == 0x01:
+            j = data.find(b"\0", i, end)
+            if j < 0:
+                return out, end, False
+            out[key] = data[i:j].decode("utf-8", "replace")
+            i = j + 1
+        elif t in (0x02, 0x04, 0x06):
+            if i + 4 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<i", data, i)[0]
+            i += 4
+        elif t == 0x03:
+            if i + 4 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<f", data, i)[0]
+            i += 4
+        elif t == 0x05:
+            start = i
+            found = False
+            while i + 2 <= end:
+                if data[i] == 0 and data[i + 1] == 0:
+                    out[key] = data[start:i].decode("utf-16-le", "replace")
+                    i += 2
+                    found = True
+                    break
+                i += 2
+            if not found:
+                return out, end, False
+        elif t == 0x09:
+            if i + 4 > end:
+                return out, end, False
+            n = struct.unpack_from("<I", data, i)[0]
+            i += 4
+            if n > end - i:
+                return out, end, False
+            out[key] = data[i:i + n]
+            i += n
+        elif t == 0x07:
+            if i + 8 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<Q", data, i)[0]
+            i += 8
+        elif t == 0x0A:
+            if i + 8 > end:
+                return out, end, False
+            out[key] = struct.unpack_from("<q", data, i)[0]
+            i += 8
+        else:
+            return out, end, False
+    return out, i, False
+
+
+def _appinfo_header(data):
+    """(таблица строк или None, смещение первой записи) либо None — это не appinfo 28/29."""
+    if len(data) < 8:
+        return None
+    magic = struct.unpack_from("<I", data, 0)[0]
+    if magic == 0x07564429:
+        if len(data) < 16:
+            return None
+        off = struct.unpack_from("<q", data, 8)[0]
+        if off < 0 or off > len(data) - 4:
+            return None
+        n = struct.unpack_from("<I", data, off)[0]
+        keys, j = [], off + 4
+        for _ in range(n):
+            if j >= len(data):
+                return None
+            k = data.find(b"\0", j)
+            if k < 0:
+                return None
+            keys.append(data[j:k].decode("utf-8", "replace"))
+            j = k + 1
+        return keys, 16
+    if magic == 0x07564428:
+        return None, 8
+    return None
+
+
+def _appinfo_apps(data):
+    """Пары (AppID, словарь appinfo). Размер записи, который не умещается в файл, обрывает хвост."""
+    opened = _appinfo_header(data)
+    if opened is None:
+        return
+    keys, i = opened
+    while i + 8 <= len(data):
+        aid, size = struct.unpack_from("<II", data, i)
+        if aid == 0 or size < 60 or i + 8 + size > len(data):
+            return
+        record_end = i + 8 + size
+        kv, _, _ = _appinfo_kv(data, i + 68, keys, record_end)
+        app = kv.get("appinfo")
+        yield aid, app if isinstance(app, dict) else {}
+        i = record_end
+
+
+def _appinfo_text(block, name):
+    if not isinstance(block, dict):
+        return ""
+    value = block.get(name)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _read_appinfo(steamapps):
+    steam_root = os.path.dirname(os.path.abspath(steamapps))
+    path = os.path.join(steam_root, "appcache", "appinfo.vdf")
+    if not os.path.isfile(path):
+        path = os.path.join(steamapps, "appcache", "appinfo.vdf")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return {}
+    out = {}
+    for aid, app in _appinfo_apps(data):
+        idir = _appinfo_text(app.get("config"), "installdir")
+        name = _appinfo_text(app.get("common"), "name")
+        if idir and "/" not in idir and "\\" not in idir and "\0" not in idir and idir not in (".", ".."):
+            out[str(aid)] = {"appid": str(aid), "installdir": idir, "name": name}
+    return out
+
+
+def _read_nm(state_dir):
+    nm_dir = os.path.join(state_dir, "nm") if state_dir else ""
+    if not nm_dir or not os.path.isdir(nm_dir):
+        return {}
+    by_folder = {}
+    for fn in sorted(os.listdir(nm_dir)):
+        if not fn.isdigit():
+            continue
+        try:
+            folder = open(os.path.join(nm_dir, fn), encoding="utf-8", errors="replace").read().strip()
+        except OSError:
+            continue
+        if folder and "/" not in folder and "\0" not in folder and "\n" not in folder and folder not in (".", ".."):
+            by_folder.setdefault(folder, set()).add(fn)
+    return {folder: next(iter(aids)) for folder, aids in by_folder.items() if len(aids) == 1}
+
+
+def _read_programs(programs_dir=None, home=None):
+    cands = []
+    if programs_dir:
+        cands.append(programs_dir)
+    if home:
+        cands.extend([os.path.join(home, "Downloads", "Programs"), os.path.join(home, "Programs")])
+    pdirs = [d for d in cands if d and os.path.isdir(d)]
+    progs = set()
+    for d in pdirs:
+        try:
+            for top in sorted(os.listdir(d)):
+                if not top.startswith(".") and top not in (".", "..") and os.path.isdir(os.path.join(d, top)):
+                    progs.add(f"prog--{top}")
+        except OSError:
+            pass
+    return progs, bool(pdirs)
+
+
+def _read_cloud_ls(cloud_ls):
+    archs = set()
+    if cloud_ls and os.path.isfile(cloud_ls):
+        try:
+            lines = open(cloud_ls, encoding="utf-8", errors="replace").read().splitlines()
+        except OSError:
+            lines = []
+        for ln in lines:
+            fname = ln.split("\t", 1)[0].strip()
+            if ".tar.zst" in fname:
+                archs.add(fname.split(".tar.zst", 1)[0])
+    return archs
+
+
+def _discover_by_appid(steamapps, state_dir=None, cloud_archs=(), home=None, allowed_progs=None):
+    by_appid = {}
+    def add(a, arch):
+        if not (a and str(a).isdigit() and arch):
+            return
+        if arch.startswith("prog--") and allowed_progs is not None and arch not in allowed_progs:
+            return
+        by_appid.setdefault(str(a), set()).add(arch)
+
+    compat = os.path.join(steamapps, "compatdata")
+    if os.path.isdir(compat):
+        for d in sorted(os.listdir(compat)):
+            if d.isdigit() and os.path.isdir(os.path.join(compat, d)):
+                add(d, f"pfx--{d}")
+    for base in sorted(cloud_archs):
+        if base.startswith("pfx--") and base[5:].isdigit():
+            add(base[5:], base)
+        else:
+            m = APP_ARCH.match(base)
+            if m:
+                add(m.group(2), base)
+    if state_dir and os.path.isdir(state_dir):
+        for appid, ids in _jload(os.path.join(state_dir, "progs.auto")).items():
+            for ident in ids if isinstance(ids, list) else []:
+                add(appid, _prog_archive(ident))
+        for appid, info in _jload(os.path.join(state_dir, "launch.sel")).items():
+            if isinstance(info, dict):
+                add(appid, _prog_archive(info.get("id")))
+        for appid, info in _jload(os.path.join(state_dir, "progs.helper")).items():
+            if isinstance(info, dict):
+                for ident in info.get("auto") or [] if isinstance(info.get("auto"), list) else []:
+                    add(appid, _prog_archive(ident))
+                via = info.get("launch")
+                if isinstance(via, dict):
+                    add(appid, _prog_archive(via.get("id")))
+    launch_dir = os.path.join(home, ".local/share/vastgame/launch") if home else ""
+    if launch_dir and os.path.isdir(launch_dir):
+        for fn in sorted(os.listdir(launch_dir)):
+            m = re.fullmatch(r"(\d+)(?:\.once)?", fn)
+            if not m:
+                continue
+            try:
+                lines = open(os.path.join(launch_dir, fn), encoding="utf-8", errors="replace").read().splitlines()
+            except OSError:
+                continue
+            if len(lines) >= 3:
+                add(m.group(1), _prog_archive(lines[2].strip()))
+    return by_appid
+
+
+def index(steamapps, old_path=None, state_dir=None, cloud_ls=None, home=None, programs_dir=None):
+    state_dir = state_dir if state_dir is not None else os.environ.get("WOLF_STATE")
+    cloud_ls = cloud_ls if cloud_ls is not None else os.environ.get("WOLF_LS")
+    home = home if home is not None else os.environ.get("WOLF_HOME")
+    programs_dir = programs_dir if programs_dir is not None else os.environ.get("WOLF_PROGRAMS")
+    old_list = load(old_path) if old_path else []
+    by_arch = {g["archive"]: dict(g) for g in old_list}
+    cloud_archs = _read_cloud_ls(cloud_ls)
+    local_forgotten = set()
+    if state_dir and os.path.isdir(os.path.join(state_dir, "x")):
+        try:
+            local_forgotten = set(os.listdir(os.path.join(state_dir, "x")))
+        except OSError:
+            local_forgotten = set()
+    revived = cloud_archs - local_forgotten
+    for a, g in by_arch.items():
+        if g.get("forgotten"):
+            restored = [x for x in g["forgotten"] if x in revived]
+            g["forgotten"] = [x for x in g["forgotten"] if x not in revived]
+            if not g["forgotten"]:
+                g.pop("forgotten", None)
+            if a in restored and a not in (g.get("archives") or ()):
+                g["archives"] = sorted(set(g.get("archives") or ()) | {a})
+    disk_progs, has_pdirs = _read_programs(programs_dir, home)
+    old_progs = {x for g in old_list for x in (g.get("archives") or ()) if isinstance(x, str) and x.startswith("prog--")}
+    cloud_progs = {x for x in cloud_archs if x.startswith("prog--")}
+    allowed_progs = (disk_progs | cloud_progs | old_progs) if has_pdirs else None
+
     for f in sorted(glob.glob(os.path.join(steamapps, "appmanifest_*.acf"))
                     + glob.glob(os.path.join(steamapps, HID, "appmanifest_*.acf"))):
         m = acf(f)
         if m.get("installdir") and m.get("appid"):
             a = "sgame--" + m["installdir"]
-            new[a] = {"archive": a, "appid": m["appid"], "name": m.get("name") or m["installdir"], "kind": "steam"}
+            cur = {"archive": a, "appid": m["appid"], "name": m.get("name") or m["installdir"],
+                   "kind": "steam", "_explicit_name": bool(m.get("name")), "archives": [a]}
+            by_arch[a] = merge_game(by_arch.get(a), cur)
     for line in sys.stdin:
         parts = line.rstrip("\n").split("\t")
         if len(parts) == 3 and parts[0].startswith("game--"):
-            new[parts[0]] = {"archive": parts[0], "appid": parts[1], "name": parts[2], "kind": "folder"}
-    for g in load(old_path) if old_path else []:
-        new.setdefault(g["archive"], g)
+            a = parts[0]
+            cur = {"archive": a, "appid": parts[1], "name": parts[2], "kind": "folder", "_explicit_name": True,
+                   "archives": [a]}
+            by_arch[a] = merge_game(by_arch.get(a), cur)
+    for folder, aid in sorted(_read_nm(state_dir).items()):
+        a = f"game--{folder}"
+        existing = by_arch.get(a)
+        if existing and existing.get("appid") and str(existing["appid"]) != aid:
+            continue
+        name = folder.replace("_", " ").strip() or folder
+        cur = {"archive": a, "appid": aid, "name": name, "kind": "folder", "_explicit_name": False,
+               "archives": [a]}
+        by_arch[a] = merge_game(existing, cur)
+
+    extra = _discover_by_appid(steamapps, state_dir, cloud_archs, home, allowed_progs)
+    appinfo = _read_appinfo(steamapps)
+    if appinfo:
+        by_idir = {}
+        for info in appinfo.values():
+            by_idir.setdefault(info["installdir"], []).append(info)
+        common_dir = os.path.join(steamapps, "common")
+        sgame_dirs = {a[7:] for a in by_arch if a.startswith("sgame--")}
+        sgame_dirs |= {a[7:] for a in cloud_archs if a.startswith("sgame--")}
+        if os.path.isdir(common_dir):
+            try:
+                for d in os.listdir(common_dir):
+                    if not d.startswith(".") and os.path.isdir(os.path.join(common_dir, d)):
+                        sgame_dirs.add(d)
+            except OSError:
+                pass
+        active_aids = set(extra) | {str(g.get("appid") or "") for g in by_arch.values() if g.get("appid")}
+        for idir in sorted(sgame_dirs):
+            a = f"sgame--{idir}"
+            if a in by_arch and TOOL.match(a):
+                continue
+            existing = by_arch.get(a)
+            ex_aid = str(existing.get("appid") or "") if existing else ""
+            if ex_aid and ex_aid in appinfo:
+                info = appinfo[ex_aid]
+            else:
+                cands = by_idir.get(idir) or []
+                if len(cands) == 1:
+                    info = cands[0]
+                else:
+                    act = [c for c in cands if c["appid"] in active_aids]
+                    info = act[0] if len(act) == 1 else None
+            if info and (not ex_aid or ex_aid == info["appid"]):
+                cur = {"archive": a, "appid": info["appid"], "name": info["name"] or idir,
+                       "kind": "steam", "_explicit_name": bool(info["name"]), "archives": [a]}
+                by_arch[a] = merge_game(existing, cur)
+        known_aids = {str(g.get("appid") or "") for g in by_arch.values() if g.get("appid")}
+        for aid in sorted(extra):
+            if aid in known_aids or aid not in appinfo:
+                continue
+            info = appinfo[aid]
+            idir = info["installdir"]
+            a = f"sgame--{idir}"
+            cands = [c for c in (by_idir.get(idir) or []) if c["appid"] in (set(extra) | known_aids)]
+            if len(cands) != 1 or (a in by_arch and by_arch[a].get("appid") not in ("", aid)):
+                continue
+            cur = {"archive": a, "appid": aid, "name": info["name"] or idir,
+                   "kind": "steam", "_explicit_name": bool(info["name"]), "archives": [a]}
+            by_arch[a] = merge_game(by_arch.get(a), cur)
+            known_aids.add(aid)
+
+    by_id = {}
+    for g in by_arch.values():
+        aid = str(g.get("appid") or "")
+        if aid:
+            by_id.setdefault(aid, []).append(g)
+    for aid, archs in extra.items():
+        matches = by_id.get(aid) or []
+        if len(matches) == 1:
+            g = matches[0]
+            inc = not isinstance(g.get("archives"), (list, dict)) and not isinstance(g.get("forgotten"), (list, dict))
+            g["archives"] = _norm_archives(list(g.get("archives") or []) + sorted(archs), g["archive"], aid,
+                                           include_primary=inc)
     games = []
-    for a in sorted(new):
-        g = dict(new[a])
-        g["tool"] = bool(TOOL.match(a))
+    for a in sorted(by_arch):
+        g = dict(by_arch[a])
+        aid = str(g.get("appid") or "")
+        g["tool"] = bool(TOOL.match(a)) or bool(g.get("tool"))
+        inc = not isinstance(g.get("archives"), (list, dict)) and not isinstance(g.get("forgotten"), (list, dict))
+        cands = _norm_archives(g.get("archives"), a, aid, include_primary=inc)
+        forg = set(_norm_archives(g.get("forgotten"), a, aid, include_primary=False))
+        for x in local_forgotten:
+            if x == a or x in cands or (aid and len(by_id.get(aid) or ()) == 1 and _valid_member(x, a, aid) and not x.startswith("prog--")):
+                forg.add(x)
+        forg_list = _norm_archives(sorted(forg), a, aid, include_primary=False)
+        g["archives"] = [x for x in cands if x not in forg_list]
+        if forg_list:
+            g["forgotten"] = forg_list
+        else:
+            g.pop("forgotten", None)
         games.append(g)
     return json.dumps({"version": 1, "games": games}, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
 
 
+def get_field(path, target, field):
+    games = load(path)
+    for g in games:
+        if g["archive"] == target:
+            val = g.get(field)
+            return "\n".join(val) if isinstance(val, list) else str(val or "")
+    matches = []
+    for g in games:
+        aid = str(g.get("appid") or "")
+        inc = not isinstance(g.get("archives"), (list, dict)) and not isinstance(g.get("forgotten"), (list, dict))
+        members = set(_norm_archives(g.get("archives"), g["archive"], aid, include_primary=inc))
+        if target in members or (aid and _valid_member(target, g["archive"], aid) and not target.startswith("prog--")):
+            matches.append(g)
+    if field in ("games", "archives"):
+        return "\n".join(sorted({g["archive"] for g in matches if g.get("archive")}))
+    if field == "appids":
+        return "\n".join(sorted({str(g["appid"]) for g in matches if g.get("appid")}))
+    if len(matches) == 1:
+        val = matches[0].get(field)
+        return "\n".join(val) if isinstance(val, list) else str(val or "")
+    return ""
+
+
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["index"]:
-        sys.stdout.write(index(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None))
+    if sys.argv[1:2] == ["index"] and len(sys.argv) >= 3:
+        sys.stdout.write(index(sys.argv[2], *(sys.argv[3:8])))
     elif sys.argv[1:2] == ["get"] and len(sys.argv) == 5:
-        for g in load(sys.argv[2]):
-            if g["archive"] == sys.argv[3]:
-                print(g.get(sys.argv[4]) or "")
-                break
+        print(get_field(sys.argv[2], sys.argv[3], sys.argv[4]))
     else:
         sys.exit("wolf-games.py index STEAMAPPS [ПРЕЖНИЙ.json] | get ИНДЕКС.json АРХИВ appid|name")
 GAMES
@@ -5565,7 +13989,7 @@ def _norm_name(name):
     """Имя компьютера и DeviceName из Steam сравниваются без регистра, пробелов и «.local»."""
     s = (name or "").strip().lower()
     s = re.sub(r"\.local$", "", s)
-    return re.sub(r"[\s_\-.'’]+", "", s)
+    return re.sub(r"[\s_\-\u2010-\u2015\u2212.'’]+", "", s)
 
 
 def _devices(root, sid):
@@ -5705,7 +14129,10 @@ def pin_check(root=None, port=8080, device_ids="", name="", known=""):
                     print(f"check: {st} {u}".strip())
                     return 0
                 devices = _devices(root, u)
+                cef_paired = (st == "paired")
                 st, did = _device_decision(devices, _split_ids(device_ids), name, _split_known(known), u)
+                if st == "pin" and cef_paired and not _split_ids(device_ids) and u in _split_known(known):
+                    st = "ok"
                 print(f"check: {st} {u}{(' ' + did) if st == 'ok' and did else ''}".strip())
                 return 0
         except Exception:
@@ -5734,7 +14161,12 @@ def pin(code, root=None, port=8080, wait=15):
         print("pin: invalid")
         return 2
     sid = active_account(root)
-    before = set(_devices(root, sid))
+    before = {sid: set(_devices(root, sid))} if sid else {}
+    if root and (Path(root) / "userdata").is_dir():
+        for d in (Path(root) / "userdata").iterdir():
+            if d.name.isdigit():
+                s = str(BASE + int(d.name))
+                before[s] = set(_devices(root, s))
     expr = (
         f"(function(){{"
         f"if (typeof SteamClient === 'undefined' || !SteamClient.RemotePlay || !SteamClient.RemotePlay.SetRemoteDeviceAuthorized) return 'no';"
@@ -5770,9 +14202,20 @@ def pin(code, root=None, port=8080, wait=15):
                     if isinstance(res, str) and res.startswith("ok"):
                         _, _, u = res.partition(" ")
                         u = u.strip() if re.fullmatch(r"7656\d{13}", u.strip()) else sid
-                        after = _devices(root, u)
-                        added = [i for i in after if i not in before]
-                        did = added[-1] if len(added) == 1 else ""
+                        prev = before.get(u, set())
+                        did = ""
+                        for attempt in range(6):
+                            after = _devices(root, u)
+                            added = [i for i in after if i not in prev]
+                            if len(added) == 1:
+                                did = added[0]
+                                break
+                            if not added and len(after) == 1 and not prev:
+                                did = next(iter(after))
+                                break
+                            if not root or attempt == 5:
+                                break
+                            time.sleep(0.5)
                         print(f"pin: ok {u}{(' ' + did) if did else ''}".strip())
                         return 0
                 except Exception:
@@ -6456,7 +14899,10 @@ w /usr/local/bin/wolf-parts.py <<'PARTS'
 # [v4.4] Большие архивы в облаке — частями, параллельно. Google Drive отдаёт и принимает один файл одним потоком
 # (~25 МБ/с): игра на 50 ГБ восстанавливалась 35+ минут (живой случай 2026-09-26). Теперь архив больше одной части
 # хранится частями по WOLF_PART_MB (512) МБ и оглавлением; части качаются и выгружаются по WOLF_PART_PAR (4) сразу.
-#   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]        — поток со stdin в ОБЛАКО/ОБЪЕКТ
+#   wolf-parts.py put ОБЛАКО ОБЪЕКТ [--no-trash]        — поток со stdin сразу в боевой ОБЪЕКТ
+#   wolf-parts.py stage ОБЛАКО ОБЪЕКТ [--no-trash]      — только подготовить; квитанция в stdout, боевой не трогать
+#   wolf-parts.py publish ОБЛАКО ОБЪЕКТ [--no-trash]    — квитанция из stdin: проверить выгрузку и сделать её боевой
+#   wolf-parts.py abort ОБЛАКО ОБЪЕКТ                   — убрать подготовку по квитанции, боевой не трогать
 #   wolf-parts.py get ОБЛАКО ОБЪЕКТ                     — архив из частей в stdout, по порядку
 #   wolf-parts.py cat ОБЛАКО ОБЪЕКТ РАЗМЕР MD5           — [v4.5] одиночный файл в stdout, так же кусками
 #   wolf-parts.py rm  ОБЛАКО ОБЪЕКТ [--no-trash] [--all] — удалить объект во всех видах (--all — и его дельты)
@@ -6486,6 +14932,7 @@ import concurrent.futures as cf
 import fcntl
 import hashlib
 import itertools
+import json
 import os
 import re
 import secrets
@@ -6522,6 +14969,155 @@ HEAD = "vastgame-parts 1"
 
 def log(msg):
     print(f"parts: {msg}", file=sys.stderr, flush=True)
+
+
+try:
+    if '/usr/local/lib' not in sys.path:
+        sys.path.insert(0, '/usr/local/lib')
+    from wolf_session import (
+        get_run_id, get_env_iid, get_env_r, get_storage_folder_id, is_cleanup_authorized
+    )
+except Exception:
+    def get_run_id(run_id_file='/run/wolf/run_id'):
+        try:
+            with open(run_id_file, 'r', encoding='utf-8') as f:
+                v = f.read().strip()
+                return v if v else None
+        except Exception:
+            return None
+
+    def get_env_iid(iid_file='/run/wolf/iid'):
+        v = os.environ.get('VI')
+        if v and str(v).strip():
+            return str(v).strip()
+        try:
+            with open(iid_file, 'r', encoding='utf-8') as f:
+                c = f.read().strip()
+                return c if c else None
+        except Exception:
+            return None
+
+    def get_env_r(env_file='/etc/wolf/env'):
+        if os.environ.get('R'):
+            v = str(os.environ['R']).strip()
+            if v:
+                return v
+        if os.path.isfile(env_file):
+            try:
+                with open(env_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if 'R=' in line:
+                            m = re.search(r'\bR=["\']?([^"\'\s]+)["\']?', line)
+                            if m and m.group(1).strip():
+                                return m.group(1).strip()
+            except Exception:
+                pass
+        return ''
+
+    def get_storage_folder_id(r_val=None, rc_cmd=None, fid_path='/run/wolf/storage_folder_id'):
+        if r_val is None:
+            r_val = get_env_r()
+        if not r_val or ':' not in r_val:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+        rem, _, fol = r_val.partition(':')
+        fol = fol.strip('/')
+        if not rem or not fol:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+        if rc_cmd is None:
+            rc_cmd = os.environ.get('WOLF_RCLONE_CMD', 'rclone')
+        try:
+            res = subprocess.run([rc_cmd, 'lsjson', '-M', '--stat', r_val],
+                                 capture_output=True, text=True, timeout=10)
+            if res.returncode == 0:
+                d = json.loads(res.stdout or '{}')
+                fid = str(d.get('ID') or d.get('id') or '').strip()
+                if fid:
+                    try:
+                        os.makedirs(os.path.dirname(fid_path), exist_ok=True)
+                        tmp = f'{fid_path}.tmp.{os.getpid()}'
+                        with open(tmp, 'w', encoding='utf-8') as f:
+                            f.write(fid)
+                        os.replace(tmp, fid_path)
+                    except Exception:
+                        pass
+                    return fid
+            else:
+                try:
+                    os.unlink(fid_path)
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            try:
+                os.unlink(fid_path)
+            except Exception:
+                pass
+            return None
+        try:
+            res = subprocess.run([rc_cmd, 'lsjson', '-M', '--dirs-only', '--max-depth', '1', f'{rem}:'],
+                                 capture_output=True, text=True, timeout=10)
+            if res.returncode == 0:
+                for item in json.loads(res.stdout or '[]'):
+                    if str(item.get('Name') or '').strip() == fol:
+                        fid = str(item.get('ID') or item.get('id') or '').strip()
+                        if fid:
+                            try:
+                                os.makedirs(os.path.dirname(fid_path), exist_ok=True)
+                                tmp = f'{fid_path}.tmp.{os.getpid()}'
+                                with open(tmp, 'w', encoding='utf-8') as f:
+                                    f.write(fid)
+                                os.replace(tmp, fid_path)
+                            except Exception:
+                                pass
+                            return fid
+            else:
+                try:
+                    os.unlink(fid_path)
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            pass
+        try:
+            os.unlink(fid_path)
+        except Exception:
+            pass
+        return None
+
+    def is_cleanup_authorized(grant_file='/run/wolf/cleanup_grant.json', run_id_val=None, iid_val=None, folder_id_val=None):
+        """Единая проверка допуска к очистке во всех слоях Wolf."""
+        cur_run_id = (run_id_val if run_id_val is not None else get_run_id()) or ''
+        cur_iid = (iid_val if iid_val is not None else get_env_iid()) or ''
+        cur_fid = (folder_id_val if folder_id_val is not None else get_storage_folder_id()) or ''
+        if not cur_run_id or not cur_iid or not cur_fid:
+            return False
+        if not os.path.isfile(grant_file):
+            return False
+        try:
+            with open(grant_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return False
+            if data.get('status') != 'granted':
+                return False
+            g_run = str(data.get('run_id') or '').strip()
+            g_iid = str(data.get('iid') or '').strip()
+            g_fid = str(data.get('folder_id') or '').strip()
+            if not g_run or not g_iid or not g_fid:
+                return False
+            if g_run != cur_run_id or g_iid != cur_iid or g_fid != cur_fid:
+                return False
+            return True
+        except Exception:
+            return False
 
 
 class Progress:
@@ -6574,8 +15170,13 @@ def argv(*args, trash=False):
     return [*RC, f"--drive-use-trash={'true' if trash else 'false'}", *args]
 
 
+def pack_lock_fds():
+    return (8,) if os.environ.get("WOLF_PART_LOCK_FD") == "8" else ()
+
+
 def rclone(*args, trash=False):
-    return subprocess.run(argv(*args, trash=trash), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return subprocess.run(argv(*args, trash=trash), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          pass_fds=pack_lock_fds())
 
 
 def why(r):
@@ -6595,8 +15196,28 @@ def names(remote):
 def same(remote, name, md5):
     """Файл в облаке — с этим MD5. Нужно, когда rclone сообщил об ошибке, а дело на самом деле сделано
     (ответ сервера потерялся): не принять удачу за сбой и не удалить только что записанное."""
+    return probe(remote, name, md5) == "match"
+
+
+def probe(remote, name, md5):
+    """match — MD5 совпал; differ — ответ получен и MD5 другой; absent — файла нет (код 3);
+    unknown — запрос не удался, отсутствие этим не считается."""
     r = rclone("md5sum", f"{remote}/{name}")
-    return r.returncode == 0 and r.stdout.decode("utf-8", "replace").split()[:1] == [md5]
+    if r.returncode == 3:
+        return "absent"
+    if r.returncode != 0:
+        return "unknown"
+    got = r.stdout.decode("utf-8", "replace").split()[:1]
+    return "match" if got == [md5] else "differ"
+
+
+def note_attempt(obj, receipt, kind):
+    """Сведения о попытке, пока судьба публикации не известна. Части в облаке при этом не удаляются."""
+    os.makedirs(TMP, exist_ok=True)
+    path = os.path.join(TMP, "attempt-" + obj.replace("/", "_"))
+    with open(path, "w") as f:
+        f.write(kind + "\n")
+        f.write(format_receipt(receipt))
 
 
 def md5_of(path):
@@ -6663,7 +15284,7 @@ def rcat(src, dest, limit=None, first=b""):
     """Поток прямо в облако, без временного файла (на диске мало места): first, затем src — до limit байт
     (None — до конца). Одна попытка: поток не перечитать. (успех, md5, размер, поток кончился)."""
     p = subprocess.Popen(argv("rcat", "--drive-chunk-size=128M", dest), stdin=subprocess.PIPE,
-                         stdout=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, pass_fds=pack_lock_fds())
     h, n, eof, b = hashlib.md5(), 0, False, first
     try:
         while True:
@@ -6704,26 +15325,130 @@ def upload(path, remote, name):
             pass
 
 
-def put_single(remote, obj, path=None, md5=None, src=None):
-    """Одним файлом, как до v4.4: ОБЪЕКТ.part → переименование в ОБЪЕКТ (прежний — в корзину).
-    path (и его md5) — файл на диске; src — прямо из потока (на диске мало места)."""
-    part = f"{remote}/{obj}.part"
-    rclone("deletefile", part)                            # хвост прерванной выгрузки
+def cloud_size(remote, name):
+    """Размер уже выгруженного файла. None — его нет или облако не ответило."""
+    r = rclone("lsl", f"{remote}/{name}")
+    if r.returncode != 0:
+        return None
+    line = r.stdout.decode("utf-8", "replace").split()
+    try:
+        return int(line[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def staged_ok(remote, name, md5, size):
+    """Выгрузка на месте и совпала: размер и MD5 одним ответом lsjson.
+    Вызывается после подготовки и ещё раз непосредственно перед moveto.
+    Неверный размер, другой или пустой MD5, ошибка запроса — не подтверждено.
+    Потерянный ответ moveto сюда не относится: его разбирает probe."""
+    r = rclone("lsjson", "--stat", "--hash-type", "MD5", f"{remote}/{name}")
+    if r.returncode != 0:
+        return False
+    try:
+        item = json.loads(r.stdout.decode("utf-8", "replace"))
+    except ValueError:
+        return False
+    if not isinstance(item, dict) or item.get("Size") != size:
+        return False
+    hashes = item.get("Hashes") if isinstance(item.get("Hashes"), dict) else {}
+    got = next((v for k, v in hashes.items() if str(k).lower() == "md5" and v), "")
+    return got == md5
+
+
+def discard(remote, names):
+    for name in names:
+        rclone("deletefile", f"{remote}/{name}")
+
+
+def stage_single(remote, obj, path=None, md5=None, src=None):
+    """Одним файлом во временное имя ОБЪЕКТ.part. Боевой ОБЪЕКТ не переименовывается.
+    path (и его md5) — файл на диске; src — прямо из потока (на диске мало места).
+    None — не вышло, прежняя версия не тронута."""
+    part_name = f"{obj}.part"
+    rclone("deletefile", f"{remote}/{part_name}")
     if path:
-        ok = rclone("copyto", path, part).returncode == 0
+        size = os.path.getsize(path)
+        ok = rclone("copyto", path, f"{remote}/{part_name}").returncode == 0
     else:
-        ok, md5, _, _ = rcat(src, part)
-    ok = ok and (rclone("moveto", part, f"{remote}/{obj}", trash=True).returncode == 0 or same(remote, obj, md5))
+        ok, md5, size, _ = rcat(src, f"{remote}/{part_name}")
+    if not (ok and staged_ok(remote, part_name, md5, size)):
+        discard(remote, [part_name])
+        log(f"{obj}: подготовка одним файлом не удалась — прежняя версия в облаке не тронута")
+        return None
+    return ("single", md5, size)
+
+
+def publish_single(remote, obj, md5, size, trash):
+    """Боевым файл становится только после повторной проверки ОБЪЕКТ.part."""
+    part_name = f"{obj}.part"
+    if not staged_ok(remote, part_name, md5, size):
+        discard(remote, [part_name])
+        log(f"{obj}: проверка выгрузки не сошлась — прежняя версия в облаке не тронута")
+        return 1
+    ok = (rclone("moveto", f"{remote}/{part_name}", f"{remote}/{obj}", trash=trash).returncode == 0
+          or same(remote, obj, md5))
     if not ok:
-        rclone("deletefile", part)
+        discard(remote, [part_name])
         log(f"{obj}: выгрузка одним файлом не удалась — прежняя версия в облаке не тронута")
-    return 0 if ok else 1
+        return 1
+    return 0
+
+
+def record_stage(path, remote, obj, gen):
+    """Записать имя поколения до первого обращения, которое создаёт его в облаке."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump([remote, obj, gen], f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(path + ".tmp", path)
+    directory = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def recover_stage(remote, base, path):
+    """Повтор после обрыва stage. Работаем только со своим записанным поколением."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            saved_remote, obj, gen = json.load(f)
+        if (saved_remote != remote or not isinstance(obj, str) or not isinstance(gen, str)
+                or not re.fullmatch(re.escape(base) + r"(?:\.[0-9a-f]{8})?", obj)
+                or not re.fullmatch(r"[0-9a-f]{8}", gen)):
+            raise ValueError("журнал подготовки не соответствует архиву или хранилищу")
+        have = names(remote)
+        if have is None:
+            raise ValueError("не получен список объектов")
+        pattern = re.compile(re.escape(f"{obj}.g{gen}-") + r"\d{4,}")
+        mine = [name for name in have if pattern.fullmatch(name)]
+        if mine:
+            active = f"{obj}.parts"
+            r = rclone("cat", *RC_READ, f"{remote}/{active}")
+            if r.returncode == 0 and have.count(active) <= 1:
+                used = {name for name, _, _ in parse_index(r.stdout.decode("utf-8"), obj)}
+                mine = [name for name in mine if name not in used]
+            elif r.returncode not in (3, 4) or active in have:
+                raise ValueError("не удалось подтвердить боевое оглавление")
+            if len(mine) != len(set(mine)) or not delete(remote, mine, trash=True):
+                raise ValueError("удаление остатков подготовки не подтверждено")
+            if mine:
+                log(f"{obj}: убраны части прерванной подготовки ({len(mine)})")
+        os.unlink(path)
+        return 0
+    except (OSError, ValueError, TypeError) as e:
+        log(f"{base}: {e}")
+        return 1
 
 
 def put_parts(remote, obj, have, trash, tmp, src, ahead):
     """Части нового поколения, по PAR сразу; потом оглавление; потом уборка прежней версии.
     ahead — первая часть, уже прочитанная на диск: (путь, md5, размер, замок места)."""
     t0, gen = time.time(), secrets.token_hex(4)
+    while any(name.startswith(f"{obj}.g{gen}-") for name in have):
+        gen = secrets.token_hex(4)
     parts, futures, ok = [], [], True
     mine = threading.Semaphore(PAR)
 
@@ -6735,6 +15460,8 @@ def put_parts(remote, obj, have, trash, tmp, src, ahead):
             mine.release()
 
     try:
+        if path := os.environ.get("WOLF_STAGE_LOG"):
+            record_stage(path, remote, obj, gen)
         with cf.ThreadPoolExecutor(PAR) as ex:
             for i in itertools.count():
                 name = f"{obj}.g{gen}-{i:04d}"
@@ -6777,35 +15504,70 @@ def put_parts(remote, obj, have, trash, tmp, src, ahead):
     if not ok:
         delete(remote, [n for n, _, _ in parts], trash=False)
         log(f"{obj}: выгрузка частей не удалась — прежняя версия в облаке не тронута")
-        return 1
+        return None
 
     index = os.path.join(tmp, "index")
     total = sum(s for _, _, s in parts)
     with open(index, "w") as f:
         f.write(f"{HEAD}\n{total}\n" + "".join(f"{n}\t{m}\t{s}\n" for n, m, s in parts))
-    committed = (rclone("copyto", index, f"{remote}/{obj}.parts.new").returncode == 0
-                 and rclone("moveto", f"{remote}/{obj}.parts.new", f"{remote}/{obj}.parts", trash=True).returncode == 0)
-    if not committed and not same(remote, f"{obj}.parts", md5_of(index)):
+    index_md5 = md5_of(index)
+    staged = rclone("copyto", index, f"{remote}/{obj}.parts.new").returncode == 0 and staged_ok(
+        remote, f"{obj}.parts.new", index_md5, os.path.getsize(index))
+    staged = staged and all(staged_ok(remote, n, m, s) for n, m, s in parts)
+    if not staged:
         delete(remote, [n for n, _, _ in parts] + [f"{obj}.parts.new"], trash=False)
         log(f"{obj}: оглавление не записалось — прежняя версия в облаке не тронута")
+        return None
+    return ("parts", gen, index_md5, os.path.getsize(index), parts, t0)
+
+
+def publish_parts(remote, obj, gen, index_md5, index_size, parts, trash, t0):
+    """Боевым оглавление становится только после повторной проверки частей и ОБЪЕКТ.parts.new."""
+    fresh = [f"{obj}.parts.new", *[n for n, _, _ in parts]]
+    if not staged_ok(remote, f"{obj}.parts.new", index_md5, index_size):
+        delete(remote, fresh, trash=False)
+        log(f"{obj}: проверка оглавления не сошлась — прежняя версия в облаке не тронута")
         return 1
-    # новая версия записана — старые части и прежний одиночный файл больше не нужны
+    if not all(staged_ok(remote, n, m, s) for n, m, s in parts):
+        delete(remote, fresh, trash=False)
+        log(f"{obj}: проверка частей не сошлась — прежняя версия в облаке не тронута")
+        return 1
+    moved = rclone("moveto", f"{remote}/{obj}.parts.new", f"{remote}/{obj}.parts", trash=trash).returncode == 0
+    if not moved:
+        # Ответ moveto потерялся. MD5 боевого оглавления: совпал — публикация была;
+        # другой — переименования не было; проверка не прошла — результат неизвестен, части не трогаем.
+        state = probe(remote, f"{obj}.parts", index_md5)
+        if state == "unknown":
+            note_attempt(obj, ("parts", gen, index_md5, index_size, parts, t0), "unknown")
+            log(f"{obj}: ответ moveto потерян, MD5 не проверен — части оставляю, публикация не подтверждена")
+            return 2
+        if state == "absent":
+            note_attempt(obj, ("parts", gen, index_md5, index_size, parts, t0), "absent")
+            log(f"{obj}: активного оглавления нет — одиночный архив остаётся, части подготовки оставляю")
+            return 3
+        if state != "match":
+            delete(remote, fresh, trash=False)
+            log(f"{obj}: переименование не состоялось — прежняя версия в облаке не тронута")
+            return 1
+    have = names(remote) or []
     pr = part_re(obj)
     old = [n for n in have if (m := pr.fullmatch(n)) and m.group(1) != gen]
     if obj in have:
         old.append(obj)
     if not delete(remote, old, trash):
         log(f"{obj}: не все старые части удалились (уберутся при следующей выгрузке)")
+    total = sum(s for _, _, s in parts)
     dt = max(time.time() - t0, 0.001)
     log(f"{obj}: {len(parts)} частей, {total >> 20} МБ за {dt:.0f} с ({(total >> 20) / dt:.0f} МБ/с)")
     return 0
 
 
-def put(remote, obj, trash):
+def prepare(remote, obj, trash):
+    """Залить новую версию рядом с боевой. Квитанция или None. Боевое имя не меняется."""
     have = names(remote)
     if have is None:
         log(f"{obj}: облако не ответило")
-        return 1
+        return None
     os.makedirs(TMP, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="parts-", dir=TMP)
     src = sys.stdin.buffer
@@ -6814,21 +15576,130 @@ def put(remote, obj, trash):
         if f"{obj}.parts" not in have:
             if not roomy():
                 log(f"{obj}: мало места на диске — одним файлом, одним потоком")
-                return put_single(remote, obj, src=src)
+                return stage_single(remote, obj, src=src)
             lock, first = slot(), os.path.join(tmp, "first")
             md5, size, eof = read_part(src, first)
             if eof:                                        # меньше одной части — одним файлом, как всегда
                 try:
-                    return put_single(remote, obj, path=first, md5=md5)
+                    return stage_single(remote, obj, path=first, md5=md5)
                 finally:
                     lock.close()
             ahead = (first, md5, size, lock)
         return put_parts(remote, obj, have, trash, tmp, src, ahead)
     except OSError as e:
         log(f"{obj}: {e} — прежняя версия в облаке не тронута")
-        return 1
+        return None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def activate(remote, obj, receipt, trash):
+    if receipt[0] == "single":
+        return publish_single(remote, obj, receipt[1], receipt[2], trash)
+    return publish_parts(remote, obj, receipt[1], receipt[2], receipt[3], receipt[4], trash, receipt[5])
+
+
+def format_receipt(receipt):
+    if receipt[0] == "single":
+        _, md5, size = receipt
+        return f"vastgame-stage 1\nsingle\n{md5}\n{size}\n"
+    _, gen, index_md5, index_size, parts, t0 = receipt
+    body = "".join(f"{n}\t{m}\t{s}\n" for n, m, s in parts)
+    return f"vastgame-stage 1\nparts\n{gen}\n{index_md5}\n{index_size}\n{t0}\n{body}"
+
+
+def parse_receipt(text, obj):
+    lines = text.splitlines()
+    if len(lines) < 4 or lines[0] != "vastgame-stage 1":
+        raise ValueError("нет квитанции подготовки")
+    if lines[1] == "single":
+        return ("single", lines[2], int(lines[3]))
+    if lines[1] != "parts" or len(lines) < 6:
+        raise ValueError("нет квитанции подготовки")
+    parts = []
+    for ln in lines[6:]:
+        n, m, s = ln.split("\t")
+        if not n.startswith(obj + ".g"):
+            raise ValueError(f"чужое имя в квитанции: {n}")
+        parts.append((n, m, int(s)))
+    return ("parts", lines[2], lines[3], int(lines[4]), parts, float(lines[5]))
+
+
+def abort_staged(remote, obj, receipt):
+    """Убрать только подготовку. Боевой файл и боевое оглавление не удаляются.
+    Неизвестный результат moveto — части и сведения о попытке сохраняются и здесь."""
+    if receipt is None:
+        discard(remote, [f"{obj}.part", f"{obj}.parts.new"])
+        return 0
+    if receipt[0] == "single":
+        discard(remote, [f"{obj}.part"])
+        return 0
+    state = probe(remote, f"{obj}.parts", receipt[2])
+    if state == "unknown":
+        note_attempt(obj, receipt, "unknown")
+        log(f"{obj}: abort: публикация не проверена — части оставляю")
+        return 2
+    if state == "absent":
+        note_attempt(obj, receipt, "absent")
+        log(f"{obj}: abort: активного оглавления нет — подготовку и одиночный архив оставляю")
+        return 3
+    if state == "match":
+        log(f"{obj}: abort: новое оглавление уже боевое — части не удаляю")
+        return 0
+    discard(remote, [n for n, _, _ in receipt[4]] + [f"{obj}.parts.new"])
+    return 0
+
+
+def resume(remote, obj, receipt, trash):
+    """После восстановления связи: боевая версия — наша выгрузка или нет.
+    Совпала — признать. Не совпала — это не наша публикация. Проверка не удалась — не трогать."""
+    if receipt[0] == "single":
+        state = probe(remote, obj, receipt[1])
+        if state == "unknown":
+            note_attempt(obj, receipt, "unknown")
+            log(f"{obj}: повтор: MD5 нашей выгрузки не проверен")
+            return 2
+        if state == "match" and cloud_size(remote, obj) == receipt[2]:
+            log(f"{obj}: боевой файл совпал с нашей выгрузкой")
+            return 0
+        log(f"{obj}: боевой файл не совпал с нашей выгрузкой")
+        return 1
+    if receipt[0] != "parts":
+        return 1
+    _, gen, index_md5, index_size, parts, t0 = receipt
+    state = probe(remote, f"{obj}.parts", index_md5)
+    if state == "unknown":
+        note_attempt(obj, receipt, "unknown")
+        log(f"{obj}: повтор: MD5 боевого оглавления не проверен — части оставляю")
+        return 2
+    if state == "absent":
+        log(f"{obj}: повтор: активного оглавления нет — довожу публикацию, одиночный архив пока на месте")
+    if state == "match":
+        have = names(remote) or []
+        pr = part_re(obj)
+        old = [n for n in have if (m := pr.fullmatch(n)) and m.group(1) != gen]
+        if obj in have:
+            old.append(obj)
+        if old and not delete(remote, old, trash):
+            log(f"{obj}: не все старые части удалились (уберутся при следующей выгрузке)")
+        log(f"{obj}: боевое оглавление уже новое — публикация подтверждена")
+        return 0
+    staged = probe(remote, f"{obj}.parts.new", index_md5)
+    if staged == "unknown":
+        note_attempt(obj, receipt, "unknown")
+        log(f"{obj}: повтор: подготовка не проверена — части оставляю")
+        return 2
+    if staged != "match":
+        log(f"{obj}: подготовки нового оглавления нет — публикую заново")
+        return 1
+    return publish_parts(remote, obj, gen, index_md5, index_size, parts, trash, t0)
+
+
+def put(remote, obj, trash):
+    receipt = prepare(remote, obj, trash)
+    if receipt is None:
+        return 1
+    return activate(remote, obj, receipt, trash)
 
 
 def parse_index(text, obj):
@@ -6982,16 +15853,52 @@ def rm(remote, obj, trash, everything):
 def main(args):
     if args[1:2] == ["count"]:
         return count()
-    if len(args) < 4 or args[1] not in ("put", "get", "cat", "rm") or (args[1] == "cat" and len(args) < 6):
-        print("usage: wolf-parts.py put|get|rm REMOTE OBJECT [--no-trash] [--all] | cat REMOTE OBJECT SIZE MD5",
-              file=sys.stderr)
+    commands = ("put", "get", "cat", "rm", "stage", "publish", "abort", "resume", "recover-stage", "classify")
+    if len(args) < 4 or args[1] not in commands or (args[1] == "cat" and len(args) < 6):
+        print("usage: wolf-parts.py put|stage|publish|abort|resume|get|rm|classify REMOTE OBJECT [--no-trash] [--all] [--json] "
+              "| cat REMOTE OBJECT SIZE MD5", file=sys.stderr)
         return 2
     cmd, remote, obj, flags = args[1], args[2].rstrip("/"), args[3], args[4:]
+    if cmd == "recover-stage":
+        path = os.environ.get("WOLF_STAGE_LOG")
+        return recover_stage(remote, obj, path) if path else 1
+    if cmd == "classify":
+        json_mode = "--json" in flags
+        try:
+            if '/usr/local/lib' not in sys.path:
+                sys.path.insert(0, '/usr/local/lib')
+            from wolf_classifier import classify_archive, format_classification_report
+            rep = classify_archive(remote, obj)
+            if json_mode:
+                print(json.dumps(rep, indent=2, ensure_ascii=False))
+            else:
+                print(format_classification_report(rep))
+            return 0
+        except Exception as e:
+            log(f"classify: {e}")
+            return 1
     if cmd == "cat":
         return cat(remote, obj, flags[0], flags[1])
     trash = "--no-trash" not in flags
     if cmd == "put":
         return put(remote, obj, trash)
+    if cmd == "stage":
+        receipt = prepare(remote, obj, trash)
+        if receipt is None:
+            return 1
+        sys.stdout.write(format_receipt(receipt))
+        return 0
+    if cmd in ("publish", "abort", "resume"):
+        try:
+            receipt = parse_receipt(sys.stdin.read(), obj)
+        except ValueError as e:
+            log(f"{obj}: {e}")
+            return 1
+        if cmd == "abort":
+            return abort_staged(remote, obj, receipt)
+        if cmd == "resume":
+            return resume(remote, obj, receipt, trash)
+        return activate(remote, obj, receipt, trash)
     if cmd == "get":
         return get(remote, obj)
     return rm(remote, obj, trash, "--all" in flags)
