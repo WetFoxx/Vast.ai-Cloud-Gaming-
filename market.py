@@ -38,6 +38,9 @@ DOCKER_DRIVER = 580
 # CUDA 13 (Sunshine 2026) их не поддерживает, а со старой Sunshine на CUDA 12.9 машина зависла при подключении
 # Moonlight (кончились процессы) — отложено
 MIN_COMPUTE = 750
+SEARCH_LIMIT = 200
+PAIR_SEARCH_LIMIT = 100
+HOST_SEARCH_LIMIT = 20
 PAIRS = True          # Docker: показывать машины, которые сдаются только парой видеокарт
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
 # машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
@@ -169,16 +172,19 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         "reliability": {"gte": min_rel},
         "disk_space": {"gte": disk},        # на машине хватает места под наш диск
         "allocated_storage": disk,          # чтобы цена в час сразу включала этот диск
-        "limit": 1000,
+        "order": [["dph_total", "asc"]],
+        "limit": HOST_SEARCH_LIMIT if where and "machine_id" in where else SEARCH_LIMIT,
         **(where or {}),
     }
     # [0.3.1] Машины, которые сдаются только парой видеокарт (одной — нет): игра идёт на первой, вторая простаивает,
     # цена — за обе (~130 машин, 2026-10-01). Только Docker: в KVM две карты в виртуальной машине не проверялись.
     # [0.4.5] Оба поиска — одновременно
     pairs = docker and PAIRS
-    found = parallel.run(lambda: call("POST", "bundles/", query).get("offers", []),
-                         *([lambda: call("POST", "bundles/", {**query, "num_gpus": {"eq": 2}}).get("offers", [])]
-                           if pairs else []))
+    def fetch(payload):
+        return call("POST", "bundles/", payload, cache_search=True).get("offers", [])
+
+    pair_query = {**query, "num_gpus": {"eq": 2}, "limit": min(query["limit"], PAIR_SEARCH_LIMIT)}
+    found = parallel.run(lambda: fetch(query), *([lambda: fetch(pair_query)] if pairs else []))
     offers = found[0]
     if pairs:
         singles = {o.get("machine_id") for o in offers}

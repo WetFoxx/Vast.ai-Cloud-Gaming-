@@ -3,8 +3,10 @@
 # чтобы чтение ключа и запросы не повторялись в каждом файле.
 
 import copy
+import datetime
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -60,41 +62,75 @@ def check_key(key):
     return r.json().get("credit", 0)
 
 
-def call(method, path, body=None, params=None, base=API):
-    """Запрос к API Vast. Возвращает ответ как словарь или бросает VastgameError с понятным текстом.
+_search_lock = threading.Lock()
+_search_results = {}
+_search_quota_until = {}
+_SEARCH_TTL = 30
 
-    method — "GET", "POST" и т.д.; path — например "users/current/"; body — JSON для POST/PUT.
-    """
+
+def _error_body(response):
     try:
-        # 429 — Vast просит не спешить: подождать и повторить (2, 4, 8 с), а не падать
+        data = response.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _quota_error():
+    return VastgameError("Дневная квота поиска Vast исчерпана. Повтори поиск после 00:00 UTC.",
+                         key="vast.search_quota")
+
+
+def call(method, path, body=None, params=None, base=API, *, cache_search=False):
+    """Запрос к Vast. Кэш выдачи включается только для каталога, проверки перед арендой читают свежие данные."""
+    is_search = method == "POST" and path == "bundles/"
+    key = read_key()
+    scope = (base, hashlib.sha256(key.encode()).digest()) if is_search else None
+    cache_key = (scope, json.dumps(body, sort_keys=True)) if is_search and cache_search else None
+    if is_search:
+        with _search_lock:
+            if time.time() < _search_quota_until.get(scope, 0):
+                raise _quota_error()
+            hit = _search_results.get(cache_key)
+            if hit and time.monotonic() - hit[0] < _SEARCH_TTL:
+                return copy.deepcopy(hit[1])
+    try:
         for wait in (2, 4, 8, None):
-            r = requests.request(
-                method,
-                base + path,
-                headers={"Authorization": f"Bearer {read_key()}"},
-                json=body,
-                params=params,
-                timeout=30,
-            )
-            if r.status_code != 429 or wait is None:
+            r = requests.request(method, base + path, headers={"Authorization": f"Bearer {key}"},
+                                 json=body, params=params, timeout=30)
+            if r.status_code != 429:
+                break
+            if is_search:
+                error = _error_body(r)
+                if (error.get("error") == "search_quota_exceeded"
+                        or "daily search row quota exhausted" in str(error.get("msg", "")).lower()):
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+                    with _search_lock:
+                        _search_quota_until[scope] = midnight.timestamp()
+                    raise _quota_error()
+            if wait is None:
                 break
             time.sleep(wait)
     except requests.RequestException as e:
         raise VastgameError(f"Не удалось связаться с Vast: {type(e).__name__}", key="vast.network",
                             error=type(e).__name__)
     if method != "GET" and path.startswith("template"):
-        _templates.clear()                     # шаблон меняли — память окна о нём больше не верна
+        _templates.clear()
     if r.status_code == 401:
         raise VastgameError("Vast не принял ключ (401) — замени его: vastgame setup", key="vast.bad_key")
     if r.status_code != 200:
-        # В ошибках Vast кладёт объяснение в поле msg — показываем только его
-        try:
-            msg = r.json().get("msg") or ""
-        except ValueError:
-            msg = ""
+        msg = _error_body(r).get("msg") or ""
         raise VastgameError(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip(), key="vast.http",
                             code=r.status_code, msg=msg)
-    return r.json()
+    data = r.json()
+    if cache_key is not None:
+        with _search_lock:
+            _search_results.pop(cache_key, None)
+            if len(_search_results) >= 64:
+                _search_results.pop(next(iter(_search_results)))
+            _search_results[cache_key] = time.monotonic(), copy.deepcopy(data)
+    return data
 
 
 def instance_logs(iid, tail=300):

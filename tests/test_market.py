@@ -115,5 +115,65 @@ class TestLastMachine(unittest.TestCase):
         self.assertEqual(self.queries, [])                               # лишний запрос не делается
 
 
+class TestSearchQuota(unittest.TestCase):
+    def setUp(self):
+        import vastapi
+        self.api = vastapi
+        for name, value in (("_search_results", {}), ("_search_quota_until", {}), ("read_key", lambda: "test-key")):
+            patcher = mock.patch.object(vastapi, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def response(self, status, body):
+        return mock.Mock(status_code=status, json=lambda: body)
+
+    def test_daily_limit_stops_retries_and_other_searches(self):
+        for body in ({"error": "search_quota_exceeded"}, {"msg": "Daily search row quota exhausted"}):
+            with self.subTest(body=body), mock.patch.dict(self.api._search_quota_until, clear=True), \
+                 mock.patch.object(self.api.requests, "request", return_value=self.response(429, body)) as send, \
+                 mock.patch.object(self.api.time, "sleep") as sleep:
+                for size in (100, 120):
+                    with self.assertRaises(self.api.VastgameError) as err:
+                        self.api.call("POST", "bundles/", {"limit": size})
+                    self.assertEqual(err.exception.key, "vast.search_quota")
+                send.assert_called_once()
+                sleep.assert_not_called()
+                until = next(iter(self.api._search_quota_until.values()))
+                with mock.patch.object(self.api.time, "time", return_value=until):
+                    send.return_value = self.response(200, {"offers": []})
+                    self.assertEqual(self.api.call("POST", "bundles/"), {"offers": []})
+                self.assertEqual(send.call_count, 2)
+
+    def test_short_429_still_retries(self):
+        with mock.patch.object(self.api.requests, "request", side_effect=[
+                self.response(429, {}), self.response(200, {"offers": []})]) as send, \
+             mock.patch.object(self.api.time, "sleep") as sleep:
+            self.api.call("POST", "bundles/")
+            self.assertEqual(send.call_count, 2)
+            sleep.assert_called_once_with(2)
+
+    def test_only_catalog_uses_cache_and_rows_are_isolated(self):
+        query = {"limit": 200}
+        with mock.patch.object(self.api.requests, "request", side_effect=[
+                self.response(200, {"offers": [{"id": i}]}) for i in range(4)]) as send:
+            first = self.api.call("POST", "bundles/", query, cache_search=True)
+            first["offers"].clear()
+            self.assertEqual(self.api.call("POST", "bundles/", query, cache_search=True)["offers"], [{"id": 0}])
+            self.assertEqual(self.api.call("POST", "bundles/", query)["offers"], [{"id": 1}])
+            with mock.patch.object(self.api, "read_key", return_value="other-key"):
+                self.assertEqual(self.api.call("POST", "bundles/", query, cache_search=True)["offers"], [{"id": 2}])
+            self.assertEqual(send.call_count, 3)
+
+    def test_search_caps_broad_and_focused_queries(self):
+        with mock.patch.object(market, "call", return_value={"offers": []}) as send, \
+             mock.patch.object(market, "bad_hosts", return_value={}):
+            market.search(100, docker=True)
+            market.search(100, docker=True, where={"machine_id": {"eq": 222}})
+        sent = [c.args[2] for c in send.call_args_list]
+        self.assertCountEqual([(x["limit"], x["num_gpus"]["eq"]) for x in sent],
+                              [(200, 1), (100, 2), (20, 1), (20, 2)])
+        self.assertTrue(all(c.kwargs["cache_search"] for c in send.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()
