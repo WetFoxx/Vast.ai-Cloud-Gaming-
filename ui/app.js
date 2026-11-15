@@ -807,7 +807,7 @@ async function snapshotOf(name) {
 function setStale(id, on) { $(id).classList.toggle("stale", !!on); }
 let offersDocker = null;   // вкладка: false — KVM, true — Docker (основная); null — как в прошлый раз
 let offersRequestedDisk = null;
-async function openOffers(disk, docker) {
+async function openOffers(disk, docker, expanded = false) {
   offersRequestedDisk = disk ?? null;
   if (docker != null) offersDocker = docker;
   show("offers");
@@ -816,6 +816,7 @@ async function openOffers(disk, docker) {
   setStale("screen-offers", false);
   $("rent").disabled = true;
   $("offers-refresh").disabled = true;
+  $("offers-expand").hidden = true;
   $("offers-summary").textContent = t("offers.loading");
   $("offers-summary").hidden = false;
   $("offers-grid").innerHTML = "";
@@ -824,8 +825,8 @@ async function openOffers(disk, docker) {
   const my = ++offersReq;
   showTabs();
   const mode = offersDocker;
-  const fresh = DEMO ? null : api().offers(offersRequestedDisk, mode, replaceMode);
-  if (!replaceMode) {
+  const fresh = DEMO ? null : api().offers(offersRequestedDisk, mode, replaceMode, expanded);
+  if (!replaceMode && !expanded) {
     const snap = await snapshotOf("offers:" + (mode == null ? "auto" : mode ? "docker" : "kvm"));
     if (my === offersReq && !offersData && snap && Array.isArray(snap.offers)
         && (mode == null || snap.docker === mode) && (disk == null || snap.disk === disk)) {
@@ -837,7 +838,7 @@ async function openOffers(disk, docker) {
       renderOffers();
     }
   }
-  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker } : await fresh;
+  const data = DEMO ? { ...demoOffers(disk), docker: !!offersDocker, expanded } : await fresh;
   if (my !== offersReq) return;
   $("offers-refresh").disabled = false;
   offersStale = false;
@@ -855,6 +856,7 @@ async function openOffers(disk, docker) {
     return;
   }
   offersData = data;
+  $("offers-expand").hidden = !!data.expanded;
   if (replaceMode && !data.replace) replaceMode = false;       // запуск успел закончиться неудачно — обычная аренда
   renderReplace();
   offersDocker = !!data.docker;
@@ -877,6 +879,9 @@ $("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offe
 $("tab-docker").addEventListener("click", () => { if (!offersDocker) openOffers(offersData?.disk ?? offersRequestedDisk, true); });
 // «Обновить» — свежий список машин той же вкладки и диска (выбор игр не сбрасывается)
 $("offers-refresh").addEventListener("click", () => openOffers(offersData ? offersData.disk : Number($("disk").value), offersDocker));
+$("offers-expand").addEventListener("click", () => {
+  if (offersData && !offersStale && !offersData.expanded) openOffers(offersData.disk, offersDocker, true);
+});
 
 // Ползунок диска: число меняется сразу, список машин (цены зависят от диска) — когда отпустили
 $("disk").addEventListener("input", () => { $("disk-value").textContent = t("disk.value", { gb: $("disk").value }); });

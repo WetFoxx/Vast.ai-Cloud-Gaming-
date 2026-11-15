@@ -222,7 +222,7 @@ class Api:
         m = d.get("meta") or {}
         return m.get("offer") or next((r["offer"] for r in m.get("race") or [] if r.get("offer")), None) or {}
 
-    def offers(self, disk=None, docker=None, replace=False):
+    def offers(self, disk=None, docker=None, replace=False, expanded=False):
         """Подходящие машины (лучшие по полной цене часа) под диск disk ГБ и баланс.
         docker — вкладка «Docker» (основная с 0.3.1) (None — как в прошлый раз).
         replace — каталог во время запуска («Сменить машину»): машина уже есть — это та, что запускается;
@@ -239,8 +239,9 @@ class Api:
             *_, tpl, credit = parallel.run(*([core.require_no_machine] if launching is None else []),
                                            lambda: core.template(TEMPLATE_TTL), core.balance)
             disk = self._disk(disk, tpl)
-            rows, last = parallel.run(lambda: market.search(disk, min_rel=REL_FLOOR, docker=docker),  # порог надёжности —
-                                      last_machine)                                            # фильтром на странице
+            rows, last = parallel.run(
+                lambda: market.search(disk, min_rel=REL_FLOOR, docker=docker, expanded=bool(expanded)),
+                last_machine)
         except VastgameError as e:
             return {"error": error_data(e)}
         remembered, me = latency.known(), geo.home()
@@ -266,10 +267,10 @@ class Api:
         out = {"replace": launching is not None, "current": current,
                 "docker": docker, "disk": disk, "disk_min": DISK_MIN, "disk_max": DISK_MAX, "min_rel": market.MIN_REL, "count": len(rows), "balance": credit,
                 "sync": self._sync(), "offers": [row(o) for o in rows], "page_size": OFFERS_PAGE,
-                "filters": self._offer_filters(),
+                "filters": self._offer_filters(), "expanded": bool(expanded),
                 "last": last and {"gpu": last["gpu"], "country": last["country"], "start": last["start"],
                                   "offer": last["offer"] and row(last["offer"])}}
-        if launching is None:                     # [0.4.5] обычный список — показать сразу в следующий раз
+        if launching is None and not expanded:    # открытие экрана показывает только обычную выдачу
             snapshot.save("offers:" + ("docker" if docker else "kvm"), out)
         return out
 

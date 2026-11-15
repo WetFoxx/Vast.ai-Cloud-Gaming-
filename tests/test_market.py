@@ -172,9 +172,11 @@ class TestSearchQuota(unittest.TestCase):
              mock.patch.object(market, "bad_hosts", return_value={}):
             market.search(100, docker=True)
             market.search(100, docker=True, where={"machine_id": {"eq": 222}})
+            market.search(100)
+            market.search(100, docker=True, expanded=True)
         sent = [c.args[2] for c in send.call_args_list]
         self.assertCountEqual([(x["limit"], x["num_gpus"]["eq"]) for x in sent],
-                              [(200, 1), (100, 2), (20, 1), (20, 2)])
+                              [(50, 1), (20, 2), (2, 1), (2, 2), (70, 1), (200, 1), (100, 2)])
         self.assertTrue(all(c.kwargs["cache_search"] for c in send.call_args_list))
 
     def test_cache_separates_modes_disk_and_server_filters(self):

@@ -38,9 +38,12 @@ DOCKER_DRIVER = 580
 # CUDA 13 (Sunshine 2026) их не поддерживает, а со старой Sunshine на CUDA 12.9 машина зависла при подключении
 # Moonlight (кончились процессы) — отложено
 MIN_COMPUTE = 750
-SEARCH_LIMIT = 200
-PAIR_SEARCH_LIMIT = 100
-HOST_SEARCH_LIMIT = 20
+DOCKER_SEARCH_LIMIT = 50
+KVM_SEARCH_LIMIT = 70
+PAIR_SEARCH_LIMIT = 20
+HOST_SEARCH_LIMIT = 2
+EXPANDED_SEARCH_LIMIT = 200
+EXPANDED_PAIR_LIMIT = 100
 PAIRS = True          # Docker: показывать машины, которые сдаются только парой видеокарт
 # Страны, где машина не может работать: Google Drive (архивы) и GitHub (скрипт) заблокированы — в Китае
 # машина висит на скачивании скрипта (живой случай 2026-09-26, GTX 1660 S)
@@ -154,15 +157,22 @@ def driver_major(o):
 
 
 def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb=STREAM_GB, where=None,
-           docker=False):
+           docker=False, *, expanded=False):
     """Подходящие машины, от дешёвых к дорогим по полной цене часа.
     where — дополнительные фильтры Vast, например {"machine_id": {"eq": 140348}}.
     docker — для образа vastgame-desktop (обычный контейнер): KVM не нужен, нужен драйвер от DOCKER_DRIVER.
+    expanded — больший лимит по явному запросу пользователя.
 
     Возвращает список словарей-предложений Vast с добавленными полями:
     _traffic ($/ч за стрим), _total (аренда с диском + трафик).
     """
     # Фильтры поиска — проверены на живом API (см. CLAUDE.md, раздел Vast API)
+    limit = DOCKER_SEARCH_LIMIT if docker else KVM_SEARCH_LIMIT
+    pair_limit = EXPANDED_PAIR_LIMIT if expanded else PAIR_SEARCH_LIMIT
+    if expanded:
+        limit = EXPANDED_SEARCH_LIMIT
+    if where and "machine_id" in where:
+        limit = HOST_SEARCH_LIMIT
     query = {
         "type": "ondemand",
         "rentable": {"eq": True},
@@ -173,7 +183,7 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
         "disk_space": {"gte": disk},        # на машине хватает места под наш диск
         "allocated_storage": disk,          # чтобы цена в час сразу включала этот диск
         "order": [["dph_total", "asc"]],
-        "limit": HOST_SEARCH_LIMIT if where and "machine_id" in where else SEARCH_LIMIT,
+        "limit": limit,
         **(where or {}),
     }
     # [0.3.1] Машины, которые сдаются только парой видеокарт (одной — нет): игра идёт на первой, вторая простаивает,
@@ -183,7 +193,7 @@ def search(disk, min_rel=MIN_REL, free=False, max_traffic=MAX_TRAFFIC, stream_gb
     def fetch(payload):
         return call("POST", "bundles/", payload, cache_search=True).get("offers", [])
 
-    pair_query = {**query, "num_gpus": {"eq": 2}, "limit": min(query["limit"], PAIR_SEARCH_LIMIT)}
+    pair_query = {**query, "num_gpus": {"eq": 2}, "limit": min(query["limit"], pair_limit)}
     found = parallel.run(lambda: fetch(query), *([lambda: fetch(pair_query)] if pairs else []))
     offers = found[0]
     if pairs:

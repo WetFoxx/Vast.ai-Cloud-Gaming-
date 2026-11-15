@@ -119,7 +119,7 @@ class TestSnapshots(unittest.TestCase):
         for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
                                  (gui.core, "template", lambda *a, **k: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
-                                 (gui.market, "search", lambda disk, docker=False, min_rel=None: [row]),
+                                 (gui.market, "search", lambda disk, docker=False, min_rel=None, expanded=False: [row]),
                                  (gui.market, "last_machine", lambda disk, docker=False: None)]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
 
@@ -317,7 +317,7 @@ class TestOffers(unittest.TestCase):
         for obj, name, value in [(gui.core, "require_no_machine", lambda: None),
                                  (gui.core, "template", lambda *a, **k: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
-                                 (gui.market, "search", lambda disk, docker=False, min_rel=None: [row])]:
+                                 (gui.market, "search", lambda disk, docker=False, min_rel=None, expanded=False: [row])]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
         self.row = row
 
@@ -347,10 +347,21 @@ class TestOffers(unittest.TestCase):
 
     def test_search_reaches_down_to_90_percent(self):
         asked = []
-        with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None: asked.append(min_rel) or [self.row]), \
+        with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None, expanded=False: asked.append(min_rel) or [self.row]), \
              mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
             gui.Api().offers()
         self.assertEqual(asked, [0.90])
+
+    def test_expanded_search_requires_opt_in_and_does_not_replace_snapshot(self):
+        with mock.patch.object(gui.market, "search", return_value=[self.row]) as search, \
+             mock.patch.object(gui.market, "last_machine", return_value=None), \
+             mock.patch.object(gui.snapshot, "save") as save:
+            api = gui.Api()
+            self.assertFalse(api.offers(docker=True)["expanded"])
+            self.assertTrue(api.offers(docker=True, expanded=True)["expanded"])
+        self.assertEqual([item.kwargs["expanded"] for item in search.call_args_list], [False, True])
+        save.assert_called_once()
+        self.assertFalse(save.call_args.args[1]["expanded"])
 
     def test_traffic_prices_per_tb(self):
         # Колонка «Трафик» и подтверждение аренды: ↓ на машину и ↑ с машины, $ за ТБ (Vast отдаёт $ за ГБ)
@@ -379,7 +390,7 @@ class TestOffers(unittest.TestCase):
 
     def test_all_machines_with_ping_speed_and_filters(self):
         rows = [dict(self.row, id=i, inet_down=500 + i, inet_up=300, geolocation="Japan, JP") for i in range(40)]
-        with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None: rows), \
+        with mock.patch.object(gui.market, "search", lambda disk, docker=False, min_rel=None, expanded=False: rows), \
              mock.patch.object(gui.market, "last_machine", lambda disk, docker=False: None):
             d = gui.Api().offers()
         self.assertEqual(len(d["offers"]), 40)                        # все, а не 10 лучших — страницы на экране
@@ -434,7 +445,7 @@ class TestReplaceCatalog(unittest.TestCase):
         for obj, name, value in [(gui.core, "require_no_machine", running),
                                  (gui.core, "template", lambda *a, **k: {"recommended_disk_space": 100}),
                                  (gui.core, "balance", lambda: 3.0),
-                                 (gui.market, "search", lambda disk, docker=False, min_rel=None: [row]),
+                                 (gui.market, "search", lambda disk, docker=False, min_rel=None, expanded=False: [row]),
                                  (gui.market, "last_machine", lambda disk, docker=False: None),
                                  (gui.Api, "_launching", lambda self: launching)]:
             p = mock.patch.object(obj, name, value); p.start(); self.addCleanup(p.stop)
