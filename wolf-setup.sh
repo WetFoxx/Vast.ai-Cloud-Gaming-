@@ -6972,10 +6972,11 @@ w /usr/local/bin/wolf-web.py <<'WEB'
 # умолчанию SSH просит подтверждать вход в браузере раз в несколько часов). Выполняется только
 # короткий закрытый список команд и только от устройства ТОГО ЖЕ владельца в Tailscale, что и эта
 # машина: кто прислал, спрашиваем у самого Tailscale (tailscale whois) — без паролей и ключей.
-import os, time, html, glob, json, re, subprocess
+import os, time, html, glob, json, re, stat, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ST = '/var/lib/wolf/st/'
 PG = '/var/lib/wolf/pg/'
+STEAM_LOG = '/tmp/steam.log'
 def progress(n):
     """[v4.6] Ход архива, если идёт: {done, total, speed} (байты, байт/с); файл старше 30 с — не идёт."""
     try:
@@ -7003,6 +7004,29 @@ def log_tail(n=8000):
             return f.read().decode('utf-8', 'replace')
     except Exception:
         return ''
+def diagnostic_data():
+    # The log stays on the machine. Only known diagnostic codes go over HTTP.
+    try:
+        fd = os.open(STEAM_LOG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise OSError('Steam log is not a regular file')
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 16_384))
+            log = f.read(16_384).lower()
+    except OSError:
+        code = 'not_available'
+    else:
+        if b'steam now requires user namespaces' in log:
+            code = 'user_namespaces'
+        elif b'error while loading shared libraries:' in log:
+            code = 'missing_library'
+        else:
+            code = 'no_known_error'
+    services = {name: state for name, _, state, _ in items()
+                if name in ('boot', 'sunshine', 'play', 'finish', 'shutdown')
+                and state in ('ok', 'err', 'up', 'down', 'wait', 'login', 'other', 'running', 'closed', 'launch', 'download')}
+    return {'schema': 1, 'steam_log': code, 'services': services}
 def page():
     its = items(); now = time.time()
     err = sum(s == 'err' for _, _, s, _ in its)
@@ -7278,6 +7302,10 @@ class H(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             return self.reply(200, {'code': None, 'out': 'не закончилось за 10 минут'})
     def do_GET(self):
+        if self.path == '/diagnostics':
+            if not same_owner(*self.client_address[:2]):
+                return self.reply(403, {'error': 'forbidden'})
+            return self.reply(200, diagnostic_data())
         if self.path.startswith('/json'):
             body = json.dumps([dict(name=n, ts=t, state=s, text=x,
                                     **({'progress': pg} if s in ('up', 'down') and (pg := progress(n)) else {}))

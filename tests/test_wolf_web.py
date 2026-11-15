@@ -55,6 +55,7 @@ class TestWolfWeb(unittest.TestCase):
         cls.old_path = os.environ["PATH"]
         os.environ["PATH"] = f"{d}:{cls.old_path}"
         ns = load_wolf_web(wolf)
+        cls.web = ns
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), ns["H"])
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.port = cls.server.server_address[1]
@@ -92,6 +93,20 @@ class TestWolfWeb(unittest.TestCase):
         self.assertIn("finish: запущено", out)
         self.assertEqual(self.calls(), ["finish"])
         self.assertEqual(self.ssh, [])                                  # SSH не понадобился
+
+    def test_support_diagnostics_exposes_only_codes_to_owner(self):
+        steam_log = self.d / "steam.log"
+        steam_log.write_text("Steam now requires user namespaces to be enabled.\nsecret=example\n")
+        states = self.d / "diagnostic-states"
+        states.mkdir(exist_ok=True)
+        (states / "play").write_text("1|err|private@example.invalid\n")
+        (states / "private-archive").write_text("1|ok|private archive\n")
+        with mock.patch.dict(self.web, {"STEAM_LOG": str(steam_log), "ST": str(states) + "/"}):
+            self.assertEqual(wolfnode.diagnostics("127.0.0.1"), {
+                "schema": 1, "steam_log": "user_namespaces", "services": {"play": "err"},
+            })
+            self.owner("42")
+            self.assertIsNone(wolfnode.diagnostics("127.0.0.1"))
 
     def test_sunshine_password_goes_to_stdin_not_args(self):
         code, out = self.run_cmd("sunshine-creds", ["vastgame"], stdin="секрет\n")

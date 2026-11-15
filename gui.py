@@ -19,12 +19,14 @@ import time
 import traceback
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import webview   # pywebview: окно с веб-страницей (на Mac — системный WebKit, на Windows — Edge WebView2)
 
 import asks
 import autostart
 import cloudgames
+import diagnostics
 import drive
 import filelock
 import fxwin
@@ -112,6 +114,8 @@ class Api:
         self._steam_lock = threading.Lock()   # окно входа Steam — одно
         self._template_refresh_lock = threading.Lock()
         self._template_refresh_attempted = False
+        self._diagnostics = diagnostics.SessionReport()
+        self._diagnostic_peer = None
 
     # ---- настройки
     def settings(self):
@@ -158,7 +162,13 @@ class Api:
         try:
             st, credit = parallel.run(core.status, core.balance)
         except VastgameError as e:   # подвид SystemExit — ловим явно, иначе поток тихо завершится
-            return {"error": error_data(e)}
+            result = {"error": error_data(e)}
+            self._diagnostic_peer = None
+            self._diagnostics.observe_action("machine_status", result)
+            return result
+        self._diagnostics.observe_machine(st)
+        address = (st.get("links") or {}).get("status")
+        self._diagnostic_peer = urlsplit(address).hostname if address else None
         price = st["machine"]["price"] if st["machine"] else None
         session = None
         try:
@@ -455,6 +465,22 @@ class Api:
                 "stage": d["stage"], "events": d["events"][since:], "next": len(d["events"]),
                 "archives": d["archives"], "question": None, "result": d["result"], "error": d["error"],
                 "done": d["done"], "game_names": self._game_names(d["archives"])}
+
+    def session_diagnostics(self):
+        """Read-only export, also available when startup failed or the rental ended."""
+        peer = self._diagnostic_peer
+        remote = wolfnode.diagnostics(peer) if peer else None
+        local = self._job.snapshot() if self._job else None
+        return {"text": self._diagnostics.export(updater.VERSION, sys.platform, jobs.load(), remote, local)}
+
+    def _diagnostic_action(self, name, action, *args):
+        try:
+            result = action(*args)
+        except (Exception, VastgameError) as error:
+            self._diagnostics.observe_action(name, {"error": {"key": getattr(error, "key", None)}})
+            raise
+        self._diagnostics.observe_action(name, result)
+        return result
 
     def cancel_start(self):
         """«Отменить запуск и удалить машину» (человек подтвердил на странице). Удаляем сразу, если
@@ -1174,6 +1200,9 @@ class Api:
 
     def open_moonlight(self, host, app):
         """Открыть трансляцию; выбор приложения запомнить."""
+        return self._diagnostic_action("moonlight_open", self._launch_moonlight, host, app)
+
+    def _launch_moonlight(self, host, app):
         if not isinstance(host, str) or not host or not isinstance(app, str) or not app:
             return {"error": {"key": None, "params": {}, "text": "bad arguments"}}
         if not moonlight.path():
@@ -1225,7 +1254,9 @@ class Api:
                                   "text": "Moonlight не принял сертификат машины"}}
         args = self._stream_args()
         settings.applog(f"moonlight: трансляция {host} «{app}», разрешение/частота/битрейт: {args}")
-        moonlight.stream(host, app, *args)
+        self._diagnostics.moonlight_requested(time.time())
+        if moonlight.stream(host, app, *args) is False:
+            return {"error": {"key": "moonlight.missing", "params": {}, "text": "Moonlight не установлен"}}
         return {"ok": True}
 
     @staticmethod
@@ -1341,6 +1372,9 @@ class Api:
         """Запустить Steam Link. Окно PIN — если этого компьютера нет в Remote Play у текущего аккаунта.
         Другой компьютер в том же списке не мешает и не закрывает окно. Свой номер запоминается,
         когда машина подтвердила, что запись есть."""
+        return self._diagnostic_action("steamlink_open", self._launch_steamlink, windowed)
+
+    def _launch_steamlink(self, windowed):
         if not moonlight.steamlink_path():
             return {"error": {"key": "steamlink.missing", "params": {}, "text": "Steam Link не установлен"}}
         if windowed:
@@ -1361,14 +1395,23 @@ class Api:
         """Фоновая проверка после запуска: не появился ли запрос PIN (другой аккаунт или устройство удалили)."""
         status, account, device_id = self._steamlink_machine_check()
         if not status:
+            self._diagnostics.observe_action("steamlink_check", None)
             return {"need_pin": False, "account": ""}
         if device_id and status == "ok":
             self._remember_steamlink_account(account)
             self._remember_steamlink_device(account, device_id)
-        return {"need_pin": self._steamlink_needs_pin(status, account, device_id), "account": account, "status": status}
+        result = {"need_pin": self._steamlink_needs_pin(status, account, device_id), "account": account, "status": status}
+        if status in ("nologin", "nosteam"):
+            self._diagnostics.observe_action("steamlink_check", {"error": {"key": "steamlink.pin." + status}})
+        else:
+            self._diagnostics.observe_action("steamlink_check", {"ok": True, "need_pin": result["need_pin"]})
+        return result
 
     def pair_steamlink(self, pin):
         """Авторизовать устройство Steam Link по 4-значному PIN-коду в клиенте Steam на машине и запомнить аккаунт."""
+        return self._diagnostic_action("steamlink_pair", self._pair_steamlink, pin)
+
+    def _pair_steamlink(self, pin):
         pin = str(pin or "").strip()
         if not re.fullmatch(r"\d{4}", pin):
             return {"error": {"key": "steamlink.pin.invalid", "params": {}, "text": "нужен 4-значный PIN-код"}}

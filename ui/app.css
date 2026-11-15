@@ -264,6 +264,12 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
 }
 .modal-text { white-space: pre-wrap; }
+#diagnostics-home { align-self: flex-start; }
+#diagnostics-report {
+  width: 100%; max-height: 44vh; resize: vertical; padding: 8px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  font: 12px/1.5 ui-monospace, monospace; user-select: text; -webkit-user-select: text;
+}
 
 /* ---- «Закончить» и аварийное удаление */
 .danger-row { display: flex; justify-content: center; }

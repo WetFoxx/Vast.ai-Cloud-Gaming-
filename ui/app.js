@@ -203,7 +203,7 @@ function setBalance(value) {
 }
 
 function render(data) {
-  if (data.error) { showError("error", data.error); return; }
+  if (data.error) { $("diagnostics-home").hidden = false; showError("error", data.error); return; }
   showError("error", null);
   current = data;
   if (data.game_names) GAME_NAMES = data.game_names;
@@ -243,6 +243,7 @@ function render(data) {
   }
   const li = st.links;
   $("links").hidden = !li || st.state === "starting";
+  $("diagnostics-home").hidden = !$("links").hidden;
   if (li) $("moonlight").textContent = li.moonlight;
   if (li && st.state !== "starting") { loadMoonlightApps(li.moonlight); loadStreamSettings(); }
 
@@ -360,6 +361,58 @@ $("copy-moonlight").addEventListener("click", async () => {
   }
   $("copy-moonlight").textContent = t("btn.copied");
   setTimeout(() => ($("copy-moonlight").textContent = t("btn.copy")), 1500);
+});
+
+let diagnosticsRequest = 0;
+let diagnosticsTrigger = null;
+function closeDiagnostics() {
+  ++diagnosticsRequest;
+  $("diagnostics-modal").hidden = true;
+  if (diagnosticsTrigger) diagnosticsTrigger.focus();
+}
+async function showDiagnostics(event) {
+  const request = ++diagnosticsRequest;
+  diagnosticsTrigger = event.currentTarget;
+  const report = $("diagnostics-report"), copy = $("diagnostics-copy"), status = $("diagnostics-status");
+  report.hidden = true;
+  report.value = "";
+  copy.disabled = true;
+  copy.textContent = t("btn.copy");
+  status.textContent = t("diagnostics.collecting");
+  $("diagnostics-modal").hidden = false;
+  $("diagnostics-close").focus();
+  try {
+    const result = DEMO ? { text: '{"report":"VastGame support","schema":1,"machine":{"state":"ready"}}' }
+      : await api().session_diagnostics();
+    if (request !== diagnosticsRequest) return;
+    if (!result || typeof result.text !== "string" || !result.text) throw new Error("missing report");
+    report.value = result.text;
+    report.hidden = false;
+    copy.disabled = false;
+    status.textContent = "";
+  } catch (_) {
+    if (request === diagnosticsRequest) status.textContent = t("diagnostics.failed");
+  }
+}
+$("diagnostics-home").addEventListener("click", showDiagnostics);
+$("diagnostics-session").addEventListener("click", showDiagnostics);
+$("diagnostics-progress").addEventListener("click", showDiagnostics);
+$("diagnostics-close").addEventListener("click", closeDiagnostics);
+$("diagnostics-modal").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.stopPropagation(); closeDiagnostics(); }
+});
+$("diagnostics-copy").addEventListener("click", async () => {
+  const report = $("diagnostics-report"), status = $("diagnostics-status");
+  try {
+    await navigator.clipboard.writeText(report.value);
+  } catch (_) {
+    report.focus();
+    report.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (_) { /* keep the text selected */ }
+    if (!copied) { status.textContent = t("diagnostics.copy_failed"); return; }
+  }
+  status.textContent = t("btn.copied");
 });
 
 // ---- Moonlight: список приложений Sunshine приходит с самой машины (один раз на машину)

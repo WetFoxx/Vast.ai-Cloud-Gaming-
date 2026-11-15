@@ -86,6 +86,7 @@
         <div class="sub" id="ml-note" hidden></div>
         <div class="row-link" id="params-row">
           <button class="link" id="params-toggle" data-i18n="params.open"></button>
+          <button class="link" id="diagnostics-session" data-i18n="diagnostics.open"></button>
         </div>
         <!-- Параметры: разрешение и битрейт; ручное подключение (обычно не нужно — связывает VastGame сам) -->
         <div class="params" id="params" hidden>
@@ -143,6 +144,7 @@
       <div class="lib-strip" id="lib-strip"></div>
     </section>
     <div class="error" id="error" hidden></div>
+    <button class="link" id="diagnostics-home" data-i18n="diagnostics.open"></button>
   </main>
 
   <!-- ===== Выбор машины ===== -->
@@ -393,12 +395,26 @@
         <button class="primary" id="progress-back" hidden data-i18n="btn.back"></button>
         <button id="progress-home" hidden data-i18n="progress.home"></button>
         <button id="progress-replace" hidden data-i18n="task.replace"></button>
+        <button id="diagnostics-progress" data-i18n="diagnostics.open"></button>
         <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
       </div>
     </aside>
   </main>
 
   <!-- ===== Вопрос (да/нет) ===== -->
+  <div class="modal" id="diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="diagnostics-title" hidden>
+    <div class="dialog">
+      <div class="title" id="diagnostics-title" data-i18n="diagnostics.open"></div>
+      <p class="sub" data-i18n="diagnostics.help"></p>
+      <p class="sub" id="diagnostics-status" role="status"></p>
+      <textarea id="diagnostics-report" aria-labelledby="diagnostics-title" rows="12" readonly hidden></textarea>
+      <div class="actions">
+        <button class="primary" id="diagnostics-copy" data-i18n="btn.copy" disabled></button>
+        <button id="diagnostics-close" data-i18n="diagnostics.close"></button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal" id="modal" hidden>
     <div class="dialog">
       <div class="title" id="modal-title"></div>

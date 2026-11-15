@@ -19,6 +19,52 @@ from vastapi import VastgameError  # noqa: E402
 APPLOG = []
 
 
+class TestSessionDiagnostics(unittest.TestCase):
+    def test_export_preserves_codes_and_drops_private_values(self):
+        api = gui.Api()
+        secret = "PRIVATE-123"
+        api._diagnostic_peer = "100.64.0.1"
+        api._diagnostics.observe_machine({"machine": {"id": 123456789}, "kind": "ready",
+                                          "links": {"moonlight": secret}, "detail": secret})
+        with mock.patch.object(api, "_launch_moonlight", return_value={
+            "error": {"key": "pair.cert", "text": secret, "params": {"account": secret}},
+        }):
+            api.open_moonlight(secret, secret)
+        with mock.patch.object(api, "_launch_steamlink", return_value={"ok": True, "need_pin": True, "account": secret}):
+            api.open_steamlink()
+        job = {"kind": "stop", "stage": "verify", "events": [
+            {"key": "core.finish_answer", "text": secret, "url": "https://example.invalid"},
+            {"key": secret},
+        ], "archives": {"private-game": ["err", secret]},
+            "error": {"key": "core.upload_unconfirmed", "params": {"token": secret}}}
+        with mock.patch.object(gui.jobs, "load", return_value=job), mock.patch.object(gui.wolfnode, "diagnostics", return_value={
+            "schema": 1, "steam_log": "user_namespaces", "services": {"play": "err", "boot": secret}, "account": secret,
+        }):
+            text = api.session_diagnostics()["text"]
+        for private in (secret, "100.64.0.1", "123456789", "private-game", "example.invalid"):
+            self.assertNotIn(private, text)
+        report = json.loads(text)
+        self.assertEqual(report["operation"]["events"], ["core.finish_answer"])
+        self.assertEqual(report["operation"]["error"], "core.upload_unconfirmed")
+        self.assertEqual(report["operation"]["archive_counts"], {"err": 1})
+        self.assertEqual(report["wolf"]["steam_log"], "user_namespaces")
+        self.assertEqual(report["wolf"]["services"], {"boot": "unknown", "play": "err"})
+        self.assertEqual([item["outcome"] for item in report["actions"]], ["error", "pin_required"])
+        api._diagnostic_peer = None
+        with mock.patch.object(gui.jobs, "load", return_value=None):
+            self.assertEqual(json.loads(api.session_diagnostics()["text"])["wolf"]["source"], "last_check")
+
+    def test_diagnostics_works_before_machine_is_online(self):
+        api = gui.Api()
+        with mock.patch.object(gui.jobs, "load", return_value={
+            "kind": "play", "stage": "tailscale", "error": {"key": "core.tailscale_timeout"},
+        }), mock.patch.object(gui.wolfnode, "diagnostics") as fetch:
+            report = json.loads(api.session_diagnostics()["text"])
+        fetch.assert_not_called()
+        self.assertIsNone(report["wolf"])
+        self.assertEqual(report["operation"]["error"], "core.tailscale_timeout")
+
+
 def setUpModule():
     """Тесты не трогают настоящие файлы в папке настроек: настройки, историю, пометки хостов."""
     import tempfile

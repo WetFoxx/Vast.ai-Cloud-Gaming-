@@ -54,6 +54,25 @@ def wolf_status(ip):
         return None
 
 
+def diagnostics(ip):
+    """Read the bounded, structured support summary from a known Tailscale peer."""
+    try:
+        with requests.get(f"http://{ip}:{WOLF_PORT}/diagnostics", timeout=(2, 3),
+                          allow_redirects=False, stream=True) as response:
+            if response.status_code != 200 or "application/json" not in response.headers.get("Content-Type", ""):
+                return None
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=4096):
+                body.extend(chunk)
+                if len(body) > 4096:
+                    return None
+            value = json.loads(body)
+            return value if isinstance(value, dict) else None
+    except (requests.RequestException, OSError, ValueError):
+        return None
+    return None
+
+
 def session_info(ip, timeout=5):
     """Метаданные сессии Wolf (/session):
     {"iid": ..., "run_id": ..., "storage": {"remote": ..., "folder_name": ..., "folder_id": ...}, "cleanup_allowed": bool}
