@@ -806,8 +806,9 @@ async function snapshotOf(name) {
 }
 function setStale(id, on) { $(id).classList.toggle("stale", !!on); }
 let offersDocker = null;   // вкладка: false — KVM, true — Docker (основная); null — как в прошлый раз
+let offersRequestedDisk = null;
 async function openOffers(disk, docker) {
-  const reload = disk != null;       // смена диска: тумблеры синхронизации не сбрасывать
+  offersRequestedDisk = disk ?? null;
   if (docker != null) offersDocker = docker;
   show("offers");
   renderOffersGame();
@@ -822,10 +823,12 @@ async function openOffers(disk, docker) {
   showError("offers-error", null);
   const my = ++offersReq;
   showTabs();
-  const fresh = DEMO ? null : api().offers(disk ?? null, offersDocker, replaceMode);
+  const mode = offersDocker;
+  const fresh = DEMO ? null : api().offers(offersRequestedDisk, mode, replaceMode);
   if (!replaceMode) {
-    const snap = await snapshotOf("offers:" + (offersDocker == null ? "auto" : offersDocker ? "docker" : "kvm"));
-    if (my === offersReq && !offersData && snap && Array.isArray(snap.offers) && (disk == null || snap.disk === disk)) {
+    const snap = await snapshotOf("offers:" + (mode == null ? "auto" : mode ? "docker" : "kvm"));
+    if (my === offersReq && !offersData && snap && Array.isArray(snap.offers)
+        && (mode == null || snap.docker === mode) && (disk == null || snap.disk === disk)) {
       offersData = snap; offersStale = true;
       offersDocker = !!snap.docker;
       showTabs();
@@ -870,8 +873,8 @@ function showTabs() {
   $("f-traffic").hidden = !offersDocker;
 }
 // Вкладка — другой список машин (диск тот же): Docker без KVM, но с драйвером от 580
-$("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offersData ? offersData.disk : null, false); });
-$("tab-docker").addEventListener("click", () => { if (!offersDocker) openOffers(offersData ? offersData.disk : null, true); });
+$("tab-kvm").addEventListener("click", () => { if (offersDocker) openOffers(offersData?.disk ?? offersRequestedDisk, false); });
+$("tab-docker").addEventListener("click", () => { if (!offersDocker) openOffers(offersData?.disk ?? offersRequestedDisk, true); });
 // «Обновить» — свежий список машин той же вкладки и диска (выбор игр не сбрасывается)
 $("offers-refresh").addEventListener("click", () => openOffers(offersData ? offersData.disk : Number($("disk").value), offersDocker));
 

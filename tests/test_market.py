@@ -1,7 +1,9 @@
 # market: последняя машина — ищется по номеру машины хоста среди свободных предложений (поддельный Vast).
 
 import sys
+import threading
 import unittest
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -119,7 +121,8 @@ class TestSearchQuota(unittest.TestCase):
     def setUp(self):
         import vastapi
         self.api = vastapi
-        for name, value in (("_search_results", {}), ("_search_quota_until", {}), ("read_key", lambda: "test-key")):
+        for name, value in (("_search_results", {}), ("_search_pending", {}),
+                            ("_search_quota_until", {}), ("read_key", lambda: "test-key")):
             patcher = mock.patch.object(vastapi, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -173,6 +176,99 @@ class TestSearchQuota(unittest.TestCase):
         self.assertCountEqual([(x["limit"], x["num_gpus"]["eq"]) for x in sent],
                               [(200, 1), (100, 2), (20, 1), (20, 2)])
         self.assertTrue(all(c.kwargs["cache_search"] for c in send.call_args_list))
+
+    def test_cache_separates_modes_disk_and_server_filters(self):
+        def response(method, url, **kwargs):
+            query = kwargs["json"]
+            disk = query["allocated_storage"]
+            mode = int("vms_enabled" in query)
+            gpus = query["num_gpus"]["eq"]
+            host = query.get("machine_id", {}).get("eq", 0)
+            offer_id = disk * 1000 + mode * 100 + gpus * 10 + host
+            return self.response(200, {"offers": [dict(OFFER, id=offer_id, machine_id=offer_id, driver_version="580.1")]})
+
+        with mock.patch.object(self.api.requests, "request", side_effect=response) as send:
+            docker = market.search(100, docker=True)
+            self.assertEqual({row["id"] for row in docker}, {100010, 100020})
+            self.assertEqual([row["id"] for row in market.search(100)], [100110])
+            self.assertEqual([row["id"] for row in market.search(150)], [150110])
+            self.assertEqual([row["id"] for row in market.search(100, where={"machine_id": {"eq": 7}})], [100117])
+            self.assertEqual(market.search(100, docker=True, max_traffic=0), [])
+            self.assertEqual(market.search(100, docker=True), docker)
+            self.assertEqual(send.call_count, 5)
+
+    def test_cache_expires_and_includes_query_params(self):
+        with mock.patch.object(self.api.time, "monotonic", return_value=100) as now, \
+             mock.patch.object(self.api.requests, "request", side_effect=[
+                 self.response(200, {"offers": [i]}) for i in range(3)]) as send:
+            def fetch(params):
+                return self.api.call("POST", "bundles/", params=params, cache_search=True)["offers"]
+
+            self.assertEqual(fetch({"view": 1}), [0])
+            self.assertEqual(fetch({"view": 2}), [1])
+            now.return_value = 129
+            self.assertEqual(fetch({"view": 1}), [0])
+            now.return_value = 130
+            self.assertEqual(fetch({"view": 1}), [2])
+            self.assertEqual(send.call_count, 3)
+
+    def test_concurrent_identical_searches_share_result_or_failure(self):
+        for status in (200, 500):
+            started, waiting, release = threading.Event(), threading.Event(), threading.Event()
+
+            class ObservedFuture(Future):
+                def result(self, timeout=None):
+                    waiting.set()
+                    return super().result(timeout)
+
+            def response(*args, **kwargs):
+                started.set()
+                if not release.wait(5):
+                    self.fail("HTTP request was not released")
+                return self.response(status, {"offers": [{"id": 1}]})
+
+            def fetch():
+                return self.api.call("POST", "bundles/", {"limit": status}, cache_search=True)
+
+            with self.subTest(status=status), mock.patch.object(self.api, "Future", ObservedFuture), \
+                 mock.patch.object(self.api.requests, "request", side_effect=response) as send, \
+                 ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(fetch)
+                try:
+                    self.assertTrue(started.wait(5))
+                    second = pool.submit(fetch)
+                    self.assertTrue(waiting.wait(5))
+                    send.assert_called_once()
+                finally:
+                    release.set()
+                if status == 200:
+                    first.result()["offers"].clear()
+                    self.assertEqual(second.result()["offers"], [{"id": 1}])
+                else:
+                    for result in (first, second):
+                        with self.assertRaises(self.api.VastgameError):
+                            result.result()
+                    send.side_effect = None
+                    send.return_value = self.response(200, {"offers": []})
+                    self.assertEqual(fetch(), {"offers": []})
+                    self.assertEqual(send.call_count, 2)
+
+    def test_concurrent_docker_and_kvm_queries_do_not_wait_on_each_other(self):
+        arrived = threading.Barrier(2, timeout=5)
+
+        def response(method, url, **kwargs):
+            arrived.wait()
+            return self.response(200, {"offers": [kwargs["json"]]})
+
+        def fetch(query):
+            return self.api.call("POST", "bundles/", query, cache_search=True)["offers"]
+
+        docker, kvm = {"num_gpus": {"eq": 1}}, {"num_gpus": {"eq": 1}, "vms_enabled": {"eq": True}}
+        with mock.patch.object(self.api.requests, "request", side_effect=response) as send, \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(fetch, (docker, kvm))), [[docker], [kvm]])
+            self.assertEqual(list(pool.map(fetch, (kvm, docker))), [[kvm], [docker]])
+            self.assertEqual(send.call_count, 2)
 
 
 if __name__ == "__main__":

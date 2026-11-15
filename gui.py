@@ -235,10 +235,10 @@ class Api:
                 return None      # не удалось проверить последнюю машину — список машин всё равно показать
 
         try:
+            docker = self._docker(docker)
             *_, tpl, credit = parallel.run(*([core.require_no_machine] if launching is None else []),
                                            lambda: core.template(TEMPLATE_TTL), core.balance)
             disk = self._disk(disk, tpl)
-            docker = self._docker(docker)
             rows, last = parallel.run(lambda: market.search(disk, min_rel=REL_FLOOR, docker=docker),  # порог надёжности —
                                       last_machine)                                            # фильтром на странице
         except VastgameError as e:

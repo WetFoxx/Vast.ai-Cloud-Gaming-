@@ -8,6 +8,7 @@ import hashlib
 import json
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 import keystore
@@ -64,6 +65,7 @@ def check_key(key):
 
 _search_lock = threading.Lock()
 _search_results = {}
+_search_pending = {}
 _search_quota_until = {}
 _SEARCH_TTL = 30
 
@@ -85,29 +87,63 @@ def call(method, path, body=None, params=None, base=API, *, cache_search=False):
     """Запрос к Vast. Кэш выдачи включается только для каталога, проверки перед арендой читают свежие данные."""
     is_search = method == "POST" and path == "bundles/"
     key = read_key()
-    scope = (base, hashlib.sha256(key.encode()).digest()) if is_search else None
-    cache_key = (scope, json.dumps(body, sort_keys=True)) if is_search and cache_search else None
-    if is_search:
+    if not is_search:
+        return _request(method, path, body, params, base, key)
+
+    scope = (base, hashlib.sha256(key.encode()).digest())
+    if not cache_search:
+        return _request(method, path, body, params, base, key, scope)
+
+    cache_key = (scope, json.dumps((body, params), sort_keys=True))
+    with _search_lock:
+        if time.time() < _search_quota_until.get(scope, 0):
+            raise _quota_error()
+        hit = _search_results.get(cache_key)
+        if hit and time.monotonic() - hit[0] < _SEARCH_TTL:
+            return copy.deepcopy(hit[1])
+        pending = _search_pending.get(cache_key)
+        if pending is None:
+            _search_pending[cache_key] = request = Future()
+    if pending is not None:
+        return copy.deepcopy(pending.result())
+
+    try:
+        data = _request(method, path, body, params, base, key, scope)
+        entry = copy.deepcopy(data)
         with _search_lock:
-            if time.time() < _search_quota_until.get(scope, 0):
-                raise _quota_error()
-            hit = _search_results.get(cache_key)
-            if hit and time.monotonic() - hit[0] < _SEARCH_TTL:
-                return copy.deepcopy(hit[1])
+            _search_results.pop(cache_key, None)
+            if len(_search_results) >= 64:
+                _search_results.pop(next(iter(_search_results)))
+            _search_results[cache_key] = time.monotonic(), entry
+        request.set_result(entry)
+        return data
+    except BaseException as error:  # VastgameError наследуется от SystemExit
+        request.set_exception(error)
+        raise
+    finally:
+        with _search_lock:
+            del _search_pending[cache_key]
+
+
+def _request(method, path, body, params, base, key, search_scope=None):
     try:
         for wait in (2, 4, 8, None):
+            if search_scope is not None:
+                with _search_lock:
+                    if time.time() < _search_quota_until.get(search_scope, 0):
+                        raise _quota_error()
             r = requests.request(method, base + path, headers={"Authorization": f"Bearer {key}"},
                                  json=body, params=params, timeout=30)
             if r.status_code != 429:
                 break
-            if is_search:
+            if search_scope is not None:
                 error = _error_body(r)
                 if (error.get("error") == "search_quota_exceeded"
                         or "daily search row quota exhausted" in str(error.get("msg", "")).lower()):
                     now = datetime.datetime.now(datetime.timezone.utc)
                     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
                     with _search_lock:
-                        _search_quota_until[scope] = midnight.timestamp()
+                        _search_quota_until[search_scope] = midnight.timestamp()
                     raise _quota_error()
             if wait is None:
                 break
@@ -123,14 +159,7 @@ def call(method, path, body=None, params=None, base=API, *, cache_search=False):
         msg = _error_body(r).get("msg") or ""
         raise VastgameError(f"Vast ответил ошибкой: HTTP {r.status_code} {msg}".rstrip(), key="vast.http",
                             code=r.status_code, msg=msg)
-    data = r.json()
-    if cache_key is not None:
-        with _search_lock:
-            _search_results.pop(cache_key, None)
-            if len(_search_results) >= 64:
-                _search_results.pop(next(iter(_search_results)))
-            _search_results[cache_key] = time.monotonic(), copy.deepcopy(data)
-    return data
+    return r.json()
 
 
 def instance_logs(iid, tail=300):
