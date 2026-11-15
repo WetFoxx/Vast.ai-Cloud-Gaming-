@@ -11,7 +11,7 @@ Set-Location $PSScriptRoot
 
 $RcloneVer = 'v1.75.1'
 $RcloneSha = '200eb602c126d82aa38b51e0f6b9ae837473ff99b51278d3f6f837574c494d6e'   # rclone-$RcloneVer-windows-amd64.zip
-$Py = '.venv\Scripts\python.exe'
+$Py = if (Test-Path '.venv\Scripts\python.exe') { '.venv\Scripts\python.exe' } elseif (Test-Path 'C:\Users\vgtest\Python312\python.exe') { 'C:\Users\vgtest\Python312\python.exe' } elseif (Test-Path "$env:USERPROFILE\Python312\python.exe") { "$env:USERPROFILE\Python312\python.exe" } else { 'python.exe' }
 
 if (-not (Test-Path oauth_client.json)) { throw 'Нет oauth_client.json — без него новые пользователи не войдут в Google' }
 
@@ -47,7 +47,7 @@ $size = [math]::Round(((Get-ChildItem dist\VastGame -Recurse -File | Measure-Obj
 
 # ---- установщик (Inno Setup 6, для одного пользователя): dist\VastGame-Setup-<версия>.exe
 $Ver = [regex]::Match((Get-Content version.py -Raw -Encoding UTF8), '(?m)^VERSION = "(\d+\.\d+\.\d+)"').Groups[1].Value
-$Iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") |
+$Iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "C:\Users\vgtest\AppData\Local\Programs\Inno Setup 6\ISCC.exe", "C:\Users\wetfox\AppData\Local\Programs\Inno Setup 6\ISCC.exe") |
         Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $Iscc) { throw 'Нет Inno Setup 6 (ISCC.exe) — поставить с jrsoftware.org' }
 Remove-Item "dist\VastGame-Setup-*.exe" -ErrorAction SilentlyContinue

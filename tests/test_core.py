@@ -610,6 +610,7 @@ class TestFinish(Base):
         with self.assertRaises(VastgameError) as e:
             core.stop(ui)
         self.assertEqual(e.exception.key, "core.finish_failed")
+        self.assertEqual(e.exception.params["id"], 42)
         self.assertEqual(self.deleted, [])
 
     def test_app_double_checks_machine_verdict(self):
@@ -619,6 +620,25 @@ class TestFinish(Base):
         with self.assertRaises(VastgameError) as e:
             core.stop(ui)
         self.assertEqual(e.exception.key, "core.upload_unconfirmed")
+        self.assertEqual(e.exception.params["id"], 42)
+        self.assertEqual(self.deleted, [])
+
+    def test_retry_finish_same_machine(self):
+        done = {"finish": (T0 + 60, "ok", "self: всё выгружено"), "steam-state": (T0 + 50, "ok", "выгружено")}
+        ui = self.setup_machine([done], gone_after=1)
+        r = core.stop(ui, expected_id=42)
+        self.assertEqual(r["iid"], 42)
+        self.assertTrue(r["deleted"])
+        self.assertIn("wolf finish", self.commands)
+
+    def test_retry_finish_refuses_replaced_machine(self):
+        ui = self.setup_machine([{}])
+        self.alive[:] = [99]
+        with self.assertRaises(VastgameError) as e:
+            core.stop(ui, expected_id=42)
+        self.assertEqual(e.exception.key, "core.finish_machine_changed")
+        self.assertEqual((e.exception.params["id"], e.exception.params["expected"]), (99, 42))
+        self.assertNotIn("wolf finish", self.commands)
         self.assertEqual(self.deleted, [])
 
     def test_network_errors_do_not_abort(self):

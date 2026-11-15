@@ -54,7 +54,8 @@ log "=== vastgame-desktop: старт ($(nvidia-smi --query-gpu=name,driver_vers
 # Перезапуск контейнера (Stop → Start на Vast): /tmp и /run здесь не tmpfs — старые замок X, сокет шины,
 # метки прошлой загрузки wolf и номер его процесса (теперь это мог бы быть чужой процесс) помешали бы запуску
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 "$XRD/bus" /run/vastgame/{stage,nvenc,capture,headless,ts-login.url} \
-      /run/wolf/boot-done /run/wolf/boot-started /run/wolf/supervise.pid 2>/dev/null
+      /run/wolf/boot-done /run/wolf/boot-started /run/wolf/supervise.pid \
+      /run/wolf/state-agent.pid /run/wolf/state-agent-loop.pid /run/wolf/state-agent.json 2>/dev/null
 mkdir -p "$XRD" && chown "$DU:" "$XRD" && chmod 700 "$XRD"
 
 # --------------------------------------------------------------------- отладка

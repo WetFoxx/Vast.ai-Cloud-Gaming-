@@ -240,6 +240,37 @@ mkdir -p "$S/van" "$S/x"; : > "$S/sel.on"; : > "$S/sel.store"
         out = self.m_run(m, stubs + pack + "\nmods_pack 10 Ten")
         self.assertIn("RC copyto", out)
 
+    def test_mods_pack_upload_failure_keeps_old_archive_and_skips_fp(self):
+        m = self.machine()
+        self.run_m(m, "mods_scan")
+        pack = fn("mods_pack").replace("/usr/local/bin/wolf-mods.py", str(PY)).replace("/var/log/wolf.log", str(m.d / "wolf.log"))
+        stubs = ('R=cloud; names() { printf "mod--10--OldTen\\nmod--10--Ten\\n"; }; '
+                 'rc() { echo "RC $*"; [ "$1" = "copyto" ] && return 1; return 0; }\n')
+        (m.d / "home/sa/steamapps/common/Ten/mod.dll").write_bytes(b"M")
+        out = self.m_run(m, stubs + pack + "\nmods_pack 10 Ten || echo FAILED")
+        self.assertIn("FAILED", out)
+        self.assertIn("RC copyto", out)
+        self.assertNotIn("deletefile", out)
+        self.assertFalse((m.d / "S/van/10.fp").exists())
+        st = (m.d / "S/st/mod--10--Ten").read_text()
+        self.assertIn("err|выгрузка модов не удалась", st)
+
+    def test_mods_pack_upload_success_deletes_renamed_archive(self):
+        m = self.machine()
+        self.run_m(m, "mods_scan")
+        pack = fn("mods_pack").replace("/usr/local/bin/wolf-mods.py", str(PY)).replace("/var/log/wolf.log", str(m.d / "wolf.log"))
+        stubs = ('R=cloud; names() { printf "mod--10--OldTen\\nmod--10--Ten\\n"; }; '
+                 'rc() { echo "RC $*"; return 0; }\n')
+        (m.d / "home/sa/steamapps/common/Ten/mod.dll").write_bytes(b"M")
+        out = self.m_run(m, stubs + pack + "\nmods_pack 10 Ten && echo OK")
+        self.assertIn("OK", out)
+        self.assertIn("RC copyto", out)
+        self.assertIn("RC deletefile cloud/mod--10--OldTen.tar.zst", out)
+        self.assertNotIn("RC deletefile cloud/mod--10--Ten.tar.zst", out)
+        self.assertTrue((m.d / "S/van/10.fp").exists())
+        st = (m.d / "S/st/mod--10--Ten").read_text()
+        self.assertIn("ok|моды выгружены", st)
+
     def m_run(self, m, body):
         return m.run(f"{FUNCS}\n{MODF}\nrd() {{ cat \"$1\" 2>/dev/null; }}\nmkdir -p \"$S/van\" \"$S/x\"\n{body}")
 
@@ -269,7 +300,7 @@ class TestScript(unittest.TestCase):
         src = (Path(__file__).resolve().parent.parent / "wolf-setup.sh").read_text()
         self.assertIn("MOD = re.compile(r'^mod--\\d{1,10}$')", src)
         self.assertIn("(game|sgame|pfx|mod|prog|lgame|gsave)--", src)   # [v5.6] lgame — файлы игры лаунчера; [v5.7] gsave
-        self.assertIn('"$0" mods                                    # [v5.0]', WOLF)
+        self.assertIn('"$0" mods || shut=1', WOLF)                  # [v5.0] выключение выгружает моды; сбой не проглатывается
         watch = fn("play_watch")
         self.assertLess(watch.index("mods_snap"), watch.index("mods_apply"))
         self.assertLess(watch.index("mods_apply"), watch.index("play_launch"))

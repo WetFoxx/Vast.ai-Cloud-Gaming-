@@ -254,7 +254,7 @@ def _post_check(version, zip_path, exe=None):
 def publish(notes):
     """Выпустить версию из version.py: проверки → сборка → архив и образ → проверка архива → подпись →
     сводка и «да» → GitHub Releases → проверка глазами приложения → метка в git проекта."""
-    version = re.search(r'^VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "version.py").read_text(), re.M).group(1)
+    version = re.search(r'^VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "version.py").read_text(encoding="utf-8"), re.M).group(1)
     tag = f"vastgame-v{version}"
     notes = (notes or "").strip()
 

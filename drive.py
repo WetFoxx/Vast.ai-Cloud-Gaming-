@@ -218,3 +218,65 @@ def set_trashed(file_id, trashed):
                        params={"fields": "id,trashed"}, json={"trashed": trashed},
                        headers={"Authorization": f"Bearer {at}"})
     return r.status_code == 200 and r.json().get("trashed") == trashed
+
+
+def folder_id(timeout=30):
+    """Уникальный ID папки FOLDER ('vastai-cloud-games') в Google Drive (или None)."""
+    try:
+        r = rclone("lsjson", "-M", "--dirs-only", "--max-depth", "1", REMOTE, timeout=timeout)
+        if r.returncode == 0:
+            for item in json.loads(r.stdout or "[]"):
+                if item.get("Name") == FOLDER:
+                    fid = item.get("ID")
+                    if fid:
+                        return str(fid)
+    except Exception:
+        pass
+    try:
+        at = _access_token()
+        if at:
+            res = requests.get(
+                "https://www.googleapis.com/drive/v3/files",
+                params={
+                    "q": f"name='{FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                    "fields": "files(id, name)",
+                },
+                headers={"Authorization": f"Bearer {at}"},
+                timeout=timeout,
+            )
+            if res.status_code == 200:
+                files = res.json().get("files") or []
+                if files:
+                    return str(files[0]["id"])
+    except Exception:
+        pass
+    return None
+
+
+def storage_identity(timeout=30):
+    """Идентичность хранилища на стороне клиента:
+    {"account_email": str, "folder_id": str, "folder_name": str} или None.
+    """
+    try:
+        tok = token()
+    except getattr(keystore, "RealKeychainInTest", ()):
+        return None
+    except Exception:
+        return None
+    if not tok:
+        return None
+    try:
+        chk = check(tok, sizes=False)
+        if not chk:
+            return None
+        email = chk[0]
+        fid = folder_id(timeout=timeout)
+        if not fid:
+            return None
+        return {
+            "account_email": email,
+            "folder_id": str(fid),
+            "folder_name": FOLDER,
+        }
+    except Exception:
+        return None

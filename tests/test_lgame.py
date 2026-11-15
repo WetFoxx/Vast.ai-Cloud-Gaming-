@@ -206,5 +206,496 @@ class TestWolfSide(unittest.TestCase):
         self.assertIn('flock "$L/snap-$a.lock" true', WOLF)
 
 
+import re as _re  # noqa: E402
+import subprocess as _sp  # noqa: E402
+
+_ZSTD = _sp.run(["which", "zstd"], capture_output=True).returncode == 0
+_PARTS_PY = TMP / "wolf-parts.py"
+_PARTS_PY.write_text(heredoc("wolf-parts.py", "PARTS"))
+_MODS_PY = TMP / "wolf-mods.py"
+_MODS_PY.write_text(heredoc("wolf-mods.py", "MODS"))
+
+
+def _wolf_fn(name):
+    m = (_re.search(rf"^{name}\(\) *\{{[^\n]*\n.*?\n\}}$", WOLF, _re.S | _re.M)
+         or _re.search(rf"^{name}\(\) *\{{.*\}}$", WOLF, _re.M))
+    assert m, name
+    return m.group(0)
+
+
+_DELTA_FNS = "\n".join(_wolf_fn(n) for n in (
+    "acf_get", "spec", "ls_", "man", "sz", "delsz", "rver", "gamearch", "drop", "idhint", "stable",
+    "xt_user", "get", "del", "unpack", "pack",
+    "mods_snap", "lgame_restore", "gsave_name", "gsave_restore", "lgame_push", "gsave_push"
+))
+
+
+@unittest.skipUnless(_ZSTD, "нет zstd")
+class TestMultiCycleDeltas(unittest.TestCase):
+    """Регрессионные тесты последовательных циклов сохранения и восстановления дельт для gsave-- и lgame--."""
+
+    def setUp(self):
+        self.cloud = Path(tempfile.mkdtemp(dir=TMP))
+
+    def setup_game(self, m):
+        m.steam_game(10, "Ten", name="Ten", flags=4)
+        g = m.d / "home/sa/steamapps/common/Ten"
+        (g / "boot.exe").write_bytes(b"V" * 500)
+        return g
+
+    def run_m(self, m, body):
+        script = f"""
+set +u
+{_DELTA_FNS}
+CLOUD="{self.cloud}"
+ZL=1; ZG=1; SV=1; R="cloud"
+rd() {{ cat "$1" 2>/dev/null; }}
+flock() {{ return 0; }}
+sleep() {{ :; }}
+comm() {{
+  python3 -c 'import sys
+opt, f1, f2 = sys.argv[1], sys.argv[2], sys.argv[3]
+s1 = set(x for x in open(f1, "rb").read().split(b"\\0") if x)
+s2 = set(x for x in open(f2, "rb").read().split(b"\\0") if x)
+res = sorted(s2 - s1 if "13" in opt else s1 - s2)
+sys.stdout.buffer.write(b"".join(x + b"\\0" for x in res))' "$@"
+}}
+cut() {{
+  python3 -c 'import sys
+data = open(sys.argv[2], "rb").read() if len(sys.argv) > 2 else sys.stdin.buffer.read()
+for r in data.split(b"\\0"):
+    if r: sys.stdout.buffer.write(r.split(b"\\t", 1)[0] + b"\\0")' "$@"
+}}
+tar() {{
+  python3 -c 'import os, sys, tarfile
+args = sys.argv[1:]
+if "-xpf" in args:
+    cwd = args[args.index("-C") + 1]
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as tf:
+        tf.extractall(cwd)
+elif "-cf" in args:
+    cwd = "."
+    i = 0
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
+        while i < len(args):
+            a = args[i]
+            if a in ("-cf", "-"):
+                i += 1
+            elif a == "-C":
+                cwd = args[i + 1]; i += 2
+            elif a == "-T":
+                for rel in open(args[i + 1], "rb").read().split(b"\\0"):
+                    if rel:
+                        r = rel.decode()
+                        tf.add(os.path.join(cwd, r), arcname=r, recursive=False)
+                i += 2
+            elif a.startswith("-"):
+                i += 1
+            else:
+                tf.add(os.path.join(cwd, a), arcname=a, recursive=False)
+                i += 1' "$@"
+}}
+del() {{
+  [ -f "$B/.wolf-del.$1" ] && python3 -c 'import os, shutil, sys
+b, f = sys.argv[1], os.path.join(sys.argv[1], sys.argv[2])
+for rel in open(f, "rb").read().split(b"\\0"):
+    if rel:
+        p = os.path.join(b, rel.decode())
+        if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p, ignore_errors=True)
+        elif os.path.lexists(p): os.remove(p)
+os.remove(f)' "$B" ".wolf-del.$1"
+  return 0
+}}
+rl() {{
+  python3 -c 'import hashlib, os, sys
+c = sys.argv[1]
+for fn in sorted(os.listdir(c)):
+    p = os.path.join(c, fn)
+    if os.path.isfile(p):
+        d = open(p, "rb").read()
+        print(f"{{fn}}\\t{{hashlib.md5(d).hexdigest()}}\\t{{len(d)}}")' "$CLOUD"
+}}
+rc() {{
+  local last; for last; do :; done
+  if [ "$1" = "cat" ]; then
+    cat "$CLOUD/${{last#cloud/}}"
+  fi
+}}
+rcp() {{
+  local last; for last; do :; done
+  if [ "$1" = "deletefile" ]; then
+    rm -f "$CLOUD/${{last#cloud/}}"
+  fi
+}}
+parts() {{
+  if [ "$1" = "stage" ]; then
+    cat > "$CLOUD/$2.part"
+    printf 'vastgame-stage 1\\nsingle\\n0\\n0\\n'
+  elif [ "$1" = "publish" ]; then
+    mv -f "$CLOUD/$2.part" "$CLOUD/$2"
+  elif [ "$1" = "abort" ]; then
+    rm -f "$CLOUD/$2.part" "$CLOUD/$2.parts.new"
+  elif [ "$1" = "put" ]; then
+    cat > "$CLOUD/$2"
+  elif [ "$1" = "rm" ]; then
+    rm -f "$CLOUD/$2"*
+  elif [ "$1" = "get" ] || [ "$1" = "cat" ]; then
+    cat "$CLOUD/$2"
+  fi
+}}
+mkdir -p "$S"/{{h,m,v,p,st,nt,nm,x,pg,van}}
+echo 10 > "$S/sel.gdata"
+rl > "$LS"
+{body}
+"""
+        return m.run(script)
+
+    def test_gsave_multi_cycle_deltas_preserve_all_changes(self):
+        # Цикл 1 (Машина 1): базовый архив gsave--10--Ten.tar.zst
+        m1 = Machine()
+        g1 = self.setup_game(m1)
+        self.run_m(m1, "mods_snap 10 Ten 1")
+        self.run_m(m1, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g1 / "save_base.sav").write_bytes(b"S" * 4000)
+        (g1 / "save_slot1.sav").write_bytes(b"1" * 200)
+        (g1 / "save_temp.sav").write_bytes(b"T" * 100)
+        self.run_m(m1, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m1, "NOW=1 gsave_push")
+        self.assertEqual(sorted(os.listdir(self.cloud)), ["gsave--10--Ten.tar.zst"])
+
+        # Цикл 2 (Машина 2): восстановление базы -> дельта 1 (новый файл, изменённый файл, удалённый файл)
+        m2 = Machine()
+        g2 = self.setup_game(m2)
+        self.run_m(m2, "mods_snap 10 Ten 1")
+        self.run_m(m2, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g2 / "save_delta1.sav").write_bytes(b"D" * 100)
+        (g2 / "save_slot1.sav").write_bytes(b"2" * 220)
+        (g2 / "save_temp.sav").unlink()
+        self.run_m(m2, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m2, "NOW=1 gsave_push")
+        cloud_after_m2 = sorted(os.listdir(self.cloud))
+        self.assertEqual(len(cloud_after_m2), 2)
+        self.assertTrue(cloud_after_m2[1].startswith("gsave--10--Ten.tar.zst."))
+
+        # Цикл 3 (Машина 3): восстановление базы + дельты 1 -> проверка, что $S/m/ хранит манифест базы -> дельта 2
+        m3 = Machine()
+        g3 = self.setup_game(m3)
+        self.run_m(m3, "mods_snap 10 Ten 1")
+        base_man = (m3.d / "S/m/gsave--10--Ten").read_text()
+        self.assertIn("save_base.sav", base_man)
+        self.assertIn("save_temp.sav", base_man)
+        self.assertNotIn("save_delta1.sav", base_man)          # манифест базы не перезаписан дельтой 1!
+        self.assertTrue((g3 / "save_delta1.sav").exists())
+        self.assertFalse((g3 / "save_temp.sav").exists())
+        self.assertEqual((g3 / "save_slot1.sav").read_bytes(), b"2" * 220)
+
+        self.run_m(m3, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g3 / "save_delta2.sav").write_bytes(b"E" * 100)
+        self.run_m(m3, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m3, "NOW=1 gsave_push")
+
+        # Цикл 4 (Машина 4): восстановление базы + кумулятивной дельты 2 -> все изменения из дельты 1 и дельты 2 на месте
+        m4 = Machine()
+        g4 = self.setup_game(m4)
+        self.run_m(m4, "mods_snap 10 Ten 1")
+        self.assertEqual(sorted(p.name for p in g4.iterdir()),
+                         ["boot.exe", "save_base.sav", "save_delta1.sav", "save_delta2.sav", "save_slot1.sav"])
+        self.assertEqual((g4 / "save_base.sav").read_bytes(), b"S" * 4000)
+        self.assertEqual((g4 / "save_slot1.sav").read_bytes(), b"2" * 220)
+        self.assertEqual((g4 / "save_delta1.sav").read_bytes(), b"D" * 100)
+        self.assertEqual((g4 / "save_delta2.sav").read_bytes(), b"E" * 100)
+        self.assertFalse((g4 / "save_temp.sav").exists())
+
+        # Цикл 5 (на Машине 4 -> Машина 5): крупное изменение (>= 25% базы) пересобирает базу и убирает старую дельту
+        self.run_m(m4, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g4 / "save_big.sav").write_bytes(b"B" * 2000)
+        self.run_m(m4, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m4, "NOW=1 gsave_push")
+        self.assertEqual(sorted(os.listdir(self.cloud)), ["gsave--10--Ten.tar.zst"])
+
+        m5 = Machine()
+        g5 = self.setup_game(m5)
+        self.run_m(m5, "mods_snap 10 Ten 1")
+        self.assertEqual(sorted(p.name for p in g5.iterdir()),
+                         ["boot.exe", "save_base.sav", "save_big.sav", "save_delta1.sav", "save_delta2.sav", "save_slot1.sav"])
+
+    def test_lgame_multi_cycle_deltas_and_coexistence_with_gsave(self):
+        # Цикл 1 (Машина 1): лаунчер скачал базовые файлы игры (> LAUNCHER_BYTES) -> lgame--10--Ten.tar.zst
+        m1 = Machine()
+        g1 = self.setup_game(m1)
+        self.run_m(m1, "mods_snap 10 Ten 1")
+        self.run_m(m1, 'WOLF_LAUNCHER_BYTES=1000 python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g1 / "game_base.dat").write_bytes(b"G" * 5000)
+        (g1 / "game_cfg.dat").write_bytes(b"C" * 200)
+        (g1 / "game_old_patch.dat").write_bytes(b"P" * 200)
+        self.run_m(m1, 'WOLF_LAUNCHER_BYTES=1000 python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m1, "NOW=1 lgame_push")
+        self.assertEqual(sorted(os.listdir(self.cloud)), ["lgame--10--Ten.tar.zst"])
+
+        # Цикл 2 (Машина 2): восстановление базы lgame -> дельта 1 (новый патч, обновлённый cfg, удалённый старый патч)
+        m2 = Machine()
+        g2 = self.setup_game(m2)
+        self.run_m(m2, "mods_snap 10 Ten 1")
+        self.run_m(m2, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g2 / "game_delta1.dat").write_bytes(b"1" * 150)
+        (g2 / "game_cfg.dat").write_bytes(b"U" * 210)
+        (g2 / "game_old_patch.dat").unlink()
+        self.run_m(m2, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m2, "NOW=1 lgame_push")
+        cloud_m2 = sorted(os.listdir(self.cloud))
+        self.assertEqual(len(cloud_m2), 2)
+        self.assertTrue(cloud_m2[1].startswith("lgame--10--Ten.tar.zst."))
+
+        # Цикл 3 (Машина 3): восстановление базы + дельты 1 -> дельта 2 для lgame
+        m3 = Machine()
+        g3 = self.setup_game(m3)
+        self.run_m(m3, "mods_snap 10 Ten 1")
+        base_man = (m3.d / "S/m/lgame--10--Ten").read_text()
+        self.assertIn("game_base.dat", base_man)
+        self.assertIn("game_old_patch.dat", base_man)
+        self.assertNotIn("game_delta1.dat", base_man)          # манифест базы lgame не затёрт дельтой 1!
+        self.assertTrue((g3 / "game_delta1.dat").exists())
+        self.assertFalse((g3 / "game_old_patch.dat").exists())
+        self.assertEqual((g3 / "game_cfg.dat").read_bytes(), b"U" * 210)
+
+        self.run_m(m3, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g3 / "game_delta2.dat").write_bytes(b"2" * 150)
+        self.run_m(m3, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m3, "NOW=1 lgame_push")
+
+        # Цикл 4 (Машина 4): восстановление базы + кумулятивной дельты 2 -> все файлы и удаления из обеих дельт сохранены
+        m4 = Machine()
+        g4 = self.setup_game(m4)
+        self.run_m(m4, "mods_snap 10 Ten 1")
+        self.assertEqual(sorted(p.name for p in g4.iterdir()),
+                         ["boot.exe", "game_base.dat", "game_cfg.dat", "game_delta1.dat", "game_delta2.dat"])
+        self.assertEqual((g4 / "game_base.dat").read_bytes(), b"G" * 5000)
+        self.assertEqual((g4 / "game_cfg.dat").read_bytes(), b"U" * 210)
+        self.assertEqual((g4 / "game_delta1.dat").read_bytes(), b"1" * 150)
+        self.assertEqual((g4 / "game_delta2.dat").read_bytes(), b"2" * 150)
+        self.assertFalse((g4 / "game_old_patch.dat").exists())
+        # Восстановленные файлы лаунчера не считаются модами
+        diff_out = self.run_m(m4, 'python3 /usr/local/bin/wolf-mods.py diff "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        self.assertEqual(diff_out.split()[0], "0")
+
+    def test_claim_failure_aborts_restore_without_stale_lists_or_checksums(self):
+        # Подготовим в облаке базовый архив + дельту для gsave--10--Ten и lgame--10--Ten
+        m1 = Machine()
+        g1 = self.setup_game(m1)
+        self.run_m(m1, "mods_snap 10 Ten 1")
+        self.run_m(m1, 'WOLF_LAUNCHER_BYTES=1000 python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g1 / "game_base.dat").write_bytes(b"G" * 4000)
+        self.run_m(m1, 'WOLF_LAUNCHER_BYTES=1000 python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m1, "NOW=1 lgame_push")
+        self.run_m(m1, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g1 / "game_delta.dat").write_bytes(b"D" * 100)
+        self.run_m(m1, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m1, "NOW=1 lgame_push")
+
+        # 1) Намеренный сбой claim на базовом архиве: устаревший .game.tsv удаляется,
+        #    контрольные суммы $S/m, $S/h, $S/v не записываются, unpack возвращает 1 и ставит err
+        m2 = Machine()
+        self.setup_game(m2)
+        self.run_m(m2, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        (m2.d / "S/van/10.game.tsv").write_text("stale.dat\t100\t1\n")
+        out_base_fail = self.run_m(m2, """
+python3() {
+  if [ "$1" = "/usr/local/bin/wolf-mods.py" ] && [ "$2" = "claim" ]; then
+    return 1
+  fi
+  case $1 in /usr/local/bin/*) set -- """ + f'"{TMP}/${{1##*/}}"' + """ "${@:2}";; esac
+  command """ + sys.executable + """ "$@"
+}
+unpack "lgame--10--Ten" && echo "UNEXPECTED_OK" || echo "EXPECTED_FAIL"
+""")
+        self.assertIn("EXPECTED_FAIL", out_base_fail)
+        self.assertNotIn("UNEXPECTED_OK", out_base_fail)
+        self.assertEqual((m2.d / "S/st/lgame--10--Ten").read_text().strip(), "err|ошибка восстановления")
+        self.assertFalse((m2.d / "S/van/10.game.tsv").exists())
+        self.assertFalse((m2.d / "S/m/lgame--10--Ten").exists())
+        self.assertFalse((m2.d / "S/h/lgame--10--Ten").exists())
+        self.assertFalse((m2.d / "S/v/lgame--10--Ten").exists())
+
+        # 2) Намеренный сбой второго claim (на дельте, после успешного claim базового архива):
+        #    .game.tsv от базового архива (теперь устаревший относительно дельты) и $S/m очищаются,
+        #    $S/h и $S/v не записываются, статус err
+        m3 = Machine()
+        self.setup_game(m3)
+        self.run_m(m3, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        out_delta_fail = self.run_m(m3, """
+_CLAIM_N=0
+python3() {
+  if [ "$1" = "/usr/local/bin/wolf-mods.py" ] && [ "$2" = "claim" ]; then
+    _CLAIM_N=$((_CLAIM_N + 1))
+    [ $((_CLAIM_N % 2)) -eq 0 ] && return 1
+  fi
+  case $1 in /usr/local/bin/*) set -- """ + f'"{TMP}/${{1##*/}}"' + """ "${@:2}";; esac
+  command """ + sys.executable + """ "$@"
+}
+unpack "lgame--10--Ten" && echo "UNEXPECTED_OK" || echo "EXPECTED_DELTA_FAIL"
+""")
+        self.assertIn("EXPECTED_DELTA_FAIL", out_delta_fail)
+        self.assertNotIn("UNEXPECTED_OK", out_delta_fail)
+        self.assertEqual((m3.d / "S/st/lgame--10--Ten").read_text().strip(), "err|ошибка восстановления")
+        self.assertFalse((m3.d / "S/van/10.game.tsv").exists())
+        self.assertFalse((m3.d / "S/m/lgame--10--Ten").exists())
+        self.assertFalse((m3.d / "S/h/lgame--10--Ten").exists())
+        self.assertFalse((m3.d / "S/v/lgame--10--Ten").exists())
+
+        # 3) Та же проверка для gsave-- (сбой claim не оставляет устаревший .pend.tsv и не пишет $S/m, $S/h, $S/v)
+        m_gs = Machine()
+        g_gs = self.setup_game(m_gs)
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g_gs / "save1.sav").write_bytes(b"S" * 500)
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m_gs, "NOW=1 gsave_push")
+
+        m4 = Machine()
+        self.setup_game(m4)
+        self.run_m(m4, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        (m4.d / "S/van/10.pend.tsv").write_text("stale.sav\t50\t1\n")
+        out_gs_fail = self.run_m(m4, """
+python3() {
+  if [ "$1" = "/usr/local/bin/wolf-mods.py" ] && [ "$2" = "claim" ]; then
+    return 1
+  fi
+  case $1 in /usr/local/bin/*) set -- """ + f'"{TMP}/${{1##*/}}"' + """ "${@:2}";; esac
+  command """ + sys.executable + """ "$@"
+}
+gsave_restore 10 Ten
+""")
+        self.assertIn("данные игры 10: из облака не восстановились", out_gs_fail)
+        self.assertEqual((m4.d / "S/st/gsave--10--Ten").read_text().strip(), "err|ошибка восстановления")
+        self.assertFalse((m4.d / "S/van/10.pend.tsv").exists())
+        self.assertFalse((m4.d / "S/m/gsave--10--Ten").exists())
+        self.assertFalse((m4.d / "S/h/gsave--10--Ten").exists())
+        self.assertFalse((m4.d / "S/v/gsave--10--Ten").exists())
+
+        # 4) Когда снимок $S/van/10.tsv отсутствует, вызов claim не требуется — unpack проходит штатно
+        m5 = Machine()
+        g5 = self.setup_game(m5)
+        out_no_snap = self.run_m(m5, """
+python3() {
+  if [ "$1" = "/usr/local/bin/wolf-mods.py" ] && [ "$2" = "claim" ]; then
+    echo "CLAIM_SHOULD_NOT_RUN"; return 1
+  fi
+  case $1 in /usr/local/bin/*) set -- """ + f'"{TMP}/${{1##*/}}"' + """ "${@:2}";; esac
+  command """ + sys.executable + """ "$@"
+}
+unpack "lgame--10--Ten" && unpack "gsave--10--Ten" && echo "NO_SNAP_OK"
+""")
+        self.assertIn("NO_SNAP_OK", out_no_snap)
+        self.assertNotIn("CLAIM_SHOULD_NOT_RUN", out_no_snap)
+        self.assertEqual((m5.d / "S/st/lgame--10--Ten").read_text().strip(), "ok|восстановлено")
+        self.assertEqual((m5.d / "S/st/gsave--10--Ten").read_text().strip(), "ok|восстановлено")
+        self.assertTrue((g5 / "game_base.dat").exists())
+        self.assertTrue((g5 / "game_delta.dat").exists())
+        self.assertTrue((g5 / "save1.sav").exists())
+
+    def test_final_claim_failure_in_lgame_restore_and_gsave_restore_sets_err_status(self):
+        # Подготовим в облаке базовый архив + дельту для lgame--10--Ten и gsave--10--Ten
+        m1 = Machine()
+        g1 = self.setup_game(m1)
+        self.run_m(m1, "mods_snap 10 Ten 1")
+        self.run_m(m1, 'WOLF_LAUNCHER_BYTES=1000 python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g1 / "game_base.dat").write_bytes(b"G" * 4000)
+        self.run_m(m1, 'WOLF_LAUNCHER_BYTES=1000 python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m1, "NOW=1 lgame_push")
+        self.run_m(m1, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g1 / "game_delta.dat").write_bytes(b"D" * 100)
+        self.run_m(m1, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m1, "NOW=1 lgame_push")
+
+        m_gs = Machine()
+        g_gs = self.setup_game(m_gs)
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g_gs / "save_base.sav").write_bytes(b"S" * 4000)
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m_gs, "NOW=1 gsave_push")
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 1 ""')
+        (g_gs / "save_delta.sav").write_bytes(b"2" * 100)
+        self.run_m(m_gs, 'python3 /usr/local/bin/wolf-mods.py track "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" 0 ""')
+        self.run_m(m_gs, "NOW=1 gsave_push")
+
+        # 1) Сценарий lgame: unpack() завершается успешно (оба внутренних claim для базы и дельты проходят,
+        #    unpack ставит ok|восстановлено и записывает контрольные суммы), но финальный 3-й claim
+        #    в lgame_restore() возвращает ошибку. Статус обязан переключиться в err|ошибка восстановления,
+        #    а контрольные суммы и .game.tsv — удалиться.
+        m2 = Machine()
+        self.setup_game(m2)
+        self.run_m(m2, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        out_lgame = self.run_m(m2, """
+_CLAIM_N=0
+python3() {
+  if [ "$1" = "/usr/local/bin/wolf-mods.py" ] && [ "$2" = "claim" ]; then
+    _CLAIM_N=$((_CLAIM_N + 1))
+    if [ "$_CLAIM_N" -eq 3 ]; then
+      cp "$S/st/lgame--10--Ten" "$S/st/before_final_lgame"
+      return 1
+    fi
+  fi
+  case $1 in /usr/local/bin/*) set -- """ + f'"{TMP}/${{1##*/}}"' + """ "${@:2}";; esac
+  command """ + sys.executable + """ "$@"
+}
+lgame_restore 10 Ten
+""")
+        self.assertEqual((m2.d / "S/st/before_final_lgame").read_text().strip(), "ok|восстановлено")
+        self.assertIn("игра 10: из облака не восстановилась — лаунчер скачает её сам", out_lgame)
+        self.assertEqual((m2.d / "S/st/lgame--10--Ten").read_text().strip(), "err|ошибка восстановления")
+        self.assertFalse((m2.d / "S/van/10.game.tsv").exists())
+        self.assertFalse((m2.d / "S/m/lgame--10--Ten").exists())
+        self.assertFalse((m2.d / "S/h/lgame--10--Ten").exists())
+        self.assertFalse((m2.d / "S/v/lgame--10--Ten").exists())
+
+        # 2) Сценарий gsave: unpack() завершается успешно (оба внутренних claim для базы и дельты проходят,
+        #    unpack ставит ok|восстановлено), но финальный 3-й claim в gsave_restore() возвращает ошибку.
+        #    Статус обязан переключиться в err|ошибка восстановления, а контрольные суммы и .pend.tsv — удалиться.
+        m3 = Machine()
+        self.setup_game(m3)
+        self.run_m(m3, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv"')
+        out_gsave = self.run_m(m3, """
+_CLAIM_N=0
+python3() {
+  if [ "$1" = "/usr/local/bin/wolf-mods.py" ] && [ "$2" = "claim" ]; then
+    _CLAIM_N=$((_CLAIM_N + 1))
+    if [ "$_CLAIM_N" -eq 3 ]; then
+      cp "$S/st/gsave--10--Ten" "$S/st/before_final_gsave"
+      return 1
+    fi
+  fi
+  case $1 in /usr/local/bin/*) set -- """ + f'"{TMP}/${{1##*/}}"' + """ "${@:2}";; esac
+  command """ + sys.executable + """ "$@"
+}
+gsave_restore 10 Ten
+""")
+        self.assertEqual((m3.d / "S/st/before_final_gsave").read_text().strip(), "ok|восстановлено")
+        self.assertIn("данные игры 10: из облака не восстановились", out_gsave)
+        self.assertEqual((m3.d / "S/st/gsave--10--Ten").read_text().strip(), "err|ошибка восстановления")
+        self.assertFalse((m3.d / "S/van/10.pend.tsv").exists())
+        self.assertFalse((m3.d / "S/m/gsave--10--Ten").exists())
+        self.assertFalse((m3.d / "S/h/gsave--10--Ten").exists())
+        self.assertFalse((m3.d / "S/v/gsave--10--Ten").exists())
+
+        # 3) Проверка необходимости финального claim после unpack(): если архив был распакован до создания снимка
+        #    $S/van/10.tsv (когда внутренний claim пропускался, но $S/v/ записался), то при вызове lgame_restore /
+        #    gsave_restore функция unpack() сразу выходит со статусом ok|актуально без вызова внутреннего claim,
+        #    и именно финальный claim формирует .game.tsv / .pend.tsv, $S/m/ и $S/h/.
+        m4 = Machine()
+        self.setup_game(m4)
+        self.run_m(m4, 'unpack "lgame--10--Ten"')
+        self.assertFalse((m4.d / "S/van/10.game.tsv").exists())
+        self.run_m(m4, 'python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv" && (rm -f "$DH/$SR/steamapps/common/Ten"/game_*.dat; python3 /usr/local/bin/wolf-mods.py snap "$DH/$SR/steamapps/common/Ten" "$S/van/10.tsv")')
+        self.run_m(m4, 'FORCE=1 unpack "lgame--10--Ten"')
+        (m4.d / "S/van/10.game.tsv").unlink()
+        (m4.d / "S/m/lgame--10--Ten").write_text("")
+        out_fast = self.run_m(m4, "lgame_restore 10 Ten")
+        self.assertIn("файлы из облака на месте, лаунчеру осталось докачать новое (2 файлов)", out_fast)
+        self.assertTrue((m4.d / "S/van/10.game.tsv").exists())
+        self.assertTrue((m4.d / "S/m/lgame--10--Ten").read_text().strip())
+        self.assertTrue((m4.d / "S/h/lgame--10--Ten").read_text().strip())
+
+
 if __name__ == "__main__":
     unittest.main()

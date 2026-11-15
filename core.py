@@ -53,7 +53,8 @@ DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:c55c6cc0d4a7e99a859a42e7cd38cb6
 SUNSHINE = "sunshine"    # запись образа на странице wolf: заработал ли NVENC (не архив)
 PLAY = "play"            # [v4.8] запись wolf: игра из библиотеки — вход в Steam, скачивание, запуск (не архив)
 PROGS = "progs"          # [v5.4] запись wolf: программы игр (JSON: {номер: {running, auto, progs}}) — не архив
-NOT_ARCHIVES = (SUNSHINE, PLAY, PROGS)
+CLEANUP = "cleanup"      # запись wolf: очистка вытесненных поколений архивов (не архив)
+NOT_ARCHIVES = (SUNSHINE, PLAY, PROGS, CLEANUP)
 
 
 # ------------------------------------------------------------------ подготовка аренды ---
@@ -304,6 +305,20 @@ def _trace(text):
     settings.applog(text)
 
 
+def wait_instance_gone(iid, timeout=20, interval=2):
+    """Опрашивает list_instances() до подтверждённого исчезновения iid у провайдера."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            instances = list_instances()
+            if not any(str(i.get("id")) == str(iid) for i in instances):
+                return True
+        except Exception:
+            return False
+        time.sleep(interval)
+    return False
+
+
 def delete_instance(iid):
     """Удалить инстанс. (успех, сообщение Vast)."""
     t = time.time()
@@ -312,6 +327,16 @@ def delete_instance(iid):
     _trace(f"удаление {iid}: Vast ответил за {time.time() - t:.1f} с, успех={bool(r.get('success'))}")
     if r.get("success"):
         history.ended(iid)
+        try:
+            import settings
+            hist = settings.get("storage_history")
+            if hist and isinstance(hist, dict) and str(hist.get("last_iid")) == str(iid):
+                if wait_instance_gone(iid, timeout=10, interval=1):
+                    hist["last_iid_confirmed_ended"] = True
+                    settings.set("storage_history", hist)
+                    _trace(f"удаление {iid}: подтверждено отсутствие у провайдера")
+        except Exception as e:
+            _trace(f"удаление {iid}: ошибка проверки отсутствия ({e})")
     return bool(r.get("success")), r.get("msg")
 
 
@@ -480,6 +505,132 @@ class _MachineLog:
 MSTAGES = ("nvidia", "display", "audio", "desktop", "wolf", "ready", "error")
 
 
+def _ui_say(ui, text, level="info"):
+    _trace(text)
+    if ui and hasattr(ui, "say"):
+        ui.say(text, level, None)
+
+
+def _authorize_cleanup(ui, iid, ip):
+    """Сессионная авторизация очистки хранилища (безопасный режим).
+    Если история неизвестна, нарушена или проверка провайдера завершилась ошибкой —
+    разрешение не выдавать. Ошибки не прерывают запуск игры.
+    Все служебные сообщения фиксируются в журнале приложения (_trace) и передаются в ui.
+    """
+    import drive
+    import wolfnode
+    import settings
+    import keystore
+
+    # 1. Проверка идентичности хранилища на стороне клиента
+    try:
+        storage_id = drive.storage_identity(timeout=10)
+    except Exception as e:
+        _ui_say(ui, f"Очистка хранилища: не удалось определить идентичность хранилища ({e}) — режим view-only.", "info")
+        return False
+    if not storage_id or not isinstance(storage_id, dict):
+        _ui_say(ui, "Очистка хранилища: папка хранилища не определена — режим view-only.", "info")
+        return False
+    client_fid = str(storage_id.get("folder_id") or "").strip()
+    client_email = str(storage_id.get("account_email") or "").strip()
+    if not client_fid or not client_email:
+        _ui_say(ui, "Очистка хранилища: папка или аккаунт Google Drive не определены — режим view-only.", "info")
+        return False
+
+    req_iid = str(iid or "").strip()
+    if not req_iid:
+        _ui_say(ui, "Очистка хранилища: iid инстанса не задан — режим view-only.", "info")
+        return False
+
+    # 2. Проверка истории хранилища в настройках клиента
+    hist = settings.get("storage_history")
+    if not hist or not isinstance(hist, dict):
+        settings.set("storage_history", {
+            "account_email": client_email,
+            "folder_id": client_fid,
+            "last_iid": req_iid,
+            "last_iid_confirmed_ended": False,
+            "trusted": False,
+        })
+        _ui_say(ui, "Очистка хранилища: история сессий неизвестна — режим view-only (разрешение не выдаётся).", "info")
+        return False
+
+    if not hist.get("trusted"):
+        _ui_say(ui, "Очистка хранилища: история сессий не является доверенной — режим view-only.", "info")
+        return False
+
+    if hist.get("account_email") != client_email or hist.get("folder_id") != client_fid:
+        _ui_say(ui, "Очистка хранилища: сменился аккаунт или папка Google Drive — режим view-only.", "info")
+        return False
+
+    # 3. Проверка завершения предыдущего инстанса у провайдера
+    prior_iid = hist.get("last_iid")
+    if prior_iid and str(prior_iid) != req_iid:
+        try:
+            active = list_instances()
+            active_ids = {str(item.get("id")) for item in active}
+            if str(prior_iid) in active_ids:
+                _ui_say(ui, f"Очистка хранилища: предыдущий инстанс {prior_iid} всё ещё активен у провайдера — отказ.", "warn")
+                return False
+        except getattr(keystore, "RealKeychainInTest", ()):
+            _ui_say(ui, "Очистка хранилища: ключ провайдера недоступен — отказ.", "warn")
+            return False
+        except Exception as e:
+            _ui_say(ui, f"Очистка хранилища: сбой проверки активных инстансов у провайдера ({e}) — отказ.", "warn")
+            return False
+
+    # 4. Проверка метаданных сессии Wolf
+    try:
+        s_info = wolfnode.session_info(ip, timeout=5)
+    except Exception as e:
+        _ui_say(ui, f"Очистка хранилища: сбой запроса сессии Wolf ({e}) — режим view-only.", "info")
+        return False
+
+    if not s_info or not isinstance(s_info, dict):
+        _ui_say(ui, "Очистка хранилища: Wolf старой версии или не вернул сессию — режим view-only.", "info")
+        return False
+
+    wolf_iid = str(s_info.get("iid") or "").strip()
+    wolf_run_id = str(s_info.get("run_id") or "").strip()
+    wolf_storage = s_info.get("storage")
+    wolf_fid = str((wolf_storage.get("folder_id") if isinstance(wolf_storage, dict) else "") or "").strip()
+
+    # Обязательные проверки: ни одно из полей не может быть пустым
+    if not wolf_iid:
+        _ui_say(ui, "Очистка хранилища: Wolf не знает свой iid — режим view-only.", "info")
+        return False
+
+    if not wolf_run_id:
+        _ui_say(ui, "Очистка хранилища: Wolf не предоставил run_id — режим view-only.", "info")
+        return False
+
+    if not wolf_fid:
+        _ui_say(ui, "Очистка хранилища: Wolf не определил папку хранилища — режим view-only.", "info")
+        return False
+
+    # Строгие проверки совпадения
+    if wolf_iid != req_iid:
+        _ui_say(ui, f"Очистка хранилища: несовпадение iid (Wolf {wolf_iid} != контракт {req_iid}) — отказ.", "warn")
+        return False
+
+    if wolf_fid != client_fid:
+        _ui_say(ui, f"Очистка хранилища: несовпадение папки Drive (Wolf {wolf_fid} != клиент {client_fid}) — отказ.", "warn")
+        return False
+
+    # 5. Передача разрешения
+    enabled_val = "1" if bool(settings.get("storage_cleanup_enabled", False)) else "0"
+    code, out = wolfnode.run(ip, "grant-cleanup", [req_iid, wolf_run_id, client_fid, enabled_val], timeout=10)
+    if code == 0:
+        hist["last_iid"] = req_iid
+        hist["last_iid_confirmed_ended"] = False
+        settings.set("storage_history", hist)
+        _ui_say(ui, f"Сессионное разрешение на очистку выдано (run_id={wolf_run_id[:8]}…).", "ok")
+        return True
+    else:
+        _ui_say(ui, f"Очистка хранилища: сервер отклонил разрешение ({out}) — режим view-only.", "info")
+        return False
+
+
 def wait_ready(iid, t0, o, ui, docker=False):
     """Дождаться, пока машина готова к игре: Vast → Tailscale → восстановление из Drive.
     docker — контейнер vastgame-desktop: кодировщик NVENC работает не на всех хостах — такую машину
@@ -611,6 +762,12 @@ def wait_ready(iid, t0, o, ui, docker=False):
                                 key="core.tailscale_timeout", min=TAILSCALE_MIN)
         time.sleep(15)
     ui.say(f"Tailscale: {dns or ip} ({ip}) онлайн.", "ok", key="core.tailscale_online", name=dns or ip, ip=ip)
+
+    # Сессионная авторизация очистки хранилища (безопасный режим: при любой ошибке запуск продолжается)
+    try:
+        _authorize_cleanup(ui, iid, ip)
+    except Exception as e:
+        _trace(f"Очистка хранилища: отключена ({e}) — запуск в безопасном режиме.")
 
     # ---- wolf восстанавливает всё из Google Drive
     ui.stage("restore", "Восстановление из Google Drive:")
@@ -778,13 +935,19 @@ def _find_machine():
     return iid, ip, dns
 
 
-def stop(ui, dry_run=False):
+def stop(ui, dry_run=False, expected_id=None):
     """Выгрузить всё с машины в Google Drive, проверить и только потом (после «да») удалить её.
 
     Возвращает {"iid", "uploaded", "deleted"} или, при dry_run, {"iid", "archives"}.
     Выгрузка не подтвердилась — VastgameError, машина НЕ удаляется.
+    expected_id — повтор выгрузки той же машины: если сейчас арендована другая, finish не отправляется.
     """
     iid, ip, dns = _find_machine()
+    if expected_id is not None and int(expected_id) != int(iid):
+        raise VastgameError(
+            f"Сейчас работает машина {iid}, а повторить выгрузку можно только для {expected_id}. "
+            "Finish не отправляю.",
+            key="core.finish_machine_changed", id=iid, expected=int(expected_id))
     ui.say(f"Инстанс {iid}, узел {dns or ip}", key="core.stop_machine", id=iid, name=dns or ip)
     before = wolf_status(ip)
     # [2026-10-15] Короткий обрыв связи (живой случай: страница машины не ответила один раз, через 15 с — ответила) —
@@ -917,7 +1080,7 @@ def _follow_finish(ui, iid, ip, t0):
         time.sleep(5)
     if fin[1] == "err":
         raise VastgameError(f"!!! Выгрузка НЕ подтверждена (проверка на машине): {fin[2]}\nИнстанс НЕ удалён.",
-                            key="core.finish_failed", text=fin[2])
+                            key="core.finish_failed", text=fin[2], id=iid)
     return _verify_and_delete(ui, iid, s, t0, self_delete=fin[2].startswith("self"))
 
 
@@ -987,7 +1150,7 @@ def _verify_and_delete(ui, iid, after, t0, self_delete=False):
                             + "\n".join(f"  {n:<28} {st:<5} {tx}" for n, (_, st, tx) in sorted(bad.items()))
                             + "\nНЕ удаляю инстанс. Разберись на машине (/var/log/wolf.log), "
                               "затем запусти vastgame stop снова.",
-                            key="core.upload_unconfirmed", names=sorted(bad))
+                            key="core.upload_unconfirmed", names=sorted(bad), id=iid)
 
     # ---- Удаление — сразу, без вопроса (решение 2026-09-24), но только после подтверждённой выгрузки:
     # если выгрузка не подтвердилась, выше уже VastgameError и машина остаётся

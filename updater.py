@@ -385,6 +385,8 @@ def install(staged_app, version, target=None, pid=None, folder=None, opener="/us
 
 WATCH_WIN = r'''
 $f = $env:VG_FOLDER
+$stateFile = "$f\backup_state"
+$backup = "$f\backup"
 function say($t) { Add-Content -LiteralPath "$f\update.log" -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + " $t") -Encoding UTF8 }
 try { Wait-Process -Id ([int]$env:VG_PID) -Timeout 60 -ErrorAction Stop } catch {}
 $dir = (Split-Path -Parent $env:VG_EXE) + '\'
@@ -393,6 +395,133 @@ function mine { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePa
 for ($i = 0; $i -lt $wait -and (mine).Count; $i++) { Start-Sleep 1 }
 foreach ($x in (mine)) { say "закрываю $($x.Name) ($($x.ProcessId))"; Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep 1
+
+function restore-backup {
+  say "восстанавливаю прежнюю версию из резервной копии"
+  Set-Content -LiteralPath $stateFile -Value "restoring"
+  for ($j = 0; $j -lt 5 -and (mine).Count; $j++) {
+    foreach ($x in (mine)) { Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep 1
+  }
+  try {
+    Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.FullName -ne $f -and $_.FullName -ne $backup } | Remove-Item -Recurse -Force -ErrorAction Stop
+    Get-ChildItem -LiteralPath $backup -Force | Copy-Item -Destination $dir -Recurse -Force -ErrorAction Stop
+    $exeName = Split-Path -Leaf $env:VG_EXE
+    if (-not (Test-Path -LiteralPath "$dir$exeName")) { throw "отсутствует $exeName в восстановленном каталоге" }
+    say "прежняя версия успешно восстановлена"
+    return $true
+  } catch {
+    say "ошибка при восстановлении: $_"
+    return $false
+  }
+}
+
+function finish-rollback {
+  param($restored)
+  if (-not $restored) {
+    Set-Content -LiteralPath "$f\failed" -Value $env:VG_VERSION
+    Set-Content -LiteralPath $stateFile -Value "restore_failed"
+    say "восстановление не завершено — запуск повреждённого приложения отменён"
+    exit 1
+  }
+  Set-Content -LiteralPath "$f\failed" -Value $env:VG_VERSION
+  Set-Content -LiteralPath $stateFile -Value "restored"
+  Remove-Item -LiteralPath "$f\started" -Force -ErrorAction SilentlyContinue
+  $oldP = $null
+  try {
+    $oldP = Start-Process -FilePath $env:VG_EXE -PassThru
+  } catch {
+    say "не удалось запустить восстановленный $env:VG_EXE: $_"
+    exit 1
+  }
+  $restoredReady = $false
+  for ($i = 0; $i -lt $wait; $i++) {
+    if ((-not (Test-Path -LiteralPath "$f\failed")) -or (Test-Path -LiteralPath "$f\started")) {
+      $restoredReady = $true
+      break
+    }
+    if ($oldP -and $oldP.HasExited) {
+      say "восстановленное приложение завершилось аварийно (код $($oldP.ExitCode))"
+      break
+    }
+    Start-Sleep 1
+  }
+  if ($restoredReady) {
+    say "прежняя версия подтвердила запуск — удаляю резервную копию"
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$f\started" -ErrorAction SilentlyContinue
+    if ($env:VG_RESUME -eq '1') { exit 0 }
+  } else {
+    say "восстановленная версия не подтвердила готовность — резервная копия сохранена"
+  }
+  exit 1
+}
+
+if ($env:VG_RESUME -eq '1') {
+  say "запуск возобновления восстановления из резервной копии"
+  if (-not (Test-Path -LiteralPath $backup)) {
+    say "резервная копия отсутствует — возобновление невозможно"
+    Set-Content -LiteralPath "$f\failed" -Value "no_backup"
+    exit 1
+  }
+  if (-not (Test-Path -LiteralPath $stateFile)) {
+    say "состояние резервной копии отсутствует — возобновление остановлено без изменения файлов"
+    Set-Content -LiteralPath "$f\failed" -Value "backup_state_missing"
+    exit 1
+  }
+  $resumeState = (Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8).Trim()
+  $validResumeStates = @('ready', 'restoring', 'restore_failed', 'restored')
+  if ($validResumeStates -notcontains $resumeState) {
+    say "недопустимое состояние резервной копии ($resumeState) — возобновление остановлено без изменения файлов"
+    Set-Content -LiteralPath "$f\failed" -Value "backup_invalid_state"
+    exit 1
+  }
+  $exeName = Split-Path -Leaf $env:VG_EXE
+  if (-not (Test-Path -LiteralPath "$backup\$exeName")) {
+    say "отсутствует $exeName в резервной копии — возобновление остановлено без изменения файлов"
+    Set-Content -LiteralPath "$f\failed" -Value "backup_incomplete"
+    exit 1
+  }
+  $res = restore-backup
+  finish-rollback $res
+}
+
+$state = if (Test-Path -LiteralPath $stateFile) { (Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8).Trim() } else { "none" }
+if (Test-Path -LiteralPath $backup) {
+  if ($state -eq "restoring" -or $state -eq "restore_failed") {
+    say "предыдущее восстановление не завершено — запуск нового обновления заблокирован"
+    Set-Content -LiteralPath "$f\failed" -Value "restore_incomplete"
+    exit 1
+  }
+  if ($state -ne "ready") {
+    say "обнаружена неподтверждённая или неполная резервная копия — обновление остановлено для безопасности"
+    Set-Content -LiteralPath "$f\failed" -Value "backup_unknown"
+    exit 1
+  }
+  say "обнаружена существующая резервная копия — запуск нового обновления заблокирован до разрешения"
+  Set-Content -LiteralPath "$f\failed" -Value "backup_exists"
+  exit 1
+}
+
+try {
+  Set-Content -LiteralPath $stateFile -Value "backing_up"
+  New-Item -ItemType Directory -Path $backup -Force -ErrorAction Stop | Out-Null
+  Get-ChildItem -LiteralPath $dir | Where-Object { $_.FullName -ne $f -and $_.FullName -ne $backup } | Copy-Item -Destination $backup -Recurse -Force -ErrorAction Stop
+  $exeName = Split-Path -Leaf $env:VG_EXE
+  if (-not (Test-Path -LiteralPath "$backup\$exeName")) { throw "отсутствует $exeName в резервной копии" }
+  Set-Content -LiteralPath $stateFile -Value "ready"
+  say "резервная копия создана и подтверждена"
+} catch {
+  Set-Content -LiteralPath $stateFile -Value "backup_failed"
+  say "не удалось создать резервную копию: $_"
+  Set-Content -LiteralPath "$f\failed" -Value $env:VG_VERSION
+  Start-Process -FilePath $env:VG_EXE
+  exit 1
+}
+
+Remove-Item -LiteralPath "$f\started" -Force -ErrorAction SilentlyContinue
+
 $code = -1
 try {
   $p = Start-Process -FilePath $env:VG_SETUP -PassThru -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$f\setup.log`"")
@@ -400,14 +529,46 @@ try {
   $p.WaitForExit()
   $code = $p.ExitCode
 } catch { say "установщик не запустился: $_" }
-if ($code -eq 0) {
-  say "поставлена $env:VG_VERSION"
-  Remove-Item -LiteralPath $env:VG_SETUP -ErrorAction SilentlyContinue
-} else {
-  say "установка $env:VG_VERSION не прошла (код $code) — открываю прежнюю версию"
-  Set-Content -LiteralPath "$f\failed" -Value $env:VG_VERSION
+
+if ($code -ne 0) {
+  say "установка $env:VG_VERSION не прошла (код $code) — восстанавливаю прежнюю версию"
+  $restored = restore-backup
+  finish-rollback $restored
 }
-Start-Process -FilePath $env:VG_EXE
+
+say "установщик завершился успешно — запускаю $env:VG_VERSION для проверки готовности"
+$newP = $null
+try {
+  $newP = Start-Process -FilePath $env:VG_EXE -PassThru
+} catch {
+  say "не удалось запустить $env:VG_EXE: $_"
+}
+
+$ready = $false
+for ($i = 0; $i -lt $wait; $i++) {
+  if (Test-Path -LiteralPath "$f\started") {
+    $ready = $true
+    break
+  }
+  if ($newP -and $newP.HasExited) {
+    say "новое приложение завершилось без подтверждения готовности (код $($newP.ExitCode))"
+    break
+  }
+  Start-Sleep 1
+}
+
+if ($ready) {
+  say "поставлена $env:VG_VERSION"
+  Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath "$f\started" -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $env:VG_SETUP -ErrorAction SilentlyContinue
+  exit 0
+} else {
+  say "$env:VG_VERSION не подтвердила запуск за $wait с — восстанавливаю прежнюю версию"
+  $restored = restore-backup
+  finish-rollback $restored
+}
 '''
 
 
@@ -424,8 +585,13 @@ def check_place_win(exe):
     в его папку можно писать; иначе VastgameError."""
     if not exe or not (Path(exe).parent / "unins000.exe").is_file():
         raise VastgameError("Обновление ставится только в установленный VastGame.", key="update.err.not_app")
-    if not os.access(Path(exe).parent, os.W_OK):
-        raise VastgameError("Нет прав заменить приложение.", key="update.err.no_rights", error="нет прав на запись")
+    target_dir = Path(exe).parent
+    try:
+        probe = target_dir / ".vastgame_write_test"
+        probe.touch()
+        probe.unlink(missing_ok=True)
+    except OSError as e:
+        raise VastgameError("Нет прав заменить приложение.", key="update.err.no_rights", error=str(e)) from None
 
 
 def _install_win(setup, version, exe=None, pid=None, folder=None, spawn=None):
@@ -434,6 +600,12 @@ def _install_win(setup, version, exe=None, pid=None, folder=None, spawn=None):
     exe = Path(exe) if exe else bundle_path()
     check_place_win(exe)
     folder = Path(folder or UPDATE_DIR)
+    state_file = folder / "backup_state"
+    if (folder / "backup").exists():
+        state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "unknown"
+        if state in ("restoring", "restore_failed"):
+            raise VastgameError("Предыдущее восстановление не завершено.", key="update.err.restore_incomplete")
+        raise VastgameError("Обнаружена существующая резервная копия.", key="update.err.backup_exists")
     (folder / STARTED).unlink(missing_ok=True)
     (folder / FAILED).unlink(missing_ok=True)
     settings.set("updated", {"from": VERSION, "to": version})
@@ -450,18 +622,57 @@ def _install_win(setup, version, exe=None, pid=None, folder=None, spawn=None):
                             error=e.strerror) from None
 
 
+VALID_RESUME_STATES = {"ready", "restoring", "restore_failed", "restored"}
+
+
+def resume_rollback_win(exe=None, pid=None, folder=None, spawn=None):
+    """Windows: продолжить незавершённое восстановление из резервной копии."""
+    exe = Path(exe) if exe else bundle_path()
+    folder = Path(folder or UPDATE_DIR)
+    backup = folder / "backup"
+    if not backup.is_dir():
+        raise VastgameError("Резервная копия отсутствует.", key="update.err.no_backup")
+    state_file = folder / "backup_state"
+    if not state_file.is_file():
+        raise VastgameError("Состояние резервной копии отсутствует.", key="update.err.invalid_backup")
+    state = state_file.read_text(encoding="utf-8").strip()
+    if state not in VALID_RESUME_STATES:
+        raise VastgameError(f"Недопустимое состояние резервной копии: {state}.", key="update.err.invalid_backup")
+    if not (backup / exe.name).is_file():
+        raise VastgameError(f"Файл {exe.name} отсутствует в резервной копии.", key="update.err.invalid_backup")
+    (folder / STARTED).unlink(missing_ok=True)
+    env = dict(os.environ, VG_FOLDER=str(folder), VG_PID=str(pid or os.getpid()),
+               VG_EXE=str(exe), VG_RESUME="1", VG_VERSION="restore",
+               VG_WAIT=str(os.environ.get("VG_WAIT", "60")))
+    script = base64.b64encode(WATCH_WIN.encode("utf-16-le")).decode()
+    try:
+        (spawn or subprocess.Popen)(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                     "-EncodedCommand", script], env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **watch_flags())
+    except OSError as e:
+        raise VastgameError(f"Не удалось возобновить восстановление: {e.strerror}", key="update.err.resume",
+                            error=e.strerror) from None
+
+
 def after_start():
     """Окно открылось: если это конец обновления — знак сторожу и что сказать человеку.
     {"updated": {"from", "to"}} — обновились; {"failed": версия} — не встала, вернули прежнюю; иначе None."""
     u = settings.get("updated")
     if not u:
         return None
-    settings.set("updated", None)
     folder = Path(UPDATE_DIR)
     if u.get("to") == VERSION:
         folder.mkdir(parents=True, exist_ok=True)
         (folder / STARTED).touch()          # сторож увидит и уберёт прежнюю версию
+        try:
+            settings.set("updated", None)
+        except Exception:
+            pass
         return {"updated": u}
+    try:
+        settings.set("updated", None)
+    except Exception:
+        pass
     failed = folder / FAILED
     if failed.exists():
         failed.unlink(missing_ok=True)

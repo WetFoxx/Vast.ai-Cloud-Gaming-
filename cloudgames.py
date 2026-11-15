@@ -21,12 +21,99 @@ LGAME = re.compile(r"^lgame--(\d+)--(.*)$")  # [v5.6] файлы игры, ко�
 # [v5.7] данные игры (сохранения и настройки, которые игра пишет в свою папку): gsave--НОМЕР--Название. На экране —
 # в строке сохранений той же игры (pfx--НОМЕР), не отдельным пунктом; «Убрать» убирает оба
 GSAVE = re.compile(r"^gsave--(\d+)--(.*)$")
+_MEMBER = re.compile(r"^(?:sgame|game|lgame|pfx|gsave|mod|prog)--[^\x00-\x1f/]+$")
+_ORIG_ARCHIVES = drive.archives
+_ORIG_GAMES_INDEX = drive.games_index
+_ORIG_RCLONE = drive.rclone
 
 
-def listing():
-    """{"games": [{name, kind, title, appid, bytes, mtime, files}], "service": {"names", "bytes"}}.
+def _valid_member(name):
+    return isinstance(name, str) and bool(_MEMBER.match(name)) and ".." not in name.split("--")
 
-    title — имя папки игры или, для сохранений, название игры из Steam (если Steam её знает).
+
+def _norm_archives(items):
+    out = []
+    for x in items or []:
+        if _valid_member(x) and x not in out:
+            out.append(x)
+    return out
+
+
+def _prog_archive(ident):
+    if not isinstance(ident, str) or not ident.startswith("prog:"):
+        return None
+    top = ident[5:].strip().split("/", 1)[0]
+    if not top or top in (".", ".."):
+        return None
+    cand = f"prog--{top}"
+    return cand if _valid_member(cand) else None
+
+
+def merge_game_meta(old_g, new_g):
+    """Объединить прежнюю и новую запись игры из vastgame-games.json без потери поля archives, tombstones (forgotten) и доп. полей."""
+    old_g = old_g if isinstance(old_g, dict) else {}
+    new_g = new_g if isinstance(new_g, dict) else {}
+    out = dict(old_g)
+    for k, v in new_g.items():
+        if k in ("archives", "forgotten") or v is None:
+            continue
+        if k in ("archive", "appid", "name", "kind"):
+            if isinstance(v, str) and v != "":
+                out[k] = v
+            elif k not in out:
+                out[k] = v
+        elif k == "tool":
+            out[k] = bool(v)
+        else:
+            out[k] = v
+    arch = out.get("archive")
+    old_forg = _norm_archives(old_g.get("forgotten")) if isinstance(old_g.get("forgotten"), list) else []
+    new_forg = _norm_archives(new_g.get("forgotten")) if isinstance(new_g.get("forgotten"), list) else []
+    old_has = isinstance(old_g.get("archives"), list) or isinstance(old_g.get("forgotten"), list)
+    new_has = isinstance(new_g.get("archives"), list) or isinstance(new_g.get("forgotten"), list)
+    old_arch = _norm_archives(old_g.get("archives")) if isinstance(old_g.get("archives"), list) else (
+        [arch] if old_g and not old_has and _valid_member(arch) else [])
+    new_arch = _norm_archives(new_g.get("archives")) if isinstance(new_g.get("archives"), list) else (
+        [arch] if new_g and not new_has and _valid_member(arch) else [])
+    if not old_g and not new_g and _valid_member(arch):
+        new_arch = [arch]
+    if isinstance(old_g.get("archives"), list) and not isinstance(old_g.get("forgotten"), list) and _valid_member(arch) and arch not in old_arch:
+        old_forg = _norm_archives(old_forg + [arch])
+    if isinstance(new_g.get("archives"), list) and not isinstance(new_g.get("forgotten"), list) and _valid_member(arch) and arch not in new_arch:
+        new_forg = _norm_archives(new_forg + [arch])
+    forg = sorted(set(old_forg + new_forg))
+    out["archives"] = sorted(set(old_arch + new_arch) - set(forg))
+    if forg:
+        out["forgotten"] = forg
+    else:
+        out.pop("forgotten", None)
+    return out
+
+
+def merge_games_index(*catalogs):
+    """Объединить один или несколько списков игр vastgame-games.json (включая старый формат v1 без archives)."""
+    by_arch = {}
+    for cat in catalogs:
+        entries = cat.get("games") if isinstance(cat, dict) else cat
+        for g in entries or ():
+            if isinstance(g, dict) and _valid_member(g.get("archive")):
+                a = g["archive"]
+                by_arch[a] = merge_game_meta(by_arch.get(a), g)
+    return [by_arch[k] for k in sorted(by_arch)]
+
+
+def _load_index(index):
+    if index is not None:
+        return merge_games_index(index)
+    if drive.archives is not _ORIG_ARCHIVES and drive.games_index is _ORIG_GAMES_INDEX and drive.rclone is _ORIG_RCLONE:
+        return []
+    return merge_games_index(drive.games_index())
+
+
+def listing(index=None):
+    """{"games": [{name, kind, title, appid, bytes, mtime, files, ...}], "service": {"names", "bytes"}}.
+
+    title — имя папки игры или, для сохранений, название игры из Steam / индекса (если оно известно однозначно).
     Служебные архивы (identity, steam-state, …) — отдельно: их не удаляют."""
     if not drive.token():
         raise VastgameError("Нет токена Google Drive — пройди первую настройку: vastgame setup", key="games.no_token")
@@ -36,6 +123,51 @@ def listing():
     if arch is None:
         raise VastgameError("Не удалось открыть Google Drive — проверь интернет или пройди шаг 2: vastgame setup",
                             key="games.drive_failed")
+    idx = _load_index(index)
+    by_arch = {g["archive"]: g for g in idx}
+    by_appid = {}
+    explicit_owners = {}
+    for g in idx:
+        aid = str(g.get("appid") or "").strip()
+        if aid:
+            by_appid.setdefault(aid, []).append(g)
+        for member in g.get("archives") or ():
+            explicit_owners.setdefault(member, []).append(g)
+    unambiguous_appid = {aid: items[0] for aid, items in by_appid.items() if len(items) == 1}
+
+    # Связь prog-- с играми: одна программа может относиться к нескольким играм (индекс + настройки progs_sel/launch_sel)
+    prog_appids = {}
+    prog_games = {}
+    for g in idx:
+        aid = str(g.get("appid") or "").strip()
+        for member in g.get("archives") or ():
+            if member.startswith("prog--"):
+                prog_games.setdefault(member, set()).add(g["archive"])
+                if aid:
+                    prog_appids.setdefault(member, set()).add(aid)
+    for appid, idents in (settings.get("progs_sel") or {}).items():
+        if str(appid).isdigit() and isinstance(idents, list):
+            for ident in idents:
+                pa = _prog_archive(ident)
+                if pa:
+                    prog_appids.setdefault(pa, set()).add(str(appid))
+                    if str(appid) in unambiguous_appid:
+                        prog_games.setdefault(pa, set()).add(unambiguous_appid[str(appid)]["archive"])
+    for appid, info in (settings.get("launch_sel") or {}).items():
+        if str(appid).isdigit() and isinstance(info, dict):
+            pa = _prog_archive(info.get("id"))
+            if pa:
+                prog_appids.setdefault(pa, set()).add(str(appid))
+                if str(appid) in unambiguous_appid:
+                    prog_games.setdefault(pa, set()).add(unambiguous_appid[str(appid)]["archive"])
+
+    # Непредположительные названия из соседних архивов с тем же номером игры (только если нет противоречий)
+    sibling_titles = {}
+    for base in arch:
+        m = GSAVE.match(base) or MOD.match(base) or LGAME.match(base)
+        if m and m[2] and m[2] != f"app{m[1]}":
+            sibling_titles.setdefault(m[1], set()).add(m[2])
+
     names = steamnames.for_archives(arch)
     games, service, gsaves = [], [], []
     for base, info in arch.items():
@@ -51,11 +183,59 @@ def listing():
         if kind in ("mod", "lgame") and not mod:
             service.append((base, info["size"]))
             continue
-        games.append({"name": base, "kind": kind, "appid": rest if kind == "pfx" else mod[1] if mod else None,
-                      "title": names.get(rest, "") if kind == "pfx" else mod[2] if mod else rest,
-                      "bytes": info["size"], "mtime": info["mtime"], "files": info["files"],
-                      # служебное Steam (Proton, Runtime…) и его «сохранения» — нужно для запуска игр
-                      "system": bool(TOOL.match(base)) or (kind == "pfx" and rest in TOOL_APPIDS)})
+        if kind in ("sgame", "game"):
+            meta = by_arch.get(base)
+            aid = str(meta["appid"]).strip() if meta and meta.get("appid") else None
+            title = (meta.get("name") if meta and meta.get("name") else None) or rest
+            appids = [aid] if aid else []
+            game_archives = [base]
+            game_archive = base
+            is_tool = bool(TOOL.match(base)) or bool(meta and meta.get("tool"))
+        elif kind == "prog":
+            aids = sorted(prog_appids.get(base, ()))
+            garchs = sorted(prog_games.get(base, ()))
+            aid = aids[0] if len(aids) == 1 and len(garchs) <= 1 else None
+            title = rest
+            appids = aids
+            game_archives = garchs
+            game_archive = garchs[0] if len(garchs) == 1 and len(aids) <= 1 else None
+            is_tool = False
+        else:
+            aid = rest if kind == "pfx" else mod[1]
+            appids = [aid] if aid else []
+            owner = unambiguous_appid.get(aid)
+            if owner is None and len(explicit_owners.get(base, ())) == 1:
+                owner = explicit_owners[base][0]
+            game_archives = [owner["archive"]] if owner else []
+            game_archive = owner["archive"] if owner else None
+            if kind == "pfx":
+                sib = sibling_titles.get(aid, set())
+                title = (names.get(aid, "")
+                         or (owner.get("name") or "" if owner else "")
+                         or (next(iter(sib)) if len(sib) == 1 else ""))
+            else:
+                title = mod[2]
+            is_tool = (kind == "pfx" and aid in TOOL_APPIDS) or bool(owner and owner.get("tool"))
+        item = {"name": base, "kind": kind, "appid": aid, "appids": appids,
+                "game_archive": game_archive, "game_archives": game_archives,
+                "title": title, "bytes": info["size"], "mtime": info["mtime"], "files": info["files"],
+                # служебное Steam (Proton, Runtime…) и его «сохранения» — нужно для запуска игр
+                "system": is_tool}
+        if kind in ("sgame", "game"):
+            known = list(meta.get("archives") or [base]) if meta else [base]
+            if base not in known:
+                known.append(base)
+            forg = set(meta.get("forgotten") or ()) if meta else set()
+            if aid and unambiguous_appid.get(aid) is meta:
+                for cand in arch:
+                    if cand == f"pfx--{aid}" or cand.startswith((f"gsave--{aid}--", f"mod--{aid}--", f"lgame--{aid}--")):
+                        if cand not in known:
+                            known.append(cand)
+                for pa, pa_aids in prog_appids.items():
+                    if aid in pa_aids and (pa not in forg or pa in arch) and pa not in known:
+                        known.append(pa)
+            item["archives"] = sorted(set(known))
+        games.append(item)
     for base, info in gsaves:
         m = GSAVE.match(base)
         g = next((x for x in games if x["kind"] == "pfx" and x["appid"] == m[1]), None)
@@ -66,8 +246,15 @@ def listing():
             g["mtime"] = max(g["mtime"] or "", info["mtime"] or "")
             g["title"] = g["title"] or m[2]
         else:
-            games.append({"name": base, "kind": "pfx", "appid": m[1], "title": names.get(m[1], "") or m[2],
-                          "bytes": info["size"], "mtime": info["mtime"], "files": info["files"], "system": False})
+            owner = unambiguous_appid.get(m[1])
+            if owner is None and len(explicit_owners.get(base, ())) == 1:
+                owner = explicit_owners[base][0]
+            games.append({"name": base, "kind": "pfx", "appid": m[1], "appids": [m[1]],
+                          "game_archive": owner["archive"] if owner else None,
+                          "game_archives": [owner["archive"]] if owner else [],
+                          "title": names.get(m[1], "") or (owner.get("name") or "" if owner else "") or m[2],
+                          "bytes": info["size"], "mtime": info["mtime"], "files": info["files"],
+                          "system": bool(owner and owner.get("tool"))})
     games.sort(key=lambda g: (KINDS.index(g["kind"]), -g["bytes"]))
     return {"games": games,
             "service": {"names": sorted(n for n, _ in service), "bytes": sum(b for _, b in service)}}

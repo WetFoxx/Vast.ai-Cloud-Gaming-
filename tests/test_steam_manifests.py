@@ -42,7 +42,7 @@ DH="{self.home}"; SR=.steam/debian-installation; SG={sg}
 u() {{ "$@"; }}
 log() {{ echo "LOG $*"; }}
 {FUNCS}
-F() {{ find "$@" -print 2>/dev/null; }}
+F() {{ find "$@" -print 2>/dev/null || true; }}
 '''
         r = subprocess.run(["bash", "-c", pre + script], capture_output=True, text=True, cwd=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)

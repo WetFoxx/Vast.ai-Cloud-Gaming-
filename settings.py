@@ -46,7 +46,17 @@ def set(name, value):   # noqa: A001 — «set» здесь понятнее в�
     # Целиком или никак: сбой посередине записи (на Windows без режима UTF-8 — на кириллице, 2026-10-08) стирал файл
     tmp = FILE.with_name(f"{FILE.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, FILE)
+    last_err = None
+    for attempt in range(5):
+        try:
+            os.replace(tmp, FILE)
+            return
+        except OSError as e:
+            last_err = e
+            time.sleep(0.05 * (attempt + 1))
+    tmp.unlink(missing_ok=True)
+    if last_err:
+        raise last_err
 
 
 def applog(text):

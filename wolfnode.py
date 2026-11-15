@@ -54,6 +54,22 @@ def wolf_status(ip):
         return None
 
 
+def session_info(ip, timeout=5):
+    """Метаданные сессии Wolf (/session):
+    {"iid": ..., "run_id": ..., "storage": {"remote": ..., "folder_name": ..., "folder_id": ...}, "cleanup_allowed": bool}
+    или None при старом сервере (404) или ошибке связи.
+    """
+    try:
+        r = requests.get(f"http://{ip}:{WOLF_PORT}/session", timeout=timeout)
+        if r.status_code == 200:
+            d = r.json()
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return None
+
+
 # Команды, которые понимает страница wolf, и то же самое для старых машин — строкой для SSH
 SHELL = {"ping": lambda a: "echo ok", "time": lambda a: "date +%s", "finish": lambda a: "wolf finish",
          "push-identity": lambda a: "(NOW=1 wolf push identity </dev/null >/dev/null 2>&1 &)",
@@ -99,6 +115,8 @@ def run(ip, cmd, args=(), stdin=None, timeout=120, on_notice=None, ssh=None):
     r = post_cmd(ip, cmd, args, stdin, timeout)
     if r is not None:
         return r
+    if cmd not in SHELL:
+        return 1, f"команда {cmd} не поддерживается сервером"
     extra = {"stdin_text": stdin} if stdin else {}
     return (ssh or ssh_run)(ip, SHELL[cmd](list(args)), timeout=timeout, on_notice=on_notice, **extra)
 

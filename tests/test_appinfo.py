@@ -26,6 +26,7 @@ def load(name, tag, mod):
 
 
 short = load("wolf-shortcuts.py", "SHORTCUTS", "short_appinfo")
+games = load("wolf-games.py", "GAMES", "games_appinfo")
 ws = load("wolf-steam.py", "STEAMPY", "steam_appinfo")
 
 
@@ -96,6 +97,163 @@ class TestAppinfo(unittest.TestCase):
         r = subprocess.run([sys.executable, TMP / "short_appinfo.py", str(self.root / "Games"), str(self.root),
                             "--appinfo", "312060"], capture_output=True, text=True)
         self.assertEqual(r.stdout.strip("\n"), "FINAL FANTASY XIV Online\twindows")
+
+
+# U+0100 в UTF-16LE начинается с байта 00. Поиск «до первого нуля» обрезал бы строку и съехал бы со следующих полей.
+WIDE = "A\u0100B"
+BLOB = b"\x08\x00\x00\x00\x00\xff"
+
+
+def _key(name, table):
+    if table is None:
+        return name.encode() + b"\0"
+    if name not in table:
+        table.append(name)
+    return struct.pack("<I", table.index(name))
+
+
+def _leaf(typ, name, payload, table):
+    return bytes([typ]) + _key(name, table) + payload
+
+
+def _obj(name, inner, table):
+    return bytes([0x00]) + _key(name, table) + inner + b"\x08"
+
+
+def _wstring(text):
+    return text.encode("utf-16-le") + b"\x00\x00"
+
+
+def _app_tree(table, installdir, name, oslist="windows", prefix=b""):
+    common = _leaf(0x05, "name", _wstring(name), table) + _leaf(0x01, "oslist", oslist.encode() + b"\0", table)
+    config = _leaf(0x01, "installdir", installdir.encode() + b"\0", table)
+    return _obj("appinfo", prefix + _obj("common", common, table) + _obj("config", config, table), table)
+
+
+def _prefix(table):
+    """float32, Binary и WString до имени и папки: их длина не должна сдвинуть следующие поля."""
+    return (_leaf(0x03, "score", struct.pack("<f", 1.5), table)
+            + _leaf(0x09, "hash", struct.pack("<I", len(BLOB)) + BLOB, table)
+            + _leaf(0x05, "label", _wstring(WIDE), table))
+
+
+def _pack(records, version, table):
+    body = b""
+    for aid, kv in records:
+        chunk = b"\0" * 60 + kv
+        body += struct.pack("<II", aid, len(chunk)) + chunk
+    body += struct.pack("<I", 0)
+    if version == 28:
+        return struct.pack("<II", 0x07564428, 1) + body
+    head = struct.pack("<II", 0x07564429, 1)
+    off = len(head) + 8 + len(body)
+    strings = struct.pack("<I", len(table)) + b"".join(s.encode() + b"\0" for s in table)
+    return head + struct.pack("<q", off) + body + strings
+
+
+class TestAppinfoTypes(unittest.TestCase):
+    """Обе копии разбора: wolf-shortcuts.py (appinfo) и wolf-games.py (_read_appinfo / _appinfo_kv)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(dir=TMP))
+        (self.root / "appcache").mkdir()
+        (self.root / "steamapps").mkdir()
+
+    def _write(self, blob):
+        (self.root / "appcache/appinfo.vdf").write_bytes(blob)
+
+    def test_leaves_match_steam_layout(self):
+        # Прямой разбор дерева, формат 28: ключи строками. Float — не биты int32.
+        tree = (_prefix(None) + _leaf(0x01, "after", b"ok\0", None) + b"\x08")
+        for label, mod in (("shortcuts", short), ("games", games)):
+            got, _, ok = mod._appinfo_kv(tree, 0, None, len(tree))
+            self.assertTrue(ok, label)
+            self.assertEqual(got["score"], 1.5, label)
+            self.assertNotEqual(got["score"], struct.unpack("<i", struct.pack("<f", 1.5))[0], label)
+            self.assertEqual(got["hash"], BLOB, label)
+            self.assertEqual(got["label"], WIDE, label)
+            self.assertEqual(got["after"], "ok", label)
+
+    def test_alternate_end_closes_only_the_block(self):
+        # 0x0B — второй маркер конца блока у Steam, без своего тела. Следующее поле того же родителя читается.
+        tree = (bytes([0x00]) + _key("box", None) + _leaf(0x01, "a", b"x\0", None) + b"\x0b"
+                + _leaf(0x01, "installdir", b"SafeDir\0", None) + b"\x08")
+        for label, mod in (("shortcuts", short), ("games", games)):
+            got, _, ok = mod._appinfo_kv(tree, 0, None, len(tree))
+            self.assertTrue(ok, label)
+            self.assertEqual(got["box"]["a"], "x", label)
+            self.assertEqual(got["installdir"], "SafeDir", label)
+
+    def test_wstring_binary_and_float_keep_installdir(self):
+        for version in (28, 29):
+            table = [] if version == 29 else None
+            kv570 = _app_tree(table, "SafeDir", WIDE, prefix=_prefix(table))
+            blob = _pack([(570, kv570)], version, table if table is not None else [])
+            self._write(blob)
+            for label, read in (("shortcuts", lambda: short.appinfo(str(self.root), "570")),
+                                ("games", lambda: games._read_appinfo(str(self.root / "steamapps")).get("570"))):
+                got = read()
+                self.assertEqual(got["installdir"], "SafeDir", (label, version))
+            self.assertEqual(short.appinfo(str(self.root), "570")["oslist"], "windows")
+            self.assertEqual(games._read_appinfo(str(self.root / "steamapps"))["570"]["name"], WIDE)
+            # Значения float/binary/wstring из той же записи, оба парсера.
+            data = (self.root / "appcache/appinfo.vdf").read_bytes()
+            for label, mod in (("shortcuts", short), ("games", games)):
+                apps = dict(mod._appinfo_apps(data))
+                app = apps[570]
+                self.assertEqual(app["score"], 1.5, (label, version))
+                self.assertEqual(app["hash"], BLOB, (label, version))
+                self.assertEqual(app["label"], WIDE, (label, version))
+
+    def test_unknown_type_keeps_parsed_fields_and_the_next_app(self):
+        for version in (28, 29):
+            table = [] if version == 29 else None
+            # 570: папка уже прочитана, дальше неизвестный тип 0x7F и мусор, похожий на конец чужой записи.
+            good = _obj("config", _leaf(0x01, "installdir", b"SafeDir\0", table), table)
+            junk = bytes([0x7F]) + _key("nope", table) + b"\x08\x00" + b"ONLY730"
+            kv570 = _obj("appinfo", good + junk, table)
+            kv730 = _app_tree(table, "ONLY730", "Counter-Strike 2")
+            self._write(_pack([(570, kv570), (730, kv730)], version, table if table is not None else []))
+            self.assertEqual(short.appinfo(str(self.root), "570")["installdir"], "SafeDir")
+            self.assertEqual(short.appinfo(str(self.root), "730")["installdir"], "ONLY730")
+            self.assertNotIn("ONLY730", short.appinfo(str(self.root), "570")["installdir"])
+            found = games._read_appinfo(str(self.root / "steamapps"))
+            self.assertEqual(found["570"]["installdir"], "SafeDir", version)
+            self.assertEqual(found["730"]["installdir"], "ONLY730", version)
+            self.assertEqual(found["730"]["name"], "Counter-Strike 2", version)
+
+    def test_does_not_read_past_the_record_into_the_next_app(self):
+        for version in (28, 29):
+            table = [] if version == 29 else None
+            # Строка без нуля упирается в границу size. Нуль есть только в следующей записи.
+            spilled = (_obj("config", _leaf(0x01, "installdir", b"SafeDir\0", table), table)
+                       + _leaf(0x01, "spill", b"NOTERM", table))
+            kv570 = bytes([0x00]) + _key("appinfo", table) + spilled
+            kv730 = _app_tree(table, "ONLY730", "Next")
+            self._write(_pack([(570, kv570), (730, kv730)], version, table if table is not None else []))
+            self.assertEqual(short.appinfo(str(self.root), "570")["installdir"], "SafeDir")
+            self.assertEqual(short.appinfo(str(self.root), "730")["installdir"], "ONLY730")
+            found = games._read_appinfo(str(self.root / "steamapps"))
+            self.assertEqual(found["570"]["installdir"], "SafeDir", version)
+            self.assertEqual(found["730"]["installdir"], "ONLY730", version)
+            # Binary с длиной больше остатка записи не захватывает байты 730.
+            table2 = [] if version == 29 else None
+            huge = _obj("config", _leaf(0x01, "installdir", b"SafeDir\0", table2), table2)
+            huge += _leaf(0x09, "hash", struct.pack("<I", 1_000_000), table2)
+            kv_huge = bytes([0x00]) + _key("appinfo", table2) + huge
+            self._write(_pack([(570, kv_huge), (730, _app_tree(table2, "ONLY730", "Next"))],
+                              version, table2 if table2 is not None else []))
+            self.assertEqual(short.appinfo(str(self.root), "730")["installdir"], "ONLY730", version)
+            self.assertEqual(games._read_appinfo(str(self.root / "steamapps"))["730"]["installdir"], "ONLY730")
+
+    def test_end_argument_stops_before_the_buffer(self):
+        tree = _leaf(0x01, "installdir", b"SafeDir\0", None) + _leaf(0x01, "evil", b"ONLY-NEXT\0", None) + b"\x08"
+        cut = tree.index(b"evil") - 1  # тип второго поля ещё не входит в границу
+        for label, mod in (("shortcuts", short), ("games", games)):
+            got, _, ok = mod._appinfo_kv(tree, 0, None, cut)
+            self.assertFalse(ok, label)
+            self.assertEqual(got, {"installdir": "SafeDir"}, label)
+            self.assertNotIn("evil", got, label)
 
 
 class TestManifestFolder(unittest.TestCase):

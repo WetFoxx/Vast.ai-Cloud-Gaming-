@@ -812,12 +812,26 @@ class TestStop(unittest.TestCase):
 
     def test_failed_upload_notifies(self):
         def failing(ui, dry_run=False):
-            raise VastgameError("не подтверждена", key="core.upload_unconfirmed", names=["pfx--1"])
+            raise VastgameError("не подтверждена", key="core.upload_unconfirmed", names=["pfx--1"], id=42)
         with mock.patch.object(gui.jobs.core, "stop", failing):
             self.api.stop("ru")
             p = wait_done(self.api, session=True)
         self.assertEqual(p["error"]["key"], "core.upload_unconfirmed")
+        self.assertEqual(p["error"]["params"]["id"], 42)
         self.assertEqual(SENT[-1][0], "Завершить не удалось")
+
+    def test_retry_stop_is_bound_to_the_failed_machine(self):
+        seen = []
+
+        def stop(ui, dry_run=False, expected_id=None):
+            seen.append(expected_id)
+            return self.fake_stop(ui)
+
+        with mock.patch.object(gui.jobs.core, "stop", stop):
+            self.assertEqual(self.api.stop("ru", 42), {"ok": True})
+            p = wait_done(self.api, session=True)
+        self.assertEqual(seen, [42])
+        self.assertEqual(p["result"]["iid"], 42)
 
     def test_interrupted_stop_resumes(self):
         calls = []

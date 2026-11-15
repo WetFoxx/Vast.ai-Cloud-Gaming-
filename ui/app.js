@@ -15,6 +15,7 @@ let offersData = null;   // список машин на экране выбор
 let selected = null;     // выбранная машина (id)
 let prog = null;         // ход операции: {since, log[], shownQ}
 let progTimer = null;
+let finishIid = null;    // машина неудавшейся выгрузки: «Повторить» только для неё
 
 // ---------------------------------------------------------------- помощники
 function money(x) { return "$" + Number(x).toFixed(2); }
@@ -2774,6 +2775,26 @@ function renderBanner(kind) {
   $("progress-banner-sub").textContent = $("progress-elapsed").textContent;
 }
 
+function showHeldFinish() {
+  show("progress");
+  prog = { since: 0, log: [], shownQ: 0, kind: "stop" };
+  $("progress-title").textContent = t("progress.title.stop");
+  $("progress-elapsed").textContent = "";
+  $("progress-note").hidden = true;
+  $("progress-cancel").hidden = true;
+  $("progress-home").hidden = true;
+  $("progress-replace").hidden = true;
+  $("progress-offers").hidden = true;
+  $("progress-back").hidden = false;
+  $("progress-result").hidden = true;
+  showError("progress-error", {
+    key: "core.finish_failed",
+    params: { text: "файлы изменились после чтения" },
+    text: "",
+  });
+  showFinishHold(true);
+}
+
 function startProgress(kind = "play") {
   show("progress");
   prog = { since: 0, log: [], shownQ: 0, kind };
@@ -2786,6 +2807,7 @@ function startProgress(kind = "play") {
   $("progress-alert").hidden = true;
   $("progress-log").textContent = "";
   $("progress-result").hidden = true;
+  $("progress-hold").hidden = true;
   $("progress-back").hidden = true;
   $("progress-offers").hidden = true;
   $("progress-cancel").hidden = kind !== "play";
@@ -2993,6 +3015,8 @@ async function pollOnce() {
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
+    const hold = !!(p.error && FINISH_HOLD.includes(p.error.key));
+    showFinishHold(hold, hold ? (p.error.params || {}).id : null);
     // К списку машин: выбранную заняли, или она не запустилась, а замены «не хуже» нет — выбирает человек
     $("progress-offers").hidden = !(p.error && TO_LIST.includes(p.error.key));
     $("tailscale-box").hidden = true;
@@ -3013,6 +3037,29 @@ $("progress-cancel").addEventListener("click", async () => {
 });
 
 $("tailscale-open").addEventListener("click", () => { if (prog && prog.tsUrl && !DEMO) api().open_url(prog.tsUrl); });
+
+const FINISH_HOLD = ["core.upload_unconfirmed", "core.finish_failed"];
+
+function showFinishHold(on, id) {
+  $("progress-hold").hidden = !on;
+  if (on) finishIid = id == null ? null : id;
+}
+
+$("finish-retry").addEventListener("click", async () => {
+  if (DEMO) { startProgress("stop"); return; }
+  if (finishIid == null) return;
+  $("finish-retry").disabled = true;
+  const r = await api().stop(LANG, finishIid);
+  $("finish-retry").disabled = false;
+  if (r && r.error) { showError("progress-error", r.error); return; }
+  startProgress("stop");
+});
+
+$("finish-back").addEventListener("click", () => {
+  if (!DEMO) api().session_seen();
+  show("main");
+  refresh();
+});
 
 function renderStopResult(r) {
   const box = $("progress-result");
@@ -3148,6 +3195,8 @@ function demoState(kind) {
                       { kind: "del", archive: "sgame--The Blood of Dawnwalker", name: "The Blood of Dawnwalker" }] },
     error: { ...base, state: "error", kind: "sync_error", errors: ["steam-client"] },
     low: { ...base, state: "ready", kind: "ready" },
+    // неподтверждённая выгрузка: машина не удалена, аренда продолжается
+    stopfail: { ...base, state: "ready", kind: "ready" },
   }[kind] || { state: "none", kind: "none", machine: null, links: null };
   const balance = kind === "low" ? 0.74 : 3.18;
   return { balance, low_balance: balance < 1, hours_left: s.machine ? balance / s.machine.price : null, status: s,
@@ -3397,6 +3446,7 @@ async function start() {
   if (DEMO === "replace") { openReplace(); return; }
   if (DEMO === "progress") { startProgress(); return; }
   if (DEMO === "stop") { startProgress("stop"); return; }
+  if (DEMO === "stopfail") { showHeldFinish(); return; }
   if (DEMO === "games") { openGames(); return; }
   if (DEMO === "setup") { openSetup(); return; }
   if (DEMO === "history") { openHistory(30); return; }

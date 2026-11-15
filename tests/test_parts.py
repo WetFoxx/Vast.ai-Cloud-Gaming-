@@ -45,6 +45,33 @@ class PartsBase(unittest.TestCase):
         act = f'"{RCLONE}" "$@"; exit 1' if done else "exit 1"
         self.fake_sh = f'for a in "$@"; do case "$a" in *{sub}*) [[ " $* " == *" {cmd} "* ]] && {{ {act}; }} ;; esac; done'
 
+    def fail_active_index(self, code):
+        """moveto оглавления не делается. md5sum боевого ОБЪЕКТ.parts завершается code; .parts.new не трогаем."""
+        self.fake_sh = f'''
+if [[ " $* " == *" moveto "* && " $* " == *".parts.new"* ]]; then exit 1; fi
+for a in "$@"; do
+  case "$a" in
+    *.parts.new) ;;
+    *.parts) [[ " $* " == *" md5sum "* ]] && exit {int(code)} ;;
+  esac
+done
+'''
+
+    def lost_parts_moveto(self, happened):
+        """moveto .parts.new отвечает ошибкой. happened — переименование всё же делается.
+        Следующие md5sum тоже падают: результат публикации неизвестен."""
+        do = f'"{RCLONE}" "$@"' if happened else ":"
+        mark = self.d / "moved"
+        self.fake_sh = (
+            f'mark="{mark}"\n'
+            'if [[ " $* " == *" moveto "* && " $* " == *".parts.new"* ]]; then\n'
+            f'  {do}\n'
+            '  echo 1 > "$mark"\n'
+            '  exit 1\n'
+            'fi\n'
+            'if [[ " $* " == *" md5sum "* && -f "$mark" ]]; then exit 1; fi\n'
+        )
+
     def env(self):
         path = str(Path(RCLONE).parent)
         if self.fake_sh:
@@ -190,6 +217,205 @@ class TestParts(PartsBase):
         self.assertEqual(self.put("s.tar.zst", data), 0)
         self.fake_sh = None
         self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), data)
+
+    def test_stage_stays_inactive_until_publish(self):
+        prev = os.urandom(1000)
+        self.put("s.tar.zst", prev)
+        new = os.urandom(900)
+        staged = self.run_p("stage", str(self.cloud), "s.tar.zst", data=new)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.assertTrue(staged.stdout.startswith(b"vastgame-stage 1\n"))
+        self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), prev)
+        self.assertTrue((self.cloud / "s.tar.zst.part").is_file())
+        published = self.run_p("publish", str(self.cloud), "s.tar.zst", data=staged.stdout)
+        self.assertEqual(published.returncode, 0, published.stderr)
+        self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), new)
+        self.assertFalse((self.cloud / "s.tar.zst.part").exists())
+
+    def tamper_lsjson(self, mode):
+        """Ответы lsjson: error — код 1; size/md5/missing — подмена JSON настоящего rclone."""
+        script = self.d / "tamper-lsjson.py"
+        script.write_text(
+            "import json, sys\n"
+            "item = json.loads(sys.stdin.read())\n"
+            "mode = sys.argv[1]\n"
+            "if mode == 'size':\n"
+            "    item['Size'] = int(item['Size']) + 1\n"
+            "elif mode == 'md5':\n"
+            "    hashes = item.setdefault('Hashes', {})\n"
+            "    key = next((k for k in hashes if str(k).lower() == 'md5'), 'md5')\n"
+            "    hashes[key] = '0' * 32\n"
+            "elif mode == 'missing':\n"
+            "    hashes = item.get('Hashes') or {}\n"
+            "    for key in list(hashes):\n"
+            "        if str(key).lower() == 'md5':\n"
+            "            del hashes[key]\n"
+            "    item['Hashes'] = hashes\n"
+            "json.dump(item, sys.stdout)\n")
+        self.fake_sh = (
+            'if [[ " $* " == *" lsjson "* ]]; then\n'
+            f'  if [ "{mode}" = error ]; then exit 1; fi\n'
+            f'  out=$("{RCLONE}" "$@" 2>"{self.d}/lsjson.err") || exit $?\n'
+            f'  printf %s "$out" | "{sys.executable}" "{script}" "{mode}"\n'
+            '  exit $?\n'
+            'fi\n'
+        )
+
+    def test_both_size_and_md5_checks_run_before_rename(self):
+        log = self.d / "calls"
+        self.fake_sh = f'printf "%s\\n" "$*" >> "{log}"\n'
+        data = os.urandom(400)
+        self.assertEqual(self.put("s.tar.zst", data), 0)
+        lines = log.read_text().splitlines()
+        lsjson = [i for i, line in enumerate(lines) if " lsjson " in f" {line} "]
+        moveto = [i for i, line in enumerate(lines) if " moveto " in f" {line} "]
+        self.assertEqual(len(lsjson), 2)
+        self.assertLess(lsjson[0], lsjson[1])
+        self.assertLess(lsjson[1], moveto[0])
+        self.assertFalse(any(" md5sum " in f" {line} " or " lsl " in f" {line} " for line in lines))
+
+    def test_bad_lsjson_before_rename_keeps_the_previous_archive(self):
+        prev = os.urandom(1000)
+        self.put("s.tar.zst", prev)
+        for mode in ("size", "md5", "missing", "error"):
+            with self.subTest(mode=mode):
+                staged = self.run_p("stage", str(self.cloud), "s.tar.zst", data=os.urandom(800))
+                self.assertEqual(staged.returncode, 0, staged.stderr)
+                self.tamper_lsjson(mode)
+                published = self.run_p("publish", str(self.cloud), "s.tar.zst", data=staged.stdout)
+                self.assertEqual(published.returncode, 1, published.stderr)
+                self.fake_sh = None
+                self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), prev)
+                self.assertFalse((self.cloud / "s.tar.zst.part").exists())
+
+    def test_lsjson_error_after_prepare_does_not_replace_the_archive(self):
+        prev = os.urandom(1000)
+        self.put("s.tar.zst", prev)
+        self.tamper_lsjson("error")
+        staged = self.run_p("stage", str(self.cloud), "s.tar.zst", data=os.urandom(700))
+        self.assertEqual(staged.returncode, 1, staged.stderr)
+        self.fake_sh = None
+        self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), prev)
+        self.assertFalse((self.cloud / "s.tar.zst.part").exists())
+
+    def test_bad_lsjson_keeps_previous_parts_archive(self):
+        prev = os.urandom(PART * 2 + 5)
+        self.put("g.tar.zst", prev)
+        staged = self.run_p("stage", str(self.cloud), "g.tar.zst", data=os.urandom(PART * 2 + 9))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.tamper_lsjson("size")
+        published = self.run_p("publish", str(self.cloud), "g.tar.zst", data=staged.stdout)
+        self.assertEqual(published.returncode, 1, published.stderr)
+        self.fake_sh = None
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
+
+    def test_publish_rejects_a_corrupt_staged_file(self):
+        prev = os.urandom(1000)
+        self.put("s.tar.zst", prev)
+        staged = self.run_p("stage", str(self.cloud), "s.tar.zst", data=os.urandom(800))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        part = self.cloud / "s.tar.zst.part"
+        blob = bytearray(part.read_bytes())
+        blob[0] ^= 0xff
+        part.write_bytes(blob)
+        published = self.run_p("publish", str(self.cloud), "s.tar.zst", data=staged.stdout)
+        self.assertEqual(published.returncode, 1, published.stderr)
+        self.assertEqual((self.cloud / "s.tar.zst").read_bytes(), prev)
+
+    def test_abort_drops_prepared_parts_and_keeps_the_old_ones(self):
+        prev = os.urandom(PART * 2 + 3)
+        self.put("g.tar.zst", prev)
+        before = self.files()
+        staged = self.run_p("stage", str(self.cloud), "g.tar.zst", data=os.urandom(PART * 2 + 9))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))          # боевое оглавление ещё старое
+        self.assertNotEqual(self.files(), before)
+        self.assertEqual(self.run_p("abort", str(self.cloud), "g.tar.zst", data=staged.stdout).returncode, 0)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
+
+    def _stage_next(self, prev, new):
+        self.put("g.tar.zst", prev)
+        staged = self.run_p("stage", str(self.cloud), "g.tar.zst", data=new)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        return staged.stdout
+
+    def test_unknown_moveto_keeps_parts_when_rename_happened(self):
+        prev, new = os.urandom(PART * 2 + 3), os.urandom(PART * 2 + 8)
+        receipt = self._stage_next(prev, new)
+        self.lost_parts_moveto(True)
+        published = self.run_p("publish", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(published.returncode, 2, published.stderr)
+        self.assertIn("не подтверждена", published.stderr.decode())
+        aborted = self.run_p("abort", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(aborted.returncode, 2, aborted.stderr)
+        self.assertIn("части оставляю", aborted.stderr.decode())
+        self.assertTrue(list(self.tmp.glob("attempt-*")))
+        self.fake_sh = None
+        self.assertEqual(self.get("g.tar.zst"), (0, new))
+        resumed = self.run_p("resume", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(self.get("g.tar.zst"), (0, new))
+
+    def test_unknown_moveto_keeps_parts_when_rename_did_not_happen(self):
+        prev, new = os.urandom(PART * 2 + 4), os.urandom(PART * 2 + 6)
+        receipt = self._stage_next(prev, new)
+        self.lost_parts_moveto(False)
+        published = self.run_p("publish", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(published.returncode, 2, published.stderr)
+        aborted = self.run_p("abort", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(aborted.returncode, 2, aborted.stderr)
+        self.assertTrue(any(name.endswith(".parts.new") for name in self.files()))
+        self.fake_sh = None
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
+        resumed = self.run_p("resume", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(self.get("g.tar.zst"), (0, new))
+        self.assertFalse(any(name.endswith(".parts.new") for name in self.files()))
+
+    def test_absent_parts_index_is_not_a_failed_request(self):
+        single, new = os.urandom(1000), os.urandom(PART * 2 + 40)
+        self.put("g.tar.zst", single)
+        staged = self.run_p("stage", str(self.cloud), "g.tar.zst", data=new)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.fail_active_index(1)
+        published = self.run_p("publish", str(self.cloud), "g.tar.zst", data=staged.stdout)
+        self.assertEqual(published.returncode, 2, published.stderr)
+        aborted = self.run_p("abort", str(self.cloud), "g.tar.zst", data=staged.stdout)
+        self.assertEqual(aborted.returncode, 2, aborted.stderr)
+        self.assertEqual((self.cloud / "g.tar.zst").read_bytes(), single)
+        self.assertTrue((self.cloud / "g.tar.zst.parts.new").is_file())
+        self.assertEqual(self.run_p("resume", str(self.cloud), "g.tar.zst", data=staged.stdout).returncode, 2)
+        self.fake_sh = None
+        self.assertEqual((self.cloud / "g.tar.zst").read_bytes(), single)
+        resumed = self.run_p("resume", str(self.cloud), "g.tar.zst", data=staged.stdout)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("активного оглавления нет", resumed.stderr.decode())
+        self.assertEqual(self.get("g.tar.zst"), (0, new))
+
+    def test_confirmed_moveto_refusal_drops_only_the_staging(self):
+        prev = os.urandom(PART * 2 + 5)
+        receipt = self._stage_next(prev, os.urandom(PART * 2 + 7))
+        self.fake(".parts.new", "moveto")
+        published = self.run_p("publish", str(self.cloud), "g.tar.zst", data=receipt)
+        self.assertEqual(published.returncode, 1, published.stderr)
+        self.fake_sh = None
+        self.assertNotIn("g.tar.zst.parts.new", self.files())
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
+
+    def test_publish_rejects_a_corrupt_part(self):
+        prev = os.urandom(PART * 2 + 4)
+        self.put("g.tar.zst", prev)
+        before = set(self.files())
+        staged = self.run_p("stage", str(self.cloud), "g.tar.zst", data=os.urandom(PART * 2 + 6))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        fresh = next(p for p in self.cloud.iterdir() if p.name not in before and p.name.endswith("-0000"))
+        blob = bytearray(fresh.read_bytes())
+        blob[0] ^= 0xff
+        fresh.write_bytes(blob)
+        published = self.run_p("publish", str(self.cloud), "g.tar.zst", data=staged.stdout)
+        self.assertEqual(published.returncode, 1, published.stderr)
+        self.assertEqual(self.get("g.tar.zst"), (0, prev))
 
     def test_missing_folder_is_created(self):
         self.cloud = self.cloud / "новая папка"

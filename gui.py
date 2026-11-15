@@ -408,12 +408,16 @@ class Api:
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
 
-    def stop(self, lang=None):
-        """«Закончить»: выгрузить всё, проверить и удалить машину — в фоновом процессе."""
-        settings.applog(f"закончить: нажато, Moonlight {'идёт' if moonlight.streaming() else 'не идёт'}")
+    def stop(self, lang=None, expected_id=None):
+        """«Закончить»: выгрузить всё, проверить и удалить машину — в фоновом процессе.
+
+        expected_id — «Повторить выгрузку»: только машина из неудавшейся операции.
+        """
+        settings.applog(f"закончить: нажато, Moonlight {'идёт' if moonlight.streaming() else 'не идёт'}"
+                        + (f", повтор для {expected_id}" if expected_id is not None else ""))
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
-        if not jobs.spawn("stop", lang=lang):
+        if not jobs.spawn("stop", lang=lang, expected_id=expected_id):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 

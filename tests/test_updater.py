@@ -83,7 +83,7 @@ def tearDownModule():
 
 def signed(key=KEY, **fields):
     """Описание версии, подписанное key: поля по умолчанию + fields."""
-    d = {"format": 1, "version": "9.9.9", "file": "vastgame-9.9.9-mac-arm64.zip", "size": 10, "sha256": "0" * 64}
+    d = {"format": 1, "version": "9.9.9", "file": updater.FILE.format(version="9.9.9"), "size": 10, "sha256": "0" * 64}
     d.update(fields)
     d["signature"] = base64.b64encode(key.sign(updater.canonical(d))).decode()
     return d
@@ -303,6 +303,7 @@ def fake_bundle(where, mark, bundle_id="com.vastgame.app"):
     return app
 
 
+@unittest.skipUnless(sys.platform == "darwin", "только macOS")
 class TestInstall(unittest.TestCase):
     def setUp(self):
         self.d = Path(tempfile.mkdtemp(dir=TMP))
@@ -406,6 +407,7 @@ class TestAfterStart(unittest.TestCase):
         self.assertIsNone(updater.after_start())
 
 
+@unittest.skipUnless(sys.platform == "darwin", "только macOS")
 class TestWatch(unittest.TestCase):
     """Сторож — настоящий /bin/sh на подставных папках; «открыть приложение» — подставной скрипт."""
 
@@ -547,12 +549,23 @@ class TestWindows(unittest.TestCase):
 
     def test_no_rights(self):
         exe = self.installed()
-        os.chmod(exe.parent, 0o555)
-        try:
-            with self.assertRaises(VastgameError) as c:
-                self.install(exe)
-        finally:
-            os.chmod(exe.parent, 0o755)
+        if sys.platform == "win32":
+            sid = "*S-1-1-0"
+            try:
+                subprocess.run(["icacls", str(exe.parent), "/deny", f"{sid}:(W)"],
+                               check=True, capture_output=True)
+                with self.assertRaises(VastgameError) as c:
+                    self.install(exe)
+            finally:
+                subprocess.run(["icacls", str(exe.parent), "/remove:d", sid],
+                               capture_output=True)
+        else:
+            os.chmod(exe.parent, 0o555)
+            try:
+                with self.assertRaises(VastgameError) as c:
+                    self.install(exe)
+            finally:
+                os.chmod(exe.parent, 0o755)
         self.assertEqual(c.exception.key, "update.err.no_rights")
         self.assertEqual(self.spawned, [])
 
@@ -632,7 +645,7 @@ class TestRelease(unittest.TestCase):
         z.write_bytes("архив".encode() * 100)
         with mock.patch.object(release, "load_key", lambda: KEY):
             release.manifest(z)
-        m = updater.verify(json.loads((self.d / "vastgame-update.json").read_text()))
+        m = updater.verify(json.loads((self.d / "vastgame-update.json").read_text()), file=updater.MAC_FILE)
         self.assertEqual((m["version"], m["size"]), ("9.9.9", z.stat().st_size))
 
     def test_manifest_for_windows_installer(self):
@@ -644,7 +657,7 @@ class TestRelease(unittest.TestCase):
         m = updater.verify(data, file=updater.WIN_FILE)
         self.assertEqual((m["version"], m["file"], m["size"]), ("9.9.9", z.name, z.stat().st_size))
         with self.assertRaises(VastgameError):                       # приложение для Mac его не примет
-            updater.verify(data)
+            updater.verify(data, file=updater.MAC_FILE)
         self.assertFalse((self.d / "vastgame-update.json").exists())
 
     def test_manifest_needs_a_known_file(self):
@@ -668,7 +681,8 @@ class TestRelease(unittest.TestCase):
              mock.patch.object(release, "_store", stored.append):
             release.keygen()
         self.assertEqual(len(stored), 1)
-        self.assertEqual(release.BACKUP.stat().st_mode & 0o777, 0o600)
+        if sys.platform != "win32":
+            self.assertEqual(release.BACKUP.stat().st_mode & 0o777, 0o600)
         back = serialization.load_pem_private_key(release.BACKUP.read_bytes(), b"correct horse battery")
         pub = release.PUBLIC_FILE.read_text().strip()
         self.assertEqual((release.public_b64(back), release.public_b64(stored[0])), (pub, pub))
@@ -788,7 +802,7 @@ class TestPublish(unittest.TestCase):
         self.assertIn(str(release.ROOT / "wolf-setup.sh"), create)
         self.assertIn("--latest", create)
         self.assertEqual(create[create.index("--repo") + 1], "WetFoxx/Vast.ai-Cloud-Gaming-")
-        m = updater.verify(json.loads((self.dist / "vastgame-update.json").read_text()))
+        m = updater.verify(json.loads((self.dist / "vastgame-update.json").read_text()), file=updater.MAC_FILE)
         self.assertEqual((m["version"], m["size"]), (v, 300))
         self.assertEqual((self.dist / "release-notes.md").read_text().strip(), "Исправлена связка Moonlight")
 

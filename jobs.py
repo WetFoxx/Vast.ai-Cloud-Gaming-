@@ -442,10 +442,16 @@ def _gone(iid, wait=None):
         time.sleep(5)
 
 
-def run_stop(job, lang=None):
-    """Выгрузить всё, проверить и удалить машину (удаление — только после подтверждённой выгрузки)."""
+def run_stop(job, lang=None, expected_id=None):
+    """Выгрузить всё, проверить и удалить машину (удаление — только после подтверждённой выгрузки).
+
+    expected_id — номер машины из неудавшейся выгрузки: ядро сверяет его до команды finish.
+    """
     try:
-        r = core.stop(job)
+        kw = {}
+        if expected_id is not None:
+            kw["expected_id"] = int(expected_id)
+        r = core.stop(job, **kw)
         job.finish(result={"uploaded": r["uploaded"], "deleted": r["deleted"], "iid": r["iid"],
                            "gone": r.get("gone", False)})
     except VastgameError as e:
