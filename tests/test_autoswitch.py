@@ -70,7 +70,7 @@ class Race(unittest.TestCase):
             raise VastgameError("занята", key="core.offer_gone", id=oid)
         return {**OFFERS[oid], **self.over.get(oid, {})}
 
-    def rent(self, oid, body, o):
+    def rent(self, oid, body, o, *, tpl=None):
         if oid == self.rent_fails_on:
             raise VastgameError("мало денег", key="core.rent_failed", msg="insufficient credit")
         if oid in self.rent_gone:

@@ -490,7 +490,7 @@ class TestPlay(unittest.TestCase):
                 return
             time.sleep(0.02)
 
-    def fake_rent(self, offer_id, body, offer=None):
+    def fake_rent(self, offer_id, body, offer=None, *, tpl=None):
         self.rented.append(offer_id)
         self.body = body
         return 42, time.time()
@@ -564,7 +564,7 @@ class TestPlay(unittest.TestCase):
         # «Сменить машину» во время запуска: прежняя удалена и пропала у Vast ДО аренды новой — двух машин нет ни на миг
         log, alive, ids = [], set(), {5: 42, 7: 43}
 
-        def rent(oid, body, offer=None):
+        def rent(oid, body, offer=None, *, tpl=None):
             log.append(("rent", oid, sorted(alive)))                     # какие машины были у Vast в момент аренды
             alive.add(ids[oid])
             self.rented.append(oid)
@@ -664,7 +664,7 @@ class TestPlay(unittest.TestCase):
 
     def test_sync_toggles_remembered_and_sent(self):
         bodies, store = [], {}
-        with mock.patch.object(gui.jobs.core, "rent", lambda oid, body, offer=None: bodies.append(body) or (42, time.time())), \
+        with mock.patch.object(gui.jobs.core, "rent", lambda oid, body, offer=None, *, tpl=None: bodies.append(body) or (42, time.time())), \
              mock.patch.object(gui.settings, "get", lambda k, d=None: store.get(k, d)), \
              mock.patch.object(gui.settings, "set", lambda k, v: store.__setitem__(k, v)):
             self.assertEqual(self.api._sync(), {"steam_games": False, "other_games": True, "saves": True})

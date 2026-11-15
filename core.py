@@ -19,6 +19,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -272,16 +273,67 @@ def balance():
 
 # ------------------------------------------------------------------------- аренда ---
 
-def rent(offer_id, body, offer=None):
+def _kvm_direct_body(body, tpl):
+    """Параметры штатного шаблона для аренды без template_hash_id."""
+    import setup
+
+    onstart = tpl.get("onstart") or ""
+    if (tpl.get("name") != TEMPLATE_NAME or tpl.get("private") is not True
+            or tpl.get("image") != setup.IMAGE or tpl.get("tag") != setup.IMAGE_TAG
+            or tpl.get("runtype") != "ssh" or not tpl.get("use_ssh") or not tpl.get("ssh_direct")
+            or (onstart != setup.ONSTART and not setup._old_vastgame_launcher(onstart))
+            or any(tpl.get(key) for key in ("args", "args_str", "volume_info", "jupyter_dir", "use_jupyter_lab",
+                                           "docker_login_repo", "docker_login_user", "docker_login_pass"))):
+        return None
+    try:
+        tokens = shlex.split(tpl.get("env") or "")
+    except ValueError:
+        return None
+    if len(tokens) % 2:
+        return None
+    env = {}
+    for flag, value in zip(tokens[::2], tokens[1::2]):
+        if flag == "-p" and re.fullmatch(r"\d+:\d+(?:/(?:tcp|udp))?", value):
+            env[f"-p {value}"] = "1"
+        elif flag == "-e":
+            name, sep, val = value.partition("=")
+            if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+                return None
+            env[name] = val
+        else:
+            return None
+
+    direct = dict(body)
+    del direct["template_hash_id"]
+    return {**direct, "image": f"{setup.IMAGE}:{setup.IMAGE_TAG}", "vm": True,
+            "runtype": "ssh_direct", "onstart": body.get("onstart", onstart),
+            "env": {**env, **body.get("env", {})}}
+
+
+def rent(offer_id, body, offer=None, *, tpl=None):
     """Арендовать. Возвращает (id инстанса, время начала). Деньги начинают списываться сразу.
-    offer — данные машины (видеокарта, страна, цена) для истории сессий."""
+    offer — данные машины (видеокарта, страна, цена) для истории сессий.
+    tpl — шаблон этой аренды для прямого запуска KVM при явном отказе Vast принять его хеш."""
     try:
         sshkey.ensure()   # без SSH-ключа в аккаунте Vast не запускает VM (у друга 2026-09-25)
     except VastgameError:
         pass              # проверка не удалась — пробуем арендовать как есть; Vast сам объяснит отказ
     t0 = time.time()
+    path = f"asks/{offer_id}/"
     try:
-        r = call("PUT", f"asks/{offer_id}/", body)
+        try:
+            r = call("PUT", path, body)
+        except VastgameError as e:
+            if (not tpl or not body.get("template_hash_id") or body["template_hash_id"] != tpl.get("hash_id")
+                    or e.key != "vast.http" or e.params.get("code") != 400
+                    or "invalid template hash or id or template not accessible by user"
+                    not in str(e.params.get("msg", "")).lower()):
+                raise
+            direct = _kvm_direct_body(body, tpl)
+            if direct is None:
+                raise
+            settings.applog(f"аренда {offer_id}: Vast отклонил хеш шаблона, повторяю с параметрами KVM")
+            r = call("PUT", path, direct)
     except VastgameError as e:
         settings.applog(f"аренда {offer_id}: Vast отказал: {str(e)[:300]}")   # сырой ответ — для разбора
         # Предложение сняли между выбором и арендой (заняли или хост ещё не освободил машину):

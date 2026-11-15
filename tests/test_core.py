@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core    # noqa: E402
 import market  # noqa: E402
+import setup   # noqa: E402
 from vastapi import VastgameError  # noqa: E402
 
 
@@ -740,6 +741,81 @@ class TestRentalBody(unittest.TestCase):
         b = core.rental_body(tpl, 100, sync={"steam_games": False, "other_games": True, "saves": False})
         self.assertEqual(b["env"], {"SYNC_STEAM_GAMES": "0", "SYNC_OTHER_GAMES": "1", "SYNC_SAVES": "0"})
         self.assertEqual(core.rental_body(tpl, 100, games="1")["env"], {"SYNC_STEAM_GAMES": "1"})
+
+
+class TestKvmTemplateFallback(unittest.TestCase):
+    def setUp(self):
+        self.tpl = {"hash_id": "h", "name": "vastgame", "private": True, "image": setup.IMAGE, "tag": setup.IMAGE_TAG,
+                    "vm": False, "runtype": "ssh", "use_ssh": True, "ssh_direct": True, "onstart": setup.ONSTART,
+                    "env": " ".join(f"-p {port}" for port in setup.PORTS) + " " + setup.PORTAL
+                    + " -e RES=1920x1200 -e STEAM_LANG=spanish -e SYNC_STEAM_GAMES=0"}
+        self.body = core.rental_body(self.tpl, 64, games="1", sync={"saves": True})
+        self.rejected = VastgameError("HTTP 400", key="vast.http", code=400,
+                                      msg="invalid template hash or id or template not accessible by user")
+        self.success = {"success": True, "new_contract": 42}
+        for name, target in (("call", core), ("ensure", core.sshkey), ("started", core.history),
+                             ("applog", core.settings), ("get", core.settings)):
+            patcher = mock.patch.object(target, name)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+
+    def test_retries_once_with_full_vm_configuration(self):
+        self.body["onstart"] = "test launcher"
+        self.call.side_effect = [self.rejected, self.success]
+        iid, _ = core.rent(9, self.body, tpl=self.tpl)
+        self.assertEqual(iid, 42)
+        self.assertEqual(self.call.call_count, 2)
+        self.assertEqual(self.call.call_args_list[0], mock.call("PUT", "asks/9/", self.body))
+        method, path, direct = self.call.call_args.args
+        self.assertEqual((method, path), ("PUT", "asks/9/"))
+        self.assertNotIn("template_hash_id", direct)
+        self.assertEqual(direct["image"], f"{setup.IMAGE}:{setup.IMAGE_TAG}")
+        self.assertIs(direct["vm"], True)
+        self.assertEqual(direct["runtype"], "ssh_direct")
+        self.assertEqual(direct["disk"], 64)
+        self.assertEqual(direct["label"], self.body["label"])
+        self.assertEqual(direct["onstart"], "test launcher")
+        self.assertEqual(direct["env"]["RES"], "1920x1200")
+        self.assertEqual(direct["env"]["STEAM_LANG"], "spanish")
+        self.assertEqual(direct["env"]["SYNC_STEAM_GAMES"], "1")
+        self.assertEqual(direct["env"]["SYNC_SAVES"], "1")
+        self.assertEqual(direct["env"]["OPEN_BUTTON_PORT"], "1111")
+        self.assertIn("Selkies Low Latency Desktop", direct["env"]["PORTAL_CONFIG"])
+        for port in setup.PORTS:
+            self.assertEqual(direct["env"][f"-p {port}"], "1")
+        self.assertEqual(self.body["template_hash_id"], "h")
+        self.ensure.assert_called_once()
+        self.started.assert_called_once()
+
+    def test_success_uses_only_the_template_request(self):
+        self.call.return_value = self.success
+        core.rent(9, self.body, tpl=self.tpl)
+        self.call.assert_called_once_with("PUT", "asks/9/", self.body)
+
+    def test_does_not_retry_other_failures_docker_or_custom_templates(self):
+        for body, tpl, error in (
+            (self.body, self.tpl, VastgameError("timeout", key="vast.network")),
+            (self.body, self.tpl, VastgameError("HTTP 400", key="vast.http", code=400, msg="insufficient credit")),
+            (core.rental_body(self.tpl, 64, docker=True), self.tpl, self.rejected),
+            (self.body, dict(self.tpl, onstart="custom launcher"), self.rejected),
+            (self.body, dict(self.tpl, env="-v /custom:/mount"), self.rejected),
+        ):
+            with self.subTest(key=error.key, template=body.get("template_hash_id"), onstart=tpl["onstart"]):
+                self.call.reset_mock()
+                self.call.side_effect = error
+                with self.assertRaises(VastgameError) as raised:
+                    core.rent(9, body, tpl=tpl)
+                self.assertIs(raised.exception, error)
+                self.call.assert_called_once_with("PUT", "asks/9/", body)
+        self.started.assert_not_called()
+
+    def test_second_rejection_is_returned_without_another_retry(self):
+        self.call.side_effect = [self.rejected, self.rejected]
+        with self.assertRaises(VastgameError):
+            core.rent(9, self.body, tpl=self.tpl)
+        self.assertEqual(self.call.call_count, 2)
+        self.assertEqual(self.call.call_args.args[2]["onstart"], setup.ONSTART)
+        self.started.assert_not_called()
 
 
 class TestEmergency(Base):

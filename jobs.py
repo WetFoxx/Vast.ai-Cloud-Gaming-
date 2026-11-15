@@ -344,7 +344,8 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None, hint=None):
                 job.stage("vast", "Vast запускает машину")
                 announced = True
             try:
-                iid, t0 = core.rent(o["id"], core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang), o)
+                body = core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang)
+                iid, t0 = core.rent(o["id"], body, o, tpl=tpl)
             except VastgameError as e:
                 if e.key == "core.offer_gone" and (not chosen or chosen_gone(oid)):
                     continue                           # замену (или выбранную — тогда похожая) только что заняли
