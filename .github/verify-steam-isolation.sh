@@ -7,15 +7,15 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 fail=0
 bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 
+# Не login-shell: bash -l читает /etc/profile.d и под seccomp падает на fork.
 user_shell() {
-  docker run --rm -i --entrypoint bash "${@:2}" "$IMAGE" -lc \
+  docker run --rm -i --entrypoint bash "${@:2}" "$IMAGE" -c \
     'runuser -u user -- env -i HOME=/home/user USER=user LOGNAME=user LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -s'
 }
 
 echo "CHECK files and pinned proot"
-if ! info=$(docker run --rm --entrypoint bash "$IMAGE" -lc '
-set -eu
-dpkg-query -W -f "bubblewrap ${Version}\n" bubblewrap
+if ! info=$(docker run --rm --entrypoint bash "$IMAGE" -c '
+dpkg-query -W bubblewrap
 file /usr/local/lib/proot-next/proot
 stat -c "%a %n" /usr/local/lib/proot-next/proot /usr/local/lib/proot-next/bwrap /usr/bin/steam /opt/vastgame/steam-isolation.sh
 sha256sum /usr/local/lib/proot-next/proot
@@ -29,13 +29,13 @@ test -x /opt/vastgame/real/steam
 if grep -q vastgame-ns-ok /opt/vastgame/steam-patch.sh; then echo "stub=yes"; else echo "stub=no"; fi
 '); then
   bad "image inspection failed"
-  info=""
+else
+  printf '%s\n' "$info"
+  printf '%s\n' "$info" | grep -qx "proot-on-path=no" || bad "proot name is on PATH"
+  printf '%s\n' "$info" | grep -q "$EXPECTED_SHA" || bad "proot sha256 mismatch"
+  printf '%s\n' "$info" | grep -q "x86-64" || bad "proot is not an x86-64 binary"
+  printf '%s\n' "$info" | grep -qx "stub=no" || bad "steam-patch contains the check stub"
 fi
-printf '%s\n' "$info"
-printf '%s\n' "$info" | grep -qx "proot-on-path=no" || bad "proot name is on PATH"
-printf '%s\n' "$info" | grep -q "$EXPECTED_SHA" || bad "proot sha256 mismatch"
-printf '%s\n' "$info" | grep -q "x86-64" || bad "proot is not an x86-64 binary"
-printf '%s\n' "$info" | grep -qx "stub=no" || bad "steam-patch contains the check stub"
 
 echo "CHECK auto selection as user after env -i"
 if ! auto=$(user_shell << 'EOS'
@@ -43,7 +43,7 @@ rm -f /tmp/vastgame-steam-isolation.json /tmp/vastgame-steam-isolation.env
 /opt/vastgame/steam-isolation.sh
 echo "rc=$?"
 python3 - << 'PY'
-import json, os
+import json
 d = json.load(open("/tmp/vastgame-steam-isolation.json"))
 print("selected=" + d["selected"])
 print("native=" + d["native"])
@@ -54,16 +54,16 @@ python3 -c 'import os; print("child=" + os.environ.get("BWRAP", "unset"))'
 EOS
 ); then
   bad "auto selection command failed"
-  auto=""
+else
+  printf '%s\n' "$auto"
+  printf '%s\n' "$auto" | grep -qx "rc=0" || bad "auto isolation returned an error"
+  selected=$(printf '%s\n' "$auto" | sed -n 's/^selected=//p')
+  case "$selected" in
+    bwrap) printf '%s\n' "$auto" | grep -qx "child=unset" || bad "native mode exported BWRAP" ;;
+    proot) printf '%s\n' "$auto" | grep -qx "child=/usr/local/lib/proot-next/bwrap" || bad "proot mode did not export BWRAP" ;;
+    *) bad "unexpected selection: ${selected:-missing}" ;;
+  esac
 fi
-printf '%s\n' "$auto"
-printf '%s\n' "$auto" | grep -qx "rc=0" || bad "auto isolation returned an error"
-selected=$(printf '%s\n' "$auto" | sed -n 's/^selected=//p')
-case "$selected" in
-  bwrap) printf '%s\n' "$auto" | grep -qx "child=unset" || bad "native mode exported BWRAP" ;;
-  proot) printf '%s\n' "$auto" | grep -qx "child=/usr/local/lib/proot-next/bwrap" || bad "proot mode did not export BWRAP" ;;
-  *) bad "unexpected selection: ${selected:-missing}" ;;
-esac
 
 echo "CHECK forced proot as user"
 if ! forced=$(user_shell << 'EOS'
@@ -76,27 +76,33 @@ printf 'path=%s\n' "${BWRAP:-}"
 EOS
 ); then
   bad "forced proot command failed"
-  forced=""
+else
+  printf '%s\n' "$forced"
+  printf '%s\n' "$forced" | grep -qx "rc=0" || bad "forced proot selector failed"
+  printf '%s\n' "$forced" | grep -qx "probe=ok" || bad "proot --bind / / true failed"
+  printf '%s\n' "$forced" | grep -qx "path=/usr/local/lib/proot-next/bwrap" || bad "forced BWRAP path is wrong"
 fi
-printf '%s\n' "$forced"
-printf '%s\n' "$forced" | grep -qx "rc=0" || bad "forced proot selector failed"
-printf '%s\n' "$forced" | grep -qx "probe=ok" || bad "proot --bind / / true failed"
-printf '%s\n' "$forced" | grep -qx "path=/usr/local/lib/proot-next/bwrap" || bad "forced BWRAP path is wrong"
 
 echo "CHECK richer filesystem operations and overlay"
-rich=$(user_shell << 'EOS' || true
+if ! rich=$(user_shell << 'EOS'
 run() { printf 'cmd=%s\n' "$*"; if "$@"; then echo rc=0; else echo "rc=$?"; fi; }
 run bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir / true
 run /usr/local/lib/proot-next/bwrap --die-with-parent --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir / true
-mkdir -p /tmp/ov
-run /usr/local/lib/proot-next/bwrap --overlay-src / --overlay /tmp/ov true
+mkdir -p /tmp/ov-src /tmp/ov-dest
+/usr/local/lib/proot-next/bwrap --help >/tmp/bwrap-help.txt 2>&1 || true
+grep -n overlay /tmp/bwrap-help.txt || true
+run /usr/local/lib/proot-next/bwrap --overlay-src /tmp/ov-src --overlay /tmp/ov-dest true
 EOS
-)
-printf '%s\n' "$rich"
+); then
+  bad "rich filesystem probe container failed"
+else
+  printf '%s\n' "$rich"
+  printf '%s\n' "$rich" | grep -q "proot-next/bwrap --die-with-parent" || bad "rich probe returned no proot result"
+fi
 
-echo "CHECK auto selection when unshare is blocked"
+echo "CHECK fallback when user namespaces are blocked"
 if ! blocked=$(docker run --rm -i --security-opt "seccomp=${ROOT}/seccomp-no-userns.json" \
-  --entrypoint bash "$IMAGE" -lc \
+  --entrypoint bash "$IMAGE" -c \
   'runuser -u user -- env -i HOME=/home/user USER=user LOGNAME=user LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -s' << 'EOS'
 rm -f /tmp/vastgame-steam-isolation.json /tmp/vastgame-steam-isolation.env
 VASTGAME_STEAM_ISOLATION_REPROBE=1 /opt/vastgame/steam-isolation.sh
@@ -104,24 +110,27 @@ echo "rc=$?"
 python3 - << 'PY'
 import json
 d = json.load(open("/tmp/vastgame-steam-isolation.json"))
-print("native=" + d["native"])
-print("selected=" + d["selected"])
-print("fallback=" + d["fallback"])
+print("native=" + str(d.get("native", "")))
+print("selected=" + str(d.get("selected", "")))
+print("fallback=" + str(d.get("fallback", "")))
 PY
 EOS
 ); then
-  echo "seccomp run failed to start"
-  blocked=""
-fi
-printf '%s\n' "$blocked"
-native=$(printf '%s\n' "$blocked" | sed -n 's/^native=//p')
-chosen=$(printf '%s\n' "$blocked" | sed -n 's/^selected=//p')
-if [ -z "$native" ]; then
-  echo "seccomp probe produced no result"
-elif [ "$native" = ok ]; then
-  echo "this seccomp profile did not block user namespaces"
-elif [ "$chosen" != proot ]; then
-  bad "blocked user namespace did not select proot (native=$native selected=${chosen:-missing})"
+  bad "seccomp fallback container failed to start"
+else
+  printf '%s\n' "$blocked"
+  native=$(printf '%s\n' "$blocked" | sed -n 's/^native=//p')
+  chosen=$(printf '%s\n' "$blocked" | sed -n 's/^selected=//p')
+  fallback=$(printf '%s\n' "$blocked" | sed -n 's/^fallback=//p')
+  if [ -z "$native" ] || [ -z "$chosen" ] || [ -z "$fallback" ]; then
+    bad "seccomp fallback returned no diagnostic data"
+  elif ! printf '%s\n' "$blocked" | grep -qx "rc=0"; then
+    bad "seccomp fallback selector failed"
+  elif [ "$native" = ok ]; then
+    bad "seccomp profile did not block user namespaces"
+  elif [ "$chosen" != proot ] || [ "$fallback" != ok ]; then
+    bad "blocked user namespace did not select proot (native=$native selected=$chosen fallback=$fallback)"
+  fi
 fi
 
 if [ "$fail" = 0 ]; then

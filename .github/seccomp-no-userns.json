@@ -10,7 +10,15 @@
     {
       "names": ["unshare"],
       "action": "SCMP_ACT_ERRNO",
-      "errnoRet": 1
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 268435456,
+          "op": "SCMP_CMP_MASKED_EQ"
+        }
+      ],
+      "comment": "EPERM only for unshare(CLONE_NEWUSER). A blanket unshare block is not used."
     },
     {
       "names": ["clone"],
@@ -22,7 +30,8 @@
           "value": 268435456,
           "op": "SCMP_CMP_MASKED_EQ"
         }
-      ]
+      ],
+      "comment": "x86_64 clone flags are argument 0. Ordinary fork flags do not include CLONE_NEWUSER (0x10000000)."
     }
   ]
 }
