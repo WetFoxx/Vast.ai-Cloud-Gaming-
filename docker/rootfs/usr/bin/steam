@@ -23,7 +23,17 @@ done
 for pfx in "$HOME"/.steam/debian-installation/steamapps/compatdata/*/pfx/drive_c "$HOME"/.steam/steam/steamapps/compatdata/*/pfx/drive_c; do
   [ -d "$pfx/users/steamuser" ] && mkdir -p "$pfx/users/steamuser/AppData/Local/Temp" "$pfx/users/steamuser/Temp" "$pfx/users/steamuser/Documents" "$pfx/windows/temp" 2>/dev/null
 done
-# Steam уже работает — передать ему команду (steam://…) и выйти
+# wolf и entrypoint запускают эту обёртку через env -i. BWRAP задаётся здесь, уже после очистки,
+# и его наследуют настоящий клиент, pressure-vessel и Proton. Раньше этого места его нет.
+if [ -x /opt/vastgame/steam-isolation.sh ]; then
+  /opt/vastgame/steam-isolation.sh || {
+    echo "[steam] ни bubblewrap, ни резервный proot-next не запустили окружение Steam" >&2
+    exit 1
+  }
+  [ -f "${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}" ] \
+    && . "${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}"
+fi
+# Steam уже работает — передать ему команду (steam://…) и выйти. Окружение уже с BWRAP.
 if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
 exec 9>"/tmp/steam-run-$ME.lock"
 flock -n 9 || exec /opt/vastgame/real/steam "$@"          # другой запуск уже присматривает
@@ -32,7 +42,10 @@ W=$!
 trap 'kill $W 2>/dev/null' EXIT
 for try in 1 2 3 4 5 6 7 8; do
   /opt/vastgame/steam-patch.sh once
-  /opt/vastgame/real/steam -cef-disable-gpu-compositing "$@"
+  for sd in "$HOME/.steam/debian-installation" "$HOME/.steam/steam" "$HOME/.local/share/Steam"; do
+    [ -d "$sd" ] && : > "$sd/.cef-enable-remote-debugging" 2>/dev/null
+  done
+  /opt/vastgame/real/steam -cef-disable-gpu-compositing -cef-enable-debugging "$@"
   rc=$?
   [ "$rc" = 71 ] || break
   echo "[steam] проверка user namespaces вернулась (обновление клиента?) — заплатка и перезапуск $try" >&2

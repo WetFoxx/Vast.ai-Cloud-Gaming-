@@ -38,10 +38,22 @@ RUN dpkg --add-architecture i386 && apt-get update -qq && apt-get install -yq --
       libnotify-bin xfce4-notifyd \
       pulseaudio pulseaudio-utils \
       curl ca-certificates gnupg python3 procps iproute2 pciutils psmisc less nano zstd unzip xz-utils file \
-      7zip libarchive-tools \
+      7zip libarchive-tools bubblewrap \
       zenity xdg-utils libibus-1.0-5 libevdev2 libsdl2-2.0-0 evtest \
       libc6:i386 libgl1:i386 libgl1-mesa-dri:i386 libegl1:i386 libgbm1:i386 \
     && rm -rf /var/lib/apt/lists/*
+
+# proot-next 0.3.9 — запасной bwrap, только если штатный user namespace в контейнере Vast закрыт.
+# Скачивается при сборке образа, сверяется по SHA-256 и не лежит в PATH: Steam получает его через BWRAP.
+ARG PROOT_NEXT_VERSION=0.3.9
+ARG PROOT_NEXT_SHA256=1bda9d143b0b2ad700f0d8aafe432f50a2a27e83a317d4c38e8289ee03c78764
+RUN curl -fsSL -o /tmp/proot-x86_64 \
+      "https://github.com/selkies-project/proot-next/releases/download/${PROOT_NEXT_VERSION}/proot-x86_64" \
+    && echo "${PROOT_NEXT_SHA256}  /tmp/proot-x86_64" | sha256sum -c - \
+    && mkdir -p /usr/local/lib/proot-next \
+    && install -m 755 /tmp/proot-x86_64 /usr/local/lib/proot-next/proot \
+    && ln -s proot /usr/local/lib/proot-next/bwrap \
+    && rm -f /tmp/proot-x86_64
 
 # Пользователь как на KVM: user, uid 1000, основная группа users (в образе Ubuntu uid 1000 занят ubuntu)
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -g users -G audio,video -s /bin/bash user
@@ -112,7 +124,7 @@ COPY rootfs/ /
 
 # Настройки XFCE по умолчанию (без вопроса о панели при первом входе, без композитора — меньше задержка),
 # папка игр как на KVM (~/Downloads/Games), ярлыки на неё и на Chrome на рабочем столе
-RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/bin/steam /usr/bin/google-chrome-stable \
+RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/local/bin/vg-wg /usr/bin/steam /usr/bin/google-chrome-stable \
     && ln -sfn /usr/bin/steam /usr/games/steam \
     && mkdir -p /home/user/.config/xfce4/xfconf/xfce-perchannel-xml /home/user/Downloads/Games /home/user/Desktop \
     && cp /etc/xdg/xfce4/panel/default.xml /home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \

@@ -1,0 +1,31 @@
+# Тестовая сборка только этой ветки. Не запускается на main и не ставит тег latest.
+name: docker-isolation-test
+
+on:
+  push:
+    branches: [steam-isolation-test]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build test image
+        run: docker build -t vastgame-desktop:steam-isolation-test docker
+      - name: Verify Steam isolation
+        run: bash .github/verify-steam-isolation.sh vastgame-desktop:steam-isolation-test
+      - name: Push test tag only
+        run: |
+          set -euo pipefail
+          docker tag vastgame-desktop:steam-isolation-test ghcr.io/wetfoxx/vastgame-desktop:steam-isolation-test
+          docker push ghcr.io/wetfoxx/vastgame-desktop:steam-isolation-test
+          docker image inspect vastgame-desktop:steam-isolation-test --format 'local={{.Id}}'

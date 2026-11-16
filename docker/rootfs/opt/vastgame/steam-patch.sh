@@ -22,11 +22,10 @@ roots() {
       echo "$HOME/.local/share/Steam"; } | awk 'NF && !s[$0]++')
 }
 check() {
-  local r c
-  for r in "${ROOTS[@]}"; do
-    c=$r/ubuntu12_32/steam-runtime/amd64/usr/bin/steam-runtime-check-requirements
-    [ -x "$c" ] && chmod -x "$c"
-  done
+  # Проверку Steam не подменяем и не выключаем. Её проходит настоящий bubblewrap
+  # или $BWRAP (steam-isolation.sh). Старый приём «снять бит исполнения» оставлял
+  # окно ошибки, если steam.sh всё равно запускал проверку.
+  return 0
 }
 webhelper() {
   local r w
@@ -43,15 +42,19 @@ slr() {
     done
   done
 }
-zen() { pkill -u "$(id -u)" -f 'zenity.*user namespaces' 2>/dev/null; }
+zen() { pkill -u "$(id -u)" -f 'zenity.*user namespaces' 2>/dev/null || true; }
 case "${1:-once}" in
-  once) roots; check; webhelper; slr ;;
+  once) roots; check
+        # Старый пропуск контейнера Steam Runtime — только явный откат.
+        # Обычный запуск оставляет steamwebhelper и _v2-entry-point как есть:
+        # их окружение строит bubblewrap или $BWRAP.
+        if [ "${VASTGAME_STEAM_LEGACY_PATCH:-0}" = 1 ]; then webhelper; slr; fi ;;
   watch)
     i=0
     while :; do
-      [ $((i % 10)) = 0 ] && roots        # клиент мог появиться (первый запуск) — корни заново
+      [ $((i % 10)) = 0 ] && roots
       check; zen
-      [ $((i % 10)) = 0 ] && { webhelper; slr; }
+      if [ "${VASTGAME_STEAM_LEGACY_PATCH:-0}" = 1 ] && [ $((i % 10)) = 0 ]; then webhelper; slr; fi
       i=$((i + 1))
       sleep 0.3
     done ;;
