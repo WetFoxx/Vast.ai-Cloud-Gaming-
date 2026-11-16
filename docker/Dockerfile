@@ -124,7 +124,8 @@ COPY rootfs/ /
 
 # Настройки XFCE по умолчанию (без вопроса о панели при первом входе, без композитора — меньше задержка),
 # папка игр как на KVM (~/Downloads/Games), ярлыки на неё и на Chrome на рабочем столе
-RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/local/bin/vg-wg /usr/bin/steam /usr/bin/google-chrome-stable \
+RUN chmod 755 /opt/vastgame/*.sh /usr/local/bin/wolf-res /usr/bin/steam /usr/bin/google-chrome-stable \
+    && if [ -f /usr/local/bin/vg-wg ]; then chmod 755 /usr/local/bin/vg-wg; fi \
     && ln -sfn /usr/bin/steam /usr/games/steam \
     && mkdir -p /home/user/.config/xfce4/xfconf/xfce-perchannel-xml /home/user/Downloads/Games /home/user/Desktop \
     && cp /etc/xdg/xfce4/panel/default.xml /home/user/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
