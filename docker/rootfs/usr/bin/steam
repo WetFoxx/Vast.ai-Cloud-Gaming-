@@ -32,9 +32,24 @@ if [ -x /opt/vastgame/steam-isolation.sh ]; then
     # блокировать Steam: неудача не кэшируется, следующий запуск попробует снова, а здесь
     # запускаем как прежде — без BWRAP (на здоровом хосте Steam работает, на закрытом покажет
     # свою ошибку). Причина осталась в /tmp/vastgame-steam-isolation.json.
-    iso_reason=$(python3 -c 'import json;print(json.load(open("/tmp/vastgame-steam-isolation.json")).get("reason",""))' 2>/dev/null)
-    echo "[steam] изоляция Steam Runtime не выбрана (${iso_reason:-причина не записана}) — запуск без BWRAP" >&2
-    unset iso_reason
+    iso_diag=$(python3 - <<'PY' 2>/dev/null
+import json
+try:
+    d = json.load(open("/tmp/vastgame-steam-isolation.json"))
+except (OSError, ValueError):
+    print("причина не записана")
+    raise SystemExit
+parts = []
+if d.get("reason"):
+    parts.append(str(d["reason"]))
+for k in ("native_error", "fallback_error"):
+    if d.get(k):
+        parts.append(k.replace("_error", "") + ": " + str(d[k]))
+print("; ".join(parts) or "причина не записана")
+PY
+)
+    echo "[steam] изоляция Steam Runtime не выбрана (${iso_diag:-причина не записана}) — запуск без BWRAP" >&2
+    unset iso_diag
   fi
   [ -f "$ISO_ENVF" ] && . "$ISO_ENVF"
 fi

@@ -12,6 +12,8 @@
 set -u
 OUT=${VASTGAME_STEAM_ISOLATION_JSON:-/tmp/vastgame-steam-isolation.json}
 ENVF=${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}
+ERRN=${VASTGAME_STEAM_ISOLATION_NATIVE_ERR:-/tmp/vastgame-steam-isolation.native.err}
+ERRF=${VASTGAME_STEAM_ISOLATION_FALLBACK_ERR:-/tmp/vastgame-steam-isolation.fallback.err}
 NATIVE=${VASTGAME_NATIVE_BWRAP:-/usr/bin/bwrap}
 PROOT=${VASTGAME_PROOT_BWRAP:-/usr/local/lib/proot-next/bwrap}
 TIMEOUT=${VASTGAME_BWRAP_TIMEOUT:-8}
@@ -27,6 +29,7 @@ PROBE_BINDS="--ro-bind /etc /etc --ro-bind /usr /usr --bind /proc /proc --dev-bi
 
 write_result() {  # native fallback selected reason [failed]
   NATIVE_R=$1 FALLBACK_R=$2 SELECTED=$3 REASON=$4 FAILED=${5:-} \
+  NATIVE_ERR=$(err_text "$ERRN") FALLBACK_ERR=$(err_text "$ERRF") \
   OUT=$OUT ENVF=$ENVF PROOT=$PROOT VERSION=$VERSION python3 - <<'PY'
 import json, os, time
 out, envf = os.environ["OUT"], os.environ["ENVF"]
@@ -39,6 +42,10 @@ doc = {
     "reason": os.environ["REASON"],
     "version": os.environ.get("VERSION", ""),
 }
+for key, env in (("native_error", "NATIVE_ERR"), ("fallback_error", "FALLBACK_ERR")):
+    text = os.environ.get(env, "")
+    if text:
+        doc[key] = text[:300]
 if os.environ.get("FAILED"):
     doc["failed_at"] = int(time.time())
 tmp = out + ".tmp"
@@ -52,6 +59,11 @@ tmpf = envf + ".tmp"
 open(tmpf, "w").write("\n".join(lines) + ("\n" if lines else ""))
 os.replace(tmpf, envf)
 PY
+}
+
+err_text() {  # stderr пробы одной строкой (до 300 символов); пусто, когда файла нет
+  [ -s "$1" ] || return 0
+  head -c 300 "$1" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
 }
 
 # Кэш удачного выбора: proot — env-файл заново (мог потеряться), bwrap/default —
@@ -88,22 +100,27 @@ if [ "$MODE" = off ]; then
   exit 0
 fi
 
-run_probe() {  # $1 = бинарник, $2 = with-userns (1/0)
-  local bin=$1
+run_probe() {  # $1 = бинарник, $2 = with-userns (1/0), $3 = файл stderr пробы
+  local bin=$1 errf=$3
   [ -x "$bin" ] || return 2
   if [ "$2" = 1 ]; then
     set -- --unshare-user $PROBE_BINDS true
   else
     set -- $PROBE_BINDS true
   fi
-  python3 - "$TIMEOUT" "$bin" "$@" <<'PY'
-import subprocess, sys
+  PROBE_ERR=$errf python3 - "$TIMEOUT" "$bin" "$@" <<'PY'
+import os, subprocess, sys
 limit, bin_ = float(sys.argv[1]), sys.argv[2]
+errf = os.environ.get("PROBE_ERR", "")
 try:
     done = subprocess.run([bin_, *sys.argv[3:]], timeout=limit,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-except subprocess.TimeoutExpired:
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+except subprocess.TimeoutExpired as e:
+    if errf:
+        open(errf, "wb").write(e.stderr or b"")
     sys.exit(124)
+if errf:
+    open(errf, "wb").write(done.stderr or b"")
 sys.exit(done.returncode)
 PY
 }
@@ -120,7 +137,7 @@ classify() {
 native_rc=2
 fallback_rc=2
 if [ "$MODE" = auto ] || [ "$MODE" = bwrap ]; then
-  run_probe "$NATIVE" 1
+  run_probe "$NATIVE" 1 "$ERRN"
   native_rc=$?
 fi
 native_state=$(classify "$native_rc")
@@ -139,7 +156,7 @@ if [ "$MODE" = bwrap ]; then
 fi
 
 if [ "$MODE" = auto ] || [ "$MODE" = proot ]; then
-  run_probe "$PROOT" 0
+  run_probe "$PROOT" 0 "$ERRF"
   fallback_rc=$?
 fi
 fallback_state=$(classify "$fallback_rc")
