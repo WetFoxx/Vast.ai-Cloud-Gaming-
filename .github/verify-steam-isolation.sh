@@ -2,7 +2,7 @@
 # Проверка собранного образа без запуска Steam и без аренды Vast.
 set -u
 IMAGE=${1:-vastgame-desktop:steam-isolation-test}
-EXPECTED_SHA=1bda9d143b0b2ad700f0d8aafe432f50a2a27e83a317d4c38e8289ee03c78764
+EXPECTED_SHA=7848fe5f5b04f796c59b041b94339a4e9a563c1426c5d0c9f9721944d0bade2a
 ROOT=$(cd "$(dirname "$0")" && pwd)
 fail=0
 bad() { printf 'FAIL %s\n' "$*"; fail=1; }
@@ -19,6 +19,7 @@ dpkg-query -W bubblewrap
 file /usr/local/lib/proot-next/proot
 stat -c "%a %n" /usr/local/lib/proot-next/proot /usr/local/lib/proot-next/bwrap /usr/bin/steam /opt/vastgame/steam-isolation.sh
 sha256sum /usr/local/lib/proot-next/proot
+cat /usr/local/lib/proot-next/build-info
 echo "path-bwrap=$(command -v bwrap)"
 if [ -e /usr/local/bin/bwrap ]; then echo "proot-on-path=yes"; else echo "proot-on-path=no"; fi
 bwrap --version
@@ -32,7 +33,7 @@ if grep -q vastgame-ns-ok /opt/vastgame/steam-patch.sh; then echo "stub=yes"; el
 else
   printf '%s\n' "$info"
   printf '%s\n' "$info" | grep -qx "proot-on-path=no" || bad "proot name is on PATH"
-  printf '%s\n' "$info" | grep -q "$EXPECTED_SHA" || bad "proot sha256 mismatch"
+  printf '%s\n' "$info" | grep -q "$EXPECTED_SHA" || bad "proot source sha256 mismatch"
   printf '%s\n' "$info" | grep -q "x86-64" || bad "proot is not an x86-64 binary"
   printf '%s\n' "$info" | grep -qx "stub=no" || bad "steam-patch contains the check stub"
 fi
@@ -235,6 +236,79 @@ else
   elif printf '%s\n' "$blocked" | grep -qx "stale=yes"; then
     bad "successful fallback kept a failed_at marker"
   fi
+fi
+
+echo "CHECK Proton copymode when fchmodat2 is blocked"
+if ! copymode=$(docker run --rm -i --security-opt "seccomp=${ROOT}/seccomp-no-userns-fchmodat2.json" \
+  --entrypoint bash "$IMAGE" -c \
+  'runuser -u user -- env -i HOME=/home/user USER=user LOGNAME=user LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -s' << 'EOS'
+rm -f /tmp/vastgame-steam-isolation.json /tmp/vastgame-steam-isolation.env
+VASTGAME_STEAM_ISOLATION_REPROBE=1 /opt/vastgame/steam-isolation.sh
+. /tmp/vastgame-steam-isolation.env
+python3 - << 'PY'
+import json
+print("selected=" + json.load(open("/tmp/vastgame-steam-isolation.json"))["selected"])
+PY
+mkdir -p /tmp/vg-copymode
+printf source > /tmp/vg-copymode/source
+printf target > /tmp/vg-copymode/target
+python3 - << 'PY'
+import ctypes, os
+p = b"/tmp/vg-copymode/target"
+libc = ctypes.CDLL(None, use_errno=True)
+rc = libc.syscall(452, -100, p, 0o600, 0)
+err = ctypes.get_errno()
+print(f"native_fchmodat2_errno={err}")
+assert rc == -1 and err == 38
+PY
+"$BWRAP" --bind / / python3 - << 'PY'
+import os, shutil
+os.chmod("/tmp/vg-copymode/source", 0o600)
+os.chmod("/tmp/vg-copymode/target", 0o644)
+shutil.copymode("/tmp/vg-copymode/source", "/tmp/vg-copymode/target")
+mode = os.stat("/tmp/vg-copymode/target").st_mode & 0o777
+print(f"copymode={mode:o}")
+assert mode == 0o600
+PY
+EOS
+); then
+  bad "copymode seccomp container failed"
+else
+  printf '%s\n' "$copymode"
+  printf '%s\n' "$copymode" | grep -qx "selected=proot" || bad "copymode test did not select proot"
+  printf '%s\n' "$copymode" | grep -qx "native_fchmodat2_errno=38" || bad "seccomp did not block fchmodat2"
+  printf '%s\n' "$copymode" | grep -qx "copymode=600" || bad "Proton copymode failed under proot"
+fi
+
+echo "CHECK Steam wrapper preserves gamepad environment"
+if ! gamepad=$(docker run --rm -i --entrypoint bash "$IMAGE" -s << 'EOS'
+cat > /tmp/vg-real-steam <<'SH'
+#!/bin/bash
+printf 'LD_PRELOAD=%s\n' "$LD_PRELOAD" > /tmp/vg-steam-capture
+printf 'SDL_JOYSTICK_DISABLE_UDEV=%s\n' "$SDL_JOYSTICK_DISABLE_UDEV" >> /tmp/vg-steam-capture
+printf 'BWRAP=%s\n' "${BWRAP:-}" >> /tmp/vg-steam-capture
+printf 'PRESSURE_VESSEL_BWRAP=%s\n' "${PRESSURE_VESSEL_BWRAP:-}" >> /tmp/vg-steam-capture
+printf 'real_args=%s\n' "$*" >> /tmp/vg-steam-capture
+SH
+chmod 755 /tmp/vg-real-steam
+ln -sfn /tmp/vg-real-steam /opt/vastgame/real/steam
+runuser -u user -- env -i HOME=/home/user USER=user LOGNAME=user LANG=C.UTF-8 \
+  PATH=/usr/local/bin:/usr/bin:/bin DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 \
+  VASTGAME_STEAM_ISOLATION=proot VASTGAME_STEAM_ISOLATION_REPROBE=1 \
+  /usr/bin/steam -applaunch 3527290 >/tmp/vg-steam-wrapper.log 2>&1
+echo "wrapper_rc=$?"
+cat /tmp/vg-steam-capture
+EOS
+); then
+  bad "Steam gamepad environment container failed"
+else
+  printf '%s\n' "$gamepad"
+  printf '%s\n' "$gamepad" | grep -qx "wrapper_rc=0" || bad "Steam wrapper test failed"
+  printf '%s\n' "$gamepad" | grep -qx "LD_PRELOAD=libvgpad.so" || bad "Steam lost libvgpad preload"
+  printf '%s\n' "$gamepad" | grep -qx "SDL_JOYSTICK_DISABLE_UDEV=1" || bad "Steam lost SDL joystick setting"
+  printf '%s\n' "$gamepad" | grep -qx "BWRAP=/usr/local/lib/proot-next/bwrap" || bad "Steam lost BWRAP"
+  printf '%s\n' "$gamepad" | grep -qx "PRESSURE_VESSEL_BWRAP=/usr/local/lib/proot-next/bwrap" || bad "Steam lost pressure-vessel BWRAP"
+  printf '%s\n' "$gamepad" | grep -q -- "-applaunch 3527290" || bad "Steam launch arguments were not forwarded"
 fi
 
 if [ "$fail" = 0 ]; then

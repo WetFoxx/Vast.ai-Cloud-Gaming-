@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify game and mod launchers
+        run: python3 .github/verify-launchers.py
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

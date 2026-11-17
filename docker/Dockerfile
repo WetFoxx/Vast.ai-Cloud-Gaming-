@@ -20,6 +20,18 @@ RUN mkdir -p /out/x86_64 /out/i386 \
     && gcc $F -o /out/x86_64/libvgnv.so /src/vgnv.c -ldl \
     && gcc $F -Wl,-soname,libXrandr.so.2 -o /out/x86_64/libvgrr.so /src/vgrr.c -ldl
 
+# ---------------------------------------------------------------- proot-next с запасным fchmodat
+FROM rust:1.89.0-bookworm AS proot-next
+ARG PROOT_NEXT_COMMIT=04cfb059ddafb426f6488d8a285bf8d87f747e23
+ARG PROOT_NEXT_SOURCE_SHA256=7848fe5f5b04f796c59b041b94339a4e9a563c1426c5d0c9f9721944d0bade2a
+COPY proot-next-fchmodat2.patch /tmp/proot-next-fchmodat2.patch
+RUN curl -fsSL "https://codeload.github.com/selkies-project/proot-next/tar.gz/${PROOT_NEXT_COMMIT}" -o /tmp/proot-next.tar.gz \
+    && echo "${PROOT_NEXT_SOURCE_SHA256}  /tmp/proot-next.tar.gz" | sha256sum -c - \
+    && mkdir /src && tar -xzf /tmp/proot-next.tar.gz -C /src --strip-components=1 \
+    && cd /src && patch -p1 < /tmp/proot-next-fchmodat2.patch \
+    && rustup target add x86_64-unknown-linux-musl \
+    && cargo build --release --target x86_64-unknown-linux-musl
+
 # ---------------------------------------------------------------- образ
 FROM ubuntu:24.04
 LABEL org.opencontainers.image.source="https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-" \
@@ -43,17 +55,17 @@ RUN dpkg --add-architecture i386 && apt-get update -qq && apt-get install -yq --
       libc6:i386 libgl1:i386 libgl1-mesa-dri:i386 libegl1:i386 libgbm1:i386 \
     && rm -rf /var/lib/apt/lists/*
 
-# proot-next 0.3.9 — запасной bwrap, только если штатный user namespace в контейнере Vast закрыт.
-# Скачивается при сборке образа, сверяется по SHA-256 и не лежит в PATH: Steam получает его через BWRAP.
-ARG PROOT_NEXT_VERSION=0.3.9
-ARG PROOT_NEXT_SHA256=1bda9d143b0b2ad700f0d8aafe432f50a2a27e83a317d4c38e8289ee03c78764
-RUN curl -fsSL -o /tmp/proot-x86_64 \
-      "https://github.com/selkies-project/proot-next/releases/download/${PROOT_NEXT_VERSION}/proot-x86_64" \
-    && echo "${PROOT_NEXT_SHA256}  /tmp/proot-x86_64" | sha256sum -c - \
-    && mkdir -p /usr/local/lib/proot-next \
-    && install -m 755 /tmp/proot-x86_64 /usr/local/lib/proot-next/proot \
-    && ln -s proot /usr/local/lib/proot-next/bwrap \
-    && rm -f /tmp/proot-x86_64
+# proot-next 0.3.9 + fchmodat fallback: старые seccomp-профили Vast возвращают ENOSYS на fchmodat2,
+# из-за чего Proton не мог обновить права файлов префикса. Собирается из закреплённого исходника с патчем.
+ARG PROOT_NEXT_COMMIT=04cfb059ddafb426f6488d8a285bf8d87f747e23
+ARG PROOT_NEXT_SOURCE_SHA256=7848fe5f5b04f796c59b041b94339a4e9a563c1426c5d0c9f9721944d0bade2a
+COPY proot-next-fchmodat2.patch /usr/local/lib/proot-next/fchmodat2.patch
+RUN mkdir -p /usr/local/lib/proot-next && ln -s proot /usr/local/lib/proot-next/bwrap \
+    && printf 'source_commit=%s\nsource_sha256=%s\n' "$PROOT_NEXT_COMMIT" "$PROOT_NEXT_SOURCE_SHA256" \
+      > /usr/local/lib/proot-next/build-info \
+    && sha256sum /usr/local/lib/proot-next/fchmodat2.patch >> /usr/local/lib/proot-next/build-info
+COPY --from=proot-next /src/target/x86_64-unknown-linux-musl/release/proot /usr/local/lib/proot-next/proot
+COPY --from=proot-next /src/LICENSE /usr/local/lib/proot-next/LICENSE
 
 # Пользователь как на KVM: user, uid 1000, основная группа users (в образе Ubuntu uid 1000 занят ubuntu)
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -g users -G audio,video -s /bin/bash user

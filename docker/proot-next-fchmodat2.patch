@@ -1,0 +1,99 @@
+diff --git a/src/syscall/notify.rs b/src/syscall/notify.rs
+index ffdddbf..79c8fa1 100644
+--- a/src/syscall/notify.rs
++++ b/src/syscall/notify.rs
+@@ -1421,3 +1421,13 @@ fn do_chmod(r: &Req, dirfd: i32, path: &[u8], mode: i64, flags: i64) -> Result<O
+-        Ok(check(unsafe {
+-            libc::syscall(SYS_FCHMODAT2_HOST, libc::AT_FDCWD, c.as_ptr(), mode, 0)
+-        }))
++        Ok(
++            check(unsafe { libc::syscall(SYS_FCHMODAT2_HOST, libc::AT_FDCWD, c.as_ptr(), mode, 0) }).or_else(
++                |e| {
++                    if e == libc::ENOSYS {
++                        check(unsafe {
++                            libc::syscall(libc::SYS_fchmodat, libc::AT_FDCWD, c.as_ptr(), mode, 0)
++                        })
++                    } else {
++                        Err(e)
++                    }
++                },
++            ),
++        )
+diff --git a/tests/e2e.rs b/tests/e2e.rs
+index 8dfe807..0b89034 100644
+--- a/tests/e2e.rs
++++ b/tests/e2e.rs
+@@ -492,0 +493,28 @@ fn compile_probe(name: &str, dir: &Path) -> PathBuf {
++/// A container profile that refuses `fchmodat2` does not break `chmod`: the
++/// supervisor falls back to `fchmodat` on the pinned object's `/proc` link.
++#[test]
++fn chmod_survives_fchmodat2_seccomp_refusal() {
++    let d = tmpdir("chmod-fchmodat2");
++    let wrapper = compile_probe("denyfchmodat2", &d);
++    std::fs::write(d.join("file"), "content").unwrap();
++    let bind = format!("{}:/pn-chmod", d.display());
++    let args = [
++        "-r",
++        "/",
++        "-b",
++        &bind,
++        "/bin/sh",
++        "-c",
++        "chmod 640 /pn-chmod/file && stat -c %a /pn-chmod/file",
++    ];
++    for no_ptrace in [false, true] {
++        let mut cmd = Command::new(&wrapper);
++        cmd.arg(proot()).args(args);
++        if no_ptrace {
++            cmd.env("PROOT_NO_PTRACE", "1");
++        }
++        let o = cmd.output().unwrap();
++        assert_eq!(stdout(&o), "640", "{}", String::from_utf8_lossy(&o.stderr));
++    }
++}
++
+@@ -503,0 +532 @@ fn empty_paths_fail_as_the_kernel_fails_them() {
++    let want = want.replace("fchmodat2 AT_EMPTY_PATH: ENOSYS", "fchmodat2 AT_EMPTY_PATH: 640");
+diff --git a/tests/probes/denyfchmodat2.c b/tests/probes/denyfchmodat2.c
+new file mode 100644
+index 0000000..bd8e948
+--- /dev/null
++++ b/tests/probes/denyfchmodat2.c
+@@ -0,0 +1,37 @@
++/*
++ * Runs a command under a seccomp filter that refuses fchmodat2 with ENOSYS,
++ * as older container runtimes' default profiles do.
++ *
++ *   denyfchmodat2 COMMAND [ARG...]
++ */
++#include <linux/filter.h>
++#include <linux/seccomp.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <sys/prctl.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <errno.h>
++
++#ifndef SYS_fchmodat2
++#define SYS_fchmodat2 452
++#endif
++
++int main(int argc, char **argv) {
++    if (argc < 2)
++        return 2;
++    struct sock_filter f[] = {
++        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
++        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fchmodat2, 0, 1),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++    };
++    struct sock_fprog prog = {sizeof f / sizeof f[0], f};
++    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) || syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog)) {
++        perror("denyfchmodat2: seccomp");
++        return 2;
++    }
++    execvp(argv[1], argv + 1);
++    perror("denyfchmodat2: exec");
++    return 127;
++}
