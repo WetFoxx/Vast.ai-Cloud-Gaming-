@@ -39,7 +39,7 @@ echo "--- 5. изоляция в окружении живых процессо�
 found=0
 for p in $(pgrep -x steam) $(pgrep -f steamwebhelper) $(pgrep -f pressure-vessel) $(pgrep -f reaper); do
   [ -n "$p" ] || continue
-  envs=$(runuser -u user -- tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -E '^(BWRAP|PRESSURE_VESSEL_BWRAP)=' | tr '\n' ' ')
+  envs=$(runuser -u user -- sh -c "tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -E '^(BWRAP|PRESSURE_VESSEL_BWRAP)=' | tr '\n' ' '" 2>/dev/null)
   echo "pid=$p cmd=$(cut -c1-60 /proc/$p/cmdline 2>/dev/null | tr '\0' ' ') $envs"
   found=1
 done
