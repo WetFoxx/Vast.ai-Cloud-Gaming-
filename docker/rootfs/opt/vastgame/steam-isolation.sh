@@ -20,12 +20,25 @@ TIMEOUT=${VASTGAME_BWRAP_TIMEOUT:-8}
 MODE=${VASTGAME_STEAM_ISOLATION:-auto}
 VERSION=${VASTGAME_PROOT_NEXT_VERSION:-0.3.9}
 
-# Аргументы пробы — по образу test_bwrap_executable из steam-runtime-tools
-# (ro-bind /etc и /usr, bind /proc, dev-bind /dev): хост, где это работает с
-# --unshare-user, пропустит и реальный запуск Steam Runtime. Для резерва то же
-# без --unshare-user: так shim проверяется на совместимость ДО того, как его
-# получит pressure-vessel, а не в середине запуска игры.
-PROBE_BINDS="--ro-bind /etc /etc --ro-bind /usr /usr --bind /proc /proc --dev-bind /dev /dev"
+# Аргументы пробы строятся как у test_bwrap_executable из steam-runtime-tools
+# (ro-bind /etc и /usr, bind /proc, dev-bind /dev, а usrlike-пути /bin /lib /lib32
+# /lib64 /sbin воссоздаются как симлинки merged-usr, реальные каталоги — ro-bind-try):
+# без /lib64 в госте «true» не стартует, и хост, где Steam Runtime работал бы,
+# проба несправедливо заврала бы. Удачный ответ с --unshare-user означает, что
+# пройдёт и реальный запуск; резерв проверяется на том же argv, кроме userns.
+probe_argv() {  # $1 = with-userns (1/0); argv пробы одной строкой (путей с пробелами нет)
+  [ "$1" = 1 ] && printf '%s ' --unshare-user
+  printf '%s ' --ro-bind /etc /etc
+  local p target
+  for p in /bin /lib /lib32 /lib64 /sbin; do
+    if target=$(readlink "$p" 2>/dev/null); then
+      printf '%s %s %s ' --symlink "$target" "$p"
+    else
+      printf '%s %s %s ' --ro-bind-try "$p" "$p"
+    fi
+  done
+  printf '%s ' --ro-bind /usr /usr --bind /proc /proc --dev-bind /dev /dev true
+}
 
 write_result() {  # native fallback selected reason [failed]
   NATIVE_R=$1 FALLBACK_R=$2 SELECTED=$3 REASON=$4 FAILED=${5:-} \
@@ -103,11 +116,7 @@ fi
 run_probe() {  # $1 = бинарник, $2 = with-userns (1/0), $3 = файл stderr пробы
   local bin=$1 errf=$3
   [ -x "$bin" ] || return 2
-  if [ "$2" = 1 ]; then
-    set -- --unshare-user $PROBE_BINDS true
-  else
-    set -- $PROBE_BINDS true
-  fi
+  set -- $(probe_argv "$2")
   PROBE_ERR=$errf python3 - "$TIMEOUT" "$bin" "$@" <<'PY'
 import os, subprocess, sys
 limit, bin_ = float(sys.argv[1]), sys.argv[2]

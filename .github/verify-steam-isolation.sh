@@ -95,7 +95,7 @@ if ! rich=$(user_shell << 'EOS'
 run() { printf 'cmd=%s\n' "$*"; if "$@"; then echo rc=0; else echo "rc=$?"; fi; }
 run bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir / true
 run /usr/local/lib/proot-next/bwrap --die-with-parent --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir / true
-run /usr/local/lib/proot-next/bwrap --ro-bind /etc /etc --ro-bind /usr /usr --bind /proc /proc --dev-bind /dev /dev true
+run /usr/local/lib/proot-next/bwrap --ro-bind /etc /etc --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/sbin /sbin --ro-bind /usr /usr --bind /proc /proc --dev-bind /dev /dev true
 mkdir -p /tmp/ov-src /tmp/ov-dest
 /usr/local/lib/proot-next/bwrap --help >/tmp/bwrap-help.txt 2>&1 || true
 grep -n overlay /tmp/bwrap-help.txt || true
