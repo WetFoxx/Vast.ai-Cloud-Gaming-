@@ -50,7 +50,7 @@ print("native=" + d["native"])
 print("fallback=" + d["fallback"])
 PY
 . /tmp/vastgame-steam-isolation.env
-python3 -c 'import os; print("child=" + os.environ.get("BWRAP", "unset"))'
+python3 -c 'import os; print("child=" + os.environ.get("BWRAP", "unset")); print("pvchild=" + os.environ.get("PRESSURE_VESSEL_BWRAP", "unset"))'
 EOS
 ); then
   bad "auto selection command failed"
@@ -59,8 +59,12 @@ else
   printf '%s\n' "$auto" | grep -qx "rc=0" || bad "auto isolation returned an error"
   selected=$(printf '%s\n' "$auto" | sed -n 's/^selected=//p')
   case "$selected" in
-    bwrap) printf '%s\n' "$auto" | grep -qx "child=unset" || bad "native mode exported BWRAP" ;;
-    proot) printf '%s\n' "$auto" | grep -qx "child=/usr/local/lib/proot-next/bwrap" || bad "proot mode did not export BWRAP" ;;
+    bwrap)
+      printf '%s\n' "$auto" | grep -qx "child=unset" || bad "native mode exported BWRAP"
+      printf '%s\n' "$auto" | grep -qx "pvchild=unset" || bad "native mode exported PRESSURE_VESSEL_BWRAP" ;;
+    proot)
+      printf '%s\n' "$auto" | grep -qx "child=/usr/local/lib/proot-next/bwrap" || bad "proot mode did not export BWRAP"
+      printf '%s\n' "$auto" | grep -qx "pvchild=/usr/local/lib/proot-next/bwrap" || bad "proot mode did not export PRESSURE_VESSEL_BWRAP" ;;
     *) bad "unexpected selection: ${selected:-missing}" ;;
   esac
 fi
@@ -73,6 +77,7 @@ echo "rc=$?"
 . /tmp/vastgame-steam-isolation.env
 if [ -n "${BWRAP:-}" ] && "$BWRAP" --bind / / true; then echo "probe=ok"; else echo "probe=fail"; fi
 printf 'path=%s\n' "${BWRAP:-}"
+printf 'pvpath=%s\n' "${PRESSURE_VESSEL_BWRAP:-}"
 EOS
 ); then
   bad "forced proot command failed"
@@ -81,6 +86,7 @@ else
   printf '%s\n' "$forced" | grep -qx "rc=0" || bad "forced proot selector failed"
   printf '%s\n' "$forced" | grep -qx "probe=ok" || bad "proot --bind / / true failed"
   printf '%s\n' "$forced" | grep -qx "path=/usr/local/lib/proot-next/bwrap" || bad "forced BWRAP path is wrong"
+  printf '%s\n' "$forced" | grep -qx "pvpath=/usr/local/lib/proot-next/bwrap" || bad "forced PRESSURE_VESSEL_BWRAP path is wrong"
 fi
 
 echo "CHECK richer filesystem operations and overlay"
@@ -100,6 +106,97 @@ else
   printf '%s\n' "$rich" | grep -q "proot-next/bwrap --die-with-parent" || bad "rich probe returned no proot result"
 fi
 
+echo "CHECK failed selection is not cached"
+if ! recov=$(user_shell << 'EOS'
+rm -f /tmp/vastgame-steam-isolation.json /tmp/vastgame-steam-isolation.env
+python3 - << 'PY'
+import json
+# как после временной ошибки: неудача записана, механизм не выбран
+doc = {"schema": 2, "native": "timeout", "fallback": "timeout", "selected": "none",
+       "reason": "fallback-timeout", "version": "0.3.9", "failed_at": 1730000000}
+open("/tmp/vastgame-steam-isolation.json", "w").write(json.dumps(doc))
+PY
+/opt/vastgame/steam-isolation.sh
+echo "rc=$?"
+python3 - << 'PY'
+import json
+d = json.load(open("/tmp/vastgame-steam-isolation.json"))
+print("selected=" + str(d.get("selected", "")))
+print("stale=" + ("yes" if "failed_at" in d else "no"))
+PY
+EOS
+); then
+  bad "failed-selection recovery command failed"
+else
+  printf '%s\n' "$recov"
+  printf '%s\n' "$recov" | grep -qx "rc=0" || bad "cached none was not re-probed"
+  printf '%s\n' "$recov" | grep -qx "stale=no" || bad "stale failed_at survived a successful probe"
+  recov_sel=$(printf '%s\n' "$recov" | sed -n 's/^selected=//p')
+  case "$recov_sel" in bwrap|proot) ;; *) bad "re-probe after cached none selected nothing: ${recov_sel:-missing}" ;; esac
+fi
+
+echo "CHECK both mechanisms failing is reported honestly and not cached"
+if ! dbl=$(user_shell << 'EOS'
+rm -f /tmp/vastgame-steam-isolation.json /tmp/vastgame-steam-isolation.env
+VASTGAME_NATIVE_BWRAP=/bin/false VASTGAME_PROOT_BWRAP=/bin/false VASTGAME_STEAM_ISOLATION_REPROBE=1 /opt/vastgame/steam-isolation.sh
+echo "rc=$?"
+python3 - << 'PY'
+import json, os
+d = json.load(open("/tmp/vastgame-steam-isolation.json"))
+print("selected=" + str(d.get("selected", "")))
+print("failed=" + ("yes" if "failed_at" in d else "no"))
+print("envf_size=" + str(os.path.getsize("/tmp/vastgame-steam-isolation.env")))
+PY
+/opt/vastgame/steam-isolation.sh
+echo "rc2=$?"
+python3 -c 'import json; print("selected2=" + json.load(open("/tmp/vastgame-steam-isolation.json")).get("selected", ""))'
+EOS
+); then
+  bad "double-failure command failed"
+else
+  printf '%s\n' "$dbl"
+  printf '%s\n' "$dbl" | grep -qx "rc=1" || bad "both-mechanisms-fail did not return an error"
+  printf '%s\n' "$dbl" | grep -qx "selected=none" || bad "both-mechanisms-fail was not recorded as none"
+  printf '%s\n' "$dbl" | grep -qx "failed=yes" || bad "both-mechanisms-fail left no failed_at marker"
+  printf '%s\n' "$dbl" | grep -qx "envf_size=0" || bad "both-mechanisms-fail exported an env file"
+  printf '%s\n' "$dbl" | grep -qx "rc2=0" || bad "selector did not recover after a double failure"
+  dbl_sel=$(printf '%s\n' "$dbl" | sed -n 's/^selected2=//p')
+  case "$dbl_sel" in bwrap|proot) ;; *) bad "recovery after double failure selected nothing: ${dbl_sel:-missing}" ;; esac
+fi
+
+echo "CHECK corrupt cache recovers"
+if ! corrupt=$(user_shell << 'EOS'
+printf 'not json at all' > /tmp/vastgame-steam-isolation.json
+rm -f /tmp/vastgame-steam-isolation.env
+/opt/vastgame/steam-isolation.sh
+echo "rc=$?"
+python3 -c 'import json; print("selected=" + json.load(open("/tmp/vastgame-steam-isolation.json")).get("selected", ""))'
+EOS
+); then
+  bad "corrupt-cache command failed"
+else
+  printf '%s\n' "$corrupt"
+  printf '%s\n' "$corrupt" | grep -qx "rc=0" || bad "corrupt cache was not re-probed"
+  corrupt_sel=$(printf '%s\n' "$corrupt" | sed -n 's/^selected=//p')
+  case "$corrupt_sel" in bwrap|proot) ;; *) bad "re-probe after corrupt cache selected nothing: ${corrupt_sel:-missing}" ;; esac
+fi
+
+echo "CHECK direct-launch environment after env -i"
+if ! direct=$(user_shell << 'EOS'
+rm -f /tmp/vastgame-steam-isolation.json /tmp/vastgame-steam-isolation.env
+VASTGAME_STEAM_ISOLATION=proot VASTGAME_STEAM_ISOLATION_REPROBE=1 /opt/vastgame/steam-isolation.sh
+# как vg-run и wolf-steam.py: окружение собрано с нуля (env -i), env-файл подключается запускателем
+env -i HOME=/home/user USER=user PATH=/usr/local/bin:/usr/bin:/bin bash -c \
+  '. /tmp/vastgame-steam-isolation.env; python3 -c "import os; print(\"bwrap=\" + os.environ.get(\"BWRAP\", \"unset\")); print(\"pv=\" + os.environ.get(\"PRESSURE_VESSEL_BWRAP\", \"unset\"))"'
+EOS
+); then
+  bad "direct-launch command failed"
+else
+  printf '%s\n' "$direct"
+  printf '%s\n' "$direct" | grep -qx "bwrap=/usr/local/lib/proot-next/bwrap" || bad "direct launch sees no BWRAP"
+  printf '%s\n' "$direct" | grep -qx "pv=/usr/local/lib/proot-next/bwrap" || bad "direct launch sees no PRESSURE_VESSEL_BWRAP"
+fi
+
 echo "CHECK fallback when user namespaces are blocked"
 if ! blocked=$(docker run --rm -i --security-opt "seccomp=${ROOT}/seccomp-no-userns.json" \
   --entrypoint bash "$IMAGE" -c \
@@ -113,6 +210,7 @@ d = json.load(open("/tmp/vastgame-steam-isolation.json"))
 print("native=" + str(d.get("native", "")))
 print("selected=" + str(d.get("selected", "")))
 print("fallback=" + str(d.get("fallback", "")))
+print("stale=" + ("yes" if "failed_at" in d else "no"))
 PY
 EOS
 ); then
@@ -130,6 +228,8 @@ else
     bad "seccomp profile did not block user namespaces"
   elif [ "$chosen" != proot ] || [ "$fallback" != ok ]; then
     bad "blocked user namespace did not select proot (native=$native selected=$chosen fallback=$fallback)"
+  elif printf '%s\n' "$blocked" | grep -qx "stale=yes"; then
+    bad "successful fallback kept a failed_at marker"
   fi
 fi
 

@@ -126,6 +126,13 @@ if [ -z "$AGENT" ]; then
 fi
 
 # --------------------------------------------------------------------- рабочий стол
+# Изоляция Steam Runtime (bwrap/proot-next) — заранее, до первого запуска Steam: прямые пути
+# (ярлык на рабочем столе, программы в «диске C:» игры) не проходят через обёртку /usr/bin/steam
+# и забирают готовый env-файл. Неудача здесь не страшна: запускатели дозапускают селектор сами.
+u /opt/vastgame/steam-isolation.sh >/dev/null 2>&1 || true
+[ -s /tmp/vastgame-steam-isolation.json ] \
+  && log "изоляция Steam Runtime: $(sed -n 's/.*"selected": *"\([a-z]*\)".*/\1/p' /tmp/vastgame-steam-isolation.json | head -1)"
+
 stage desktop
 desktop
 sleep 3

@@ -25,13 +25,18 @@ for pfx in "$HOME"/.steam/debian-installation/steamapps/compatdata/*/pfx/drive_c
 done
 # wolf и entrypoint запускают эту обёртку через env -i. BWRAP задаётся здесь, уже после очистки,
 # и его наследуют настоящий клиент, pressure-vessel и Proton. Раньше этого места его нет.
+ISO_ENVF=${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}
 if [ -x /opt/vastgame/steam-isolation.sh ]; then
-  /opt/vastgame/steam-isolation.sh || {
-    echo "[steam] ни bubblewrap, ни резервный proot-next не запустили окружение Steam" >&2
-    exit 1
-  }
-  [ -f "${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}" ] \
-    && . "${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}"
+  if ! /opt/vastgame/steam-isolation.sh; then
+    # Селектор ничего не выбрал (оба механизма отказали или сбоили при пробе). Это НЕ повод
+    # блокировать Steam: неудача не кэшируется, следующий запуск попробует снова, а здесь
+    # запускаем как прежде — без BWRAP (на здоровом хосте Steam работает, на закрытом покажет
+    # свою ошибку). Причина осталась в /tmp/vastgame-steam-isolation.json.
+    iso_reason=$(python3 -c 'import json;print(json.load(open("/tmp/vastgame-steam-isolation.json")).get("reason",""))' 2>/dev/null)
+    echo "[steam] изоляция Steam Runtime не выбрана (${iso_reason:-причина не записана}) — запуск без BWRAP" >&2
+    unset iso_reason
+  fi
+  [ -f "$ISO_ENVF" ] && . "$ISO_ENVF"
 fi
 # Steam уже работает — передать ему команду (steam://…) и выйти. Окружение уже с BWRAP.
 if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
@@ -48,6 +53,11 @@ for try in 1 2 3 4 5 6 7 8; do
   /opt/vastgame/real/steam -cef-disable-gpu-compositing -cef-enable-debugging "$@"
   rc=$?
   [ "$rc" = 71 ] || break
+  # 71 — Steam снова увидел закрытые user namespaces: проба штатного bwrap могла пропустить
+  # хост, на котором runtime всё равно не стартует — перепробовать механизм и перечитать env-файл
+  VASTGAME_STEAM_ISOLATION_REPROBE=1 /opt/vastgame/steam-isolation.sh || true
+  unset BWRAP PRESSURE_VESSEL_BWRAP
+  [ -f "$ISO_ENVF" ] && . "$ISO_ENVF"
   echo "[steam] проверка user namespaces вернулась (обновление клиента?) — заплатка и перезапуск $try" >&2
   sleep 2
 done

@@ -2,9 +2,11 @@
 # Выбирает, чем Steam Runtime строит своё окружение. Не подменяет проверки Steam.
 # Штатный bubblewrap пробуется первым. Если ядро или seccomp контейнера Vast
 # запрещают user namespace, и только тогда, используется закреплённый proot-next
-# через переменную BWRAP, которую pressure-vessel и steam-runtime-check-requirements
-# читают сами. Имя bwrap не попадает в общий PATH.
-# Повторный запуск в том же контейнере не меняет уже записанный выбор.
+# через переменные BWRAP и PRESSURE_VESSEL_BWRAP, которые libsteam-runtime-tools
+# читает сама (find_system_bwrap и check_bwrap). Имя bwrap не попадает в общий PATH.
+# Удачный выбор кэшируется в /tmp: повторный запуск в том же контейнере его не меняет.
+# НЕУДАЧА НЕ КЭШИРУЕТСЯ: временный сбой пробы (таймаут, загрузка хоста) не должен
+# блокировать все последующие запуски Steam — следующий запуск пробует снова.
 # VASTGAME_STEAM_ISOLATION=off — ничего не задавать (прежнее поведение).
 # bwrap — только штатный, иначе отказ. proot — только резерв, иначе отказ.
 set -u
@@ -16,61 +18,90 @@ TIMEOUT=${VASTGAME_BWRAP_TIMEOUT:-8}
 MODE=${VASTGAME_STEAM_ISOLATION:-auto}
 VERSION=${VASTGAME_PROOT_NEXT_VERSION:-0.3.9}
 
-write_result() {
-  NATIVE_R=$1 FALLBACK_R=$2 SELECTED=$3 REASON=$4 python3 - "$OUT" "$ENVF" << 'PY'
-import json, os, sys
-out, envf = sys.argv[1], sys.argv[2]
+# Аргументы пробы — по образу test_bwrap_executable из steam-runtime-tools
+# (ro-bind /etc и /usr, bind /proc, dev-bind /dev): хост, где это работает с
+# --unshare-user, пропустит и реальный запуск Steam Runtime. Для резерва то же
+# без --unshare-user: так shim проверяется на совместимость ДО того, как его
+# получит pressure-vessel, а не в середине запуска игры.
+PROBE_BINDS="--ro-bind /etc /etc --ro-bind /usr /usr --bind /proc /proc --dev-bind /dev /dev"
+
+write_result() {  # native fallback selected reason [failed]
+  NATIVE_R=$1 FALLBACK_R=$2 SELECTED=$3 REASON=$4 FAILED=${5:-} \
+  OUT=$OUT ENVF=$ENVF PROOT=$PROOT VERSION=$VERSION python3 - <<'PY'
+import json, os, time
+out, envf = os.environ["OUT"], os.environ["ENVF"]
+selected = os.environ["SELECTED"]
 doc = {
-    "schema": 1,
+    "schema": 2,
     "native": os.environ["NATIVE_R"],
     "fallback": os.environ["FALLBACK_R"],
-    "selected": os.environ["SELECTED"],
+    "selected": selected,
     "reason": os.environ["REASON"],
     "version": os.environ.get("VERSION", ""),
 }
-open(out, "w").write(json.dumps(doc))
-if os.environ["SELECTED"] == "proot":
-    open(envf, "w").write('BWRAP=%s\nexport BWRAP\n' % os.environ["PROOT"])
-else:
-    open(envf, "w").write("")
+if os.environ.get("FAILED"):
+    doc["failed_at"] = int(time.time())
+tmp = out + ".tmp"
+open(tmp, "w").write(json.dumps(doc))
+os.replace(tmp, out)
+b = os.environ["PROOT"] if selected == "proot" else ""
+lines = []
+if b:
+    lines = ["BWRAP=" + b, "PRESSURE_VESSEL_BWRAP=" + b, "export BWRAP PRESSURE_VESSEL_BWRAP"]
+tmpf = envf + ".tmp"
+open(tmpf, "w").write("\n".join(lines) + ("\n" if lines else ""))
+os.replace(tmpf, envf)
 PY
 }
 
-if [ -s "$OUT" ] && [ "${VASTGAME_STEAM_ISOLATION_REPROBE:-0}" != 1 ]; then
-  VERSION=$VERSION PROOT=$PROOT python3 - "$OUT" "$ENVF" << 'PY'
+# Кэш удачного выбора: proot — env-файл заново (мог потеряться), bwrap/default —
+# пустой env-файл. selected=none и повреждённый JSON сюда не попадают: неудачу
+# не кэшируем, чужую/битую запись игнорируем и падаем в свежую пробу.
+apply_cache() {
+  [ -s "$OUT" ] || return 1
+  OUT=$OUT ENVF=$ENVF PROOT=$PROOT python3 - <<'PY'
 import json, os, sys
-out, envf = sys.argv[1], sys.argv[2]
-doc = json.load(open(out))
-selected = doc.get("selected")
+out, envf, proot = os.environ["OUT"], os.environ["ENVF"], os.environ["PROOT"]
+try:
+    with open(out) as f:
+        selected = json.load(f).get("selected")
+except (OSError, ValueError):
+    sys.exit(1)
 if selected == "proot":
-    open(envf, "w").write("BWRAP=%s\nexport BWRAP\n" % os.environ["PROOT"])
-    raise SystemExit(0)
-if selected in ("bwrap", "default"):
-    open(envf, "w").write("")
-    raise SystemExit(0)
-raise SystemExit(1)
+    body = "BWRAP=%s\nPRESSURE_VESSEL_BWRAP=%s\nexport BWRAP PRESSURE_VESSEL_BWRAP\n" % (proot, proot)
+elif selected in ("bwrap", "default"):
+    body = ""
+else:
+    sys.exit(1)
+tmp = envf + ".tmp"
+open(tmp, "w").write(body)
+os.replace(tmp, envf)
 PY
-  exit $?
-fi
+}
 
-if [ "$MODE" = off ]; then
-  VERSION=$VERSION PROOT=$PROOT write_result skipped skipped default disabled
+if [ "${VASTGAME_STEAM_ISOLATION_REPROBE:-0}" != 1 ] && apply_cache; then
   exit 0
 fi
 
-run_probe() {
-  local bin=$1 mode=$2
+if [ "$MODE" = off ]; then
+  write_result skipped skipped default disabled
+  exit 0
+fi
+
+run_probe() {  # $1 = бинарник, $2 = with-userns (1/0)
+  local bin=$1
   [ -x "$bin" ] || return 2
-  if [ "$mode" = native ]; then
-    set -- --unshare-user --bind / / true
+  if [ "$2" = 1 ]; then
+    set -- --unshare-user $PROBE_BINDS true
   else
-    set -- --bind / / true
+    set -- $PROBE_BINDS true
   fi
-  python3 - "$TIMEOUT" "$bin" "$@" << 'PY'
+  python3 - "$TIMEOUT" "$bin" "$@" <<'PY'
 import subprocess, sys
 limit, bin_ = float(sys.argv[1]), sys.argv[2]
 try:
-    done = subprocess.run([bin_, *sys.argv[3:]], timeout=limit, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    done = subprocess.run([bin_, *sys.argv[3:]], timeout=limit,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 except subprocess.TimeoutExpired:
     sys.exit(124)
 sys.exit(done.returncode)
@@ -89,26 +120,26 @@ classify() {
 native_rc=2
 fallback_rc=2
 if [ "$MODE" = auto ] || [ "$MODE" = bwrap ]; then
-  run_probe "$NATIVE" native
+  run_probe "$NATIVE" 1
   native_rc=$?
 fi
 native_state=$(classify "$native_rc")
 
 if [ "$MODE" = auto ] && [ "$native_state" = ok ]; then
-  VERSION=$VERSION PROOT=$PROOT write_result ok skipped bwrap native
+  write_result ok skipped bwrap native
   exit 0
 fi
 if [ "$MODE" = bwrap ]; then
   if [ "$native_state" = ok ]; then
-    VERSION=$VERSION PROOT=$PROOT write_result ok skipped bwrap forced
+    write_result ok skipped bwrap forced
     exit 0
   fi
-  VERSION=$VERSION PROOT=$PROOT write_result "$native_state" skipped none "native-$native_state"
+  write_result "$native_state" skipped none "native-$native_state" failed
   exit 1
 fi
 
 if [ "$MODE" = auto ] || [ "$MODE" = proot ]; then
-  run_probe "$PROOT" proot
+  run_probe "$PROOT" 0
   fallback_rc=$?
 fi
 fallback_state=$(classify "$fallback_rc")
@@ -116,8 +147,8 @@ fallback_state=$(classify "$fallback_rc")
 if [ "$fallback_state" = ok ]; then
   reason=fallback
   [ "$MODE" = proot ] && reason=forced
-  VERSION=$VERSION PROOT=$PROOT write_result "$native_state" ok proot "$reason"
+  write_result "$native_state" ok proot "$reason"
   exit 0
 fi
-VERSION=$VERSION PROOT=$PROOT write_result "$native_state" "$fallback_state" none "fallback-$fallback_state"
+write_result "$native_state" "$fallback_state" none "fallback-$fallback_state" failed
 exit 1
