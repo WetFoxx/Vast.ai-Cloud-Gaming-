@@ -11647,6 +11647,29 @@ w /usr/local/bin/vg-run <<'VGRUN'
 import json, os, re, shlex, sys, time
 
 MANIFEST = ".vastgame.json"
+ISO_ENV = "/tmp/vastgame-steam-isolation.env"
+
+
+def isolation_env(env):
+    """Переменные изоляции Steam Runtime (BWRAP, PRESSURE_VESSEL_BWRAP) для прямых запусков Proton:
+    ярлык на рабочем столе и запросы wolf идут мимо обёртки /usr/bin/steam, поэтому env-файл селектора
+    применяем здесь. Файла нет (Steam ещё не запускался в этом контейнере) — дозапускаем селектор.
+    На KVM селектора и файла нет — окружение не меняется."""
+    if os.path.exists("/opt/vastgame/steam-isolation.sh") and not os.path.exists(ISO_ENV):
+        try:
+            import subprocess
+            subprocess.run(["/opt/vastgame/steam-isolation.sh"], timeout=30,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    try:
+        for line in open(ISO_ENV, encoding="utf-8", errors="replace"):
+            k, _, v = line.strip().partition("=")
+            if k in ("BWRAP", "PRESSURE_VESSEL_BWRAP") and v:
+                env.setdefault(k, v)
+    except OSError:
+        pass
+    return env
 
 
 def manifest(game):
@@ -11730,7 +11753,7 @@ def command(game, exe=None, args=()):
     pr, entry = proton(root)
     if not pr:
         return None, "нет Proton"
-    env = dict(os.environ)
+    env = isolation_env(dict(os.environ))
     prefix = os.path.join(game, ".prefix")
     os.makedirs(prefix, exist_ok=True)
     link = os.path.join(prefix, "drive_c")
@@ -12969,6 +12992,31 @@ w /usr/local/bin/wolf-steam.py <<'STEAMPY'
 import base64, json, os, re, shutil, sys, time
 from pathlib import Path
 
+ISO_ENV = "/tmp/vastgame-steam-isolation.env"
+
+
+def isolation_env(env):
+    """Переменные изоляции Steam Runtime (BWRAP, PRESSURE_VESSEL_BWRAP) для прямых запусков Proton
+    (программы в «диске C:» игры, пока сама игра не запущена): запуск идёт мимо обёртки /usr/bin/steam,
+    поэтому env-файл селектора применяем здесь. Файла нет — дозапускаем селектор. На KVM селектора
+    и файла нет — окружение не меняется."""
+    if os.path.exists("/opt/vastgame/steam-isolation.sh") and not os.path.exists(ISO_ENV):
+        try:
+            import subprocess
+            subprocess.run(["/opt/vastgame/steam-isolation.sh"], timeout=30,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    try:
+        for line in open(ISO_ENV, encoding="utf-8", errors="replace"):
+            k, _, v = line.strip().partition("=")
+            if k in ("BWRAP", "PRESSURE_VESSEL_BWRAP") and v:
+                env.setdefault(k, v)
+    except OSError:
+        pass
+    return env
+
+
 BASE = 76561197960265728                       # steamid64 = BASE + номер аккаунта ([U:1:номер] в журналах Steam)
 
 
@@ -13296,7 +13344,7 @@ def _offline_parts(root, appid):
            "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(root), "SteamAppId": str(appid), "SteamGameId": str(appid)}
     if os.path.exists("/opt/vastgame/real/steam"):            # Docker: вход Runtime — наша пропускающая заплатка
         env["VG"] = "1"
-    return head, None, env
+    return head, None, isolation_env(env)
 
 
 def app_name(root, appid):
@@ -13497,6 +13545,7 @@ def launch(root, pd, appid, ident, user=None):
     if _running(path):
         return "running"
     head, _, env = parts
+    env = isolation_env(env)
     env["PROTON_USE_XALIA"] = "0"
     import subprocess
     with open(PROG_LOG, "ab") as log:

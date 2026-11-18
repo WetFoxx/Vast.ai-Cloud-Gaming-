@@ -48,9 +48,9 @@ SELF_DELETE_WAIT = 180   # с: сколько ждать, пока машина 
 GONE_CHECK_SEC = 60      # пока ждём машину — раз в столько секунд спрашивать Vast, есть ли она ещё
 RESTORE_QUIET_MIN = 10   # восстановление: /json молчит столько минут — машина перестала отвечать
 RESTORE_MIN = 120        # восстановление: дольше — остановить слежение (машина при этом работает)
-# Docker (основной режим с 0.3.1): образ vastgame-desktop, закреплённый на сборке.
-# Новая сборка образа не попадёт на машины, пока здесь не поменяют тег
-DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop:c55c6cc0d4a7e99a859a42e7cd38cb6cfc918d7d"
+# Docker (основной режим с 0.3.1): образ vastgame-desktop, закреплённый digest'ом.
+# Испытанная сборка не меняется без отдельного хотфикса и повторной проверки.
+DOCKER_IMAGE = "ghcr.io/wetfoxx/vastgame-desktop@sha256:2ca37b745cb19fd2aba556be0ef8142503e2404b5242bf2672a1ba00b12728db"
 SUNSHINE = "sunshine"    # запись образа на странице wolf: заработал ли NVENC (не архив)
 PLAY = "play"            # [v4.8] запись wolf: игра из библиотеки — вход в Steam, скачивание, запуск (не архив)
 PROGS = "progs"          # [v5.4] запись wolf: программы игр (JSON: {номер: {running, auto, progs}}) — не архив

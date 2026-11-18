@@ -395,13 +395,20 @@ class TestPatchRoots(unittest.TestCase):
             f.chmod(0o755)
         (home / ".steam/steam").symlink_to("debian-installation")
         path = os.path.dirname(sys.executable) + os.pathsep + os.environ["PATH"]     # python3 для steam-patch.py
+        env = {"HOME": str(home), "PATH": path}
         r = subprocess.run(["bash", str(D / "rootfs/opt/vastgame/steam-patch.sh"), "once"],
-                           capture_output=True, text=True, env={"HOME": str(home), "PATH": path})
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(wh.read_text(), WEBHELPER)
+        self.assertTrue(os.access(chk, os.X_OK))
+        self.assertNotIn("vastgame: no container when VG", slr.read_text())
+        self.assertFalse((home / ".local/share/Steam").exists())     # свой клиент рядом не заводит
+        r = subprocess.run(["bash", str(D / "rootfs/opt/vastgame/steam-patch.sh"), "once"],
+                           capture_output=True, text=True, env={**env, "VASTGAME_STEAM_LEGACY_PATCH": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('${VG-"$entry_point" --}', wh.read_text())
-        self.assertFalse(os.access(chk, os.X_OK))
+        self.assertTrue(os.access(chk, os.X_OK))
         self.assertIn("vastgame: no container when VG", slr.read_text())
-        self.assertFalse((home / ".local/share/Steam").exists())     # свой клиент рядом не заводит
 
 
 if __name__ == "__main__":

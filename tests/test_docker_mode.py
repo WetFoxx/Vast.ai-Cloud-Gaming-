@@ -67,8 +67,9 @@ class TestRentalBody(unittest.TestCase):
         self.assertNotIn("env", core.rental_body(bare, 100))                                     # язык не известен
         self.assertNotIn("STEAM_LANG", core.rental_body(bare, 100, lang="de").get("env", {}))
 
-    def test_image_pinned_to_a_build(self):
-        self.assertRegex(core.DOCKER_IMAGE, r"^ghcr\.io/wetfoxx/vastgame-desktop:[0-9a-f]{40}$")
+    def test_image_pinned_to_a_digest(self):
+        self.assertRegex(core.DOCKER_IMAGE,
+                         r"^ghcr\.io/wetfoxx/vastgame-desktop@sha256:[0-9a-f]{64}$")
 
 
 class TestSearch(unittest.TestCase):
