@@ -23,7 +23,37 @@ done
 for pfx in "$HOME"/.steam/debian-installation/steamapps/compatdata/*/pfx/drive_c "$HOME"/.steam/steam/steamapps/compatdata/*/pfx/drive_c; do
   [ -d "$pfx/users/steamuser" ] && mkdir -p "$pfx/users/steamuser/AppData/Local/Temp" "$pfx/users/steamuser/Temp" "$pfx/users/steamuser/Documents" "$pfx/windows/temp" 2>/dev/null
 done
-# Steam уже работает — передать ему команду (steam://…) и выйти
+# wolf и entrypoint запускают эту обёртку через env -i. BWRAP задаётся здесь, уже после очистки,
+# и его наследуют настоящий клиент, pressure-vessel и Proton. Раньше этого места его нет.
+ISO_ENVF=${VASTGAME_STEAM_ISOLATION_ENV:-/tmp/vastgame-steam-isolation.env}
+if [ -x /opt/vastgame/steam-isolation.sh ]; then
+  if ! /opt/vastgame/steam-isolation.sh; then
+    # Селектор ничего не выбрал (оба механизма отказали или сбоили при пробе). Это НЕ повод
+    # блокировать Steam: неудача не кэшируется, следующий запуск попробует снова, а здесь
+    # запускаем как прежде — без BWRAP (на здоровом хосте Steam работает, на закрытом покажет
+    # свою ошибку). Причина осталась в /tmp/vastgame-steam-isolation.json.
+    iso_diag=$(python3 - <<'PY' 2>/dev/null
+import json
+try:
+    d = json.load(open("/tmp/vastgame-steam-isolation.json"))
+except (OSError, ValueError):
+    print("причина не записана")
+    raise SystemExit
+parts = []
+if d.get("reason"):
+    parts.append(str(d["reason"]))
+for k in ("native_error", "fallback_error"):
+    if d.get(k):
+        parts.append(k.replace("_error", "") + ": " + str(d[k]))
+print("; ".join(parts) or "причина не записана")
+PY
+)
+    echo "[steam] изоляция Steam Runtime не выбрана (${iso_diag:-причина не записана}) — запуск без BWRAP" >&2
+    unset iso_diag
+  fi
+  [ -f "$ISO_ENVF" ] && . "$ISO_ENVF"
+fi
+# Steam уже работает — передать ему команду (steam://…) и выйти. Окружение уже с BWRAP.
 if pgrep -u "$ME" -f 'ubuntu12_32/steam( |$)' >/dev/null; then exec /opt/vastgame/real/steam "$@"; fi
 exec 9>"/tmp/steam-run-$ME.lock"
 flock -n 9 || exec /opt/vastgame/real/steam "$@"          # другой запуск уже присматривает
@@ -32,9 +62,17 @@ W=$!
 trap 'kill $W 2>/dev/null' EXIT
 for try in 1 2 3 4 5 6 7 8; do
   /opt/vastgame/steam-patch.sh once
-  /opt/vastgame/real/steam -cef-disable-gpu-compositing "$@"
+  for sd in "$HOME/.steam/debian-installation" "$HOME/.steam/steam" "$HOME/.local/share/Steam"; do
+    [ -d "$sd" ] && : > "$sd/.cef-enable-remote-debugging" 2>/dev/null
+  done
+  /opt/vastgame/real/steam -cef-disable-gpu-compositing -cef-enable-debugging "$@"
   rc=$?
   [ "$rc" = 71 ] || break
+  # 71 — Steam снова увидел закрытые user namespaces: проба штатного bwrap могла пропустить
+  # хост, на котором runtime всё равно не стартует — перепробовать механизм и перечитать env-файл
+  VASTGAME_STEAM_ISOLATION_REPROBE=1 /opt/vastgame/steam-isolation.sh || true
+  unset BWRAP PRESSURE_VESSEL_BWRAP
+  [ -f "$ISO_ENVF" ] && . "$ISO_ENVF"
   echo "[steam] проверка user namespaces вернулась (обновление клиента?) — заплатка и перезапуск $try" >&2
   sleep 2
 done

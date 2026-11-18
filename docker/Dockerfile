@@ -20,6 +20,18 @@ RUN mkdir -p /out/x86_64 /out/i386 \
     && gcc $F -o /out/x86_64/libvgnv.so /src/vgnv.c -ldl \
     && gcc $F -Wl,-soname,libXrandr.so.2 -o /out/x86_64/libvgrr.so /src/vgrr.c -ldl
 
+# ---------------------------------------------------------------- proot-next с запасным fchmodat
+FROM rust:1.89.0-bookworm AS proot-next
+ARG PROOT_NEXT_COMMIT=04cfb059ddafb426f6488d8a285bf8d87f747e23
+ARG PROOT_NEXT_SOURCE_SHA256=7848fe5f5b04f796c59b041b94339a4e9a563c1426c5d0c9f9721944d0bade2a
+COPY proot-next-fchmodat2.patch /tmp/proot-next-fchmodat2.patch
+RUN curl -fsSL "https://codeload.github.com/selkies-project/proot-next/tar.gz/${PROOT_NEXT_COMMIT}" -o /tmp/proot-next.tar.gz \
+    && echo "${PROOT_NEXT_SOURCE_SHA256}  /tmp/proot-next.tar.gz" | sha256sum -c - \
+    && mkdir /src && tar -xzf /tmp/proot-next.tar.gz -C /src --strip-components=1 \
+    && cd /src && patch -p1 < /tmp/proot-next-fchmodat2.patch \
+    && rustup target add x86_64-unknown-linux-musl \
+    && cargo build --release --target x86_64-unknown-linux-musl
+
 # ---------------------------------------------------------------- образ
 FROM ubuntu:24.04
 LABEL org.opencontainers.image.source="https://github.com/WetFoxx/Vast.ai-Cloud-Gaming-" \
@@ -38,10 +50,22 @@ RUN dpkg --add-architecture i386 && apt-get update -qq && apt-get install -yq --
       libnotify-bin xfce4-notifyd \
       pulseaudio pulseaudio-utils \
       curl ca-certificates gnupg python3 procps iproute2 pciutils psmisc less nano zstd unzip xz-utils file \
-      7zip libarchive-tools \
+      7zip libarchive-tools bubblewrap \
       zenity xdg-utils libibus-1.0-5 libevdev2 libsdl2-2.0-0 evtest \
       libc6:i386 libgl1:i386 libgl1-mesa-dri:i386 libegl1:i386 libgbm1:i386 \
     && rm -rf /var/lib/apt/lists/*
+
+# proot-next 0.3.9 + fchmodat fallback: старые seccomp-профили Vast возвращают ENOSYS на fchmodat2,
+# из-за чего Proton не мог обновить права файлов префикса. Собирается из закреплённого исходника с патчем.
+ARG PROOT_NEXT_COMMIT=04cfb059ddafb426f6488d8a285bf8d87f747e23
+ARG PROOT_NEXT_SOURCE_SHA256=7848fe5f5b04f796c59b041b94339a4e9a563c1426c5d0c9f9721944d0bade2a
+COPY proot-next-fchmodat2.patch /usr/local/lib/proot-next/fchmodat2.patch
+RUN mkdir -p /usr/local/lib/proot-next && ln -s proot /usr/local/lib/proot-next/bwrap \
+    && printf 'source_commit=%s\nsource_sha256=%s\n' "$PROOT_NEXT_COMMIT" "$PROOT_NEXT_SOURCE_SHA256" \
+      > /usr/local/lib/proot-next/build-info \
+    && sha256sum /usr/local/lib/proot-next/fchmodat2.patch >> /usr/local/lib/proot-next/build-info
+COPY --from=proot-next /src/target/x86_64-unknown-linux-musl/release/proot /usr/local/lib/proot-next/proot
+COPY --from=proot-next /src/LICENSE /usr/local/lib/proot-next/LICENSE
 
 # Пользователь как на KVM: user, uid 1000, основная группа users (в образе Ubuntu uid 1000 занят ubuntu)
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -g users -G audio,video -s /bin/bash user
