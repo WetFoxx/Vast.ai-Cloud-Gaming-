@@ -1,0 +1,24 @@
+# Проверка release-кандидата Steam Isolation. Не запускается на main и не публикует stable/latest.
+name: docker-isolation-hotfix
+
+on:
+  push:
+    branches: [release/steam-isolation-hotfix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify game and mod launchers
+        run: python3 .github/verify-launchers.py
+      - name: Build candidate image
+        run: docker build -t vastgame-desktop:steam-isolation-hotfix docker
+      - name: Verify Steam isolation
+        run: bash .github/verify-steam-isolation.sh vastgame-desktop:steam-isolation-hotfix
+      - name: Show candidate image id
+        run: docker image inspect vastgame-desktop:steam-isolation-hotfix --format 'local={{.Id}}'
