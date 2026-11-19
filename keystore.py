@@ -17,6 +17,7 @@
 # запись-отметка DONE, и записи прежних версий больше не трогаются.
 
 import contextlib
+import os
 import subprocess
 import sys
 import threading
@@ -27,7 +28,20 @@ import keyring.errors
 from settings import config_dir
 
 OLD = "vastgame"            # записи прежних версий; на Windows и Linux — единственное место
-SERVICE = "vastgame-keys"   # записи на Mac: их создаёт и читает security
+SERVICE = os.environ.get("VASTGAME_KEY_SERVICE") or "vastgame-keys"   # записи на Mac: их создаёт и читает security
+
+
+def _main_service():
+    """Обычное имя записей. Проверочная сборка с другим именем старые ключи не читает и не стирает."""
+    return SERVICE == "vastgame-keys"
+
+
+def _keyring_service():
+    """Диспетчер учётных данных Windows. Обычный запуск — «vastgame», как раньше.
+    Проверочный запуск с VASTGAME_KEY_SERVICE пишет только в своё имя и стабильную копию не трогает."""
+    if _main_service():
+        return OLD
+    return SERVICE
 SECURITY = "/usr/bin/security"
 MAC = sys.platform == "darwin"
 
@@ -68,9 +82,9 @@ def get(name):
     """Значение ключа или None, если его нет."""
     _check_name(name)
     if not MAC:
-        return keyring.get_password(OLD, name)
+        return keyring.get_password(_keyring_service(), name)
     value = _read(name)
-    if value is None and not _moved:
+    if value is None and not _moved and _main_service():
         move_old()
         value = _read(name)
     return value
@@ -80,7 +94,7 @@ def put(name, value):
     """Сохранить ключ (заменить, если уже есть). Не сохранилось — KeystoreError."""
     _check_name(name)
     if not MAC:
-        keyring.set_password(OLD, name, value)
+        keyring.set_password(_keyring_service(), name, value)
         return
     _write(name, value)
 
@@ -89,21 +103,23 @@ def exists(name):
     """Есть ли ключ (или его запись прежних версий). На Mac значение не читается — macOS не спрашивает."""
     _check_name(name)
     if not MAC:
-        return keyring.get_password(OLD, name) is not None
-    return _found(SERVICE, name) or _found(OLD, name)
+        return keyring.get_password(_keyring_service(), name) is not None
+    return _found(SERVICE, name) or (_main_service() and _found(OLD, name))
 
 
 def delete(name):
     """Стереть ключ и его запись прежних версий. True — если не осталось ни той, ни другой."""
     _check_name(name)
     if not MAC:
+        service = _keyring_service()
         try:
-            keyring.delete_password(OLD, name)
+            keyring.delete_password(service, name)
         except keyring.errors.PasswordDeleteError:
             pass
-        return keyring.get_password(OLD, name) is None
+        return keyring.get_password(service, name) is None
     _security("delete-generic-password", "-s", SERVICE, "-a", name)
-    _delete_old(name)
+    if _main_service():
+        _delete_old(name)
     return not exists(name)
 
 
@@ -156,7 +172,7 @@ def wipe(extra=()):
         _security("delete-generic-password", "-s", SERVICE, "-a", DONE)
         _moved = False
         # Записи с другими именами (от прежних версий) — по одной, пока удаляются
-        for service in (SERVICE, OLD):
+        for service in ((SERVICE, OLD) if _main_service() else (SERVICE,)):
             for _ in range(50):
                 if _security("delete-generic-password", "-s", service)[0] != 0:
                     break

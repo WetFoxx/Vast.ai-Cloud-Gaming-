@@ -521,6 +521,11 @@ th .arrow { display: inline-block; width: 1em; text-align: center; }
 .steam-accounts { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .steam-acc { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .steam-acc .sub.warn { color: var(--error); }
+.steam-actions { display: flex; gap: 6px; align-items: center; flex: none; }
+.chip-box { display: inline-flex; align-items: center; gap: 2px; }
+.chip-remove { border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 15px;
+  line-height: 1; padding: 2px 5px; border-radius: 7px; }
+.chip-remove:hover { color: var(--error); background: rgba(255, 69, 58, .12); }
 /* Игра из библиотеки: карточка на выборе машины и ход на главном */
 .offers-game, .play-box { display: flex; gap: 14px; align-items: center; }
 .offers-game img, .play-box img { width: 64px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 8px; flex: none;

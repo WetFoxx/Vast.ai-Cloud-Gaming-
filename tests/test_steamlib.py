@@ -58,6 +58,7 @@ class FakeSteam:
         self.shop_down = False
         self.finalize_calls = 0
         self.fail_net = None             # текст ошибки сети (с пропуском в адресе)
+        self.steam_id_override = None    # ответ Steam называет другой аккаунт, чем пропуск
 
     def login(self, sid):
         tok = jwt(sid, int(time.time()) + 200 * 86400, ["web", "renew", "derive"])
@@ -71,6 +72,7 @@ class FakeSteam:
             sid = self.valid.get(data["nonce"])
             if not sid:
                 return Resp(200, {"error": 8})
+            sid = self.steam_id_override or sid
             return Resp(200, {"steamID": sid, "transfer_info": [
                 {"url": "https://store.steampowered.com/login/settoken", "params": {"nonce": "s", "auth": "x"}},
                 {"url": "https://steamcommunity.com/login/settoken", "params": {"nonce": "c", "auth": "y"}}]})
@@ -188,11 +190,68 @@ class TestAccounts(Base):
         steamlib.remove_account(B)
         self.assertEqual(list(self.store), [f"STEAM_{A}"])
         self.assertEqual([a["id"] for a in steamlib.accounts()], [A])
+        self.assertNotIn(B, steamlib._stores)                           # сессия магазина удалённого аккаунта забыта
+        self.assertIn(A, steamlib._stores)                              # чужая сессия на месте
         games = {g["appid"]: g for g in steamlib.cached()["games"]}
         self.assertNotIn("30", games)                                   # была только у Bob
         self.assertEqual(games["20"]["accounts"], [A])
         with self.assertRaises(VastgameError):
             steamlib.remove_account("../x")
+        import inspect
+        src = inspect.getsource(steamlib.remove_account)
+        for word in ("drive", "cloudgames", "rclone"):
+            self.assertNotIn(word, src)                                 # игры, моды и облако не трогаем
+
+    def test_removed_account_can_be_linked_again(self):
+        kept = self.steam.login(B)
+        steamlib.add_account(self.steam.login(A))
+        steamlib.add_account(kept)
+        steamlib.remove_account(A)
+        again = self.steam.login(A)
+        steamlib.add_account(again)
+        self.assertEqual([a["id"] for a in steamlib.accounts()], [B, A])
+        self.assertEqual(self.store[f"STEAM_{A}"], again)
+        self.assertEqual(self.store[f"STEAM_{B}"], kept)
+        self.assertNotIn(A, [a["id"] for a in steamlib.accounts() if a["expired"]])
+
+    def test_remove_during_refresh_does_not_restore_games(self):
+        import threading
+        steamlib.add_account(self.steam.login(A))
+        steamlib.add_account(self.steam.login(B))
+        steamlib.library()
+        owned = steamlib._owned
+        started = threading.Event()
+
+        def slow(sid, token):
+            started.set()
+            time.sleep(0.35)
+            return owned(sid, token)
+
+        def drop():
+            self.assertTrue(started.wait(2))
+            steamlib.remove_account(B)
+
+        worker = threading.Thread(target=drop)
+        worker.start()
+        with mock.patch.object(steamlib, "_owned", slow):
+            lib = steamlib.library()
+        worker.join()
+        self.assertEqual([a["id"] for a in lib["accounts"]], [A])
+        self.assertEqual([a["id"] for a in steamlib.accounts()], [A])
+        games = {g["appid"]: g for g in lib["games"]}
+        self.assertNotIn("30", games)
+        self.assertEqual(games["20"]["accounts"], [A])
+        cached = {g["appid"]: g for g in steamlib.cached()["games"]}
+        self.assertNotIn("30", cached)
+        self.assertEqual(cached["20"]["accounts"], [A])
+        self.assertEqual(set(self.store), {f"STEAM_{A}"})
+
+    def test_steam_confirms_a_different_id_is_not_saved(self):
+        self.steam.steam_id_override = B
+        with self.assertRaises(VastgameError) as c:
+            steamlib.add_account(self.steam.login(A))
+        self.assertEqual(c.exception.key, "steam.login_failed")
+        self.assertEqual((self.store, steamlib.accounts()), ({}, []))
 
     def test_reset_wipes_steam_passes(self):
         import setup
@@ -322,19 +381,30 @@ class FakeWindow:
 
     def __init__(self, token=None, close_after=None):
         self.token, self.close_after, self.polls, self.destroyed = token, close_after, 0, False
+        self.hooks = 0
         self.events = mock.Mock(closed=self.Event(), loaded=self.Loaded())
         self.urls = []
 
     def load_url(self, url):
         self.urls.append(url)
 
+    def run_js(self, code):
+        return self.evaluate_js(code)
+
     def evaluate_js(self, code):
-        if code == steamlib.TAKE:
+        if isinstance(code, str) and code.startswith("/*vg-hook*/"):
+            self.hooks += 1
             self.polls += 1
+            import re
+            found = re.search(r'var ATTEMPT = "([0-9a-f]+)"', code)
+            if found:
+                self.attempt = found.group(1)
             if self.close_after and self.polls >= self.close_after:
                 for fn in self.events.closed.handlers:
                     fn()
-            return self.token if self.polls >= 3 else None
+            if self.sink and self.token and self.polls >= 3 and getattr(self, "attempt", None):
+                self.sink.steam_nonce(self.attempt, self.token)
+            return 1
         return 1
 
     def destroy(self):
@@ -342,11 +412,24 @@ class FakeWindow:
 
 
 class TestLoginWindow(Base):
-    def run_login(self, win):
+    def run_login(self, win, account=None):
         api = gui.Api()
-        with mock.patch.object(gui.webview, "create_window", lambda *a, **k: win), \
-             mock.patch.object(gui.time, "sleep", lambda s: None), mock.patch.object(gui.settings, "applog", lambda t: None):
-            return api.steam_login("Steam")
+        clock = {"t": time.time()}
+
+        def now():
+            return clock["t"]
+
+        def sleep(s):
+            clock["t"] += s or 0
+
+        def create(*a, **k):
+            win.sink = k.get("js_api")
+            return win
+
+        with mock.patch.object(gui.webview, "create_window", create), \
+             mock.patch.object(gui.time, "time", now), mock.patch.object(gui.time, "sleep", sleep), \
+             mock.patch.object(gui.settings, "applog", lambda t: None):
+            return api.steam_login("Steam", account)
 
     def test_login_window_links_account(self):
         tok = self.steam.login(A)
@@ -355,16 +438,94 @@ class TestLoginWindow(Base):
         self.assertEqual(r, {"ok": True, "account": {"id": A, "name": "Alex"}})
         self.assertNotIn(tok, json.dumps(r))                             # пропуск в страницу не попадает
         self.assertTrue(win.destroyed)
+        self.assertGreaterEqual(win.hooks, 1)                            # перехват ставится уже на загрузке страницы
         self.assertEqual(win.urls, [steamlib.LOGIN_URL])                  # после заглушки — страница Steam
         self.assertEqual(self.store, {f"STEAM_{A}": tok})
         # [0.4.5] игры нового аккаунта — уже в библиотеке, окну не нужно ждать полного обновления
         self.assertEqual({g["appid"] for g in steamlib.cached()["games"]}, {"10", "20", "40", "60", "70"})
+
+    def test_reauth_expected_account_replaces_pass_and_clears_expired(self):
+        steamlib.add_account(self.steam.login(B))
+        steamlib._mark(B, True)
+        tok = self.steam.login(B)
+        r = self.run_login(FakeWindow(token=tok), account=B)
+        self.assertEqual(r, {"ok": True, "account": {"id": B, "name": "Bob"}})
+        self.assertEqual(self.store, {f"STEAM_{B}": tok})
+        self.assertFalse(steamlib.accounts()[0]["expired"])
+
+    def test_reauth_wrong_account_is_not_saved(self):
+        old = self.steam.login(A)
+        steamlib.add_account(old)
+        steamlib._mark(A, True)
+        wrong = self.steam.login(B)
+        r = self.run_login(FakeWindow(token=wrong), account=A)
+        self.assertEqual(r["error"]["key"], "steam.wrong_account")
+        self.assertEqual(self.store, {f"STEAM_{A}": old})                # чужой пропуск не сохранился
+        self.assertEqual([a["id"] for a in steamlib.accounts()], [A])
 
     def test_closed_window_links_nothing(self):
         win = FakeWindow(close_after=2)
         self.assertEqual(self.run_login(win), {"cancelled": True})
         self.assertFalse(win.destroyed)
         self.assertEqual(self.store, {})
+
+    def test_cancel_then_login_links_account(self):
+        self.assertEqual(self.run_login(FakeWindow(close_after=1)), {"cancelled": True})
+        tok = self.steam.login(A)
+        r = self.run_login(FakeWindow(token=tok))
+        self.assertEqual(r["account"]["id"], A)
+        self.assertEqual(self.store, {f"STEAM_{A}": tok})
+
+    def test_reauth_one_account_leaves_the_other(self):
+        old_b = self.steam.login(B)
+        steamlib.add_account(self.steam.login(A))
+        steamlib.add_account(old_b)
+        steamlib._mark(A, True)
+        tok = self.steam.login(A)
+        r = self.run_login(FakeWindow(token=tok), account=A)
+        self.assertEqual(r["account"]["id"], A)
+        self.assertFalse(next(a for a in steamlib.accounts() if a["id"] == A)["expired"])
+        self.assertEqual(self.store[f"STEAM_{B}"], old_b)
+        self.assertEqual([a["id"] for a in steamlib.accounts()], [A, B])
+
+    def test_reauth_other_live_account_does_not_replace(self):
+        old_a, old_b = self.steam.login(A), self.steam.login(B)
+        steamlib.add_account(old_a)
+        steamlib.add_account(old_b)
+        steamlib._mark(A, True)
+        r = self.run_login(FakeWindow(token=self.steam.login(B)), account=A)
+        self.assertEqual(r["error"]["key"], "steam.wrong_account")
+        self.assertEqual(r["error"]["params"]["name"], "Alex")
+        self.assertEqual(self.store[f"STEAM_{A}"], old_a)
+        self.assertEqual(self.store[f"STEAM_{B}"], old_b)
+        self.assertEqual([a["id"] for a in steamlib.accounts()], [A, B])
+        self.assertTrue(next(a for a in steamlib.accounts() if a["id"] == A)["expired"])
+        self.assertFalse(next(a for a in steamlib.accounts() if a["id"] == B)["expired"])
+
+    def test_rejected_reauth_keeps_old_pass(self):
+        old = self.steam.login(A)
+        steamlib.add_account(old)
+        steamlib._mark(A, True)
+        bad = self.steam.login(A)
+        del self.steam.valid[bad]
+        r = self.run_login(FakeWindow(token=bad), account=A)
+        self.assertEqual(r["error"]["key"], "steam.expired")
+        self.assertEqual(self.store[f"STEAM_{A}"], old)
+        self.assertTrue(steamlib.accounts()[0]["expired"])
+        self.assertEqual([a["id"] for a in steamlib.accounts()], [A])
+
+    def test_profile_page_without_nonce_links_nothing(self):
+        # Адрес профиля — не пропуск. Окно его отдаёт и закрывается: аккаунт не появляется.
+        win = FakeWindow(token="https://steamcommunity.com/profiles/" + A, close_after=4)
+        self.assertEqual(self.run_login(win), {"cancelled": True})
+        self.assertEqual((self.store, steamlib.accounts()), ({}, []))
+
+    def test_confirmed_steam_id_mismatch_is_not_linked(self):
+        tok = self.steam.login(A)
+        self.steam.steam_id_override = B
+        r = self.run_login(FakeWindow(token=tok))
+        self.assertEqual(r["error"]["key"], "steam.login_failed")
+        self.assertEqual((self.store, steamlib.accounts()), ({}, []))
 
 
 if __name__ == "__main__":

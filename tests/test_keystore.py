@@ -273,6 +273,21 @@ class TestOtherSystems(unittest.TestCase):
             self.assertEqual(keystore.wipe(["STEAM_76561198000000001"]), {"deleted": 1, "left": 0})
             self.assertEqual(store, {})
 
+    def test_windows_trial_does_not_touch_the_stable_store(self):
+        store = {}
+        kr = mock.Mock(get_password=lambda s, n: store.get((s, n)),
+                       set_password=lambda s, n, v: store.__setitem__((s, n), v),
+                       delete_password=lambda s, n: store.pop((s, n), None))
+        with mock.patch.object(keystore, "MAC", False), \
+             mock.patch.object(keystore, "SERVICE", "vastgame-steam-test-keys"), \
+             mock.patch.multiple(keystore.keyring, get_password=kr.get_password, set_password=kr.set_password,
+                                 delete_password=kr.delete_password):
+            keystore.put("STEAM_76561198000000001", "t")
+            self.assertEqual(keystore.get("STEAM_76561198000000001"), "t")
+            self.assertEqual(set(store), {("vastgame-steam-test-keys", "STEAM_76561198000000001")})
+            keystore.delete("STEAM_76561198000000001")
+            self.assertEqual(store, {})
+
 
 class TestSafety(unittest.TestCase):
     def test_guard(self):

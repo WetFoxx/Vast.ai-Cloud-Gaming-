@@ -1050,10 +1050,18 @@ class Api:
     def steam_accounts(self):
         return {"accounts": steamlib.accounts()}
 
-    def steam_login(self, title="Steam"):
+    def steam_login(self, title="Steam", account=None):
         """Окно входа Steam (страница самой Steam: QR или логин с паролем). Ждёт, пока человек войдёт или закроет
-        окно (до STEAM_LOGIN_MIN). Долгий пропуск перехватывается в окне (steamlib.HOOK) и сразу уходит в Связку
-        ключей — в страницу он не попадает. {"ok", "account"} / {"cancelled"}."""
+        окно (до STEAM_LOGIN_MIN). Долгий пропуск перехватывается в окне (steamlib.begin_login) и сразу уходит в
+        Связку ключей — в страницу он не попадает. account — ожидаемый SteamID при повторном входе: если в окне
+        вошёл другой аккаунт, пропуск не сохраняется. Открытая страница профиля без пропуска — не вход.
+        {"ok", "account"} / {"cancelled"} / {"error"}."""
+        expected = str(account or "")
+        expected = expected if expected.isdigit() else None
+        expected_name = None
+        if expected:
+            expected_name = next((a["name"] for a in steamlib.accounts() if a["id"] == expected),
+                                 f"…{expected[-4:]}")
         if not self._steam_lock.acquire(blocking=False):
             return {"error": {"key": "steam.login_open", "params": {}, "text": "login window is open"}}
         try:
@@ -1062,36 +1070,76 @@ class Api:
             # ПК 2026-10-08: ~2 мин и в Chrome) — пустое белое окно выглядело зависшим. Прежняя страница видна,
             # пока Steam не ответит
             tr = notify.texts(settings.get("language") or settings.get("ui_language"))
-            w = webview.create_window(str(title)[:60], html=_loading_page(tr["steam.login_loading"]), width=900,
-                                      height=760)
+            deadline = time.time() + STEAM_LOGIN_MIN * 60
+            attempt, hook_js, _take_js = steamlib.begin_login(deadline)
+            sink = steamlib.LoginCapture(attempt, deadline)
+            settings.applog("steam-auth: login_window_opened")
+            w = webview.create_window(str(title)[:60], html=_loading_page(tr["steam.login_loading"]),
+                                      js_api=sink, width=900, height=760)
             closed, shown = threading.Event(), threading.Event()
+            hooked = {"ok": False}
+
+            def pull():
+                # run_js, не evaluate_js: страница Steam запрещает eval, а evaluate_js как раз вызывает eval.
+                # Перехватчик сам шлёт пропуск в нативный мост, без new Function.
+                try:
+                    w.run_js(hook_js)
+                except Exception as e:          # noqa: BLE001 — страница ещё грузится или окно закрыли
+                    if not hooked["ok"]:
+                        settings.applog("steam-auth: capture_hook_failed:" + type(e).__name__)
+                    return
+                if not hooked["ok"]:
+                    settings.applog("steam-auth: capture_hook_installed")
+                    hooked["ok"] = True
+
             w.events.closed += closed.set
+            w.events.loaded += pull
             w.events.loaded += shown.set
             shown.wait(10)
             if not closed.is_set():
                 w.load_url(steamlib.LOGIN_URL)
-            token, until = None, time.time() + STEAM_LOGIN_MIN * 60
-            while not closed.is_set() and time.time() < until:
+            until = time.time() + STEAM_LOGIN_MIN * 60
+            while not closed.is_set() and time.time() < until and not sink.pending():
                 time.sleep(0.4)
-                try:
-                    w.evaluate_js(steamlib.HOOK)    # после каждого перехода страницы — заново
-                    token = w.evaluate_js(steamlib.TAKE)
-                except Exception:                   # noqa: BLE001 — страница ещё грузится или окно закрыли
-                    continue
-                if token:
-                    break
+                pull()
             if not closed.is_set():
                 w.destroy()
             self._clear_web()                    # cookie сайта Steam в окне не оставляем
-            if not isinstance(token, str) or not token:
+            # Пока проверяем первые пропуска, мог прийти ещё один — берём и его, потом окно закрыто для новых.
+            tokens = sink.pending()
+            sink.seal()
+            tokens += [t for t in sink.pending() if t not in tokens]
+            if not tokens:
                 return {"cancelled": True}
-            acc = steamlib.add_account(token)
+            if expected:
+                matched = [t for t in tokens if steamlib.token_account(t) == expected]
+                if not matched:
+                    settings.applog(f"steam: в окне вошёл другой аккаунт (ожидался …{expected[-4:]})")
+                    return {"error": {"key": "steam.wrong_account", "params": {"name": expected_name or expected},
+                                      "text": "signed in to a different Steam account"}}
+                tokens = matched
+            acc = None
+            last = None
+            settings.applog("steam-auth: steam_validation_started")
+            for token in tokens:
+                try:
+                    acc = steamlib.add_account(token)
+                    break
+                except VastgameError as e:
+                    last = e
+                    settings.applog("steam-auth: steam_validation_failed:" + (e.key or "error"))
+            if acc is None:
+                return {"error": error_data(last)}
+            settings.applog("steam-auth: steam_validation_success")
+            settings.applog("steam-auth: account_persisted")
             settings.applog(f"steam: аккаунт …{acc['id'][-4:]} привязан")
             # [0.4.5] Игры нового аккаунта — в библиотеку сразу (секунды; остальные аккаунты — из прошлого списка):
             # раньше после входа из «Настройки» библиотека показывала их только после полного обновления
             try:
                 steamlib.library(only=acc["id"])
-            except Exception:                   # noqa: BLE001 — вход удался; список догонит обычное обновление
+                settings.applog("steam-auth: library_updated")
+            except (Exception, VastgameError):  # noqa: BLE001 — вход удался; список догонит обычное обновление
+                settings.applog("steam-auth: library_failed")
                 _log_error("steam_login library")
             return {"ok": True, "account": acc}
         finally:

@@ -2428,21 +2428,30 @@ function renderLibrary() {
   const when = d.at ? new Date(d.at * 1000).toLocaleTimeString(LANG, { hour: "2-digit", minute: "2-digit" }) : "";
   $("library-summary").textContent = t("library.summary", { n: games.length, accounts: d.accounts.length })
     + (when ? " · " + t("library.updated", { time: when }) : "");
-  // Ярлыки: все, по аккаунтам (истёкший — «войди заново»), семья, «+ Войти в Steam»
+  // Ярлыки: все, по аккаунтам (истёкший — «войди заново» и «удалить аккаунт»), семья, «+ Войти в Steam»
   const chips = $("library-chips");
   const chip = (label, key, cls = "") => {
     const b = el("button", { className: "chip " + cls + (libFilter === key ? " on" : "") }, label);
     b.addEventListener("click", () => { libFilter = key; renderLibrary(); });
     chips.appendChild(b);
+    return b;
+  };
+  const account_chip = (b, a) => {
+    const box = el("span", { className: "chip-box" });
+    box.appendChild(b);
+    const rm = el("button", { type: "button", className: "chip-remove", title: t("steam.remove"), "aria-label": t("steam.remove") }, "×");
+    rm.addEventListener("click", (e) => { e.stopPropagation(); removeSteamAccount(a); });
+    box.appendChild(rm);
+    chips.appendChild(box);
   };
   chip(t("library.all", { n: games.length }), "all");
   for (const a of d.accounts) {
     if (a.expired) {
       const b = el("button", { className: "chip warn" }, "⚠ " + t("steam.expired_chip", { name: a.name }));
-      b.addEventListener("click", () => steamLogin(null));
-      chips.appendChild(b);
+      b.addEventListener("click", () => steamLogin(null, a.id));
+      account_chip(b, a);
     } else {
-      chip(`${a.name} · ${games.filter((g) => g.accounts.includes(a.id)).length}`, a.id);
+      account_chip(chip(`${a.name} · ${games.filter((g) => g.accounts.includes(a.id)).length}`, a.id), a);
     }
   }
   const fam = games.filter((g) => !g.accounts.length && g.family.length).length;
@@ -2526,12 +2535,28 @@ async function renderMainLibrary(force = false) {
   renderHeroArt();
 }
 
-// Войти в Steam: окно со страницей самой Steam (QR или логин с паролем). msgEl — где писать ход (может не быть)
-async function steamLogin(msgEl) {
+// Отвязать Steam-аккаунт только от VastGame: пропуск этой записи, её метки в списке и локальный кэш игр.
+// Steam-аккаунт, игры, сохранения, моды и облачные архивы не трогаем.
+async function removeSteamAccount(a) {
+  if (!await ask({ title: t("steam.remove.confirm.title", { name: a.name }), text: t("steam.remove.confirm.text"),
+                   yes: t("steam.remove"), no: t("btn.cancel") })) return;
+  const r = DEMO ? (demoRemoved.add(a.id), { ok: true }) : await api().steam_logout(a.id);
+  if (r.error) { showError(!$("screen-setup").hidden ? "setup-error" : "library-error", r.error); return; }
+  if (libFilter === a.id) libFilter = "all";
+  libData = null;
+  libCardAt = 0;
+  if (!$("screen-setup").hidden) renderSteamAccounts($("setup-steam"));
+  if (!$("screen-library").hidden) await loadLibrary(false);
+}
+
+// Войти в Steam: окно со страницей самой Steam (QR или логин с паролем). msgEl — где писать ход (может не быть);
+// accountId — ожидаемый аккаунт при повторном входе, чтобы чужая сессия не заменила прежнюю запись.
+async function steamLogin(msgEl, accountId = null) {
   const say = (text) => { if (msgEl) { msgEl.hidden = !text; msgEl.textContent = text || ""; } };
   say(t("steam.login.wait"));
   showError("library-error", null);
-  const r = DEMO ? { ok: true, account: { id: "76561198000000003", name: "Demo" } } : await api().steam_login(t("steam.login.window"));
+  const r = DEMO ? { ok: true, account: { id: "76561198000000003", name: "Demo" } }
+                 : await api().steam_login(t("steam.login.window"), accountId);
   if (r.error) { say(""); showError(!$("screen-setup").hidden ? "setup-error" : "library-error", r.error); return; }
   say(r.ok ? t("steam.login.done", { name: r.account.name }) : "");
   if (r.ok) {
@@ -2540,7 +2565,7 @@ async function steamLogin(msgEl) {
   }
 }
 
-// Список аккаунтов с «Выйти» и кнопка «Войти в Steam» (экран «Настройка»)
+// Список аккаунтов с повторным входом (для истёкшего), удалением записи и кнопкой «Войти в Steam» (экран «Настройка»)
 async function renderSteamAccounts(box) {
   const d = DEMO ? { accounts: demoLibrary().accounts } : await api().steam_accounts();
   box.innerHTML = "";
@@ -2554,13 +2579,10 @@ async function renderSteamAccounts(box) {
     const date = a.until ? new Date(a.until * 1000).toLocaleDateString(LANG, { day: "numeric", month: "long", year: "numeric" }) : "";
     left.appendChild(el("div", { className: "sub" + (a.expired ? " warn" : "") }, a.expired ? t("steam.expired") : date ? t("steam.expires", { date }) : ""));
     row.appendChild(left);
-    row.appendChild(a.expired ? button(t("steam.login"), () => steamLogin(msg), true) : button(t("steam.logout"), async () => {
-      if (!await ask({ title: t("steam.logout.confirm.title", { name: a.name }), text: t("steam.logout.confirm.text"), yes: t("steam.logout"), no: t("btn.cancel") })) return;
-      const r = DEMO ? { ok: true } : await api().steam_logout(a.id);
-      if (r.error) { showError("setup-error", r.error); return; }
-      libData = null; libCardAt = 0;
-      renderSteamAccounts(box);
-    }));
+    const actions = el("div", { className: "steam-actions" });
+    if (a.expired) actions.appendChild(button(t("steam.login"), () => steamLogin(msg, a.id), true));
+    actions.appendChild(button(t("steam.remove"), () => removeSteamAccount(a)));
+    row.appendChild(actions);
     box.appendChild(row);
   }
   const add = button(d.accounts && d.accounts.length ? t("steam.login_more") : t("steam.login"), () => steamLogin(msg), !(d.accounts && d.accounts.length));
@@ -3322,17 +3344,23 @@ function demoProgress() {
            error: null, game_names: { 3751260: "The Blood of Dawnwalker" } };
 }
 
+const demoRemoved = new Set();
 function demoLibrary() {
   const A = "76561198000000001", B = "76561198000000002";
   const g = (appid, name, accounts, family = [], last = 0) => ({ appid: String(appid), name, accounts, family, minutes: 600, last,
     cap: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appid}/library_600x900.jpg`, header: "", hero: "" });
-  return {
-    accounts: new URLSearchParams(location.search).get("lib") === "none" ? [] :
-      [{ id: A, name: "Alex", until: 1809000000, expired: false }, { id: B, name: "Bob", until: 1790000000, expired: new URLSearchParams(location.search).get("lib") === "expired" }],
-    games: [g(1245620, "ELDEN RING", [A, B], [], 9), g(1091500, "Cyberpunk 2077", [A], [], 8), g(1145350, "Hades II", [A], [], 7),
+  const accounts = (new URLSearchParams(location.search).get("lib") === "none" ? [] :
+      [{ id: A, name: "Alex", until: 1809000000, expired: false }, { id: B, name: "Bob", until: 1790000000, expired: new URLSearchParams(location.search).get("lib") === "expired" }])
+    .filter((a) => !demoRemoved.has(a.id));
+  const games = [g(1245620, "ELDEN RING", [A, B], [], 9), g(1091500, "Cyberpunk 2077", [A], [], 8), g(1145350, "Hades II", [A], [], 7),
       g(1086940, "Baldur's Gate 3", [B], [], 6), g(1174180, "Red Dead Redemption 2", [], [A]), g(292030, "The Witcher 3", [A]),
       g(570, "Dota 2", [A, B]), g(2050650, "Resident Evil 4", [B]), g(312060, "FINAL FANTASY XIV Online Free Trial", [A], [], 5),
-      g(9999999, "Неизвестная игра", [A])],
+      g(9999999, "Неизвестная игра", [A])].map((game) => ({ ...game,
+    accounts: game.accounts.filter((id) => !demoRemoved.has(id)),
+    family: game.family.filter((id) => !demoRemoved.has(id)) })).filter((game) => game.accounts.length || game.family.length);
+  return {
+    accounts,
+    games,
     errors: [], at: Math.floor(Date.now() / 1000),
     mods: { "1245620": { name: "mod--1245620--ELDEN RING", bytes: 340e6, mtime: "2026-09-28" } }, mods_save: { "1245620": true },
     lgame: { "312060": { name: "lgame--312060--FINAL FANTASY XIV Online Free Trial", bytes: 86.5e9, mtime: "2026-10-08" } },

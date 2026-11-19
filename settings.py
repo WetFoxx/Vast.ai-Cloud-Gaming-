@@ -12,7 +12,13 @@ LANGUAGES = ("ru", "en", "es")
 
 
 def config_dir():
-    """Папка настроек утилиты: macOS — Application Support, Windows — %APPDATA%, иначе ~/.config."""
+    """Папка настроек утилиты: macOS — Application Support, Windows — %APPDATA%, иначе ~/.config.
+    VASTGAME_CONFIG_DIR — отдельная папка для проверочной сборки, чтобы не трогать обычные настройки."""
+    override = os.environ.get("VASTGAME_CONFIG_DIR")
+    if override:
+        d = Path(override).expanduser()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
     if sys.platform == "darwin":
         d = Path.home() / "Library" / "Application Support" / "vastgame"
     elif os.name == "nt":

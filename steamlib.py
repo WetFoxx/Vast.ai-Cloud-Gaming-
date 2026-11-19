@@ -3,7 +3,7 @@
 # Вход — на настоящей странице Steam в окне приложения (QR-код из приложения Steam или логин с паролем; пароль
 # vastgame не видит). В конце входа страница сама передаёт долгий пропуск (refresh token, ~7 месяцев) в
 # login.steampowered.com/jwt/finalizelogin; cookie с ним WebKit выбрасывает (чужой сайт), поэтому окно перехватывает
-# его в этот момент (HOOK). Долгий пропуск лежит в Связке ключей (STEAM_<steamid>), из него по мере надобности
+# его в этот момент в мост окна. Долгий пропуск лежит в Связке ключей (STEAM_<steamid>), из него по мере надобности
 # делается суточный (тот же finalizelogin → steamcommunity.com/login/settoken) — он живёт только в памяти.
 # Список игр — официальные методы Steam с этим пропуском: IPlayerService/GetOwnedGames (все игры, даже при закрытом
 # профиле) и IFamilyGroupsService (семейная библиотека). Проверено вживую 2026-10-01: 65 игр + 37 от семьи.
@@ -15,6 +15,7 @@
 
 import base64
 import json
+import re
 import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -40,22 +41,105 @@ ACCESS_MARGIN = 600       # с: суточный пропуск, котором�
 ART_BATCH = 100           # игр в одном запросе картинок
 TIMEOUT = 20
 
-# Страница Steam в конце входа отправляет долгий пропуск полем nonce в finalizelogin (fetch или XMLHttpRequest).
-# Перехватываем и кладём в sessionStorage: сразу после этого страница уходит на другой адрес того же сайта.
-HOOK = r"""(function(){ if (window.__vgHook) return 1; window.__vgHook = 1;
- function keep(n){ try { if (n) sessionStorage.setItem('__vgNonce', n); } catch(e){} }
- function grab(b){ try { if (b instanceof FormData || b instanceof URLSearchParams) keep(b.get('nonce'));
-   else if (typeof b === 'string') keep(new URLSearchParams(b).get('nonce')); } catch(e){} }
- var f = window.fetch; window.fetch = function(u, o){ try { if (String((u && u.url) || u).indexOf('finalizelogin') >= 0 && o) grab(o.body); } catch(e){} return f.apply(this, arguments); };
- var op = XMLHttpRequest.prototype.open, sd = XMLHttpRequest.prototype.send;
- XMLHttpRequest.prototype.open = function(m, u){ this.__vgU = String(u); return op.apply(this, arguments); };
- XMLHttpRequest.prototype.send = function(b){ if (this.__vgU && this.__vgU.indexOf('finalizelogin') >= 0) grab(b); return sd.apply(this, arguments); };
- return 1; })()"""
-TAKE = "(function(){ var n = sessionStorage.getItem('__vgNonce'); if (n) sessionStorage.removeItem('__vgNonce'); return n; })()"
+# Страница Steam в конце входа отправляет долгий пропуск полем nonce в finalizelogin (fetch, XHR,
+# sendBeacon, в том числе Blob и относительный адрес). Сразу зовём мост окна (steam_nonce): сообщение уходит
+# в приложение до перехода на другую страницу. Сообщение ставится в очередь моста до того, как страница
+# сменит адрес, поэтому немедленный переход на профиль его не стирает. window.name для этого не годится:
+# WebKit очищает его при смене сайта. Принимается только https://login.steampowered.com/jwt/finalizelogin.
+_HOOK = r"""/*vg-hook*/(function(){
+if (window.__vgHook) return 1;
+window.__vgHook = 1;
+var ATTEMPT = __ATTEMPT__;
+var DEADLINE = __DEADLINE__;
+function post(name, args) {
+  try {
+    var id = "vg";
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jsBridge)
+      window.webkit.messageHandlers.jsBridge.postMessage(JSON.stringify({funcName: name, params: args, id: id}));
+    else if (window.chrome && window.chrome.webview && window.chrome.webview.postMessage)
+      window.chrome.webview.postMessage([name, JSON.stringify(args), id]);
+    else if (window.pywebview && window.pywebview.api && window.pywebview.api[name])
+      window.pywebview.api[name].apply(window.pywebview.api, args);
+  } catch (e) {}
+}
+function trace(code) { post("steam_trace", [code]); }
+function keep(n) {
+  if (typeof n !== "string") { trace("nonce_rejected_shape"); return; }
+  n = n.trim();
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(n) || n.length > 8000) { trace("nonce_rejected_shape"); return; }
+  if (Date.now() > DEADLINE) { trace("nonce_rejected_shape"); return; }
+  trace("nonce_kept");
+  post("steam_nonce", [ATTEMPT, n]);
+}
+function grab(b) {
+  try {
+    trace("finalize_seen");
+    if (b == null) trace("body_empty");
+    else if (typeof FormData !== "undefined" && b instanceof FormData) trace("body_formdata");
+    else if (typeof URLSearchParams !== "undefined" && b instanceof URLSearchParams) trace("body_params");
+    else if (typeof b === "string") trace("body_string");
+    else if (typeof Blob !== "undefined" && b instanceof Blob) trace("body_blob");
+    else trace("body_other");
+    if (b instanceof FormData || b instanceof URLSearchParams) keep(b.get("nonce"));
+    else if (typeof b === "string") {
+      var fromForm = new URLSearchParams(b).get("nonce");
+      if (fromForm) keep(fromForm);
+      else { try { var j = JSON.parse(b); if (j && j.nonce) keep(String(j.nonce)); } catch (e) {} }
+    }
+    else if (typeof Blob !== "undefined" && b instanceof Blob && b.text) b.text().then(grab);
+    else if (b && typeof b === "object" && typeof b.get === "function") keep(b.get("nonce"));
+    else if (b && typeof b === "object" && b.nonce) keep(String(b.nonce));
+  } catch (e) {}
+}
+function isSteamLogin(u) {
+  try {
+    var raw = (u && typeof u === "object" && u.url) ? u.url : u;
+    var url = new URL(String(raw || ""), location.href);
+    var ok = url.protocol === "https:" && url.hostname === "login.steampowered.com" && url.pathname === "/jwt/finalizelogin";
+    if (!ok && (url.hostname === "login.steampowered.com" || url.pathname.indexOf("finalizelogin") >= 0))
+      trace("url:" + url.protocol + "//" + url.hostname + url.pathname);
+    return ok;
+  } catch (e) { return false; }
+}
+function bodyOf(u, o) {
+  if (o && o.body != null) return o.body;
+  if (u && typeof u === "object" && u.body != null) return u.body;
+  return null;
+}
+var f = window.fetch;
+window.fetch = function(u, o){ try { if (isSteamLogin(u)) grab(bodyOf(u, o)); } catch (e) {} return f.apply(this, arguments); };
+try {
+  var sb = navigator.sendBeacon;
+  navigator.sendBeacon = function(u, b){ try { if (isSteamLogin(u)) grab(b); } catch (e) {} return sb.apply(this, arguments); };
+} catch (e) {}
+try {
+  var op = XMLHttpRequest.prototype.open, sd = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(m, u){ this.__vgU = String(u); return op.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function(b){ try { if (isSteamLogin(this.__vgU)) grab(b); } catch (e) {} return sd.apply(this, arguments); };
+} catch (e) {}
+trace("hook_installed");
+return 1;
+})()"""
+_TAKE = r"""/*vg-take*/(function(){ return null; })()"""
+_TRACE_CODE = re.compile(
+    r"^(hook_installed|finalize_seen|body_(formdata|params|string|blob|json|other|empty)|"
+    r"nonce_kept|nonce_rejected_shape|url:https://[a-z0-9.-]+/[a-z0-9_./-]*)$"
+)
+
+
+def begin_login(deadline):
+    """Номер попытки, скрипт перехвата finalizelogin и скрипт запасного чтения со страницы.
+    deadline — unix-время в секундах. Номер попытки в window.name не пишется."""
+    attempt = secrets.token_hex(16)
+    deadline_ms = int(float(deadline) * 1000)
+    hook = _HOOK.replace("__ATTEMPT__", json.dumps(attempt), 1).replace("__DEADLINE__", str(deadline_ms), 1)
+    return attempt, hook, _TAKE
+
 
 _access = {}               # {steamid: (суточный пропуск, годен до)} — только в памяти
 _stores = {}               # {steamid: requests.Session с cookie магазина Steam} — тоже только в памяти, вместе с _access
-_lock = threading.Lock()   # обновление библиотеки — по одному (окно спрашивает при открытии и при возврате в окно)
+_cv = threading.Condition(threading.RLock())  # список аккаунтов и кэш библиотеки; сеть под ним не держим
+_inflight = False          # идёт обновление библиотеки (запросы к Steam — без замка)
 
 
 class SteamExpired(VastgameError):
@@ -74,6 +158,89 @@ def _claims(token):
         return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
     except (AttributeError, IndexError, ValueError):
         return {}
+
+
+def token_account(token):
+    """SteamID из открытой части пропуска, или "". Это не подтверждение входа: подпись проверяет Steam."""
+    return str(_claims(token).get("sub") or "")
+
+
+def refresh_token(token):
+    """Долгий пропуск по форме (три части JWT и назначение renew), или "". Подпись и срок здесь не доказывают
+    вход — их проверяет add_account через Steam. Страница профиля и произвольный window.name сюда не проходят."""
+    if not isinstance(token, str):
+        return ""
+    token = token.strip()
+    if token.count(".") != 2 or not 30 <= len(token) <= 8000:
+        return ""
+    if not all(part and all(c.isalnum() or c in "-_" for c in part) for part in token.split(".")):
+        return ""
+    claims = _claims(token)
+    aud = claims.get("aud") or []
+    if not str(claims.get("sub") or "").isdigit() or "renew" not in aud:
+        return ""
+    return token
+
+
+class LoginCapture:
+    """Приёмник пропуска из окна входа. Страница вызывает steam_nonce в момент finalizelogin,
+    ещё до перехода на профиль. Номер попытки только связывает сообщение с этим окном:
+    личность подтверждает Steam, когда пропуск реально продлевается. Повтор того же пропуска
+    не копится. После seal() запоздавшие сообщения отбрасываются. Профиль сам сюда ничего не шлёт."""
+
+    def __init__(self, attempt, deadline):
+        self.attempt = str(attempt)
+        self.deadline = float(deadline)
+        self._tokens = []
+        self._seen = set()
+        self._sealed = False
+        self._lock = threading.Lock()
+
+    def steam_trace(self, code):
+        """Короткий этап входа без секретов. Чужой текст в журнал не пишется."""
+        if not isinstance(code, str) or _TRACE_CODE.fullmatch(code) is None:
+            return False
+        settings.applog("steam-auth: " + code)
+        return True
+
+    def steam_nonce(self, attempt, token):
+        settings.applog("steam-auth: bridge_message_received")
+        if not isinstance(attempt, str) or len(attempt) != len(self.attempt):
+            settings.applog("steam-auth: capture_rejected:attempt")
+            return False
+        if not secrets.compare_digest(attempt, self.attempt):
+            settings.applog("steam-auth: capture_rejected:attempt")
+            return False
+        if time.time() > self.deadline:
+            settings.applog("steam-auth: capture_rejected:deadline")
+            return False
+        got = refresh_token(token)
+        if not got:
+            settings.applog("steam-auth: capture_rejected:shape")
+            return False
+        with self._lock:
+            if self._sealed:
+                settings.applog("steam-auth: capture_rejected:sealed")
+                return False
+            if got in self._seen:
+                return True
+            self._seen.add(got)
+            self._tokens.append(got)
+        settings.applog("steam-auth: capture_accepted")
+        return True
+
+    def pending(self):
+        with self._lock:
+            return list(self._tokens)
+
+    def seal(self):
+        with self._lock:
+            self._sealed = True
+
+    @property
+    def token(self):
+        with self._lock:
+            return self._tokens[0] if self._tokens else None
 
 
 def _get(url, **kw):
@@ -116,12 +283,13 @@ def _save_accounts(accs):
 
 
 def _mark(sid, expired):
-    accs = accounts()
-    for a in accs:
-        if a["id"] == sid and a["expired"] != expired:
-            a["expired"] = expired
-            _save_accounts(accs)
-            return
+    with _cv:
+        accs = accounts()
+        for a in accs:
+            if a["id"] == sid and a["expired"] != expired:
+                a["expired"] = expired
+                _save_accounts(accs)
+                return
 
 
 def add_account(refresh):
@@ -147,19 +315,23 @@ def add_account(refresh):
 
 
 def remove_account(sid):
-    """Отвязать аккаунт: стереть его пропуск из Связки ключей и из памяти, убрать из списка и из библиотеки."""
+    """Отвязать аккаунт: стереть его пропуск из Связки ключей и из памяти, убрать из списка и из библиотеки.
+    Замок только на запись списка и кэша — сетевое обновление библиотеки его не держит, поэтому удаление
+    не ждёт Steam. Идущее обновление в конце сверяется со списком и не возвращает уже удалённый аккаунт."""
     sid = str(sid)
     if not sid.isdigit():
         raise VastgameError("Непонятный аккаунт", key="steam.bad_account")
     keystore.delete(_key(sid))
-    _access.pop(sid, None)
-    _save_accounts([a for a in accounts() if a["id"] != sid])
-    lib = cached()
-    if lib:
-        lib["games"] = [g for g in ({**g, "accounts": [x for x in g["accounts"] if x != sid],
-                                     "family": [x for x in g.get("family", []) if x != sid]} for g in lib["games"])
-                        if g["accounts"] or g["family"]]
-        _write(CACHE, lib)
+    with _cv:
+        _access.pop(sid, None)
+        _stores.pop(sid, None)
+        _save_accounts([a for a in accounts() if a["id"] != sid])
+        lib = cached()
+        if lib:
+            lib["games"] = [g for g in ({**g, "accounts": [x for x in g["accounts"] if x != sid],
+                                         "family": [x for x in g.get("family", []) if x != sid]} for g in lib["games"])
+                            if g["accounts"] or g["family"]]
+            _write(CACHE, lib)
 
 
 def key_names():
@@ -192,6 +364,9 @@ def _renew(sid, refresh):
         if r.status_code in (200, 400, 401, 403) and ("error" in j or not j.get("transfer_info")):
             raise SteamExpired("Вход в Steam истёк — войди заново", key="steam.expired", id=sid)
         raise VastgameError(f"Steam не продлил вход (HTTP {r.status_code})", key="steam.renew_failed", code=r.status_code)
+    # Открытая часть пропуска сама себя не подтверждает. Номер аккаунта берём из ответа Steam.
+    if str(j.get("steamID") or "") != sid:
+        raise VastgameError("Steam не подтвердил аккаунт", key="steam.login_failed")
     c = requests.Session()
     _post(hop["url"], session=c, data={**(hop.get("params") or {}), "steamID": j.get("steamID") or sid})
     cookie = c.cookies.get("steamLoginSecure")
@@ -320,71 +495,94 @@ def library(only=None):
     Аккаунт, вход которого истёк, помечается (expired) — его игры берутся из прошлого списка. Уже обновляет
     другой поток — прошлый список (он вот-вот обновится).
     [0.4.5] only — steamid только что добавленного аккаунта: из Steam — только его игры, у остальных — прошлый
-    список. Идёт полное обновление — дождаться его (оно могло начаться до входа и нового аккаунта не знать)."""
-    if not _lock.acquire(blocking=bool(only), timeout=120 if only else -1):
-        return cached() or {"accounts": accounts(), "games": [], "errors": []}
-    try:
-        old = {g["appid"]: g for g in (cached() or {}).get("games", [])}
-        games, errors = {}, []
-
-        def add(appid, name, sid, family=False, minutes=0, last=0, demo=False):
-            g = games.setdefault(appid, {"appid": appid, "name": name, "accounts": [], "family": [], "minutes": 0, "last": 0})
-            g["name"] = g["name"] or name
-            if demo:
-                g["demo"] = True
-            (g["family"] if family else g["accounts"]).append(sid)
-            g["minutes"] = max(g["minutes"], minutes or 0)
-            g["last"] = max(g["last"], last or 0)
-
-        def fetch(sid):
-            if only and sid != only:
-                return None, None, None              # не тот аккаунт — его прошлый список (ниже)
-            token = access(sid)
-            own = _owned(sid, token)
-            return own, _family(sid, token), _extras(sid, {str(x["appid"]) for x in own})
-
-        # [0.4.5] Аккаунты — одновременно (по очереди: ~3 с на аккаунт); итог разбираем по порядку, как раньше
+    список. Идёт полное обновление — дождаться его (оно могло начаться до входа и нового аккаунта не знать).
+    Запросы к Steam идут без замка. Перед записью кэша аккаунт, который за это время удалили, в список не возвращается."""
+    global _inflight
+    with _cv:
+        if _inflight:
+            if not only:
+                return cached() or {"accounts": accounts(), "games": [], "errors": []}
+            if not _cv.wait_for(lambda: not _inflight, 120):
+                return cached() or {"accounts": accounts(), "games": [], "errors": []}
+        _inflight = True
         accs = accounts()
-        with ThreadPoolExecutor(max(1, min(8, len(accs)))) as ex:
-            futs = [ex.submit(fetch, a["id"]) for a in accs]
-        for a, f in zip(accs, futs):
-            sid = a["id"]
-            try:
-                own, fam, extra = f.result()
-                if own is not None:
-                    _mark(sid, False)
-            except SteamExpired:
-                _mark(sid, True)
-                errors.append({"id": sid, "key": "steam.expired"})
-                own, fam, extra = None, None, None
-            except VastgameError as e:
-                errors.append({"id": sid, "key": e.key or "steam.net"})
-                own, fam, extra = None, None, None
-            if own is None:                                  # прошлый список этого аккаунта
-                for g in old.values():
-                    for s in g.get("accounts", []):
-                        if s == sid:
-                            add(g["appid"], g["name"], sid, False, g.get("minutes"), g.get("last"), g.get("demo"))
-                    for s in g.get("family", []):
-                        if s == sid:
-                            add(g["appid"], g["name"], sid, True)
-                continue
-            for x in own:
-                add(str(x["appid"]), x.get("name") or "", sid, False, x.get("playtime_forever"), x.get("rtime_last_played"))
-            for x in extra:                                  # бесплатные без игры и демо — как в Steam-клиенте
-                add(str(x["appid"]), x["name"], sid, False, 0, 0, x["demo"])
-            for x in fam:
-                if str(x["appid"]) not in {str(o["appid"]) for o in own}:
-                    add(str(x["appid"]), x.get("name") or "", sid, True, 0, x.get("rt_last_played"))
-        pics = art(list(games))
-        out = sorted(games.values(), key=lambda g: (-g["last"], g["name"].lower()))
+    try:
+        return _library_fetched(accs, only)
+    finally:
+        with _cv:
+            _inflight = False
+            _cv.notify_all()
+
+
+def _library_fetched(accs, only):
+    old = {g["appid"]: g for g in (cached() or {}).get("games", [])}
+    games, errors = {}, []
+
+    def add(appid, name, sid, family=False, minutes=0, last=0, demo=False):
+        g = games.setdefault(appid, {"appid": appid, "name": name, "accounts": [], "family": [], "minutes": 0, "last": 0})
+        g["name"] = g["name"] or name
+        if demo:
+            g["demo"] = True
+        (g["family"] if family else g["accounts"]).append(sid)
+        g["minutes"] = max(g["minutes"], minutes or 0)
+        g["last"] = max(g["last"], last or 0)
+
+    def fetch(sid):
+        if only and sid != only:
+            return None, None, None              # не тот аккаунт — его прошлый список (ниже)
+        token = access(sid)
+        own = _owned(sid, token)
+        return own, _family(sid, token), _extras(sid, {str(x["appid"]) for x in own})
+
+    # [0.4.5] Аккаунты — одновременно (по очереди: ~3 с на аккаунт); итог разбираем по порядку, как раньше.
+    # Снимок accs сделан под замком. Удалённый во время запросов аккаунт отсекается перед записью кэша.
+    with ThreadPoolExecutor(max(1, min(8, len(accs)))) as ex:
+        futs = [ex.submit(fetch, a["id"]) for a in accs]
+    for a, f in zip(accs, futs):
+        sid = a["id"]
+        try:
+            own, fam, extra = f.result()
+            if own is not None:
+                _mark(sid, False)
+        except SteamExpired:
+            _mark(sid, True)
+            errors.append({"id": sid, "key": "steam.expired"})
+            own, fam, extra = None, None, None
+        except VastgameError as e:
+            errors.append({"id": sid, "key": e.key or "steam.net"})
+            own, fam, extra = None, None, None
+        if own is None:                                  # прошлый список этого аккаунта
+            for g in old.values():
+                for s in g.get("accounts", []):
+                    if s == sid:
+                        add(g["appid"], g["name"], sid, False, g.get("minutes"), g.get("last"), g.get("demo"))
+                for s in g.get("family", []):
+                    if s == sid:
+                        add(g["appid"], g["name"], sid, True)
+            continue
+        for x in own:
+            add(str(x["appid"]), x.get("name") or "", sid, False, x.get("playtime_forever"), x.get("rtime_last_played"))
+        for x in extra:                                  # бесплатные без игры и демо — как в Steam-клиенте
+            add(str(x["appid"]), x["name"], sid, False, 0, 0, x["demo"])
+        for x in fam:
+            if str(x["appid"]) not in {str(o["appid"]) for o in own}:
+                add(str(x["appid"]), x.get("name") or "", sid, True, 0, x.get("rt_last_played"))
+    pics = art(list(games))
+    out = sorted(games.values(), key=lambda g: (-g["last"], g["name"].lower()))
+    for g in out:
+        g.update({k: (pics.get(g["appid"]) or {}).get(k, "") for k in ("cap", "hero", "header")})
+    with _cv:
+        live = {a["id"] for a in accounts()}
+        kept = []
         for g in out:
-            g.update({k: (pics.get(g["appid"]) or {}).get(k, "") for k in ("cap", "hero", "header")})
-        lib = {"accounts": accounts(), "games": out, "errors": errors, "at": int(time.time())}
+            g = {**g, "accounts": [s for s in g["accounts"] if s in live],
+                 "family": [s for s in g.get("family", []) if s in live]}
+            if g["accounts"] or g["family"]:
+                kept.append(g)
+        errors = [e for e in errors if e["id"] in live]
+        lib = {"accounts": accounts(), "games": kept, "errors": errors, "at": int(time.time())}
         _write(CACHE, lib)
         return lib
-    finally:
-        _lock.release()
 
 
 def cached():
