@@ -2385,11 +2385,45 @@ _steam_running() {
   return 1
 }
 
-# [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за минуту
+_steam_term() {
+  local exclude_pgid="${1:-0}" own_pgid="${2:-0}" p pg
+  for p in $(pgrep -x steam 2>/dev/null); do
+    [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null || continue
+    if [ -f "/proc/$p/stat" ]; then
+      pg=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null) || continue
+    else
+      pg=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ') || continue
+    fi
+    [ "$exclude_pgid" -gt 1 ] 2>/dev/null && [ "$pg" -eq "$exclude_pgid" ] 2>/dev/null && continue
+    [ "$own_pgid" -gt 1 ] 2>/dev/null && [ "$pg" -eq "$own_pgid" ] 2>/dev/null && continue
+    kill -TERM "$p" 2>/dev/null || true
+  done
+}
+
+_steam_settle() {
+  local settle="${WOLF_STEAM_OFF_SETTLE:-5}"
+  [ "$settle" -le 0 ] 2>/dev/null && return 0
+  local end=$(( $(date +%s) + settle ))
+  while true; do
+    if ! pgrep -x reaper >/dev/null 2>&1 && ! pgrep -x steamwebhelper >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$(date +%s)" -ge "$end" ] && break
+    sleep 0.5
+  done
+  if pgrep -x reaper >/dev/null 2>&1; then
+    log "steam_off: игра Steam (reaper) всё ещё запущена после закрытия Steam"
+    return 1
+  fi
+  return 0
+}
+
+# [v4.1] Закрыть Steam (он при выходе записывает библиотеку и настройки). 1 — не закрылся за отведённое время
 steam_off() {
   _steam_running || return 0
 
   local to="${WOLF_STEAM_OFF_TIMEOUT:-60}"
+  local term_grace="${WOLF_STEAM_OFF_TERM_GRACE:-15}"
   local steam_cmd="${WOLF_STEAM_BIN:-/usr/games/steam}"
   local runuser_cmd
   runuser_cmd=$(command -v runuser 2>/dev/null || echo "/usr/sbin/runuser")
@@ -2423,6 +2457,7 @@ steam_off() {
     return 1
   fi
 
+  local need_term=0
   while true; do
     # Обновляем подтверждённый PGID команды, если он ещё не установлен
     if [ -z "$cmd_pgid" ] && [ -n "$cmd_pid" ] && _pid_alive "$cmd_pid"; then
@@ -2440,12 +2475,19 @@ steam_off() {
     fi
 
     if ! _steam_running "$cmd_pgid"; then
+      if [ -z "$cmd_pgid" ] && { [ -z "$cmd_pid" ] || ! _pid_alive "$cmd_pid"; }; then
+        [ -n "$cmd_pid" ] && wait "$cmd_pid" 2>/dev/null || true
+        _steam_settle
+        return $?
+      fi
       _stop_cmd_group "$cmd_pid" "$cmd_pgid" "$dl" || return 1
-      return 0
+      _steam_settle
+      return $?
     fi
 
     now=$(date +%s)
     if [ "$now" -ge "$dl" ]; then
+      need_term=1
       break
     fi
 
@@ -2455,18 +2497,39 @@ steam_off() {
       wait "$cmd_pid" 2>/dev/null || cmd_rc=$?
       cmd_pid=""
       if [ "$cmd_rc" -ne 0 ] && [ "$cmd_rc" -ne 127 ]; then
-        log "steam_off: команда остановки Steam завершилась с ошибкой (код $cmd_rc)"
-        _stop_cmd_group "" "$cmd_pgid" "$dl" || true
-        return 1
+        log "steam_off: команда остановки Steam завершилась с ошибкой (код $cmd_rc) — пробую мягкий SIGTERM"
+        need_term=1
+        break
       fi
     fi
 
     sleep 0.5
   done
 
-  # Превышен общий бюджет времени: завершаем команду остановки, Steam остался
   _stop_cmd_group "$cmd_pid" "$cmd_pgid" "$dl" || true
-  log "steam_off: Steam не закрылся за отведённое время ($to с)"
+
+  # Мягкая эскалация: если Steam (например, во время обновления) проигнорировал -shutdown,
+  # отправляем SIGTERM и даём ему время штатно сохранить состояние и завершиться (без SIGKILL).
+  if [ "$need_term" -eq 1 ] && _steam_running; then
+    log "steam_off: Steam не закрылся по -shutdown — отправляю SIGTERM (ожидание до $term_grace с)"
+    _steam_term "$cmd_pgid" "$own_pgid"
+    local term_dl=$(( $(date +%s) + term_grace ))
+    while true; do
+      if ! _steam_running; then
+        log "steam_off: Steam закрылся по SIGTERM"
+        _steam_settle
+        return $?
+      fi
+      [ "$(date +%s)" -ge "$term_dl" ] && break
+      sleep 0.5
+    done
+  fi
+
+  if ! _steam_running; then
+    _steam_settle
+    return $?
+  fi
+  log "steam_off: Steam не закрылся за отведённое время ($to с + SIGTERM $term_grace с)"
   return 1
 }
 # [v5.3] Из аккаунта Steam вышли (Steam сам убрал его вход и пропуск) — убрать и его данные userdata/НОМЕР,

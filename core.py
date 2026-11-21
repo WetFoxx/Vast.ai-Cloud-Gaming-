@@ -207,7 +207,7 @@ def setup_env(tpl, name):
     return setup.env_value((tpl or {}).get("env"), name)
 
 
-def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
+def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None, label=None):
     """Тело запроса аренды. Переменные ниже перекрывают шаблон только для этой аренды:
     games — "1"/"0" для SYNC_STEAM_GAMES (терминал: --games/--no-games);
     sync — {"steam_games": bool, "other_games": bool, "saves": bool} (тумблеры в окне); с выбором игр (v4.6) —
@@ -215,8 +215,10 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
     знают и смотрят на тумблеры — их окно выставляет по выбору).
     docker — образ vastgame-desktop вместо шаблона KVM: тот же wolf-setup.sh (образ скачивает его по
     WOLF_SCRIPT_URL), настройки разрешения и языка Steam — из шаблона, порт Tailscale для прямой связи.
-    lang — язык окна (ru/en/es): язык Steam на машине, если в шаблоне не задан свой (steam_lang)."""
+    lang — язык окна (ru/en/es): язык Steam на машине, если в шаблоне не задан свой (steam_lang).
+    label — метка инстанса в Vast.ai (по умолчанию "vastgame"; для привязки к операции — "vastgame:<run_id>")."""
     dev = not getattr(sys, "frozen", False)
+    inst_label = label or "vastgame"
     if docker:
         import setup      # адрес скрипта Docker — setup.DOCKER_SCRIPT_URL (setup не импортирует core)
         # VASTGAME_SCRIPT_URL — проверка скрипта до публикации (только запуск из папки проекта; в собранном .app отключено):
@@ -231,13 +233,15 @@ def rental_body(tpl, disk, games=None, sync=None, docker=False, lang=None):
         # VASTGAME_FORCE_HEADLESS=1 — экран без монитора на любом хосте (режим хостов без прав на выход видеокарты)
         if dev and os.environ.get("VASTGAME_FORCE_HEADLESS") == "1":
             env["VG_FORCE_HEADLESS"] = "1"
+        if dev and os.environ.get("VASTGAME_TEST_GDRIVE_REMOTE"):
+            env["R_REMOTE"] = os.environ["VASTGAME_TEST_GDRIVE_REMOTE"]
         res = setup.env_value(tpl.get("env"), "RES")
         if res:
             env["RES"] = res
-        body = {"client_id": "me", "image": (os.environ.get("VASTGAME_IMAGE") if dev else None) or DOCKER_IMAGE, "disk": disk, "label": "vastgame",
+        body = {"client_id": "me", "image": (os.environ.get("VASTGAME_IMAGE") if dev else None) or DOCKER_IMAGE, "disk": disk, "label": inst_label,
                 "runtype": "args", "args": ["start"], "env": env}
     else:
-        body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": "vastgame"}
+        body = {"client_id": "me", "template_hash_id": tpl["hash_id"], "disk": disk, "label": inst_label}
         env = {}
         # [2026-10-15] Проверка скрипта на KVM до публикации (только запуск из папки проекта; в собранном .app отключено):
         # VASTGAME_KVM_SCRIPT_URL=https://raw.githubusercontent.com/…/<коммит>/wolf-setup.sh — разовый загрузчик вместо
@@ -1000,6 +1004,8 @@ def stop(ui, dry_run=False, expected_id=None):
             f"Сейчас работает машина {iid}, а повторить выгрузку можно только для {expected_id}. "
             "Finish не отправляю.",
             key="core.finish_machine_changed", id=iid, expected=int(expected_id))
+    if hasattr(ui, "set_meta"):
+        ui.set_meta(iid=iid)
     ui.say(f"Инстанс {iid}, узел {dns or ip}", key="core.stop_machine", id=iid, name=dns or ip)
     before = wolf_status(ip)
     # [2026-10-15] Короткий обрыв связи (живой случай: страница машины не ответила один раз, через 15 с — ответила) —
@@ -1010,7 +1016,7 @@ def stop(ui, dry_run=False, expected_id=None):
         before = wolf_status(ip)
     if before is None:
         raise VastgameError("Страница статуса wolf не отвечает — НЕ удаляю. Проверь машину.",
-                            key="core.no_status_page")
+                            key="core.no_status_page", id=iid)
     boot = before.get("boot")
     if not boot or boot[1] != "ok":
         ui.say(f"!!! Загрузка ещё не закончена или с ошибкой: boot = {boot[1] if boot else 'нет'} "
@@ -1025,7 +1031,7 @@ def stop(ui, dry_run=False, expected_id=None):
     if code != 0 or out.strip() != "ok":
         raise VastgameError(f"Машина не выполняет команды (код {code}): {out.strip()[:200]}\n"
                             "НЕ удаляю. Выгрузи вручную на машине: sudo wolf shutdown",
-                            key="core.ssh_failed", code=code, out=out.strip()[:200])
+                            key="core.ssh_failed", id=iid, code=code, out=out.strip()[:200])
     ui.say("Связь с машиной: работает.", "ok", key="core.ssh_ok")
     if dry_run:
         return {"iid": iid, "archives": before}
@@ -1033,7 +1039,8 @@ def stop(ui, dry_run=False, expected_id=None):
     # ---- wolf shutdown; время берём с машины, чтобы сравнивать с ts в /json по одним часам
     code, out = _on_machine(ip, "time", timeout=60, on_notice=ui.tailscale)
     if code != 0 or not out.strip().isdigit():
-        raise VastgameError("Не удалось узнать время на машине — НЕ запускаю выгрузку.", key="core.no_clock")
+        raise VastgameError("Не удалось узнать время на машине — НЕ запускаю выгрузку.",
+                            key="core.no_clock", id=iid)
     t0 = int(out.strip()) - 2
     ui.stage("shutdown", "Закрываю Steam и выгружаю всё в Google Drive (может занять несколько минут)...")
     # wolf finish (v3.11+): машина сама выгружает, проверяет и удаляет себя отдельной службой —
@@ -1091,13 +1098,20 @@ def _follow_finish(ui, iid, ip, t0):
     # получаса, и бросать слежение, пока проценты растут, незачем (живой случай 2026-10-09, FF14 98 ГБ)
     deadline = time.time() + SHUTDOWN_MIN * 60
     seen, last_check, fin, s, moved = {}, time.time(), None, {}, {}
+    last_finish_state = None
     while True:
+        if getattr(ui, "cancelled", lambda: False)():
+            raise VastgameError("Операция прервана аварийным удалением.", key="core.emergency_aborted", id=iid)
         s = wolf_status(ip)
         now = {n: (tuple(r), (getattr(r, "progress", None) or {}).get("done")) for n, r in (s or {}).items()}
         if s and now != moved:
             moved = now
             deadline = time.time() + SHUTDOWN_MIN * 60
         if s is None and _alive(iid) is False:
+            if last_finish_state == "err" or any(v[0] == "err" for v in seen.values()):
+                raise VastgameError(f"!!! Инстанс {iid} удалён во время выгрузки (не этой командой).\n"
+                                    "Что успело выгрузиться — выше; остальное не дошло до Drive.",
+                                    key="core.deleted_during", id=iid)
             # Машины нет, а итог мы не видели — связи не было, пока она заканчивала. wolf finish уже
             # был запущен (ответил «запущено»), а удаляет себя машина ТОЛЬКО после подтверждённой
             # выгрузки — значит, всё в облаке. (Иначе её удалили вручную на сайте — редкость.)
@@ -1111,7 +1125,9 @@ def _follow_finish(ui, iid, ip, t0):
             if name == "finish":
                 if state == "up" and ts < t0:
                     t0 = ts        # finish уже шёл (продолжаем после перерыва) — проверяем с его начала
-                elif ts >= t0 and state in ("ok", "err"):
+                if ts >= t0:
+                    last_finish_state = state
+                if ts >= t0 and state in ("ok", "err"):
                     fin = (ts, state, text)
                 continue
             if ts >= t0 and seen.get(name) != (state, text):
@@ -1128,7 +1144,7 @@ def _follow_finish(ui, iid, ip, t0):
         if time.time() > deadline:
             raise VastgameError(f"!!! Выгрузка на машине {SHUTDOWN_MIN} минут не двигается. Машина "
                                 "продолжает сама и удалит себя, если выгрузка подтвердится. Посмотри /var/log/wolf.log.",
-                                key="core.finish_timeout", min=SHUTDOWN_MIN)
+                                key="core.finish_timeout", min=SHUTDOWN_MIN, id=iid)
         time.sleep(5)
     if fin[1] == "err":
         raise VastgameError(f"!!! Выгрузка НЕ подтверждена (проверка на машине): {fin[2]}\nИнстанс НЕ удалён.",
@@ -1147,6 +1163,9 @@ def _shutdown_over_ssh(ui, iid, ip, t0):
     deadline = time.time() + SHUTDOWN_MIN * 60
     last_check = time.time()
     while True:
+        if getattr(ui, "cancelled", lambda: False)():
+            proc.kill()
+            raise VastgameError("Операция прервана аварийным удалением.", key="core.emergency_aborted", id=iid)
         # Раз в минуту — жив ли инстанс: его могли удалить в консоли Vast посреди выгрузки
         if time.time() - last_check > 60:
             last_check = time.time()
@@ -1165,13 +1184,13 @@ def _shutdown_over_ssh(ui, iid, ip, t0):
         if time.time() > deadline:
             proc.kill()
             raise VastgameError(f"!!! wolf shutdown не закончился за {SHUTDOWN_MIN} минут — НЕ удаляю. "
-                                "Посмотри /var/log/wolf.log.", key="core.shutdown_timeout", min=SHUTDOWN_MIN)
+                                "Посмотри /var/log/wolf.log.", key="core.shutdown_timeout", min=SHUTDOWN_MIN, id=iid)
         time.sleep(5)
     reader.join(5)
     if proc.returncode != 0:
         tail = "".join(output).strip()[-300:]
         raise VastgameError(f"!!! SSH/wolf shutdown завершился с кодом {proc.returncode}: {tail}\nНЕ удаляю.",
-                            key="core.shutdown_failed", code=proc.returncode, out=tail)
+                            key="core.shutdown_failed", code=proc.returncode, out=tail, id=iid)
 
 
 
@@ -1183,7 +1202,7 @@ def _verify_and_delete(ui, iid, after, t0, self_delete=False):
     ui.stage("verify", "Проверяю выгрузку...")
     if after is None:
         raise VastgameError("!!! Страница статуса не отвечает после выгрузки — НЕ удаляю.",
-                            key="core.no_status_after")
+                            key="core.no_status_after", id=iid)
     fresh = {n: v for n, v in after.items() if v[0] >= t0 and n not in ("boot", "finish", *NOT_ARCHIVES)}
     bad = {n: v for n, v in fresh.items() if v[1] in ("up", "down", "err")}
     old_err = {n: v for n, v in after.items() if v[0] < t0 and v[1] == "err" and n not in NOT_ARCHIVES}
@@ -1231,27 +1250,101 @@ def _verify_and_delete(ui, iid, after, t0, self_delete=False):
     return {"iid": iid, "uploaded": uploaded, "deleted": gone}
 
 
-def emergency_delete(expected_id):
-    """Удалить машину БЕЗ выгрузки — для зависшей или сломанной. Удаляет только машину с номером
-    expected_id (её человек видел в окне и дважды подтвердил); если сейчас другая — VastgameError.
-    Возвращает True, если машина исчезла из списка, False — если Vast ещё не убрал её."""
+def find_instances_by_run_id(run_id):
+    """Достоверно найти инстансы Vast.ai, принадлежащие конкретной операции по метке vastgame:<run_id>.
+
+    Возвращает (matched_ids, all_ids). Никогда не выбирает чужие или неподтверждённые инстансы.
+    """
+    insts = list_instances()
+    all_ids = [i["id"] for i in insts]
+    if not run_id:
+        return [], all_ids
+    expected_label = f"vastgame:{run_id}"
+    matched = [i["id"] for i in insts if (i.get("label") or "") == expected_label]
+    return matched, all_ids
+
+
+def emergency_delete(expected_id=None):
+    """Удалить машину БЕЗ выгрузки — для зависшей или сломанной, независимо от Steam/Moonlight/Drive/Tailscale.
+
+    Удаляет ТОЛЬКО машину с явно подтверждённым номером expected_id.
+    Никогда не выбирает инстанс автоматически только потому, что он единственный или самый новый.
+    Возвращает True, если прекращение аренды подтверждено списком Vast,
+    False — если Vast принял DELETE, но машина всё ещё в списке.
+    Если ответ API потерян или подтвердить удаление не удалось — VastgameError (core.delete_uncertain / core.delete_failed).
+    """
+    if expected_id is None:
+        raise VastgameError(
+            "Принадлежность инстанса не подтверждена (отсутствует ID машины). "
+            "Автоматическое удаление отменено — проверь и удали инстанс вручную на сайте Vast.ai.",
+            key="core.instance_unconfirmed", id="?")
+    expected_id = int(expected_id)
     t = time.time()
     _trace(f"удалить без выгрузки {expected_id}: начало")
-    inst = list_instances()
-    _trace(f"удалить без выгрузки {expected_id}: список машин от Vast за {time.time() - t:.1f} с")
-    if not inst:
-        raise VastgameError("Инстансов нет — удалять нечего.", key="core.no_instances")
-    ids = [i["id"] for i in inst]
-    if expected_id not in ids:
-        raise VastgameError(f"Машины {expected_id} уже нет (сейчас: {', '.join(map(str, ids))}) — ничего не удаляю.",
-                            key="core.emergency_mismatch", id=expected_id)
-    ok, msg = delete_instance(expected_id)
+    inst = None
+    try:
+        inst = list_instances()
+        _trace(f"удалить без выгрузки {expected_id}: список машин от Vast за {time.time() - t:.1f} с")
+    except VastgameError as e:
+        _trace(f"удалить без выгрузки {expected_id}: list_instances не ответил ({e})")
+    if inst is not None:
+        if not inst:
+            raise VastgameError("Инстансов нет — удалять нечего.", key="core.no_instances")
+        ids = [i["id"] for i in inst]
+        if expected_id not in ids:
+            raise VastgameError(f"Машины {expected_id} уже нет (сейчас: {', '.join(map(str, ids))}) — ничего не удаляю.",
+                                key="core.emergency_mismatch", id=expected_id)
+
+    try:
+        ok, msg = delete_instance(expected_id)
+    except VastgameError as del_err:
+        _trace(f"удалить без выгрузки {expected_id}: ошибка/обрыв DELETE ({del_err}), перепроверяю наличие")
+        there = _still_there(expected_id)
+        if there is False:
+            history.ended(expected_id)
+            _trace(f"удалить без выгрузки {expected_id}: несмотря на обрыв ответа, машины нет у Vast")
+            return True
+        if there is True:
+            raise VastgameError(
+                f"Vast не удалил инстанс {expected_id}: {del_err}. Машина может продолжать тарифицироваться — "
+                "попробуй ещё раз или удали вручную на сайте Vast.ai.",
+                key="core.delete_failed", id=expected_id, msg=str(del_err)) from None
+        raise VastgameError(
+            f"Результат удаления инстанса {expected_id} не подтверждён ({del_err}). "
+            "Машина может продолжать тарифицироваться — проверь и удали вручную на сайте Vast.ai.",
+            key="core.delete_uncertain", id=expected_id, msg=str(del_err)) from None
+
     if not ok:
-        raise VastgameError(f"Vast не удалил инстанс: {msg}", key="core.delete_failed", msg=msg or "")
+        there = _still_there(expected_id)
+        if there is False:
+            history.ended(expected_id)
+            return True
+        if there is None:
+            raise VastgameError(
+                f"Результат удаления инстанса {expected_id} не подтверждён ({msg or 'нет ответа'}). "
+                "Машина может продолжать тарифицироваться — проверь и удали вручную на сайте Vast.ai.",
+                key="core.delete_uncertain", id=expected_id, msg=msg or "")
+        raise VastgameError(
+            f"Vast не удалил инстанс {expected_id}: {msg}. Машина может продолжать тарифицироваться — "
+            "удали вручную на сайте Vast.ai.",
+            key="core.delete_failed", id=expected_id, msg=msg or "")
+
+    saw_list_ok = False
     for _ in range(6):
         time.sleep(5)
-        if expected_id not in [i["id"] for i in list_instances()]:
+        try:
+            cur_ids = [i["id"] for i in list_instances()]
+            saw_list_ok = True
+        except VastgameError as e:
+            _trace(f"удалить без выгрузки {expected_id}: ошибка проверки списка ({e})")
+            continue
+        if expected_id not in cur_ids:
             _trace(f"удалить без выгрузки {expected_id}: машины нет через {time.time() - t:.1f} с")
             return True
+    if not saw_list_ok:
+        raise VastgameError(
+            f"Vast принял запрос на удаление {expected_id}, но подтвердить исчезновение машины не удалось. "
+            "Она может продолжать тарифицироваться — проверь на сайте Vast.ai.",
+            key="core.delete_uncertain", id=expected_id, msg="verification_failed")
     _trace(f"удалить без выгрузки {expected_id}: через {time.time() - t:.1f} с машина ещё в списке Vast")
     return False

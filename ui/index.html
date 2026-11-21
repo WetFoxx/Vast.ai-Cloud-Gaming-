@@ -143,6 +143,15 @@
       </div>
       <div class="lib-strip" id="lib-strip"></div>
     </section>
+    <section class="card attention" id="unresolved-card" hidden>
+      <div class="title" data-i18n="rental.unresolved.title"></div>
+      <div class="sub" id="unresolved-text"></div>
+      <div class="actions">
+        <button class="primary small" id="unresolved-recheck" data-i18n="rental.unresolved.recheck"></button>
+        <button class="small" id="unresolved-vast" data-i18n="emergency.open_vast"></button>
+        <button class="link small" id="unresolved-dismiss" data-i18n="rental.unresolved.dismiss"></button>
+      </div>
+    </section>
     <div class="error" id="error" hidden></div>
     <button class="link" id="diagnostics-home" data-i18n="diagnostics.open"></button>
   </main>
@@ -380,6 +389,7 @@
         <div class="sub" data-i18n="finish.hold.text"></div>
         <div class="actions">
           <button class="primary" id="finish-retry" data-i18n="finish.retry"></button>
+          <button class="danger" id="finish-emergency" data-i18n="btn.emergency"></button>
           <button id="finish-back" data-i18n="finish.back"></button>
         </div>
       </section>
@@ -401,6 +411,7 @@
         <button id="progress-replace" hidden data-i18n="task.replace"></button>
         <button id="diagnostics-progress" data-i18n="diagnostics.open"></button>
         <button class="danger" id="progress-cancel" hidden data-i18n="progress.cancel"></button>
+        <button class="danger" id="progress-emergency" hidden data-i18n="btn.emergency"></button>
       </div>
     </aside>
   </main>

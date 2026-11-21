@@ -23,7 +23,28 @@ function num(x, digits = 1) {
   return new Intl.NumberFormat(LANG, { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(x);
 }
 function errText(e) { return e && e.key ? t(e.key, e.params || {}) : (e && e.text) || String(e); }
-function showError(id, e) { const el = $(id); el.hidden = !e; el.textContent = e ? errText(e) : ""; }
+const VAST_MANUAL_DELETE_KEYS = new Set([
+  "core.delete_failed", "core.delete_uncertain", "core.delete_pending",
+  "core.cancel_delete_failed", "core.instance_unconfirmed",
+]);
+function showError(id, e) {
+  const el = $(id);
+  el.hidden = !e;
+  el.innerHTML = "";
+  if (!e) return;
+  el.appendChild(document.createTextNode(errText(e)));
+  if (e && VAST_MANUAL_DELETE_KEYS.has(e.key)) {
+    const wrap = document.createElement("div");
+    wrap.style.marginTop = "8px";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "link";
+    btn.textContent = t("emergency.open_vast");
+    btn.addEventListener("click", () => { if (!DEMO) api().open_url("https://cloud.vast.ai/instances/"); });
+    wrap.appendChild(btn);
+    el.appendChild(wrap);
+  }
+}
 // Размер: «340 МБ» или «62,1 ГБ» — сохранения обычно весят мегабайты
 function size(bytes) {
   return bytes >= 1e9 ? t("unit.gb", { n: num(bytes / 1e9, 1) }) : t("unit.mb", { n: num(bytes / 1e6, 0) });
@@ -202,7 +223,30 @@ function setBalance(value) {
   requestAnimationFrame(step);
 }
 
+let unresolvedTopRunId = null;
+function renderUnresolvedRentals(items) {
+  const card = $("unresolved-card");
+  if (!card) return;
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    card.hidden = true;
+    unresolvedTopRunId = null;
+    return;
+  }
+  const top = list[0];
+  unresolvedTopRunId = top.run_id || null;
+  const idInfo = top.iid != null ? String(top.iid)
+    : (top.matched_iids && top.matched_iids.length ? top.matched_iids.join(", ") : "?");
+  $("unresolved-text").textContent = t("rental.unresolved.text", {
+    id: idInfo,
+    count: list.length,
+    state: top.state || "uncertain",
+  });
+  card.hidden = false;
+}
+
 function render(data) {
+  renderUnresolvedRentals(data.unresolved_rentals);
   if (data.error) { $("diagnostics-home").hidden = false; showError("error", data.error); return; }
   showError("error", null);
   current = data;
@@ -264,7 +308,8 @@ function render(data) {
   // «Закончить» — когда машина работает (не во время запуска); аварийное удаление — пока машина есть
   $("foot").hidden = !m;
   $("stop").disabled = !m || !["ready", "syncing", "error"].includes(st.state) || !!data.busy;
-  $("emergency").hidden = !m || !!data.busy;
+  // Аварийное удаление всегда доступно, если есть машина (даже во время зависшего подключения или выгрузки)
+  $("emergency").hidden = !m;
   // [2026-10-15] «Удалить без выгрузки» — в «Параметрах трансляции», пока они есть; машина без адресов — под карточкой
   const dangerIn = $("links").hidden ? $("foot") : $("params-danger");
   if ($("emergency").parentElement !== dangerIn) dangerIn.prepend($("emergency"));
@@ -1723,18 +1768,64 @@ $("stop").addEventListener("click", async () => {
   startProgress("stop");
 });
 
+async function runEmergencyDelete(targetId, errBoxId, btn, { fromProgress = false } = {}) {
+  const idLabel = targetId == null ? "?" : targetId;
+  // Два вопроса: что пропадёт — и что это нельзя отменить
+  if (!(await ask({ title: t("emergency.title1"), text: t("emergency.text1"), yes: t("btn.emergency"), no: t("btn.cancel") }))) return;
+  if (!(await ask({ title: t("emergency.title2"), text: t("emergency.text2", { id: idLabel }), yes: t("btn.emergency"), no: t("btn.cancel") }))) return;
+  if (btn) btn.disabled = true;
+  if (fromProgress) {
+    $("progress-note").hidden = false;
+    $("progress-note").textContent = t("emergency.working");
+  } else {
+    $("status-text").textContent = t("emergency.working");
+  }
+  const r = DEMO ? { ok: true, gone: true } : await api().emergency_delete(targetId == null ? null : targetId);
+  if (btn) btn.disabled = false;
+  if (r && r.error) {
+    showError(errBoxId, r.error);
+    return;
+  }
+  if (!r || !r.gone) {
+    showError(errBoxId, { key: "core.delete_pending", params: { id: idLabel } });
+    if (!fromProgress) refresh();
+    return;
+  }
+  if (fromProgress) {
+    clearInterval(progTimer);
+    if (!DEMO) api().session_seen();
+    show("main");
+  }
+  showError("error", { text: t("emergency.done", { id: idLabel }) });
+  refresh();
+}
+
 $("emergency").addEventListener("click", async () => {
   const m = current && current.status.machine;
   if (!m) return;
-  // Два вопроса: что пропадёт — и что это нельзя отменить
-  if (!(await ask({ title: t("emergency.title1"), text: t("emergency.text1"), yes: t("btn.emergency"), no: t("btn.cancel") }))) return;
-  if (!(await ask({ title: t("emergency.title2"), text: t("emergency.text2", { id: m.id }), yes: t("btn.emergency"), no: t("btn.cancel") }))) return;
-  $("emergency").disabled = true;
-  $("status-text").textContent = t("emergency.working");
-  const r = DEMO ? { ok: true, gone: true } : await api().emergency_delete(m.id);
-  $("emergency").disabled = false;
-  if (r.error) { showError("error", r.error); return; }
-  showError("error", { text: r.gone ? t("emergency.done", { id: m.id }) : t("core.delete_pending", { id: m.id }) });
+  await runEmergencyDelete(m.id, "error", $("emergency"), { fromProgress: false });
+});
+
+$("unresolved-recheck").addEventListener("click", async () => {
+  if (DEMO) return;
+  $("unresolved-recheck").disabled = true;
+  try {
+    const r = await api().reconcile_rentals();
+    if (r && r.unresolved) renderUnresolvedRentals(r.unresolved);
+    refresh();
+  } finally {
+    $("unresolved-recheck").disabled = false;
+  }
+});
+
+$("unresolved-vast").addEventListener("click", () => {
+  if (!DEMO) api().open_url("https://cloud.vast.ai/instances/");
+});
+
+$("unresolved-dismiss").addEventListener("click", async () => {
+  if (DEMO || !unresolvedTopRunId) return;
+  const r = await api().dismiss_unresolved_rental(unresolvedTopRunId);
+  if (r && r.unresolved) renderUnresolvedRentals(r.unresolved);
   refresh();
 });
 
@@ -2895,6 +2986,8 @@ function startProgress(kind = "play") {
   $("progress-offers").hidden = true;
   $("progress-cancel").hidden = kind !== "play";
   $("progress-cancel").disabled = false;
+  $("progress-emergency").hidden = kind !== "stop";
+  $("progress-emergency").disabled = false;
   $("progress-home").hidden = false;
   $("progress-replace").hidden = kind !== "play";
   $("progress-note").hidden = false;
@@ -3039,6 +3132,7 @@ async function pollOnce() {
   // Ход «Играть»/«Закончить» — из фонового процесса (он живёт и без окна)
   const p = DEMO ? demoProgress() : await api().session_progress(prog.since);
   if (!p) return;
+  if (p.iid != null) prog.iid = p.iid;
   if (p.game_names) GAME_NAMES = p.game_names;
   if (p.kind && p.kind !== prog.kind) {          // окно открыли заново посреди операции — узнаём какой
     prog.kind = p.kind;
@@ -3046,6 +3140,7 @@ async function pollOnce() {
       : t("progress.title." + p.kind);
     $("progress-note").textContent = t(p.kind === "stop" ? "progress.background_stop" : "progress.background");
     $("progress-cancel").hidden = p.kind !== "play";
+    $("progress-emergency").hidden = p.kind !== "stop";
     $("progress-replace").hidden = p.kind !== "play";
   }
   for (const ev of p.events) {
@@ -3093,13 +3188,14 @@ async function pollOnce() {
   if (p.done) {
     clearInterval(progTimer);
     $("progress-cancel").hidden = true;
+    $("progress-emergency").hidden = true;
     $("progress-home").hidden = true;
     $("progress-replace").hidden = true;
     $("progress-note").hidden = true;
     $("progress-back").hidden = false;
     if (p.error) showError("progress-error", p.error);
     const hold = !!(p.error && FINISH_HOLD.includes(p.error.key));
-    showFinishHold(hold, hold ? (p.error.params || {}).id : null);
+    showFinishHold(hold, hold ? ((p.error.params || {}).id ?? prog.iid ?? (current && current.status.machine && current.status.machine.id)) : null);
     // К списку машин: выбранную заняли, или она не запустилась, а замены «не хуже» нет — выбирает человек
     $("progress-offers").hidden = !(p.error && TO_LIST.includes(p.error.key));
     $("tailscale-box").hidden = true;
@@ -3119,9 +3215,18 @@ $("progress-cancel").addEventListener("click", async () => {
   if (r && r.error) { showError("progress-error", r.error); $("progress-cancel").disabled = false; }
 });
 
+$("progress-emergency").addEventListener("click", async () => {
+  const id = (prog && prog.iid != null) ? prog.iid : (current && current.status.machine ? current.status.machine.id : null);
+  await runEmergencyDelete(id, "progress-error", $("progress-emergency"), { fromProgress: true });
+});
+
 $("tailscale-open").addEventListener("click", () => { if (prog && prog.tsUrl && !DEMO) api().open_url(prog.tsUrl); });
 
-const FINISH_HOLD = ["core.upload_unconfirmed", "core.finish_failed"];
+const FINISH_HOLD = [
+  "core.upload_unconfirmed", "core.finish_failed", "core.finish_timeout",
+  "core.no_status_page", "core.no_status_after", "core.ssh_failed",
+  "core.no_clock", "core.shutdown_failed", "core.shutdown_timeout", "core.no_node",
+];
 
 function showFinishHold(on, id) {
   $("progress-hold").hidden = !on;
@@ -3136,6 +3241,11 @@ $("finish-retry").addEventListener("click", async () => {
   $("finish-retry").disabled = false;
   if (r && r.error) { showError("progress-error", r.error); return; }
   startProgress("stop");
+});
+
+$("finish-emergency").addEventListener("click", async () => {
+  const id = finishIid != null ? finishIid : (prog && prog.iid != null ? prog.iid : (current && current.status.machine ? current.status.machine.id : null));
+  await runEmergencyDelete(id, "progress-error", $("finish-emergency"), { fromProgress: true });
 });
 
 $("finish-back").addEventListener("click", () => {

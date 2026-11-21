@@ -45,6 +45,7 @@ import wolfnode
 import notify
 import settings
 import paths
+import rental_journal
 import setup
 import setupcheck
 import snapshot
@@ -112,6 +113,9 @@ class Api:
         self._front = None                  # приложение, которое было впереди до карточки (Moonlight) — вернуть
         self._answer_lock = threading.Lock()  # ответы машине — по одному (второй сразу мог бы потеряться)
         self._steam_lock = threading.Lock()   # окно входа Steam — одно
+        self._emergency_lock = threading.Lock()  # аварийное удаление — независимо от _busy(), но без дублей клика
+        self._reconcile_lock = threading.Lock()  # фоновый single-flight reconciliation (не блокирует UI)
+        self._reconcile_running = False
         self._template_refresh_lock = threading.Lock()
         self._template_refresh_attempted = False
         self._diagnostics = diagnostics.SessionReport()
@@ -162,7 +166,7 @@ class Api:
         try:
             st, credit = parallel.run(core.status, core.balance)
         except VastgameError as e:   # подвид SystemExit — ловим явно, иначе поток тихо завершится
-            result = {"error": error_data(e)}
+            result = {"error": error_data(e), "unresolved_rentals": rental_journal.unresolved()}
             self._diagnostic_peer = None
             self._diagnostics.observe_action("machine_status", result)
             return result
@@ -180,13 +184,54 @@ class Api:
         except OSError:
             pass   # запись истории не должна ломать главный экран
         d = jobs.state()
+        active_run_id = d.get("run_id") if (d and d.get("active") and d.get("kind") == "play") else None
+        if rental_journal.unresolved(include_dismissed=True):
+            self._trigger_background_reconcile(active_run_id)
         task = d and {"kind": d["kind"], "active": d["active"], "unseen": d["done"] and not d.get("seen")}
         notify.low_balance(credit, price, lang)
         return {"balance": credit, "low_balance": credit < LOW_BALANCE, "session": session, "task": task,
                 "hours_left": credit / price if price else None, "status": {**st, "progs": self._progs(st.get("progs"))},
                 "game_names": self._game_names(st["archives"]), "busy": self._busy(),
+                "unresolved_rentals": rental_journal.unresolved(),
+                "reconciling": self._reconcile_running,
                 "play_now": settings.get("play_now") if st["machine"] or task else None,
                 "last_game": settings.get("last_game") or settings.get("play_now")}
+
+    def _trigger_background_reconcile(self, active_run_id=None):
+        """Запустить фоновую сверку незавершённых аренд (single-flight), не блокируя UI-поток state()."""
+        if not self._reconcile_lock.acquire(blocking=False):
+            return False
+        self._reconcile_running = True
+
+        def _run():
+            try:
+                rental_journal.reconcile_pending(core_mod=core, active_run_id=active_run_id, polls=1, step=0.0)
+            except Exception:
+                pass
+            finally:
+                self._reconcile_running = False
+                self._reconcile_lock.release()
+
+        threading.Thread(target=_run, daemon=True).start()
+        return True
+
+    def reconcile_rentals(self):
+        """Повторная сверка незавершённых/неопределённых аренд с Vast.ai API по запросу пользователя."""
+        if not self._reconcile_lock.acquire(blocking=False):
+            return {"ok": True, "reconciling": True, "results": {}, "unresolved": rental_journal.unresolved()}
+        self._reconcile_running = True
+        try:
+            d = jobs.state()
+            active_run_id = d.get("run_id") if (d and d.get("active") and d.get("kind") == "play") else None
+            results = rental_journal.reconcile_pending(core_mod=core, active_run_id=active_run_id, polls=2, step=1.0)
+            return {"ok": True, "reconciling": False, "results": results, "unresolved": rental_journal.unresolved()}
+        finally:
+            self._reconcile_running = False
+            self._reconcile_lock.release()
+
+    def dismiss_unresolved_rental(self, run_id):
+        """Скрыть предупреждение после ручной проверки пользователем в консоли Vast.ai."""
+        return {"ok": rental_journal.dismiss(run_id), "unresolved": rental_journal.unresolved()}
 
     def _game_names(self, archive_names):
         missing = [n for n in archive_names if n.startswith("pfx--") and n[5:] not in self._names]
@@ -424,25 +469,79 @@ class Api:
 
         expected_id — «Повторить выгрузку»: только машина из неудавшейся операции.
         """
-        settings.applog(f"закончить: нажато, Moonlight {'идёт' if moonlight.streaming() else 'не идёт'}"
+        try:
+            ml_state = "идёт" if moonlight.streaming() else "не идёт"
+        except Exception:
+            ml_state = "неизвестно"
+        settings.applog(f"закончить: нажато, Moonlight {ml_state}"
                         + (f", повтор для {expected_id}" if expected_id is not None else ""))
+        d = jobs.state()
+        if d and d.get("active") and d.get("kind") == "stop":
+            return {"ok": True, "attached": True}
         if self._busy():
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         if not jobs.spawn("stop", lang=lang, expected_id=expected_id):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         return {"ok": True}
 
-    def emergency_delete(self, machine_id):
-        """Удалить машину без выгрузки. Страница уже дважды спросила; удаляем только машину,
-        которую человек видел (machine_id), и только когда не идёт другая операция."""
-        settings.applog(f"удалить без выгрузки: нажато, Moonlight {'идёт' if moonlight.streaming() else 'не идёт'}")
-        if self._busy():
+    def emergency_delete(self, machine_id=None):
+        """Удалить машину без выгрузки — независимо от состояния подключения, Steam, Moonlight,
+        Google Drive и любых активных/зависших операций (play/stop/setup).
+        Страница уже дважды подтвердила потерю несинхронизированных данных.
+        Никогда не выбирает инстанс «наугад» (только по явному ID или подтверждённой метке vastgame:<run_id>)."""
+        settings.applog(f"удалить без выгрузки: нажато (machine_id={machine_id})")
+        if not self._emergency_lock.acquire(blocking=False):
             return {"error": {"key": "busy", "params": {}, "text": "busy"}}
         try:
-            gone = core.emergency_delete(int(machine_id))
-        except VastgameError as e:
-            return {"error": error_data(e)}
-        return {"ok": True, "gone": gone}
+            target_id = int(machine_id) if machine_id is not None else None
+            aborted = jobs.abort_active(iid=target_id)
+            run_id = aborted.get("run_id")
+            if target_id is None:
+                job_iids = aborted.get("iids") or []
+                if len(job_iids) == 1:
+                    target_id = job_iids[0]
+                elif len(job_iids) == 0 and run_id:
+                    entry = rental_journal.get(run_id)
+                    if entry:
+                        res = rental_journal.reconcile_run(run_id, core_mod=core, allow_delete=True)
+                        if res.get("deleted"):
+                            return {"ok": True, "gone": True}
+                        if res.get("reason") == "multiple_matches":
+                            ids_str = ", ".join(map(str, res.get("matched_iids") or []))
+                            return {"error": {"key": "core.instance_unconfirmed", "params": {"id": ids_str or "?"},
+                                              "text": f"Найдено несколько инстансов с меткой операции ({ids_str}) — "
+                                                      "удали вручную на сайте Vast.ai."}}
+                        return {"error": {"key": "core.delete_uncertain",
+                                          "params": {"id": res.get("iid") or "?", "msg": res.get("reason") or ""},
+                                          "text": "Не удалось достоверно подтвердить отсутствие аренды — "
+                                                  "тарификация может продолжаться. Проверь на сайте Vast.ai."}}
+                    try:
+                        matched, _ = core.find_instances_by_run_id(run_id)
+                    except VastgameError as e:
+                        return {"error": error_data(e)}
+                    if len(matched) == 1:
+                        target_id = matched[0]
+            if target_id is None:
+                return {"error": {"key": "core.instance_unconfirmed", "params": {"id": "?"},
+                                  "text": "Принадлежность инстанса не подтверждена — автоматическое удаление отменено. "
+                                          "Проверь и удали инстанс вручную на сайте Vast.ai."}}
+            try:
+                gone = core.emergency_delete(target_id)
+            except VastgameError as e:
+                if run_id and rental_journal.get(run_id):
+                    if e.key in ("core.no_instances", "core.emergency_mismatch"):
+                        rental_journal.mark_deleted(run_id, iid=target_id, reason="already_gone")
+                    else:
+                        rental_journal.mark_uncertain(run_id, iid=target_id, reason=e.key or "delete_error", note=str(e))
+                return {"error": error_data(e)}
+            if run_id and rental_journal.get(run_id):
+                if gone:
+                    rental_journal.mark_deleted(run_id, iid=target_id, reason="confirmed_deleted")
+                else:
+                    rental_journal.mark_uncertain(run_id, iid=target_id, reason="delete_pending")
+            return {"ok": True, "gone": gone}
+        finally:
+            self._emergency_lock.release()
 
     def progress(self, since=0):
         """События текущей операции начиная с номера since."""
@@ -462,9 +561,13 @@ class Api:
         if not d:
             return None
         since = int(since)
+        meta = d.get("meta") or {}
+        iid = meta.get("iid")
+        if iid is None and meta.get("race"):
+            iid = meta["race"][0].get("iid")
         return {"kind": d["kind"], "elapsed": int((d.get("ended") or time.time()) - d["started"]),
                 "stage": d["stage"], "events": d["events"][since:], "next": len(d["events"]),
-                "archives": d["archives"], "question": None, "result": d["result"], "error": d["error"],
+                "archives": d["archives"], "iid": iid, "question": None, "result": d["result"], "error": d["error"],
                 "done": d["done"], "game_names": self._game_names(d["archives"])}
 
     def session_diagnostics(self):
@@ -485,14 +588,63 @@ class Api:
 
     def cancel_start(self):
         """«Отменить запуск и удалить машину» (человек подтвердил на странице). Удаляем сразу, если
-        машина уже арендована; фоновый процесс увидит флаг и закончит (и удалит сам, если аренда
-        ещё шла). Процесс завис или умер — машина всё равно удалена отсюда."""
-        iids = jobs.cancel_play() or []
+        машина уже арендована и её принадлежность этой операции подтверждена (meta.iid или метка vastgame:<run_id>);
+        чужие или неподтверждённые инстансы никогда не удаляем автоматически."""
+        d_before = jobs.load()
+        run_id = (d_before or {}).get("run_id")
+        if run_id and d_before and d_before.get("kind") == "play" and not d_before.get("done"):
+            rental_journal.mark_cancel_requested(run_id, iid=(d_before.get("meta") or {}).get("iid"))
+        iids = jobs.cancel_play()
+        if iids is None:
+            return {"ok": True, "iid": None, "iids": []}
+        if not iids:
+            entry = rental_journal.get(run_id) if run_id else None
+            if entry and entry.get("state") in (rental_journal.CREATING, rental_journal.CANCEL_REQUESTED,
+                                                rental_journal.RECONCILING, rental_journal.UNCERTAIN):
+                res = rental_journal.reconcile_run(run_id, core_mod=core, allow_delete=True)
+                if res.get("deleted"):
+                    found = res.get("iid")
+                    return {"ok": True, "iid": found, "iids": [found] if found is not None else []}
+                if res.get("reason") == "multiple_matches":
+                    ids_str = ", ".join(map(str, res.get("matched_iids") or []))
+                    return {"error": {"key": "core.instance_unconfirmed", "params": {"id": ids_str or "?"},
+                                      "text": f"Найдено несколько инстансов с меткой операции ({ids_str}) — "
+                                              "удали вручную на сайте Vast.ai."}}
+                return {"error": {"key": "core.delete_uncertain",
+                                  "params": {"id": res.get("iid") or "?", "msg": res.get("reason") or ""},
+                                  "text": "Не удалось достоверно подтвердить отсутствие аренды — "
+                                          "тарификация может продолжаться. Проверь на сайте Vast.ai."}}
+            try:
+                matched, all_ids = core.find_instances_by_run_id(run_id)
+            except VastgameError as e:
+                return {"error": error_data(e)}
+            if matched:
+                iids = matched
+            elif all_ids:
+                return {"error": {"key": "core.instance_unconfirmed", "params": {"id": ", ".join(map(str, all_ids))},
+                                  "text": "Запуск отменён, но в Vast.ai есть инстансы без подтверждённой принадлежности "
+                                          f"этой операции ({', '.join(map(str, all_ids))}). Автоматически их не удаляю — "
+                                          "проверь на сайте Vast.ai."}}
         for iid in iids:                     # выбранная или все машины забега
             # Удаляем, не глядя в список: сразу после аренды Vast может ещё не показывать там машину
             ok, msg = core.cancel_delete(iid)
             if not ok:
-                return {"error": {"key": "core.delete_failed", "params": {"msg": msg or ""}, "text": msg or ""}}
+                if run_id and rental_journal.get(run_id):
+                    rental_journal.mark_uncertain(run_id, iid=iid, reason="delete_failed", note=msg or "")
+                return {"error": {"key": "core.delete_failed", "params": {"id": iid, "msg": msg or ""}, "text": msg or ""}}
+            there = core._still_there(iid)
+            if there is True:
+                if run_id and rental_journal.get(run_id):
+                    rental_journal.mark_uncertain(run_id, iid=iid, reason="delete_pending")
+                return {"error": {"key": "core.delete_pending", "params": {"id": iid},
+                                  "text": f"Vast принял удаление, но {iid} ещё в списке — проверь на сайте Vast.ai."}}
+            if there is None:
+                if run_id and rental_journal.get(run_id):
+                    rental_journal.mark_uncertain(run_id, iid=iid, reason="api_unreachable")
+                return {"error": {"key": "core.delete_uncertain", "params": {"id": iid, "msg": ""},
+                                  "text": f"Не удалось подтвердить удаление инстанса {iid} — проверь на сайте Vast.ai."}}
+            if run_id and rental_journal.get(run_id):
+                rental_journal.mark_deleted(run_id, iid=iid, reason="cancelled_and_deleted")
         return {"ok": True, "iid": iids[0] if len(iids) == 1 else None, "iids": iids}
 
     def session_seen(self):

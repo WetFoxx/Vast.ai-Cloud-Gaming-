@@ -179,7 +179,8 @@ def summary(days=30, all_machines=False):
     for iid, c in ch.items():
         if c["amount"] < 0.0005:
             continue   # машина не запустилась — ничего не стоила, в истории не нужна
-        if not all_machines and c["label"] != "vastgame" and iid not in local:
+        lbl = c["label"] or ""
+        if not all_machines and lbl != "vastgame" and not lbl.startswith("vastgame:") and iid not in local:
             other["count"] += 1
             other["amount"] += c["amount"]
             continue

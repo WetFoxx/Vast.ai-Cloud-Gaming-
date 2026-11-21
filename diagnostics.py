@@ -23,6 +23,7 @@ EVENTS = frozenset("""
     core.finish_machine_changed core.finish_timeout core.finished_offline core.upload_unconfirmed
     core.uploaded core.uploaded_none core.all_uploaded core.shutdown_failed core.shutdown_timeout
     core.self_deleting core.self_delete_failed core.deleting core.deleted core.delete_pending core.delete_failed
+    core.delete_uncertain core.emergency_aborted core.instance_unconfirmed
     wizard.install.moonlight wizard.install.steamlink wizard.install.tailscale
     wizard.finish.template wizard.finish.sshkey wizard.finish.google wizard.finish.autostart
     moonlight.missing pair.no_machine pair.cert pair.creds_failed

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import keyring.errors
@@ -31,6 +32,7 @@ import filelock
 import market
 import notify
 import paths
+import rental_journal
 import settings
 from settings import config_dir
 from vastapi import VastgameError
@@ -140,7 +142,7 @@ class Job:
 class FileJob(Job):
     """Job фонового процесса: после каждого изменения записывает себя в job.json — окно читает оттуда."""
 
-    def __init__(self, kind, pid=None, args=None, carry=None):
+    def __init__(self, kind, pid=None, args=None, carry=None, run_id=None):
         """carry — прежнее содержимое job.json: продолжаем прерванную операцию с теми же
         событиями, архивами и данными (номер машины), чтобы окно видело один непрерывный ход."""
         super().__init__(kind)
@@ -149,20 +151,30 @@ class FileJob(Job):
         self.meta = {}                   # что уже сделано: {"iid", "t0", "offer"} после аренды
         self.resumes = 0
         self.spawned = time.time()
+        self.run_id = run_id or (carry.get("run_id") if carry else None) or uuid.uuid4().hex[:12]
         self._opened = set()             # ссылки, уже открытые в браузере
         if carry:
             self.started, self.events, self.archives = carry["started"], carry["events"], carry["archives"]
             self.stage_key, self.meta = carry.get("stage"), carry.get("meta") or {}
             self.resumes, self.spawned = carry.get("resumes", 0), carry.get("spawned", self.spawned)
-        self._changed()
+        self._changed(force=(not carry and run_id is None))
 
     def set_meta(self, **kw):
         self.meta.update(kw)
         self._changed()
 
+    def _aborted_on_disk(self):
+        cur = load()
+        if not cur:
+            return False
+        cur_run = cur.get("run_id")
+        if cur_run and cur_run != self.run_id:
+            return True
+        return bool(cur.get("done") and (cur.get("error") or {}).get("key") == "core.emergency_aborted")
+
     def cancelled(self):
-        """Человек отменил запуск в окне (флаг-файл: окно и фоновый процесс — разные процессы)."""
-        return self.kind == "play" and CANCEL.exists()
+        """Человек отменил запуск или вызвал аварийное удаление (устойчиво к перезапуску и игнорированию SIGTERM)."""
+        return CANCEL.exists() or self._aborted_on_disk()
 
     def say(self, text, level="info", key=None, **params):
         super().say(text, level, key, **params)
@@ -178,13 +190,16 @@ class FileJob(Job):
         self.say(f"(вопрос без ответа, считаю «нет»: {question})", "warn", key="progress.auto_no")
         return False
 
-    def _changed(self):
+    def _changed(self, force=False):
         with self._lock:
-            data = {"kind": self.kind, "pid": self.pid, "started": self.started, "stage": self.stage_key,
+            if not force and self._aborted_on_disk():
+                return
+            data = {"kind": self.kind, "pid": self.pid, "run_id": self.run_id,
+                    "started": self.started, "stage": self.stage_key,
                     "events": self.events, "archives": self.archives, "result": self.result,
                     "error": self.error, "done": self.done, "ended": self.ended, "seen": False,
                     "args": self.args, "meta": self.meta, "resumes": self.resumes, "spawned": self.spawned}
-            tmp = STATE.with_suffix(".tmp")
+            tmp = STATE.with_name(f"{STATE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False))
             os.replace(tmp, STATE)        # окно никогда не прочитает наполовину записанный файл
 
@@ -232,6 +247,8 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=
             settings.set("disk", size)
         queue = [int(offer_id)] + [int(x) for x in spare or []]
         while True:
+            if getattr(job, "cancelled", lambda: False)():
+                raise VastgameError("Запуск отменён.", key="core.start_cancelled")
             m = getattr(job, "meta", {})
             if m.get("iid"):
                 iid, t0, o = m["iid"], m["t0"], m["offer"]
@@ -249,6 +266,8 @@ def run_play(job, offer_id, sync=None, disk=None, lang=None, spare=None, docker=
                     raise VastgameError(f"Машина {iid} не удалилась — другую не беру, чтобы не платить за две. "
                                         "Удали её на главном экране или на сайте Vast.",
                                         key="core.switch_blocked", id=iid) from None
+        if getattr(job, "run_id", None):
+            rental_journal.mark_completed(job.run_id, iid=iid)
         job.finish(result={"links": r["links"], "minutes": r["minutes"], "boot": list(r["boot"]),
                            "notes": [{"level": lv, "key": k, "params": p, "text": tx}
                                      for lv, tx, k, p in core.identity_notes(r)]})
@@ -340,15 +359,30 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None, hint=None):
                                or docker and _traffic(o) > limit["traffic"] * SPARE_MARGIN + 1e-9
                                or (o.get("inet_down") or 0) < (limit.get("down") or 0) * 0.7):   # интернет — не медленнее 70%
                 continue
+            if getattr(job, "cancelled", lambda: False)():
+                raise VastgameError("Запуск отменён.", key="core.start_cancelled")
             if not announced:
                 job.stage("vast", "Vast запускает машину")
                 announced = True
+            run_id = getattr(job, "run_id", None)
+            if run_id:
+                rental_journal.mark_creating(run_id, offer_id=o["id"])
             try:
-                body = core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang)
+                try:
+                    body = core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang,
+                                            label=f"vastgame:{run_id}" if run_id else None)
+                except TypeError:
+                    body = core.rental_body(tpl, size, sync=sync, docker=docker, lang=lang)
                 iid, t0 = core.rent(o["id"], body, o, tpl=tpl)
             except VastgameError as e:
-                if e.key == "core.offer_gone" and (not chosen or chosen_gone(oid)):
-                    continue                           # замену (или выбранную — тогда похожая) только что заняли
+                if e.key in ("core.offer_gone", "core.rent_failed"):
+                    if e.key == "core.offer_gone" and (not chosen or chosen_gone(oid)):
+                        continue                           # замену (или выбранную — тогда похожая) только что заняли
+                    if run_id and not racers and not added:
+                        rental_journal.mark_deleted(run_id, reason=e.key)
+                elif run_id and not racers and not added:
+                    # Сетевой сбой/тайм-аут во время PUT asks/: инстанс мог быть создан на Vast.ai
+                    rental_journal.mark_uncertain(run_id, reason="rent_response_lost", note=str(e))
                 if not racers and not added:
                     raise                              # не арендовали ни одной — сказать почему
                 # Например, не хватает баланса на ещё одну — ждём уже запущенные
@@ -356,6 +390,8 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None, hint=None):
                 queue.clear()
                 break
             rents += 1
+            if run_id:
+                rental_journal.mark_created(run_id, iid)
             if chosen:
                 limit = {"price": o.get("dph_total", 0), "traffic": _traffic(o), "down": o.get("inet_down") or 0}
             used.add(o.get("machine_id"))
@@ -363,6 +399,17 @@ def _race(job, queue, tpl, size, sync, docker=False, lang=None, hint=None):
             racers.append(r)
             added.append(r)
             save()
+            # Гонка отмены прямо во время PUT asks/: немедленно удаляем только что созданный инстанс
+            if getattr(job, "cancelled", lambda: False)():
+                if run_id:
+                    rental_journal.mark_cancel_requested(run_id, iid=iid)
+                drop(r, None)
+                if run_id:
+                    if core._still_there(iid) is False:
+                        rental_journal.mark_deleted(run_id, iid=iid, reason="cancelled_after_rent")
+                    else:
+                        rental_journal.mark_uncertain(run_id, iid=iid, reason="delete_pending")
+                raise VastgameError(f"Запуск отменён, машина {iid} удалена.", key="core.start_cancelled", id=iid)
         return added
 
     added = top_up()
@@ -519,7 +566,9 @@ def state():
 
 def resume(d):
     """Продолжить прерванную операцию d (из job.json) новым фоновым процессом. False — нельзя:
-    слишком много попыток или запуск прервался до аренды (тогда продолжать нечего)."""
+    слишком много попыток, операция отменена или запуск прервался до аренды (тогда продолжать нечего)."""
+    if CANCEL.exists():
+        return False
     if d.get("resumes", 0) >= MAX_RESUMES:
         return False
     if d["kind"] == "play" and not (d.get("meta") or {}).get("iid"):
@@ -530,6 +579,66 @@ def resume(d):
             key="progress.resuming")
     _launch(d["kind"], dict(d.get("args") or {}, _resume=True))
     return True
+
+
+def _pid_alive(pid):
+    if not pid or int(pid) == os.getpid():
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def abort_active(iid=None):
+    """Безопасно прервать любую активную фоновую операцию (play/stop) при аварийном удалении.
+
+    Ставит устойчивый флаг CANCEL с run_id и помечает job.json завершённым с core.emergency_aborted,
+    чтобы старая задача (даже проигнорировавшая SIGTERM или после перезапуска приложения) не могла
+    арендовать замену, перезаписать состояние или перезапуститься через resume().
+    """
+    d = load()
+    run_id = d.get("run_id") if d else None
+    if run_id and d and d.get("kind") == "play":
+        # СНАЧАЛА атомарно фиксируем намерение отмены в журнале (до SIGTERM и DELETE)
+        m_pre = d.get("meta") or {}
+        known_id = iid if iid is not None else m_pre.get("iid")
+        rental_journal.mark_cancel_requested(run_id, iid=known_id)
+    CANCEL.write_text(f"emergency:{run_id or '*'}:{os.getpid()}")
+    if not d:
+        return {"aborted": False, "kind": None, "iids": [], "run_id": None}
+    m = d.get("meta") or {}
+    iids = []
+    if m.get("iid") is not None:
+        iids.append(int(m["iid"]))
+    for r in m.get("race") or []:
+        if r.get("iid") is not None and int(r["iid"]) not in iids:
+            iids.append(int(r["iid"]))
+    if d.get("done"):
+        return {"aborted": False, "kind": d.get("kind"), "iids": iids, "run_id": run_id}
+    pid = d.get("pid")
+    if pid and _pid_alive(pid):
+        try:
+            import signal
+            os.kill(int(pid), signal.SIGTERM)
+        except OSError:
+            pass
+        end = time.time() + 0.5
+        while time.time() < end and _pid_alive(pid):
+            time.sleep(0.05)
+    d.update(
+        done=True,
+        ended=time.time(),
+        seen=True,
+        error={
+            "key": "core.emergency_aborted",
+            "params": {"id": int(iid)} if iid is not None else {},
+            "text": "Операция прервана аварийным удалением.",
+        },
+    )
+    save(d)
+    return {"aborted": True, "kind": d.get("kind"), "iids": iids, "run_id": run_id}
 
 
 def cancel_play():
@@ -545,7 +654,7 @@ def cancel_play():
 
 
 def save(d):
-    tmp = STATE.with_suffix(".tmp")
+    tmp = STATE.with_name(f"{STATE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps({k: v for k, v in d.items() if k != "active"}, ensure_ascii=False))
     os.replace(tmp, STATE)
 
@@ -622,8 +731,11 @@ def spawn(kind, **args):
     """Запустить операцию в фоновом процессе, который переживёт закрытие окна. False — уже идёт другая."""
     if running() or (state() or {}).get("active"):
         return False
-    FileJob(kind, args=args)  # сразу «началось» в job.json — окно не покажет результат прошлой операции
-    _launch(kind, args)
+    CANCEL.unlink(missing_ok=True)
+    j = FileJob(kind, args=args)  # сразу «началось» в job.json с run_id — окно и отмена видят его сразу
+    if kind == "play":
+        rental_journal.mark_prepared(j.run_id, offer_id=args.get("offer_id"))
+    _launch(kind, {**args, "_run_id": j.run_id})
     return True
 
 
@@ -642,16 +754,23 @@ def work(kind, args, log=lambda text: None):
         if not filelock.try_lock(lock):
             return False                          # другая операция уже идёт — ничего не трогаем
         args = dict(args)
+        run_id = args.pop("_run_id", None)
         carry = load() if args.pop("_resume", False) else None
         if not carry:
-            CANCEL.unlink(missing_ok=True)        # отмена прошлого запуска к новому не относится
+            # Если эту операцию уже отменили аварийным удалением до входа в work() — не запускаем её
+            cur = load()
+            if run_id and cur and cur.get("run_id") == run_id and cur.get("done") and (cur.get("error") or {}).get("key") == "core.emergency_aborted":
+                return True
+            if not (CANCEL.exists() and run_id and f"emergency:{run_id}:" in (CANCEL.read_text() if CANCEL.exists() else "")):
+                CANCEL.unlink(missing_ok=True)    # отмена прошлого запуска к новому не относится
         log(f"[{time.strftime('%F %T')}] {kind} pid={os.getpid()}" + (" (продолжение)" if carry else ""))
-        job = FileJob(kind, pid=os.getpid(), args=args, carry=carry)
+        job = FileJob(kind, pid=os.getpid(), args=args, carry=carry, run_id=run_id)
         RUNNERS[kind](job, **args)
         log(f"[{time.strftime('%F %T')}] {kind} done, error={(job.error or {}).get('key')}")
-        if (job.error or {}).get("key") != "core.start_cancelled":   # отменил сам человек — сообщать незачем
+        if (job.error or {}).get("key") not in ("core.start_cancelled", "core.emergency_aborted"):   # отменил сам человек — сообщать незачем
             notify.job_finished(kind, job.result, job.error, args.get("lang"))
-        CANCEL.unlink(missing_ok=True)
+        if not job._aborted_on_disk():
+            CANCEL.unlink(missing_ok=True)
     return True
 
 

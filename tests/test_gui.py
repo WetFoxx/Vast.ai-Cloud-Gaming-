@@ -72,6 +72,7 @@ def setUpModule():
     tmp = Path(tempfile.mkdtemp())
     for obj, name in [(settings, "FILE"), (history, "FILE"), (market, "BAD_HOSTS"), (market, "STARTS"),
                       (gui.jobs, "STATE"), (gui.jobs, "LOCK"), (gui.jobs, "LOG"), (gui.jobs, "CANCEL"),
+                      (gui.rental_journal, "FILE"),
                       (gui.latency, "FILE")]:
         p = mock.patch.object(obj, name, tmp / f"{obj.__name__}.{name}")
         p.start()
@@ -922,10 +923,10 @@ class TestStop(unittest.TestCase):
         with mock.patch.object(gui.jobs.core, "stop", lambda ui, dry_run=False: gate.wait(5) and {"iid": 1, "uploaded": [], "deleted": True}), \
              mock.patch.object(gui.core, "emergency_delete", lambda mid: calls.append(mid) or True):
             self.api.stop()
-            self.assertEqual(self.api.emergency_delete(42)["error"]["key"], "busy")   # идёт выгрузка
+            # Аварийное удаление больше не блокируется активной/зависшей выгрузкой
+            self.assertEqual(self.api.emergency_delete("42"), {"ok": True, "gone": True})
             gate.set()
             wait_done(self.api, session=True)
-            self.assertEqual(self.api.emergency_delete("42"), {"ok": True, "gone": True})
         self.assertEqual(calls, [42])
 
 
